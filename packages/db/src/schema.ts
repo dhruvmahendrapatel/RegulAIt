@@ -2021,6 +2021,8 @@ export const auditLog = pgTable(
         // (declared, removed). Plain text column — no DDL.
         "saas_entitlement_app",
         "agent_vendor_identifier",
+        // ADR-0365: a context graph source (bound, rebound, unbound, synced). Plain text column — no DDL.
+        "context_graph_source",
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
@@ -19654,3 +19656,102 @@ export const customClassifierHashKey = pgTable(
   (t) => [check("custom_classifier_hash_key_singleton_check", sql`${t.id}`)],
 );
 // ===== end ADR-0363 slice 2 =====
+
+// ===== ADR-0365 (lane E46, slice 1): the live synced context graph (pillar 4, PENDING P2) =====
+// Migration `pending/shared_context_graph.sql` (numbered at merge). Forced row-level security on all four tables; a
+// node is readable by an admin or by a principal who is a member of the project of EVERY one of its scope rows
+// (`regulait_context_graph_node_readable`). A node stores no copy of its source's facts: label, URL, type and missing
+// state are joined from pm_connections / pm_imported_work_items at read (3NF; nothing PM-authoritative is stored).
+
+/** A PM connection an admin bound into the graph, and the project whose members may read what it brings in. */
+export const contextGraphSources = pgTable(
+  "context_graph_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pmConnectionId: uuid("pm_connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    boundByUserId: uuid("bound_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
+    /** keyset cursor over the connection's imported items (first_seen_at, id); both NULL before the first sync */
+    cursorFirstSeenAt: timestamp("cursor_first_seen_at", { withTimezone: true }),
+    // the cursor's tie-breaker id, FK-free on purpose: it is a position, and the item it names may be gone
+    cursorItemId: uuid("cursor_item_id"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("context_graph_sources_connection_uq").on(t.pmConnectionId),
+    index("context_graph_sources_project_idx").on(t.projectId),
+    check("context_graph_sources_cursor_check", sql`(${t.cursorFirstSeenAt} IS NULL) = (${t.cursorItemId} IS NULL)`),
+  ],
+);
+
+export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item"] as const;
+export const CONTEXT_GRAPH_EDGE_KINDS = ["contains"] as const;
+
+/** A graph node: a bound connection's PM project (one per source) or one imported work item. */
+export const contextGraphNodes = pgTable(
+  "context_graph_nodes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => contextGraphSources.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: CONTEXT_GRAPH_NODE_KINDS }).notNull(),
+    pmImportedWorkItemId: uuid("pm_imported_work_item_id").references(() => pmImportedWorkItems.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("context_graph_nodes_work_item_uq").on(t.pmImportedWorkItemId).where(sql`${t.pmImportedWorkItemId} IS NOT NULL`),
+    uniqueIndex("context_graph_nodes_project_uq").on(t.sourceId).where(sql`${t.kind} = 'pm_project'`),
+    index("context_graph_nodes_source_kind_idx").on(t.sourceId, t.kind, t.id),
+    check(
+      "context_graph_nodes_kind_check",
+      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.pmImportedWorkItemId} IS NULL WHEN 'pm_work_item' THEN ${t.pmImportedWorkItemId} IS NOT NULL ELSE false END`,
+    ),
+  ],
+);
+export type ContextGraphNodeRow = typeof contextGraphNodes.$inferSelect;
+
+/** A directed edge; readable only when both ends are. */
+export const contextGraphEdges = pgTable(
+  "context_graph_edges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fromNodeId: uuid("from_node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    toNodeId: uuid("to_node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: CONTEXT_GRAPH_EDGE_KINDS }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("context_graph_edges_triple_uq").on(t.fromNodeId, t.toNodeId, t.kind),
+    index("context_graph_edges_to_idx").on(t.toNodeId),
+    check("context_graph_edges_kind_check", sql`${t.kind} IN ('contains')`),
+    check("context_graph_edges_no_loop_check", sql`${t.fromNodeId} <> ${t.toNodeId}`),
+  ],
+);
+
+/** A node's access-control scope: a reader needs membership of EVERY row's project; no row = admins only. */
+export const contextGraphNodeScopes = pgTable(
+  "context_graph_node_scopes",
+  {
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "context_graph_node_scopes_pk", columns: [t.nodeId, t.projectId] }),
+    index("context_graph_node_scopes_project_idx").on(t.projectId),
+  ],
+);
+// ===== end ADR-0365 =====

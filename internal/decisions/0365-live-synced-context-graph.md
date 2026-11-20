@@ -102,10 +102,16 @@ connection's work-item linkage, which only admins see today. Binding, rebinding 
 - `GET /v1/context-graph/nodes/:nodeId` and `GET /v1/context-graph/nodes/:nodeId/neighbours?depth=1|2`: a node the
   caller may not read is a **404, the same as a missing one** (no existence leak). A neighbourhood returns only edges
   whose two ends the caller may read; a hidden node is never a hop (the recursive walk is over readable nodes only).
-- **Readable** = an active admin, or a principal who is a member (any role) of the project of **every** scope row of
-  the node, and the node has at least one. The rule is one SQL predicate used by the routes, and the same predicate
+- **Readable** = an active admin, or an active principal who is a member (any role) of the project of **every**
+  scope row of the node, and the node has at least one. The rule is one SQL predicate used by the routes, and the same predicate
   is the row-level security policy (`regulait_context_graph_node_readable`), so a route that forgets the filter
   still returns nothing it should not. The bootstrap token reads as an admin, as on every other admin-readable table.
+- **One new system reason, read only.** A node's joined facts live in admin-only tables (`context_graph_sources`,
+  `pm_connections`, `pm_imported_work_items`, ADR-0234). The three read routes run as a `context_graph_read`
+  principal step (the `pm_sync` pattern): it adds SELECT on those three tables and nothing else, and it does not widen
+  nodes or edges, which stay under the principal's own readable policy. No write is admitted under it. The reason is
+  added to the closed registry in the migration and to `RLS_SYSTEM_REASONS`; a scratch-database test proves each
+  claim with no application filter.
 - Per-user tool grants (pillar 1) still decide what an agent may do with what it reads: the graph is read through
   these routes as the user, so an agent acting for a user sees what that user sees and no more.
 
@@ -131,4 +137,11 @@ connection's work-item linkage, which only admins see today. Binding, rebinding 
 - **Follow-ups (PENDING P2):** a scheduled sync; a git source (repositories and PRs, with per-repository scope rows);
   identity and connector sources; edges from work items to RegulAIt runs (`pm_links`); a UI (the routes are known UI
   gaps); provenance and retention by the compliance cascade.
-- New routes: five admin, three for any signed-in principal; all API-only in slice 1 and listed as known UI gaps.
+- New routes: five admin, three for any signed-in principal; all API-only in slice 1, listed as known UI gaps
+  (`scripts/known-ui-gaps/adr-0365-e46-context-graph.json`), and the unbind DELETE is in the affordance preflight's
+  API-only list until the screen lands.
+- Not to be confused with `GET /v1/projects/:projectId/context/graph`, which draws the revision history of one
+  project's context store; this graph indexes source-system objects across projects.
+- **Known limit:** an import that commits more than 10 minutes after its own `first_seen_at` timestamp, behind a
+  cursor that has already moved past it, is picked up only by a full pass. Imports are single transactions of
+  seconds, so the window is generous; the scheduled job will run a full pass daily.

@@ -66,6 +66,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
   ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
   // ADR-0364 S2 (lane E45): the Robots screens are the design builder's (#453); delete this entry when the robot detail screen lands
+  // ADR-0365 (lane E46): the context graph is API-only in slice 1; delete this entry when the bindings screen on #453 lands
+  ["/v1/context-graph/sources/:x", "unbinding a PM connection from the context graph (audited; removes its nodes): API-only until the context graph bindings screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
   ["/v1/robots/:x/secrets/:x/:x", "clearing a robot secret no submitted version is bound to (audited): API-only until the robot detail screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
 ]);
 

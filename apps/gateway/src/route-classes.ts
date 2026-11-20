@@ -626,6 +626,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context",
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
+  // ADR-0365 (lane E46): the live context graph's reads. Any signed-in principal; every result is filtered in-route by
+  // the caller's own project memberships (and by row-level security), and a node they cannot read is a 404. The
+  // source binding and sync routes stay admin-only (absent here).
+  "GET /v1/context-graph/nodes",
+  "GET /v1/context-graph/nodes/:nodeId",
+  "GET /v1/context-graph/nodes/:nodeId/neighbours",
   "GET /v1/projects/:projectId/compliance",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",
