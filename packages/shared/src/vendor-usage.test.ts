@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   anthropicCostReportSchema,
   centsDecimalToDollars,
+  cursorUsageEventsSchema,
   factOverlapsMetered,
+  githubBillingUsageSchema,
   normalizeAnthropicCostReport,
+  normalizeCursorUsageEvents,
+  normalizeGithubCopilotUsage,
   normalizeOpenAiCosts,
   openAiCostsSchema,
   vendorUsageFactKey,
@@ -107,5 +111,81 @@ describe("ADR-0322 pull run lifecycle (ADR-0348 machine)", () => {
       expect(() => M.next(s, "fail")).toThrow(/not allowed/);
     }
     expect(STATE_MACHINES.vendor_usage_pull_run).toBe(M);
+  });
+});
+
+describe("ADR-0322 slice 3: GitHub Copilot and Cursor normalisers", () => {
+  it("keeps only Copilot lines of the GitHub billing usage report, per organisation, product, SKU and repository", () => {
+    const page = githubBillingUsageSchema.parse({
+      usageItems: [
+        { date: "2026-11-17T00:00:00Z", product: "Copilot", sku: "Copilot Business", quantity: 3, unitType: "user-months", pricePerUnit: 19, grossAmount: 57, discountAmount: 0, netAmount: 57, organizationName: "acme-eng", repositoryName: null },
+        { date: "2026-11-17", product: "copilot premium requests", sku: "Premium request", quantity: 10, unitType: "requests", netAmount: 0.4, organizationName: "acme-eng", repositoryName: "acme-eng/api" },
+        { date: "2026-11-17T00:00:00Z", product: "Actions", sku: "Linux", quantity: 100, unitType: "minutes", netAmount: 0.8, organizationName: "acme-eng" },
+      ],
+    });
+    const facts = normalizeGithubCopilotUsage(page, { kind: "organization", slug: "acme-eng" });
+    expect(facts.map((f) => [f.accountRef, f.amount, f.currency, f.service, f.periodStart, f.periodEnd])).toEqual([
+      ["github organization acme-eng", 57, "USD", "Copilot Business", "2026-11-17T00:00:00.000Z", "2026-11-18T00:00:00.000Z"],
+      ["github organization acme-eng", 0.4, "USD", "Premium request", "2026-11-17T00:00:00.000Z", "2026-11-18T00:00:00.000Z"],
+    ]);
+    expect(facts[1]!.detail).toMatchObject({ repository: "acme-eng/api" });
+    // the repository is part of the fact identity, so two repositories are two facts
+    expect(vendorUsageFactKey(facts[0]!)).not.toBe(vendorUsageFactKey(facts[1]!));
+    expect(factOverlapsMetered("github_copilot", facts[0]!, vendorUsagePublicConfigSchemas.github_copilot.parse({ account: "organization", slug: "acme-eng" }))).toBe(false);
+  });
+
+  it("sums two Copilot items with the same identity on one day instead of keeping only one (#1069 R4)", () => {
+    const page = githubBillingUsageSchema.parse({
+      usageItems: [
+        { date: "2026-11-17", product: "Copilot", sku: "Premium request", quantity: 10, unitType: "requests", pricePerUnit: 0.04, grossAmount: 0.4, discountAmount: 0, netAmount: 0.4, organizationName: "acme-eng" },
+        { date: "2026-11-17", product: "Copilot", sku: "Premium request", quantity: 5, unitType: "requests", pricePerUnit: 0.02, grossAmount: 0.1, discountAmount: 0, netAmount: 0.1, organizationName: "acme-eng" },
+      ],
+    });
+    const facts = normalizeGithubCopilotUsage(page, { kind: "organization", slug: "acme-eng" });
+    expect(facts).toHaveLength(1);
+    expect([facts[0]!.amount, facts[0]!.quantity, facts[0]!.unit]).toEqual([0.5, 15, "requests"]);
+    expect(facts[0]!.detail).toMatchObject({ grossAmount: 0.5, discountAmount: 0 });
+  });
+
+  it("refuses a usage item whose date is not a date", () => {
+    const page = githubBillingUsageSchema.parse({ usageItems: [{ date: "yesterday", product: "Copilot", netAmount: 1 }] });
+    expect(() => normalizeGithubCopilotUsage(page, { kind: "enterprise", slug: "acme" })).toThrow(VendorUsageResponseError);
+  });
+
+  it("accepts only a GitHub login or slug as the path segment", () => {
+    const s = vendorUsagePublicConfigSchemas.github_copilot;
+    expect(s.safeParse({ account: "enterprise", slug: "acme-corp" }).success).toBe(true);
+    for (const bad of ["../x", "acme/eng", "-acme", "acme.example", "", "a".repeat(101)]) {
+      expect(s.safeParse({ account: "organization", slug: bad }).success, bad).toBe(false);
+    }
+    expect(s.safeParse({ account: "user", slug: "acme" }).success).toBe(false);
+  });
+
+  it("sums Cursor charged cents per day, person, model, kind and product without float drift", () => {
+    const day = Date.UTC(2026, 10, 17, 9);
+    const page = cursorUsageEventsSchema.parse({
+      usageEvents: [
+        { timestamp: String(day), userEmail: "Dev@Example.com", model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 1, chargedCents: 0.1 },
+        { timestamp: String(day + 3600_000), userEmail: "dev@example.com", model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 2, chargedCents: 0.2 },
+        { timestamp: day, serviceAccountId: "sa_ci", model: "model-a", kind: "Usage-based", product: "agent", chargedCents: 150 },
+        { timestamp: String(day + 86_400_000), userEmail: "dev@example.com", model: "model-a", kind: "Included", product: "agent", chargedCents: 0 },
+      ],
+      pagination: { currentPage: 1, hasNextPage: false },
+    });
+    const facts = normalizeCursorUsageEvents(page.usageEvents);
+    expect(facts.map((f) => [f.accountRef, f.accountKind, f.amount, f.quantity, f.periodStart])).toEqual([
+      ["dev@example.com", "user", 0.003, 3, "2026-11-17T00:00:00.000Z"],
+      ["cursor service account sa_ci", "service_account", 1.5, 0, "2026-11-17T00:00:00.000Z"],
+      ["dev@example.com", "user", 0, 0, "2026-11-18T00:00:00.000Z"],
+    ]);
+    expect(facts[0]!.detail).toEqual({ source: "cursor usage events", events: 2 });
+    expect(factOverlapsMetered("cursor", facts[0]!, vendorUsagePublicConfigSchemas.cursor.parse({}))).toBe(false);
+  });
+
+  it("refuses a Cursor event without charged cents or with a timestamp that is not epoch milliseconds", () => {
+    expect(cursorUsageEventsSchema.safeParse({ usageEvents: [{ timestamp: "1", userEmail: "a@b.c" }], pagination: { currentPage: 1, hasNextPage: false } }).success).toBe(false);
+    expect(cursorUsageEventsSchema.safeParse({ usageEvents: [{ timestamp: "2026-11-17", chargedCents: 1 }], pagination: { currentPage: 1, hasNextPage: false } }).success).toBe(false);
+    expect(() => normalizeCursorUsageEvents([{ timestamp: "9999999999999999", chargedCents: 1 }])).toThrow(VendorUsageResponseError);
+    expect(() => normalizeCursorUsageEvents([{ timestamp: "9000000000000000", chargedCents: 1 }])).toThrow(VendorUsageResponseError);
   });
 });
