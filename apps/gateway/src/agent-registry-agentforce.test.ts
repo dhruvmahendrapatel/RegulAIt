@@ -8,7 +8,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { createLocalJWKSet, exportJWK, importSPKI, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
-import { ADMIN_WRITE_PERMISSIONS, AGENTFORCE_ENDPOINTS, AGENTFORCE_QUERIES, AGENTFORCE_SCANNER, agentforceTargetProblem } from "./agent-registry-agentforce.js";
+import { WRITE_SYSTEM_PERMISSIONS, AGENTFORCE_ENDPOINTS, AGENTFORCE_QUERIES, AGENTFORCE_SCANNER, agentforceTargetProblem, objectWriteQuery } from "./agent-registry-agentforce.js";
 import { SALESFORCE_JWT_LIFETIME_S } from "./salesforce-jwt.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
@@ -23,6 +23,8 @@ const VER_2 = "0X9AA00000000BBBBB";
 const PLANNER_1 = "16jAA00000000AAAAA";
 const TOPIC_1 = "179AA00000000AAAAA";
 const USER_1 = "005AA00000000AAAAA";
+/** the integration user the token acts as (from the token response's identity URL) */
+const INTEGRATION_USER = "005AA00000000ZZZZZ";
 /** free text a careless adapter might keep: it must never be requested or staged */
 const SECRET_TEXT = "INSTRUCTIONS-never-stored-sk_live_example";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -31,13 +33,18 @@ const urlOf = (input: string | URL | Request) => new URL(typeof input === "strin
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
 
 interface FakeOpts {
-  permissions?: Partial<Record<(typeof ADMIN_WRITE_PERMISSIONS)[number], boolean>>;
+  permissions?: Partial<Record<(typeof WRITE_SYSTEM_PERMISSIONS)[number], boolean>>;
   permissionsStatus?: number;
   tokenError?: string;
   actionsPage2Status?: number;
   botsNextRecordsUrl?: string;
   noPlanner?: boolean;
   instanceUrl?: string;
+  /** object-level write rows the integration user's permission sets grant */
+  objectWrites?: Array<{ SobjectType: string }>;
+  objectStatus?: number;
+  /** the token response's identity URL; null omits it */
+  identity?: string | null;
 }
 
 function fakeOrg(opts: FakeOpts = {}) {
@@ -55,7 +62,8 @@ function fakeOrg(opts: FakeOpts = {}) {
       const { payload, protectedHeader } = await jwtVerify(form.get("assertion")!, jwks, { audience: "https://login.salesforce.com", issuer: CONSUMER_KEY, subject: USERNAME });
       expect(protectedHeader.alg).toBe("RS256");
       assertions.push(payload as Record<string, unknown>);
-      return json({ access_token: accessToken, instance_url: opts.instanceUrl ?? ORIGIN, token_type: "Bearer" });
+      const id = opts.identity === undefined ? `https://login.salesforce.com/id/00DAA0000000AAAAAA/${INTEGRATION_USER}` : opts.identity;
+      return json({ access_token: accessToken, instance_url: opts.instanceUrl ?? ORIGIN, token_type: "Bearer", ...(id === null ? {} : { id }) });
     }
     expect(init?.headers && (init.headers as Record<string, string>).authorization).toBe(`Bearer ${accessToken}`);
     const q = url.searchParams.get("q");
@@ -63,7 +71,11 @@ function fakeOrg(opts: FakeOpts = {}) {
     const p = url.pathname;
     if (p === `/services/data/v${V}/query` && q === AGENTFORCE_QUERIES.permissions) {
       if (opts.permissionsStatus) return json([{ errorCode: "INSUFFICIENT_ACCESS" }], opts.permissionsStatus);
-      return json({ done: true, records: [{ ...Object.fromEntries(ADMIN_WRITE_PERMISSIONS.map((x) => [x, false])), ...opts.permissions }] });
+      return json({ done: true, records: [{ ...Object.fromEntries(WRITE_SYSTEM_PERMISSIONS.map((x) => [x, false])), ...opts.permissions }] });
+    }
+    if (p === `/services/data/v${V}/query` && q === objectWriteQuery(INTEGRATION_USER)) {
+      if (opts.objectStatus) return json([{ errorCode: "INSUFFICIENT_ACCESS" }], opts.objectStatus);
+      return json({ done: true, records: opts.objectWrites ?? [] });
     }
     if (p === `/services/data/v${V}/query` && q === AGENTFORCE_QUERIES.bots) {
       return json({
@@ -172,7 +184,7 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
     expect(JSON.stringify(res)).not.toContain(USER_1);
     expect(JSON.stringify(res)).not.toContain(SECRET_TEXT);
     // the exact SOQL issued, in order; the permission check first
-    expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions, AGENTFORCE_QUERIES.bots, AGENTFORCE_QUERIES.versions, AGENTFORCE_QUERIES.planners, AGENTFORCE_QUERIES.topics, AGENTFORCE_QUERIES.actions]);
+    expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions, objectWriteQuery(INTEGRATION_USER), AGENTFORCE_QUERIES.bots, AGENTFORCE_QUERIES.versions, AGENTFORCE_QUERIES.planners, AGENTFORCE_QUERIES.topics, AGENTFORCE_QUERIES.actions]);
     // one POST (the token), every other call a GET on an allow-listed path of the My Domain origin
     const sent = calls.urls.map((u, i) => ({ url: new URL(u), method: calls.methods[i] }));
     expect(sent.filter((c) => c.method === "POST").map((c) => c.url.pathname)).toEqual(["/services/oauth2/token"]);
@@ -185,7 +197,8 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
 
   it("decision 4, pinned: the exact columns read, and no free-text column among them", () => {
     expect(AGENTFORCE_QUERIES).toEqual({
-      permissions: "SELECT PermissionsModifyAllData, PermissionsModifyMetadata, PermissionsCustomizeApplication, PermissionsAuthorApex, PermissionsManageUsers FROM UserPermissionAccess",
+      permissions:
+        "SELECT PermissionsModifyAllData, PermissionsModifyMetadata, PermissionsCustomizeApplication, PermissionsAuthorApex, PermissionsManageUsers, PermissionsAssignPermissionSets, PermissionsManageProfilesPermissionsets, PermissionsManageInternalUsers, PermissionsManageRoles, PermissionsManageSharing, PermissionsResetPasswords FROM UserPermissionAccess",
       bots: "SELECT Id, DeveloperName, MasterLabel, Type, AgentType, BotUserId FROM BotDefinition",
       versions: "SELECT Id, BotDefinitionId, VersionNumber, Status FROM BotVersion",
       planners: "SELECT Id, DeveloperName, MasterLabel, PlannerType, LinkedBotVersionId FROM GenAiPlannerDefinition",
@@ -194,6 +207,43 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
     });
     const cols = Object.values(AGENTFORCE_QUERIES).flatMap((q) => q.replace(/^SELECT /, "").replace(/ FROM .*$/, "").split(", "));
     for (const text of ["Description", "Scope", "AgentGraph", "ProgressIndicatorMessage", "Metadata", "FullName"]) expect(cols).not.toContain(text);
+  });
+
+  it("#1111 [1]: an escalation or user-management permission refuses the credential too", async () => {
+    for (const perm of ["PermissionsAssignPermissionSets", "PermissionsManageProfilesPermissionsets", "PermissionsManageInternalUsers", "PermissionsManageRoles", "PermissionsManageSharing", "PermissionsResetPasswords"] as const) {
+      const { promise, org } = run({ permissions: { [perm]: true } });
+      const res = await promise;
+      expect(res.credentialWriteScope, perm).toBe("write");
+      expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions]);
+    }
+  });
+
+  it("#1111 [1]: object-level Create, Edit, Delete or Modify All on any assigned permission set refuses the credential; nothing else is read", async () => {
+    const { promise, org } = run({ objectWrites: [{ SobjectType: "Account" }, { SobjectType: "Opportunity" }] });
+    const res = await promise;
+    expect(res.credentialWriteScope).toBe("write");
+    expect(res.registryAgents ?? []).toEqual([]);
+    expect(res.readOutcomes![0]!.detail).toMatch(/write on Account, write on Opportunity/);
+    expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions, objectWriteQuery(INTEGRATION_USER)]);
+  });
+
+  it("#1111 [1]: an object permission check that cannot be read reads nothing, and the credential is never read_only", async () => {
+    const { promise, org } = run({ objectStatus: 403 });
+    await expect(promise).rejects.toThrow(/nothing could be read/);
+    expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions, objectWriteQuery(INTEGRATION_USER)]);
+  });
+
+  it("#1111 [1]: the object query is pinned, and only a validated id is ever placed in it", () => {
+    expect(objectWriteQuery(INTEGRATION_USER)).toBe(
+      `SELECT Id, SobjectType FROM ObjectPermissions WHERE (PermissionsCreate = true OR PermissionsEdit = true OR PermissionsDelete = true OR PermissionsModifyAllRecords = true) AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${INTEGRATION_USER}') LIMIT 5`,
+    );
+    expect(() => objectWriteQuery("x' OR Id != '")).toThrow(/not a Salesforce id/);
+  });
+
+  it("a token response that names no user is refused before any query", async () => {
+    const { promise, org } = run({ identity: null });
+    await expect(promise).rejects.toThrow(/named no user/);
+    expect(org.soql).toEqual([]);
   });
 
   it("an admin or metadata write permission refuses the credential and nothing else is read (checked on every run)", async () => {
@@ -251,6 +301,11 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
     const bad = run({}, {}, { mode: "static", publicConfig: { consumerKey: CONSUMER_KEY, username: USERNAME }, secret: "not a key" });
     await expect(bad.promise).rejects.toThrow(/PKCS#8/);
     expect(bad.calls.urls).toEqual([]);
+    // #1111 S4 [2]: an RSA key under 2048 bits is refused
+    const short = generateKeyPairSync("rsa", { modulusLength: 1024, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+    const weak = run({}, {}, { mode: "static", publicConfig: { consumerKey: CONSUMER_KEY, username: USERNAME }, secret: short });
+    await expect(weak.promise).rejects.toThrow(/at least 2048 bits/);
+    expect(weak.calls.urls).toEqual([]);
   });
 
   it("is registered as an adapter whose endpoints are the token POST and GET on the query paths only", () => {

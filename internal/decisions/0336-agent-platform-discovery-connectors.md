@@ -232,8 +232,9 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
   - **Credential:** static only (Salesforce takes no external OIDC token). The public config is the consumer key and
     the integration user's name; the secret is the PKCS#8 private key. The JWT bearer helper is `salesforce-jwt.ts`,
     kept apart so the ADR-0337 Salesforce entitlement reader can reuse it.
-  - **Read-only check:** `UserPermissionAccess` is checked first on every run. Any of the five admin or metadata
-    write permissions refuses the credential, and a check that cannot be read means nothing is read.
+  - **Read-only check:** first on every run, `UserPermissionAccess` (eleven write, escalation and user-management
+    permissions) and then `ObjectPermissions` over the user's permission-set assignments (any object write). Either
+    refuses the credential, and a check that cannot be read means nothing is read.
   - **Reads:** `BotDefinition`, `BotVersion` (the active version), `GenAiPlannerDefinition` (Tooling, for
     `LinkedBotVersionId`), `GenAiPluginDefinition` (topics, counted) and `GenAiFunctionDefinition` (actions, staged
     as `tool` components, linked to their agent through `PlannerId` or their topic). The SOQL is pinned in tests, and
@@ -263,10 +264,18 @@ the RegulAIt-specific part: mapping a vendor's agent shape onto the governed inv
   inside the agent's configuration text, which is never read (decision 4); OpenAI covers ChatGPT custom GPTs only, without connected apps; n8n and OpenAI keys cannot be proven
   read-only and their runs say `unverified`; n8n's community edition keys carry full scope, which the source's docs
   state plainly.
-- **Agentforce known limits (slice 2):** the read-only check is the session's admin and metadata write
-  permissions (`ModifyAllData`, `ModifyMetadata`, `CustomizeApplication`, `AuthorApex`, `ManageUsers`), not every
-  object permission, so the integration user should hold the "Minimum Access - API Only Integrations" profile plus read
-  access to the agent objects. Components are the agent's actions only: Salesforce exposes no model name, and an
+- **Agentforce read-only check (slice 2, tightened on #1111 review):** `read_only` is recorded only when both checks
+  pass.
+  - The session holds none of the write, escalation or user-management system permissions: `ModifyAllData`,
+    `ModifyMetadata`, `CustomizeApplication`, `AuthorApex`, `ManageUsers`, `AssignPermissionSets`,
+    `ManageProfilesPermissionsets`, `ManageInternalUsers`, `ManageRoles`, `ManageSharing` and `ResetPasswords`.
+  - No permission set assigned to the user (profiles included) grants Create, Edit, Delete or Modify All Records on
+    any object.
+
+  The user is the one the token response's identity URL names. Either check refuses the credential, and a check that
+  cannot be read means nothing is read. The integration user therefore needs View Setup and Configuration, to read
+  the setup objects, plus read access to the agent objects. RSA keys under 2048 bits are refused.
+- **Agentforce known limits (slice 2):** components are the agent's actions only: Salesforce exposes no model name, and an
   action's connected service is not a separate field. An agent whose planner is not linked through
   `GenAiPlannerDefinition.LinkedBotVersionId` keeps its stored components, because the read cannot tell "none" from
   "not found".

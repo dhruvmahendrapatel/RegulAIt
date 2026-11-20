@@ -7,11 +7,15 @@
  * stored secret, static only: Salesforce takes no external OIDC token), bound to one consumer key and one integration
  * user. The token is POSTed only to the validated My Domain origin.
  *
- * Read-only, checked on EVERY run: `UserPermissionAccess` is queried for the integration user's own session, and any
- * admin or metadata write permission (`ADMIN_WRITE_PERMISSIONS`) refuses the credential before anything else is read
- * (the worker marks it `refused`). If the permissions cannot be read, nothing is read. Ordinary object permissions are
- * not part of this check: the connected app's integration user should hold the "Minimum Access - API Only
- * Integrations" profile plus read access to the agent objects.
+ * Read-only, checked on EVERY run, before anything else is read (#1111 S4 [1], R4 [1]):
+ *  1. `UserPermissionAccess` for the integration user's own session: any admin, metadata, escalation or
+ *     user-management permission (`WRITE_SYSTEM_PERMISSIONS`) refuses the credential;
+ *  2. `ObjectPermissions` over every permission set assigned to that user (profiles included, since a profile is a
+ *     permission set): any Create, Edit, Delete or Modify All Records on any object refuses it.
+ * The worker then marks the credential `refused`. If either check cannot be read, nothing is read and the run fails.
+ * Only when both pass is the credential recorded `read_only`. The integration user needs read access to these setup
+ * objects (View Setup and Configuration) and to the agent objects; the "Minimum Access - API Only Integrations"
+ * profile plus a read-only permission set is the intended shape.
  *
  * Never a secret, an instruction or prompt text (decision 4): every query selects named columns only (pinned in
  * tests); `Description`, `Scope`, `AgentGraph`, `ProgressIndicatorMessage`, `Metadata` and `FullName` are never
@@ -55,20 +59,36 @@ export const AGENTFORCE_ENDPOINTS: readonly EndpointRule[] = Object.freeze([
 ]);
 
 /**
- * An admin or metadata write permission on the integration user's session: any one of these refuses the credential.
- * Deactivating an agent (a write E19 may add with its own credential) needs one of them.
+ * A system permission on the integration user's session that writes, or lets the user grant itself more: any one of
+ * these refuses the credential. Deactivating an agent (a write E19 may add with its own credential) needs one of the
+ * first group; the second group are the escalation and user-management permissions (#1111 R4 [1]).
  */
-export const ADMIN_WRITE_PERMISSIONS = Object.freeze([
+export const WRITE_SYSTEM_PERMISSIONS = Object.freeze([
   "PermissionsModifyAllData",
   "PermissionsModifyMetadata",
   "PermissionsCustomizeApplication",
   "PermissionsAuthorApex",
   "PermissionsManageUsers",
+  "PermissionsAssignPermissionSets",
+  "PermissionsManageProfilesPermissionsets",
+  "PermissionsManageInternalUsers",
+  "PermissionsManageRoles",
+  "PermissionsManageSharing",
+  "PermissionsResetPasswords",
 ] as const);
+
+/**
+ * Object-level write on any object, across every permission set assigned to the user (#1111 S4 [1]): one row is
+ * enough to refuse. The user id is validated (a 15- or 18-character Salesforce id) before it is placed in the query.
+ */
+export function objectWriteQuery(userId: string): string {
+  if (!SF_ID.test(userId)) throw new WiderSourceConfigError(`${KIND}: the session's user id is not a Salesforce id`);
+  return `SELECT Id, SobjectType FROM ObjectPermissions WHERE (PermissionsCreate = true OR PermissionsEdit = true OR PermissionsDelete = true OR PermissionsModifyAllRecords = true) AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}') LIMIT 5`;
+}
 
 /** the exact SOQL issued (decision 4: pinned in tests); no free-text column is ever selected */
 export const AGENTFORCE_QUERIES = Object.freeze({
-  permissions: `SELECT ${ADMIN_WRITE_PERMISSIONS.join(", ")} FROM UserPermissionAccess`,
+  permissions: `SELECT ${WRITE_SYSTEM_PERMISSIONS.join(", ")} FROM UserPermissionAccess`,
   bots: "SELECT Id, DeveloperName, MasterLabel, Type, AgentType, BotUserId FROM BotDefinition",
   versions: "SELECT Id, BotDefinitionId, VersionNumber, Status FROM BotVersion",
   /** Tooling: LinkedBotVersionId is documented on the Tooling object only */
@@ -142,7 +162,7 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   const host = new URL(t.origin).host;
   const onSecret = dedupedSecretSink(ctx.registerSecret);
   await ctx.throttle();
-  const token = await salesforceJwtToken(KIND, {
+  const session = await salesforceJwtToken(KIND, {
     // credential exchanges are never digested
     fetch: allowListedFetch(scannerFetch(ctx, { digest: false }), new Set([t.origin]), AGENTFORCE_ENDPOINTS),
     origin: t.origin,
@@ -154,21 +174,26 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
     onSecret,
   });
   const fetchImpl = allowListedFetch(scannerFetch(ctx), new Set([t.origin]), AGENTFORCE_ENDPOINTS);
-  const get = (url: string) => getJson(fetchImpl, url, { authorization: `Bearer ${token}` }, ctx.signal);
+  const get = (url: string) => getJson(fetchImpl, url, { authorization: `Bearer ${session.accessToken}` }, ctx.signal);
   const queryUrl = (soql: string, tooling = false) => `${t.origin}/services/data/v${t.apiVersion}/${tooling ? "tooling/" : ""}query?q=${encodeURIComponent(soql)}`;
   const outcomes: DiscoveryReadOutcome[] = [];
 
-  // 1. what the integration user's session may do: an admin or metadata write permission refuses it (decision 5)
+  // 1. what the integration user may do: any write permission, system or object, refuses it (decision 5)
   const PERMISSIONS = `credential permissions in ${host}`;
   try {
     const body = await get(queryUrl(AGENTFORCE_QUERIES.permissions));
     const rows = atPath(body, "records");
     if (!Array.isArray(rows) || rows.length !== 1) throw new ReadFailure("error", "the permission check returned no single row");
-    const held = ADMIN_WRITE_PERMISSIONS.filter((p) => atPath(rows[0], p) === true);
-    const unknown = ADMIN_WRITE_PERMISSIONS.filter((p) => typeof atPath(rows[0], p) !== "boolean");
+    const unknown = WRITE_SYSTEM_PERMISSIONS.filter((p) => typeof atPath(rows[0], p) !== "boolean");
     if (unknown.length) throw new ReadFailure("error", `the permission check did not report ${unknown.join(", ")}`);
+    const held: string[] = WRITE_SYSTEM_PERMISSIONS.filter((p) => atPath(rows[0], p) === true);
+    if (!held.length) {
+      const objects = atPath(await get(queryUrl(objectWriteQuery(session.userId))), "records");
+      if (!Array.isArray(objects)) throw new ReadFailure("error", "the object permission check was not readable");
+      for (const o of objects) held.push(`write on ${str(atPath(o, "SobjectType"), 80) ?? "an object"}`);
+    }
     if (held.length) {
-      outcomes.push({ read: PERMISSIONS, status: "denied", detail: `the integration user holds write permissions: ${held.join(", ")}` });
+      outcomes.push({ read: PERMISSIONS, status: "denied", detail: `the integration user holds write permissions: ${held.join(", ").slice(0, 400)}` });
       return { observations: [], credentialWriteScope: "write", readOutcomes: outcomes };
     }
   } catch (err) {
@@ -292,7 +317,7 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   if (unlinked > 0 && plannersComplete) outcomes.push({ read: `agent components in ${host}`, status: "read", detail: `${unlinked} agent(s) have no linked planner: their components were not staged, so the stored set is kept` });
   if (overCap > 0) outcomes.push({ read: `agent components in ${host}`, status: "read", detail: `${overCap} agent(s) use more than ${REGISTRY_COMPONENTS_PER_RECORD_MAX} actions: their components were not staged, so the stored set is kept` });
   const registries: AgentRegistry[] = botsComplete ? ["agentforce"] : [];
-  // read_only here means: no admin or metadata write permission on the session (ADMIN_WRITE_PERMISSIONS)
+  // read_only: no write system permission on the session, and no object-level write on any assigned permission set
   return finishRegistry(records, outcomes, registries, "read_only");
 }
 

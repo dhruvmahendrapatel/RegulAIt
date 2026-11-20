@@ -10,7 +10,7 @@
  * vendor response; the `instance_url` Salesforce returns is ignored. The private key is the stored secret: encrypted at
  * rest, decrypted only for the run, never logged, rotatable by replacing the credential.
  */
-import { randomUUID } from "node:crypto";
+import { createPrivateKey, randomUUID } from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
 import { readBodyCapped } from "@regulait/cloud-discovery";
 import { WiderSourceConfigError } from "./discovery-wider-scanners.js";
@@ -25,6 +25,16 @@ export const SALESFORCE_JWT_AUDIENCE: Readonly<Record<SalesforceEnvironment, str
 });
 /** the assertion's lifetime in seconds: as short as practical, inside Salesforce's 3-minute allowance */
 export const SALESFORCE_JWT_LIFETIME_S = 120;
+/** the smallest RSA key accepted for the assertion (#1111 S4 [2]) */
+export const SALESFORCE_JWT_MIN_RSA_BITS = 2048;
+/** the identity URL in the token response names the org and the session's user: `…/id/<org id>/<user id>` */
+const IDENTITY_USER = /\/id\/[A-Za-z0-9]{15,18}\/([A-Za-z0-9]{15,18})$/;
+
+export interface SalesforceSession {
+  accessToken: string;
+  /** the integration user the token acts as, from the response's identity URL (an 18- or 15-character id) */
+  userId: string;
+}
 
 export interface SalesforceJwtInput {
   /** a fetch already restricted to the My Domain origin and its token path (allowListedFetch) */
@@ -41,14 +51,17 @@ export interface SalesforceJwtInput {
   onSecret: (value: string) => void;
 }
 
-/** an access token; any failure is a WiderSourceConfigError carrying only Salesforce's error code, never a body */
-export async function salesforceJwtToken(kind: string, i: SalesforceJwtInput): Promise<string> {
+/** an access token and its user; any failure is a WiderSourceConfigError carrying only Salesforce's error code */
+export async function salesforceJwtToken(kind: string, i: SalesforceJwtInput): Promise<SalesforceSession> {
   let key: Awaited<ReturnType<typeof importPKCS8>>;
   try {
+    const details = createPrivateKey({ key: i.privateKeyPem.trim(), format: "pem" }).asymmetricKeyDetails;
+    if ((details?.modulusLength ?? 0) < SALESFORCE_JWT_MIN_RSA_BITS) throw new Error("short key");
     key = await importPKCS8(i.privateKeyPem.trim(), "RS256");
   } catch {
-    throw new WiderSourceConfigError(`${kind}: the stored secret is not an RSA private key in PKCS#8 PEM form`);
+    throw new WiderSourceConfigError(`${kind}: the stored secret is not an RSA private key of at least ${SALESFORCE_JWT_MIN_RSA_BITS} bits in PKCS#8 PEM form`);
   }
+  // iat and exp come from this host's clock; Salesforce allows 3 minutes of skew, so a clock kept by NTP is enough
   const now = Math.floor(Date.now() / 1000);
   const assertion = await new SignJWT({})
     .setProtectedHeader({ alg: "RS256" })
@@ -89,5 +102,7 @@ export async function salesforceJwtToken(kind: string, i: SalesforceJwtInput): P
     throw new WiderSourceConfigError(`${kind}: the Salesforce token request failed (HTTP ${res.status}${code ? `, ${code}` : ""})`);
   }
   i.onSecret(token);
-  return token;
+  const userId = IDENTITY_USER.exec(field("id") ?? "")?.[1];
+  if (!userId) throw new WiderSourceConfigError(`${kind}: the Salesforce token response named no user`);
+  return { accessToken: token, userId };
 }
