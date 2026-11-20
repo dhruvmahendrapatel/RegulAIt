@@ -82,6 +82,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
+  ["/v1/pipeline-runs", "ADR-0232 (lane E49): a pipeline run is the evidence record of one governed run of one template version; the database refuses its deletion, and its workflow instance is aborted through the engine"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
   ["/v1/model-artifacts/:x/lineage", "a model file's derivation is provenance evidence, recorded once and never edited or removed; it goes with the file when the file is deleted, and its audit row keeps the record (lane L7, P14)"],
   ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
