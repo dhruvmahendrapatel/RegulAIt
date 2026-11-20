@@ -29,7 +29,8 @@ roadmap: ../product/ROADMAP.md
 - **How the build runs:** one master session dispatches about 20 builder lanes and six reviewer pairs
   (`internal/process/orchestration/`). Each PR merges only after a code APPROVE and a SECURITY APPROVE at its head and
   all-green checks. The master's merge loop merges it with a merge commit and audits the merge.
-  - 269 PRs have merged since 2026-11-01, 24 of them since 2026-11-19.
+  - 275 PRs have merged since 2026-11-01, 36 of them since 2026-11-19 (GitHub search `is:pr is:merged`, to
+    15:30 UTC).
   - The 10-session cap is suspended by the owner (D-2026-11-20-01).
 - **Built by pillar** (on `main`, dev and demo only):
   - **Pillar 1:** one governed decision core (ADR-0251) covers model, connector, MCP and A2A calls. Decision-core
@@ -46,10 +47,11 @@ roadmap: ../product/ROADMAP.md
     (#1082). Free-form browsing is limited to 30 minutes and $2 a session (D-2026-11-19-03).
   - **Pillar 8:** the inbound PM webhook has replay protection. Write-back and audit ingest are in open PRs.
   - **UI:** external-portal second factor (#1070) and the red-team gate card (#1090). The known-UI-gap count is
-    computed now (#1067), with 155 routes tracked on #453.
-- **Blocked on the owner:** enable the merge queue on `main` (ADR-0252). 53 merged migrations stay unnumbered in
-  `packages/db/migrations/pending/`, and outside CI they don't apply until it is on.
-- **Open queue:** 85 PRs. The current batch and lane roster are in `internal/process/orchestration/Status.md`.
+    computed now (#1067): 161 gap entries in `scripts/known-ui-gaps/*.json`, 151 of
+    them tracked on #453.
+- **Blocked on the owner:** enable the merge queue on `main` (ADR-0252). 55 merged migrations (`.sql` files) stay
+  unnumbered in `packages/db/migrations/pending/`, and outside CI they don't apply until it is on.
+- **Open queue:** 79 PRs, plus 7 from Dependabot. The current batch and lane roster are in `internal/process/orchestration/Status.md`.
 
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
