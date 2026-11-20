@@ -19752,7 +19752,7 @@ export const contextGraphNodeScopes = pgTable(
   },
   (t) => [
     primaryKey({ name: "context_graph_node_scopes_pk", columns: [t.nodeId, t.projectId] }),
-    index("context_graph_node_scopes_project_idx").on(t.projectId),
+    index("context_graph_node_scopes_project_idx").on(t.projectId, t.nodeId),
   ],
 );
 // ===== end ADR-0365 =====

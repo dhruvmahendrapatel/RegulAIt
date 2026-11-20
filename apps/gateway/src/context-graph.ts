@@ -235,6 +235,16 @@ const toView = (r: NodeRow): GraphNodeView => ({
   createdAt: new Date(r.created_at).toISOString(),
 });
 
+/**
+ * For a non-admin, start from the caller's own memberships (index `(project_id, node_id)`), so a member who can read
+ * few nodes never makes the database test every node in the table; `nodeReadable` stays the final, conjunctive check.
+ */
+function candidateNodes(caller: GraphCaller): SQL {
+  if (caller.isAdmin || !caller.userId) return sql``;
+  return sql`AND n.id IN (SELECT s.node_id FROM context_graph_node_scopes s
+    JOIN project_members m ON m.project_id = s.project_id WHERE m.user_id = ${caller.userId}::uuid)`;
+}
+
 /** A page of the nodes the caller may read, in id order. */
 export async function listReadableNodes(
   db: Db,
@@ -243,6 +253,7 @@ export async function listReadableNodes(
 ): Promise<{ items: GraphNodeView[]; nextAfter: string | null }> {
   const r = await db.execute<NodeRow>(sql`${NODE_SELECT}
     WHERE ${nodeReadable(caller, sql.raw("n.id"))}
+      ${candidateNodes(caller)}
       ${q.kind ? sql`AND n.kind = ${q.kind}` : sql``}
       ${q.sourceId ? sql`AND n.source_id = ${q.sourceId}::uuid` : sql``}
       ${q.after ? sql`AND n.id > ${q.after}::uuid` : sql``}

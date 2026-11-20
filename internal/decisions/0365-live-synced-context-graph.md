@@ -109,7 +109,12 @@ connection's work-item linkage, which only admins see today. Binding, rebinding 
 - **One new system reason, read only.** A node's joined facts live in admin-only tables (`context_graph_sources`,
   `pm_connections`, `pm_imported_work_items`, ADR-0234). The three read routes run as a `context_graph_read`
   principal step (the `pm_sync` pattern): it adds SELECT on those three tables and nothing else, and it does not widen
-  nodes or edges, which stay under the principal's own readable policy. No write is admitted under it. The reason is
+  nodes or edges, which stay under the principal's own readable policy. Each of those SELECT policies follows the
+  readable rule too (security review of #1092, S4 finding 1): a source, PM connection or imported item is visible only
+  when a node the principal may read refers to it, so an unbound connection (and its ciphertext columns) is never
+  reachable, even from a later route that forgets the filter. Under the same step a principal reads the scope rows of
+  its own projects only, so the node list starts from the caller's memberships (index `(project_id, node_id)`, code
+  review R4 finding 1) instead of testing every node. No write is admitted under it. The reason is
   added to the closed registry in the migration and to `RLS_SYSTEM_REASONS`; a scratch-database test proves each
   claim with no application filter.
 - Per-user tool grants (pillar 1) still decide what an agent may do with what it reads: the graph is read through

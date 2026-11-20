@@ -8,10 +8,12 @@
 --
 -- Secure by default (ADR-0180, ADR-0234): row-level security ENABLED and FORCED on every new table.
 --  - context_graph_sources: an active admin (or the bootstrap token) and `migration`; READ also under
---    `context_graph_read` (as are pm_connections and pm_imported_work_items, read only).
+--    `context_graph_read`, as are pm_connections and pm_imported_work_items: read only, and only the rows a node the
+--    principal may read refers to.
 --  - context_graph_nodes, context_graph_edges: READ by an admin, `migration`, or a principal for whom
 --    regulait_context_graph_node_readable(node, principal) holds (for an edge: for both ends). WRITE by an admin or `migration`.
---  - context_graph_node_scopes: an admin, `migration`, and `rls_membership` (the readable function's own context).
+--  - context_graph_node_scopes: an admin, `migration`, `rls_membership` (the readable function's own context), and
+--    under `context_graph_read` the rows of the principal's own projects only.
 -- Readable = the node has at least one scope row, and the principal is an active member of the project of EVERY scope
 -- row (conjunctive: a further scope can only narrow). Deleting a source, connection, imported item or project cascades
 -- (PostgreSQL referential actions bypass row-level security).
@@ -98,7 +100,8 @@ CREATE TABLE IF NOT EXISTS "context_graph_node_scopes" (
   CONSTRAINT "context_graph_node_scopes_pk" PRIMARY KEY ("node_id", "project_id")
 );
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "context_graph_node_scopes_project_idx" ON "context_graph_node_scopes" ("project_id");
+-- (project_id, node_id): the node list starts from the caller's memberships (review R4 finding 1)
+CREATE INDEX IF NOT EXISTS "context_graph_node_scopes_project_idx" ON "context_graph_node_scopes" ("project_id", "node_id");
 --> statement-breakpoint
 
 -- The one readable predicate (ADR-0365 §4): may user p_user read node p_node? The policies pass the principal; the
@@ -136,18 +139,30 @@ CREATE POLICY "context_graph_sources_admin" ON "context_graph_sources" FOR ALL
 DROP POLICY IF EXISTS "context_graph_sources_read" ON "context_graph_sources";
 --> statement-breakpoint
 CREATE POLICY "context_graph_sources_read" ON "context_graph_sources" FOR SELECT
-  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read');
+  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read'
+    AND EXISTS (SELECT 1 FROM context_graph_nodes n
+                WHERE n.source_id = context_graph_sources.id
+                  AND regulait_context_graph_node_readable(n.id, regulait_rls_user_id())));
 --> statement-breakpoint
--- the joined facts of a readable node (read only, under the context_graph_read principal step)
+-- the joined facts of a readable node (read only, under the context_graph_read principal step). Each policy follows
+-- the readable rule (security review S4 finding 1): a source, connection or imported item is visible only when a node
+-- the principal may read refers to it, so an unbound connection or an unreadable item is never reachable even if a
+-- later route selects more columns or forgets the application filter.
 DROP POLICY IF EXISTS "pm_connections_context_graph_read" ON "pm_connections";
 --> statement-breakpoint
 CREATE POLICY "pm_connections_context_graph_read" ON "pm_connections" FOR SELECT
-  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read');
+  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read'
+    AND EXISTS (SELECT 1 FROM context_graph_sources s JOIN context_graph_nodes n ON n.source_id = s.id
+                WHERE s.pm_connection_id = pm_connections.id
+                  AND regulait_context_graph_node_readable(n.id, regulait_rls_user_id())));
 --> statement-breakpoint
 DROP POLICY IF EXISTS "pm_imported_work_items_context_graph_read" ON "pm_imported_work_items";
 --> statement-breakpoint
 CREATE POLICY "pm_imported_work_items_context_graph_read" ON "pm_imported_work_items" FOR SELECT
-  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read');
+  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read'
+    AND EXISTS (SELECT 1 FROM context_graph_nodes n
+                WHERE n.pm_imported_work_item_id = pm_imported_work_items.id
+                  AND regulait_context_graph_node_readable(n.id, regulait_rls_user_id())));
 --> statement-breakpoint
 
 ALTER TABLE "context_graph_nodes" ENABLE ROW LEVEL SECURITY;
@@ -197,3 +212,13 @@ DROP POLICY IF EXISTS "context_graph_node_scopes_membership" ON "context_graph_n
 --> statement-breakpoint
 CREATE POLICY "context_graph_node_scopes_membership" ON "context_graph_node_scopes" FOR SELECT
   USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'rls_membership');
+--> statement-breakpoint
+-- the node list starts from the caller's memberships: under context_graph_read, the scope rows of the principal's own
+-- projects only (review R4 finding 1); the readable function still decides each node
+DROP POLICY IF EXISTS "context_graph_node_scopes_own_projects" ON "context_graph_node_scopes";
+--> statement-breakpoint
+CREATE POLICY "context_graph_node_scopes_own_projects" ON "context_graph_node_scopes" FOR SELECT
+  USING ((SELECT regulait_rls_system_reason()) IS NOT DISTINCT FROM 'context_graph_read'
+    AND project_id IN (SELECT m.project_id FROM project_members m
+                       JOIN users u ON u.id = m.user_id AND u.disabled_at IS NULL
+                       WHERE m.user_id = (SELECT regulait_rls_user_id())));

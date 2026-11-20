@@ -5,8 +5,9 @@
  *   - a principal reads exactly the nodes whose every scope project they belong to (a node with no scope: none), and
  *     only edges whose two ends they may read; never a scope row, never a source;
  *   - a disabled member reads nothing; a non-admin principal writes nothing;
- *   - `context_graph_read` (a principal step) opens the joined facts (sources, PM connections, imported items) for
- *     READ only, and does not widen the nodes or edges; an admin reaches every table;
+ *   - `context_graph_read` (a principal step) opens, for READ only, just the joined facts a node the principal may read
+ *     refers to (its source, its PM connection, its imported item), never an unbound connection or an unreadable item,
+ *     and does not widen the nodes or edges; an admin reaches every table;
  *   - the SQL registry of system reasons equals RLS_SYSTEM_REASONS.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -56,6 +57,8 @@ const id = {
   projA: randomUUID(),
   projB: randomUUID(),
   conn: randomUUID(),
+  connUnbound: randomUUID(), // never bound to the graph
+  iUnbound: randomUUID(),
   src: randomUUID(),
   pNode: randomUUID(),
   n1: randomUUID(), // scope A
@@ -104,11 +107,15 @@ beforeAll(async () => {
     { projectId: id.projB, userId: id.carol, role: "viewer" },
     { projectId: id.projA, userId: id.dave, role: "viewer" },
   ]);
-  await db.insert(pmConnections).values({ id: id.conn, name: `cg-${id.conn}`, provider: "mock", project: "P", tokenCiphertext: "x" });
+  await db.insert(pmConnections).values([
+    { id: id.conn, name: `cg-${id.conn}`, provider: "mock", project: "P", tokenCiphertext: "x" },
+    { id: id.connUnbound, name: `cg-${id.connUnbound}`, provider: "mock", project: "Q", tokenCiphertext: "secret" },
+  ]);
   await db.insert(pmImportedWorkItems).values([
     { id: id.i1, connectionId: id.conn, externalId: "1", externalUrl: "https://pm.example/1", itemType: "Task" },
     { id: id.i2, connectionId: id.conn, externalId: "2", externalUrl: "https://pm.example/2", itemType: "Task" },
     { id: id.i3, connectionId: id.conn, externalId: "3", externalUrl: "https://pm.example/3", itemType: "Task" },
+    { id: id.iUnbound, connectionId: id.connUnbound, externalId: "9", externalUrl: "https://pm.example/9", itemType: "Task" },
   ]);
   await db.insert(contextGraphSources).values({ id: id.src, pmConnectionId: id.conn, projectId: id.projA });
   await db.insert(contextGraphNodes).values([
@@ -184,14 +191,23 @@ describe("ADR-0365 the context graph is under forced row-level security", () => 
     expect(await count("context_graph_nodes")).toBe(4);
   });
 
-  it("context_graph_read opens the joined facts for READ only and does not widen nodes or edges", async () => {
+  it("context_graph_read opens only the joined facts a readable node refers to, for READ only, and does not widen nodes or edges", async () => {
     const step = <T>(who: string, fn: () => Promise<T>) => runWithRlsPrincipalStep({ userId: who }, "context_graph_read", "test/context-graph", fn);
+    const rows = async (t: string, col: string) => (await db.execute<{ v: string }>(sql.raw(`select ${col}::text as v from ${t} order by 1`))).rows.map((r) => r.v);
     expect(await step(id.alice, () => ids("context_graph_nodes"))).toEqual([id.pNode, id.n1].sort());
     expect(await step(id.alice, () => count("context_graph_edges"))).toBe(1);
-    expect(await step(id.alice, () => count("context_graph_node_scopes"))).toBe(0);
+    // scope rows of the principal's own projects only (alice: A), never n2's project-B row
+    expect(await step(id.alice, () => rows("context_graph_node_scopes", "project_id"))).toEqual([id.projA, id.projA, id.projA]);
     expect(await step(id.alice, () => count("context_graph_sources"))).toBe(1);
-    expect(await step(id.alice, () => count("pm_connections"))).toBe(1);
-    expect(await step(id.alice, () => count("pm_imported_work_items"))).toBe(3);
+    // security review S4 finding 1: the bound connection only (never the unbound one or its ciphertext), and only the
+    // imported items a readable node refers to
+    expect(await step(id.alice, () => rows("pm_connections", "id"))).toEqual([id.conn]);
+    expect(await step(id.alice, () => rows("pm_imported_work_items", "id"))).toEqual([id.i1]);
+    expect(await step(id.carol, () => rows("pm_imported_work_items", "id"))).toEqual([id.i1, id.i2].sort());
+    for (const t of ["context_graph_sources", "pm_connections", "pm_imported_work_items", "context_graph_node_scopes"]) {
+      expect([t, await step(id.bob, () => count(t))]).toEqual([t, 0]);
+      expect([t, await step(id.dave, () => count(t))]).toEqual([t, 0]);
+    }
     expect(await step(id.bob, () => ids("context_graph_nodes"))).toEqual([]);
     expect(await step(id.alice, () => pgError(db.update(pmImportedWorkItems).set({ itemType: "Bug" }).where(eq(pmImportedWorkItems.id, id.i1)).returning().then((r) => {
       if (r.length) throw new Error("updated a row under context_graph_read");
