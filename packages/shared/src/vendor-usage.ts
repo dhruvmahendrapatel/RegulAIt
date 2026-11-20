@@ -10,12 +10,13 @@
  * metered figure. A fact carries the vendor's own identity (`factCanonical`), from which the gateway derives the
  * upsert key, so a re-pull of the same window replaces its own rows instead of adding a second copy.
  *
- * Endpoints verified against the vendors' own documentation on 2026-11-15 (ADR-0322 §6).
+ * Endpoints verified against the vendors' own documentation on 2026-11-15 (ADR-0322 §6); GitHub's enhanced billing
+ * usage report and Cursor's Admin API re-checked on 2026-11-19 for slice 3.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai"] as const;
+export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai", "github_copilot", "cursor"] as const;
 export type VendorUsagePullVendor = (typeof VENDOR_USAGE_PULL_VENDORS)[number];
 
 export interface VendorUsageCatalogueEntry {
@@ -64,6 +65,46 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
       "resolves to a person only through an admin alias. Usage that is not billed to an API key is reported per " +
       "project.",
   },
+  github_copilot: {
+    vendor: "github_copilot",
+    label: "GitHub enhanced billing usage report (Copilot lines)",
+    host: "api.github.com",
+    endpoints: [
+      "GET /organizations/{org}/settings/billing/usage?year&month&day",
+      "GET /enterprises/{enterprise}/settings/billing/usage?year&month&day",
+    ],
+    scopePosture: "unverified",
+    scopeNote:
+      "GitHub documents organisation 'Administration' read (fine-grained token) for the organisation report and " +
+      "enterprise billing read for the enterprise report. A fine-grained token can also carry write permissions, " +
+      "and GitHub does not report a fine-grained token's permissions back, so RegulAIt cannot verify the scope. " +
+      "Storing it needs the administrator's attestation that it carries read permissions only (recorded and " +
+      "audited); RegulAIt calls only the usage report with it.",
+    overlapMatchesOn: [],
+    limits:
+      "The daily usage report is billed per organisation, product, SKU and repository, not per person, so a line " +
+      "resolves to a person only through an admin alias for its organisation. Only lines whose product names " +
+      "Copilot are kept. GitHub does not state the currency of the amounts; they are recorded as USD, the currency " +
+      "GitHub bills in. Per-user premium-request usage and cost centres are not pulled in this slice. The gateway " +
+      "does not meter Copilot, so no line is excluded as already metered.",
+  },
+  cursor: {
+    vendor: "cursor",
+    label: "Cursor Admin API (usage events)",
+    host: "api.cursor.com",
+    endpoints: ["POST /teams/filtered-usage-events"],
+    scopePosture: "write_capable",
+    scopeNote:
+      "Cursor's Admin API needs a team admin key with the admin:* scope, which can also change the team. RegulAIt " +
+      "calls only the usage events endpoint with it.",
+    overlapMatchesOn: [],
+    limits:
+      "Usage events are summed per day, user email (or service account), model, kind and product from each " +
+      "event's charged cents, so included usage that Cursor does not charge counts as zero. The user's email is " +
+      "stored on each line as its account reference, as for file-imported cost lines, and resolves it to a person. " +
+      "A window with more than 40,000 events stops with page_limit: lower backfillDays. The " +
+      "gateway does not meter Cursor, so no line is excluded as already metered.",
+  },
 };
 
 const idList = z.array(z.string().trim().min(1).max(200)).max(200);
@@ -87,10 +128,35 @@ export const vendorUsagePublicConfigSchemas = {
       backfillDays: z.number().int().min(1).max(31).default(7),
     })
     .strict(),
+  github_copilot: z
+    .object({
+      /** which report to read: the organisation's or the enterprise's */
+      account: z.enum(["organization", "enterprise"]),
+      /** the organisation login or enterprise slug, which becomes one path segment */
+      slug: z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/, "a GitHub organisation login or enterprise slug"),
+      backfillDays: z.number().int().min(1).max(31).default(7),
+    })
+    .strict(),
+  cursor: z
+    .object({
+      /** Cursor caps its other usage endpoints at 30 days */
+      backfillDays: z.number().int().min(1).max(30).default(7),
+    })
+    .strict(),
 } as const;
 
 export type AnthropicPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["anthropic"]>;
 export type OpenAiPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["openai"]>;
+export type GithubCopilotPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["github_copilot"]>;
+export type CursorPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["cursor"]>;
+export type VendorUsagePublicConfig =
+  | AnthropicPublicConfig
+  | OpenAiPublicConfig
+  | GithubCopilotPublicConfig
+  | CursorPublicConfig;
 
 /** the largest window one run asks for: both vendors cap a request at 31 daily buckets */
 export const VENDOR_USAGE_MAX_WINDOW_DAYS = 31;
@@ -164,6 +230,56 @@ export const openAiCostsSchema = z.object({
 });
 export type OpenAiCosts = z.infer<typeof openAiCostsSchema>;
 
+const money = z.number().finite();
+
+/** GitHub's enhanced billing usage report (one day); money fields are plain numbers */
+export const githubBillingUsageSchema = z.object({
+  usageItems: z
+    .array(
+      z.object({
+        date: z.string().min(1).max(40),
+        product: z.string().min(1).max(200),
+        sku: z.string().max(200).nullable().optional(),
+        quantity: money.nullable().optional(),
+        unitType: nullableText,
+        pricePerUnit: money.nullable().optional(),
+        grossAmount: money.nullable().optional(),
+        discountAmount: money.nullable().optional(),
+        netAmount: money,
+        organizationName: nullableText,
+        repositoryName: nullableText,
+      }),
+    )
+    .max(50_000),
+});
+export type GithubBillingUsage = z.infer<typeof githubBillingUsageSchema>;
+
+/** one page of Cursor's filtered usage events */
+export const cursorUsageEventsSchema = z.object({
+  usageEvents: z
+    .array(
+      z.object({
+        /** epoch milliseconds, as a string */
+        timestamp: z.union([z.string().regex(/^\d{1,16}$/), z.number().int().nonnegative()]),
+        userEmail: nullableText,
+        serviceAccountId: nullableText,
+        model: nullableText,
+        kind: nullableText,
+        product: nullableText,
+        requestsCosts: money.nullable().optional(),
+        /** CENTS, possibly fractional; the docs name it as the figure that reconciles with the team's spend */
+        chargedCents: money,
+      }),
+    )
+    .max(1000),
+  pagination: z.object({
+    currentPage: z.number().int().min(1),
+    hasNextPage: z.boolean(),
+  }),
+});
+export type CursorUsageEvents = z.infer<typeof cursorUsageEventsSchema>;
+export type CursorUsageEvent = CursorUsageEvents["usageEvents"][number];
+
 // --------------------------------------------------------------------------------------------------------------------
 // Normalisation
 // --------------------------------------------------------------------------------------------------------------------
@@ -181,7 +297,7 @@ export interface VendorUsageFact {
   factCanonical: string;
   accountRef: string;
   /** which kind of vendor id `accountRef` names, for the metered-overlap match */
-  accountKind: "api_key" | "project" | "workspace" | "organisation";
+  accountKind: "api_key" | "project" | "workspace" | "organisation" | "user" | "service_account";
   /** the bare vendor id, or null for the organisation-level remainder */
   accountId: string | null;
   periodStart: string;
@@ -305,6 +421,129 @@ export function normalizeOpenAiCosts(page: OpenAiCosts): VendorUsageFact[] {
   return facts;
 }
 
+const DAY_MS = 86_400_000;
+
+function utcDay(ms: number): { start: string; end: string } {
+  const d = new Date(ms);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return { start: new Date(start).toISOString(), end: new Date(start + DAY_MS).toISOString() };
+}
+
+/**
+ * One day of GitHub's enhanced billing usage report to facts, keeping only Copilot lines. The report has no person
+ * dimension: a line is billed to an organisation (and a repository, kept in the detail). GitHub does not state the
+ * currency; it bills in USD, and the catalogue says so.
+ */
+export function normalizeGithubCopilotUsage(page: GithubBillingUsage, account: { kind: "organization" | "enterprise"; slug: string }): VendorUsageFact[] {
+  // items with the same identity on the same day (for example around a price change) are summed, never collapsed:
+  // the gateway keeps one fact per key, so an unsummed duplicate would silently drop spend (#1069 R4)
+  const groups = new Map<string, { fact: VendorUsageFact; net: number; qty: number | null; gross: number | null; discount: number | null }>();
+  const micro = (n: number) => Math.round(n * 1e6);
+  for (const item of page.usageItems) {
+    if (!item.product.toLowerCase().includes("copilot")) continue;
+    const at = Date.parse(item.date);
+    if (Number.isNaN(at)) throw new VendorUsageResponseError("a usage item date was not a valid date");
+    const { start, end } = utcDay(at);
+    const org = item.organizationName ?? (account.kind === "organization" ? account.slug : null);
+    const repo = item.repositoryName ?? null;
+    const factCanonical = canonical(["github_copilot.billing_usage.v1", account.kind, account.slug, start, item.product, item.sku, org, repo]);
+    let g = groups.get(factCanonical);
+    if (!g) {
+      g = {
+        fact: {
+          factCanonical,
+          accountRef: org ? `github organization ${org}` : `github enterprise ${account.slug}`,
+          accountKind: "organisation",
+          accountId: org,
+          periodStart: start,
+          periodEnd: end,
+          amount: 0,
+          currency: "USD",
+          service: item.sku ?? item.product,
+          description: item.product,
+          quantity: null,
+          unit: item.unitType ?? null,
+          detail: { source: "github billing usage", ...(repo ? { repository: repo } : {}) },
+        },
+        net: 0,
+        qty: null,
+        gross: null,
+        discount: null,
+      };
+      groups.set(factCanonical, g);
+    }
+    g.net += micro(item.netAmount);
+    if (typeof item.quantity === "number") g.qty = (g.qty ?? 0) + micro(item.quantity);
+    if (typeof item.grossAmount === "number") g.gross = (g.gross ?? 0) + micro(item.grossAmount);
+    if (typeof item.discountAmount === "number") g.discount = (g.discount ?? 0) + micro(item.discountAmount);
+    // a unit that differs between summed items is not one unit any more
+    if (g.fact.unit !== (item.unitType ?? null)) g.fact.unit = null;
+  }
+  return [...groups.values()].map(({ fact, net, qty, gross, discount }) => ({
+    ...fact,
+    amount: net / 1e6,
+    quantity: qty === null ? null : qty / 1e6,
+    detail: {
+      ...fact.detail,
+      ...(gross !== null ? { grossAmount: gross / 1e6 } : {}),
+      ...(discount !== null ? { discountAmount: discount / 1e6 } : {}),
+    },
+  }));
+}
+
+/**
+ * Cursor usage events to daily facts: one fact per UTC day, user email (or service account), model, kind and
+ * product, summing each event's charged cents. Summed across every page of the run, so a fact is never split over
+ * two pages. Cents are summed as integer micro-cents, so fractional cents add up without float drift.
+ */
+export function normalizeCursorUsageEvents(events: readonly CursorUsageEvent[]): VendorUsageFact[] {
+  const groups = new Map<string, { fact: VendorUsageFact; microCents: number; events: number; requests: number }>();
+  for (const e of events) {
+    const ms = typeof e.timestamp === "number" ? e.timestamp : Number(e.timestamp);
+    // 8.64e15 ms is the last instant a Date can hold; beyond it toISOString would throw a RangeError
+    if (!Number.isSafeInteger(ms) || ms > 8.64e15) throw new VendorUsageResponseError("a usage event timestamp was not epoch milliseconds");
+    const { start, end } = utcDay(ms);
+    const email = e.userEmail?.trim().toLowerCase() || null;
+    const serviceAccount = email ? null : (e.serviceAccountId ?? null);
+    const accountKind: VendorUsageFact["accountKind"] = email ? "user" : serviceAccount ? "service_account" : "organisation";
+    const accountId = email ?? serviceAccount;
+    const factCanonical = canonical(["cursor.usage_events.v1", start, accountKind, accountId, e.model, e.kind, e.product]);
+    let g = groups.get(factCanonical);
+    if (!g) {
+      g = {
+        fact: {
+          factCanonical,
+          accountRef: email ?? (serviceAccount ? `cursor service account ${serviceAccount}` : "cursor team (no user)"),
+          accountKind,
+          accountId,
+          periodStart: start,
+          periodEnd: end,
+          amount: 0,
+          currency: "USD",
+          service: e.model ?? null,
+          description: e.product ?? e.kind ?? null,
+          quantity: null,
+          unit: "requests",
+          detail: {},
+        },
+        microCents: 0,
+        events: 0,
+        requests: 0,
+      };
+      groups.set(factCanonical, g);
+    }
+    g.microCents += Math.round(e.chargedCents * 1e6);
+    g.events += 1;
+    g.requests += e.requestsCosts ?? 0;
+  }
+  return [...groups.values()].map(({ fact, microCents, events: count, requests }) => ({
+    ...fact,
+    amount: microCents / 1e8,
+    quantity: Math.round(requests * 1e6) / 1e6,
+    detail: { source: "cursor usage events", events: count },
+  }));
+}
+
 /**
  * Whether a fact is spend the gateway already metered: the vendor billed it to a key, project or workspace the admin
  * declared as the gateway's own. Such a line is kept, excluded from the imported side and disclosed (ADR-0322 §5).
@@ -312,9 +551,11 @@ export function normalizeOpenAiCosts(page: OpenAiCosts): VendorUsageFact[] {
 export function factOverlapsMetered(
   vendor: VendorUsagePullVendor,
   fact: Pick<VendorUsageFact, "accountKind" | "accountId">,
-  config: AnthropicPublicConfig | OpenAiPublicConfig,
+  config: VendorUsagePublicConfig,
   detailProjectId?: string | null,
 ): boolean {
+  // the gateway does not meter Copilot seats or Cursor usage, so none of their lines is already metered
+  if (vendor === "github_copilot" || vendor === "cursor") return false;
   if (vendor === "anthropic") {
     const c = config as AnthropicPublicConfig;
     return fact.accountKind === "workspace" && fact.accountId !== null && c.gatewayWorkspaceIds.includes(fact.accountId);

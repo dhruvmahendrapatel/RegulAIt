@@ -17096,6 +17096,7 @@ export const vendorUsageCredentials = pgTable(
     /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
     secretCiphertext: text("secret_ciphertext"),
     scopePosture: text("scope_posture", { enum: ["read_only", "write_capable", "unverified"] }).notNull(),
+    /** when the admin acknowledged a scope RegulAIt cannot hold to read-only: `write_capable` or `unverified` (#1069) */
     writeCapableAcknowledgedAt: timestamp("write_capable_acknowledged_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
