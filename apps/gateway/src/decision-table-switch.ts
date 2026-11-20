@@ -17,7 +17,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   and,
-  approvals,
   decisionTables,
   decisionTableVersions,
   desc,
@@ -26,16 +25,21 @@ import {
   ruleStepSuggestions,
   ruleStepSwitches,
   sql,
-  users,
   type Db,
 } from "@regulait/db";
 import { ruleStepRuleDigest } from "./rule-step-serve.js";
-import { RULE_STEP_AUDIT_RULE_IDS, RULE_STEP_SWITCH_PREFIX, switchAudit, switchView, transitionSwitch } from "./rule-steps.js";
-import { requireStepUp } from "./step-up.js";
+import {
+  RULE_STEP_AUDIT_RULE_IDS,
+  checkSwitchRequest,
+  createSwitchApproval,
+  revertBody,
+  switchAudit,
+  switchIdOf,
+  switchView,
+  transitionSwitch,
+} from "./rule-steps.js";
 
 const idParam = z.object({ id: z.string().uuid() }).strict();
-const switchBody = z.object({ reviewerUserId: z.string().uuid(), reason: z.string().trim().min(1).max(500) }).strict();
-const revertBody = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
 const OPEN = ["pending_review", "switched"] as const;
 
 /** the latest switch request of any version of this table, with the version it was for */
@@ -80,21 +84,10 @@ export function registerDecisionTableSwitchRoutes(app: FastifyInstance, db: Db):
   /** ask for the step to be answered by the table's published version; nothing changes until the named reviewer approves */
   app.post("/v1/decision-tables/:id/switch", async (req, reply) => {
     const { id } = idParam.parse(req.params);
-    const parsed = switchBody.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "invalid_body", issues: parsed.error.issues.slice(0, 20) });
-    const body = parsed.data;
-    const actor = req.authCtx.userId ?? null;
-    if (!actor) {
-      return reply.status(422).send({ error: "user_identity_required", detail: "a switch is requested by a person, so its reviewer can be someone else" });
-    }
-    if (body.reviewerUserId === actor) {
-      return reply.status(422).send({ error: "reviewer_is_requester", detail: "a switch is reviewed by someone other than the person who asked for it" });
-    }
-    const [reviewer] = await db.select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt }).from(users).where(eq(users.id, body.reviewerUserId));
-    if (!reviewer || reviewer.disabledAt !== null || !reviewer.isAdmin) {
-      return reply.status(422).send({ error: "reviewer_not_eligible", detail: "the reviewer must be an active administrator" });
-    }
-    if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { ruleSteps: "switch", decisionTableId: id } })).ok) return reply;
+    // the four-eyes rules are slice 4a's, one copy (rule-steps.ts)
+    const checked = await checkSwitchRequest(db, req, reply, { ruleSteps: "switch", decisionTableId: id });
+    if (!checked) return reply;
+    const { body, actor } = checked;
     const out = await db.transaction(async (tx) => {
       const t0 = tx as unknown as Db;
       // one request at a time per table: the table row is the lock, as it is for its versions
@@ -119,34 +112,26 @@ export function registerDecisionTableSwitchRoutes(app: FastifyInstance, db: Db):
       if (digest !== published.bodySha256) {
         return { status: 409, body: { error: "decision_table_version_digest_mismatch", detail: "the published body no longer matches its digest" } } as const;
       }
-      const [w] = await tx
-        .insert(ruleStepSwitches)
-        .values({ decisionTableVersionId: published.id, ruleSha256: digest, requestedBy: actor, reason: body.reason })
-        .returning();
-      const [a] = await tx
-        .insert(approvals)
-        .values({
-          userId: actor,
-          objectType: "rule_step_switch",
-          stageId: `${RULE_STEP_SWITCH_PREFIX}${w!.id}`,
-          approverUserId: body.reviewerUserId,
-          // the consent is for exactly this version's body (ADR-0104's fingerprint column)
-          argumentsDigest: digest,
-        })
-        .returning({ id: approvals.id });
-      await tx.update(ruleStepSwitches).set({ approvalId: a!.id }).where(eq(ruleStepSwitches.id, w!.id));
+      // the consent is for exactly this version's body
+      const { switchId, approvalId } = await createSwitchApproval(t0, {
+        subject: { decisionTableVersionId: published.id },
+        digest,
+        actor,
+        reviewerUserId: body.reviewerUserId,
+        reason: body.reason,
+      });
       await switchAudit(t0, actor, RULE_STEP_AUDIT_RULE_IDS.switchRequested, "require_approval", body.reason, {
         decisionTableId: id,
         decisionTableVersionId: published.id,
         version: published.version,
-        switchId: w!.id,
-        approvalId: a!.id,
+        switchId,
+        approvalId,
         reviewerUserId: body.reviewerUserId,
         agentId: table.agentId,
         stepName: table.stepName,
         ruleSha256: digest,
       });
-      return { status: 202, body: { pending: true, switchId: w!.id, approvalId: a!.id, version: published.version } } as const;
+      return { status: 202, body: { pending: true, switchId, approvalId, version: published.version } } as const;
     });
     return reply.status(out.status).send(out.body);
   });
@@ -190,7 +175,7 @@ export async function applyDecisionTableSwitchDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
-  const switchId = approval.stageId?.startsWith(RULE_STEP_SWITCH_PREFIX) ? approval.stageId.slice(RULE_STEP_SWITCH_PREFIX.length) : null;
+  const switchId = switchIdOf(approval);
   if (!switchId) return;
   const [ref] = await tx
     .select({ versionId: ruleStepSwitches.decisionTableVersionId, tableId: decisionTableVersions.tableId })
