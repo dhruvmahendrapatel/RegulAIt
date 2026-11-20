@@ -105,6 +105,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "decision_table",
   // ADR-0345 slice 2a: acknowledging an agent-risk proof that did not pass (stageId = agent-risk-proof:<proof key>)
   "agent_risk_proof",
+  // ADR-0327 slice 4a: switching a rule-like AI step to its rule, applied only when its named reviewer approves it
+  "rule_step_switch",
   // ADR-0364 (lane E45 S2): a robot version submitted for review (stageId = robot-version:<version id>)
   "robot_version",
   // ADR-0331: removing an MCP server from endpoints, sent to no device until a second administrator approves it
@@ -134,6 +136,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   custom_classifier: "customer classifier version",
   decision_table: "decision table version",
   agent_risk_proof: "agent risk proof acknowledgement",
+  rule_step_switch: "rule-like step switch",
   robot_version: "robot version review",
   endpoint_addon_removal: "MCP server removal from endpoints",
 };

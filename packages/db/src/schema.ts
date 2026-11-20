@@ -2062,6 +2062,9 @@ export const auditLog = pgTable(
         // ADR-0327 addendum: a decision table (objectId = the table): created, a version proposed for review, and the
         // reviewer's decision (published, rejected, or approved but stale). Plain text column — no DDL.
         "decision_table",
+        // ADR-0327 slice 4a: a rule-like step switch request (objectId = the approval's object; the decide path audits
+        // the approval with its own object type). Plain text column — no DDL.
+        "rule_step_switch",
         // ADR-0333 (E15): a detection incident (objectId = the incident) and a detection rule pack change (objectId
         // null). Plain text column — no DDL.
         "detection_incident",
@@ -17789,7 +17792,7 @@ export const ruleStepSettings = pgTable(
 );
 export type RuleStepSettingsRow = typeof ruleStepSettings.$inferSelect;
 
-export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "shadow", "dismissed"] as const;
+export const RULE_STEP_SUGGESTION_STATUSES = ["suggested", "shadow", "switched", "dismissed"] as const;
 
 /** one suggestion per AI step (agent + span name): the latest scan's rule and its evidence */
 export const ruleStepSuggestions = pgTable(
@@ -17820,7 +17823,7 @@ export const ruleStepSuggestions = pgTable(
   (t) => [
     uniqueIndex("rule_step_suggestions_step_uq").on(t.agentId, t.stepName),
     index("rule_step_suggestions_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
-    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'shadow', 'dismissed')`),
+    check("rule_step_suggestions_status_check", sql`${t.status} IN ('suggested', 'shadow', 'switched', 'dismissed')`),
     check("rule_step_suggestions_rates_check", sql`${t.agreement} BETWEEN 0 AND 1 AND ${t.coverage} BETWEEN 0 AND 1`),
     check(
       "rule_step_suggestions_dismissed_check",
@@ -17866,6 +17869,56 @@ export const ruleStepShadows = pgTable(
   ],
 );
 export type RuleStepShadowRow = typeof ruleStepShadows.$inferSelect;
+
+/** the switch request lifecycle; transitions are declared once in `RULE_STEP_SWITCH_MACHINE` (`@regulait/shared`, ADR-0348) */
+export const RULE_STEP_SWITCH_STATUSES = ["pending_review", "switched", "rejected", "stale", "reverted"] as const;
+export type RuleStepSwitchStatus = (typeof RULE_STEP_SWITCH_STATUSES)[number];
+
+/**
+ * ADR-0327 slice 4a (migration `rule_step_switch`): one request to switch a rule-like step from the AI to its rule. Made
+ * from shadow mode by an admin (step-up), decided by a named reviewer through the approvals queue, reverted by an
+ * admin in one action. `rule_sha256` is the digest of the suggestion's rule the request was made for; the approval
+ * carries it too, and the decide path refuses to switch when the rule no longer hashes to it. A DB trigger freezes the
+ * suggestion, the digest and the requester after insert. Written only by `apps/gateway/src/rule-steps.ts`, each write
+ * in the same transaction as its audit row.
+ */
+export const ruleStepSwitches = pgTable(
+  "rule_step_switches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    suggestionId: uuid("suggestion_id")
+      .notNull()
+      .references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
+    /** sha256 hex of `canonicalJson(rule)` at request time */
+    ruleSha256: text("rule_sha256").notNull(),
+    status: text("status", { enum: RULE_STEP_SWITCH_STATUSES }).notNull().default("pending_review"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    reason: text("reason"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    revertedBy: uuid("reverted_by").references(() => users.id, { onDelete: "set null" }),
+    revertedAt: timestamp("reverted_at", { withTimezone: true }),
+    revertReason: text("revert_reason"),
+  },
+  (t) => [
+    // at most one request in flight and one live switch per suggestion
+    uniqueIndex("rule_step_switches_one_open_uq")
+      .on(t.suggestionId)
+      .where(sql`${t.status} IN ('pending_review', 'switched')`),
+    index("rule_step_switches_suggestion_requested_idx").on(t.suggestionId, t.requestedAt),
+    index("rule_step_switches_approval_idx").on(t.approvalId),
+    check("rule_step_switches_rule_sha256_check", sql`${t.ruleSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "rule_step_switches_status_check",
+      sql`${t.status} IN ('pending_review', 'switched', 'rejected', 'stale', 'reverted')`,
+    ),
+    check("rule_step_switches_decided_check", sql`(${t.status} = 'pending_review') = (${t.decidedAt} IS NULL)`),
+    check("rule_step_switches_reverted_check", sql`(${t.status} = 'reverted') = (${t.revertedAt} IS NOT NULL)`),
+  ],
+);
+export type RuleStepSwitchRow = typeof ruleStepSwitches.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)

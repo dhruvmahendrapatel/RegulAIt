@@ -10,6 +10,8 @@
     "GET /v1/rule-steps/suggestions/export.xlsx": "exports the rule-like step suggestions list (summary columns only, never the rule cells) under the ADR-0226 list contract, audited",
     "POST /v1/rule-steps/suggestions/:id/dismiss": "dismisses a rule-like step suggestion (audited)",
     "POST /v1/rule-steps/suggestions/:id/shadow": "puts a rule-like step suggestion in shadow mode: its rule is measured against live model spans by later scans (the AI still answers), audited",
-    "POST /v1/rule-steps/suggestions/:id/shadow/stop": "stops a rule-like step suggestion's shadow period and keeps its counts, audited"
+    "POST /v1/rule-steps/suggestions/:id/shadow/stop": "stops a rule-like step suggestion's shadow period and keeps its counts, audited",
+    "POST /v1/rule-steps/suggestions/:id/switch": "asks for a rule-like step to be switched from the AI to its measured rule; a named administrator decides it in the approvals queue (step-up, audited)",
+    "POST /v1/rule-steps/suggestions/:id/revert": "reverts a switched rule-like step to the AI in one action, no approval needed (audited)"
   }
 }

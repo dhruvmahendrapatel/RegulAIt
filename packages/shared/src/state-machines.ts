@@ -310,7 +310,7 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
 export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
   id: "rule_step_suggestion",
   stored: "rule_step_suggestions.status",
-  states: ["suggested", "shadow", "dismissed"],
+  states: ["suggested", "shadow", "switched", "dismissed"],
   initial: ["suggested"],
   terminal: ["dismissed"],
   transitions: {
@@ -331,6 +331,19 @@ export const RULE_STEP_SUGGESTION_MACHINE = defineMachine({
       to: "dismissed",
       by: ["admin"],
       summary: "An admin dismisses the suggestion; it is never suggested again for this step.",
+    },
+    switch: {
+      from: ["shadow"],
+      to: "switched",
+      by: ["approver"],
+      summary:
+        "The named reviewer approves the switch request; the rule is now the step's answer for inputs it covers, and the AI answers the rest.",
+    },
+    revert: {
+      from: ["switched"],
+      to: "suggested",
+      by: ["admin"],
+      summary: "An admin reverts the switch in one action, with no approval needed; the AI answers every request again.",
     },
   },
 });
@@ -581,6 +594,46 @@ export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
   },
 });
 
+/**
+ * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule. Proposed `pending_review` with a
+ * named reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
+ * `rule_step_switches.status`.
+ */
+export const RULE_STEP_SWITCH_MACHINE = defineMachine({
+  id: "rule_step_switch",
+  stored: "rule_step_switches.status",
+  states: ["pending_review", "switched", "rejected", "stale", "reverted"],
+  initial: ["pending_review"],
+  terminal: ["rejected", "stale", "reverted"],
+  transitions: {
+    approve: {
+      from: ["pending_review"],
+      to: "switched",
+      by: ["approver"],
+      summary: "The named reviewer approves; the suggestion is switched in the same transaction.",
+    },
+    reject: {
+      from: ["pending_review"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The named reviewer denies the switch; the suggestion stays in shadow and the AI keeps answering.",
+    },
+    mark_stale: {
+      from: ["pending_review"],
+      to: "stale",
+      by: ["system"],
+      summary:
+        "Approved, but the suggestion left shadow mode or its rule no longer matches the digest the approval was bound to; nothing is switched.",
+    },
+    revert: {
+      from: ["switched"],
+      to: "reverted",
+      by: ["admin"],
+      summary: "An admin reverts the switch; the AI answers every request again. No approval needed.",
+    },
+  },
+});
+
 /** ADR-0364 §8: the Robots list's "Status" column, computed from the robot and its versions (never stored). */
 export type RobotListStatus = "draft" | "in_review" | "approved" | "retired";
 export function robotListStatus(robot: RobotState, versions: readonly RobotVersionState[]): RobotListStatus {
@@ -686,6 +739,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [ROBOT_RUN_MACHINE.def.id]: ROBOT_RUN_MACHINE,
   [AGENT_NHI_LINK_MACHINE.def.id]: AGENT_NHI_LINK_MACHINE,
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
+  [RULE_STEP_SWITCH_MACHINE.def.id]: RULE_STEP_SWITCH_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
