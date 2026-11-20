@@ -32,6 +32,8 @@ export interface DiscoverySettingsView {
   /** ADR-0338: governed vendor agent control (off by default) and its approval window in hours (24 by default) */
   vendorAgentControl: boolean;
   vendorAgentControlApprovalTtlHours: number;
+  /** ADR-0338 §3a: a delegated (named admin) control credential may be used (off by default) */
+  vendorAgentControlDelegated: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -49,6 +51,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       endpointAddonRemoval: false,
       vendorAgentControl: false,
       vendorAgentControlApprovalTtlHours: 24,
+      vendorAgentControlDelegated: false,
       version: 1,
       updatedAt: null,
     };
@@ -62,6 +65,7 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     endpointAddonRemoval: row.endpointAddonRemovalEnabled,
     vendorAgentControl: row.vendorAgentControlEnabled,
     vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours,
+    vendorAgentControlDelegated: row.vendorAgentControlDelegatedEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -109,6 +113,12 @@ export interface DiscoveryPosture {
   googleDirectoryTokens: boolean;
   /** ADR-0337 §4: the Google Workspace sources configured to read every user's OAuth token grants */
   directoryTokenSources: SourceRef[];
+  /**
+   * ADR-0338 §3a: sources whose live CONTROL credential is delegated (a named admin's authority): a finding, since a
+   * federated service principal is preferred wherever the vendor accepts one. `usable` is false once the opt-in is
+   * off or the credential expired (it is then listed for revocation).
+   */
+  delegatedControlCredentials: Array<SourceRef & { expiresAt: string | null; usable: boolean }>;
   statement: string;
 }
 
@@ -124,6 +134,9 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
       sourceId: discoveryCredentials.sourceId,
       mode: discoveryCredentials.credentialMode,
       writeScope: discoveryCredentials.writeScope,
+      purpose: discoveryCredentials.purpose,
+      expiresAt: discoveryCredentials.expiresAt,
+      expired: sql<boolean>`coalesce(${discoveryCredentials.expiresAt} <= now(), false)`,
       // the database clock (M-075)
       ageDays: sql<number>`floor(extract(epoch from (now() - ${discoveryCredentials.createdAt})) / 86400)::int`,
     })
@@ -133,9 +146,15 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
   const staticCredentials: DiscoveryPosture["staticCredentials"] = [];
   const writeScopeUnverified: SourceRef[] = [];
   const credentialsRefused: SourceRef[] = [];
+  const delegatedControlCredentials: DiscoveryPosture["delegatedControlCredentials"] = [];
   for (const c of creds) {
     const s = byId.get(c.sourceId);
     if (!s) continue;
+    // ADR-0338 §2: a control credential is never a read credential; the read findings below count read rows only
+    if (c.purpose === "platform_write") {
+      if (c.mode === "delegated") delegatedControlCredentials.push({ ...s, expiresAt: c.expiresAt?.toISOString() ?? null, usable: settings.vendorAgentControlDelegated && !c.expired });
+      continue;
+    }
     if (c.mode === "static") staticCredentials.push({ ...s, ageDays: Number(c.ageDays) });
     if (c.writeScope === "unverified") writeScopeUnverified.push(s);
     if (c.writeScope === "refused") credentialsRefused.push(s);
@@ -156,6 +175,7 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     families: settings.families,
     googleDirectoryTokens: settings.googleDirectoryTokens,
     directoryTokenSources,
+    delegatedControlCredentials,
     statement: activeDiscoveryPosture(enabled),
   };
 }

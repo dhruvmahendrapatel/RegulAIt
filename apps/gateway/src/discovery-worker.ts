@@ -637,8 +637,11 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const [cred] = await db
     .select()
     .from(discoveryCredentials)
-    .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
+    // ADR-0338 §2: the scanner loads only the READ credential; a control (platform_write) credential never reaches a scan
+    .where(and(eq(discoveryCredentials.sourceId, source.id), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
+  // a read row is federated or static (the delegated CHECK holds `delegated` to control rows); refused all the same
+  if (cred && cred.credentialMode === "delegated") return fail("credential_refused", "a delegated credential is never used to scan");
   // decision 7 (review of #403): a credential found to grant write access is never used again
   if (cred && discoveryWriteScopeFinal(cred.writeScope)) {
     return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
@@ -709,7 +712,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         target: Object.fromEntries(Object.entries(source.target).map(([k, v]) => [k, String(v)])),
         scope: { orgLevel: source.scope.orgLevel === true, include: [...(source.scope.include ?? [])] },
       },
-      credential: cred ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
+      credential: cred && cred.credentialMode !== "delegated" ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
       // ADR-0195 SD2b: federation tokens, for a federated credential only, bound to this source and its audiences
       ...(cred?.credentialMode === "federated" ? { federation: scanFederation(db, opts.dataKey, source.id, source.kind, cred.publicConfig) } : {}),
       fetch: ((input: string | URL | Request, init?: RequestInit) =>

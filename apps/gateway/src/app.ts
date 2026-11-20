@@ -6404,7 +6404,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
   // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
   // production until slice 1b; both come only through the code-only test seam below
-  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // the data key comes from buildApp's own option, never from the test seam
+  registerVendorAgentControlRoutes(app, db, { ...(opts.vendorAgentControl ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);

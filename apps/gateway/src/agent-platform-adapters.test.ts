@@ -11,7 +11,7 @@ import {
   discoveryWriteScopeFinal,
   nextDiscoveryWriteScope,
 } from "@regulait/shared";
-import { AGENT_PLATFORM_ADAPTERS, allowListedFetch } from "./agent-platform-adapters.js";
+import { AGENT_PLATFORM_ADAPTERS, AGENT_PLATFORM_CONTROLS, allowListedFetch } from "./agent-platform-adapters.js";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
 import { ReadFailure } from "./discovery-wider-scanners.js";
 
@@ -26,8 +26,21 @@ describe("ADR-0336 decision 2: one adapter list for the agent_registry family", 
     }
   });
 
-  it("slice 1 declares no governed action anywhere (E19 adds them), and every E17 adapter declares its endpoints", () => {
-    for (const a of AGENT_PLATFORM_ADAPTERS) expect(a.governedActions).toEqual([]);
+  it("a governed action is declared exactly where a control member executes it (ADR-0338 §3), and every E17 adapter declares its endpoints", () => {
+    // the declared verbs and the control's (action, direction) pairs are one set: `unquarantine` is quarantine's reverse
+    const verbsOf = (actions: readonly string[]) => actions.flatMap((x) => (x === "quarantine" ? ["quarantine", "unquarantine"] : x === "disable" ? ["disable"] : [x])).sort();
+    for (const a of AGENT_PLATFORM_ADAPTERS) {
+      const declared = a.governedActions.map((g) => g.action).sort();
+      if (!a.control) {
+        expect(declared, a.kind).toEqual([]);
+        continue;
+      }
+      expect(declared, a.kind).toEqual(verbsOf(a.control.member.actions));
+      expect(a.control.member.acceptedModes.length, a.kind).toBeGreaterThan(0);
+      expect(AGENT_PLATFORM_CONTROLS[a.control.registry]).toBe(a.control.member);
+    }
+    // ADR-0338 slice 1b: Copilot Studio is the one control; Entra, Gemini and AgentCore declare none yet (slice 2)
+    expect(Object.keys(AGENT_PLATFORM_CONTROLS)).toEqual(["copilot_studio"]);
     const copilot = AGENT_PLATFORM_ADAPTERS.find((a) => a.kind === "agent_registry_copilot_studio")!;
     expect(copilot.vendor).toBe("microsoft");
     expect(copilot.readEndpoints!.length).toBeGreaterThan(0);
