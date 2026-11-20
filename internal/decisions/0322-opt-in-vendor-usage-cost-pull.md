@@ -394,4 +394,39 @@ pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
   rewinds `pulled_through` as before; lines it withdrew come back on the next pull only if AWS still reports them.
 - **No metered overlap**: the gateway has no Bedrock provider, so no line is excluded as already metered.
 - **Not built**: the RegulAIt-principal mode with an external id; Parquet (hyparquet, MIT, to be compared under
-  ADR-0176 first); live-tenant tests (lane E11); the settings screen (#453); OpenAI Codex analytics (slice 4b).
+  ADR-0176 first); live-tenant tests (lane E11); the settings screen (#453). OpenAI Codex analytics is slice 4b
+  (below); the principal mode and Parquet move to slice 4c (owner decision 3 for slice 4b).
+
+## As built — slice 4b (2026-11-20): ChatGPT Enterprise and Codex usage
+
+- **Connector**: `openai_codex` (the vendor id the database check already allowed, so no migration). Configuration is
+  `{ workspaceId (UUID), backfillDays 1-30 }`, strict; the UUID check keeps the path segment from being steered.
+- **Endpoint**: `GET https://api.chatgpt.com/v1/analytics/workspaces/{workspace_id}/usage` with `start_time` and
+  `end_time` (UTC-midnight Unix seconds, inclusive and exclusive) and `limit=2000`, following `next_page` as `page`
+  until `has_more` is false, at most 40 pages. Bearer Admin key. Checked against the vendor's OpenAPI document 2.5.43
+  (2026-11-20). Per-user rows only: `group=workspace` and the `user_ids`, `group_ids` and `include` extensions are not
+  sent. The Codex-only `/v1/analytics/codex/...` route (retiring 2026-12-15) is not used.
+- **Credential**: `unverified` posture. An Admin key can carry other permissions, including write ones, and the API
+  does not report them back, so storing the key needs the `acknowledgeUnverifiedScope` attestation (recorded and
+  audited), as for GitHub.
+- **Normalisation** (`normalizeChatGptDailyUsage`): per user, UTC day and client (`client_id`, such as `CHAT_WEB` or
+  `CODEX_CLI`), one `credit_estimate` line when the vendor gives `estimated_cost_usd` (USD, `detail.estimate = true`,
+  quantity = credits) and one `usd` line when it gives native `cost_usd` (unmarked, quantity = messages). The part of
+  a row's total that no client carries becomes an `unattributed` line of the same basis when it is positive. A row with
+  credit-priced usage and no estimate imports no credit line; the batch summary counts it as
+  `creditRowsWithoutEstimate`. Amounts are summed in integer micro-dollars. A row that is not a per-user UTC day inside
+  the window, or a second row for the same user and day, fails the run with `bad_response` and writes nothing.
+- **Identity**: the line's account reference is the user's email (lower-cased), else `chatgpt user <id>`, and resolves
+  through the usual alias, exact-email and domain-rule order. The fact key uses the vendor's user id, not the email,
+  so an email change updates the same line.
+- **Restatement**: upsert only, re-reading the last two days, as for the other daily vendors. Lines are not withdrawn:
+  the vendor drops deleted users from the per-user report, and withdrawing their earlier lines would lose real spend.
+  An `unattributed` line whose remainder later falls to zero keeps its last amount (rare; filed if it matters).
+- **No metered overlap**: the gateway does not meter ChatGPT or Codex, so no line is excluded as already metered.
+- **Open source first (ADR-0176)**: the `openai` SDK (6.49.0) has no method for this host. A client generated from the
+  vendor's OpenAPI document (`openapi-fetch`, MIT) was compared and not added: it would vendor a 700 KB document and a
+  new dependency for one paginated GET whose fetch must still be the guarded one. The vendor's own sample code calls
+  the endpoint with plain fetch.
+- **Not built**: the `include=plugins|skills|tools` breakdowns, per-model lines, token counts and Codex code
+  attribution (kept out of the ledger; they are usage detail, not spend); live-tenant tests (lane E11); the settings
+  screen (#453).
