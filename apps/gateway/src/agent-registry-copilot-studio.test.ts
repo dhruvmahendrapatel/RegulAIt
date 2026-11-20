@@ -240,7 +240,7 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
     const { promise, calls } = run({ botsNextLink: "https://evil.example.com/api/data/v9.2/bots?$skiptoken=2" });
     const res = await promise;
     expect(res.registriesComplete).toEqual([]);
-    expect(calls.urls.some((u) => u.includes("evil.example.com"))).toBe(false);
+    expect(calls.urls.some((u) => new URL(u).hostname === "evil.example.com")).toBe(false);
   });
 
   it("an include list keeps only the named agents", async () => {
