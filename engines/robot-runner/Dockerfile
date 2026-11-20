@@ -54,11 +54,15 @@ LABEL org.opencontainers.image.title="regulait-engine-robot-runner" \
 COPY --from=shim /out /app
 # ADR-0184 / ADR-0200 (patch, never allow-list): the zlib1g fix the promptfoo image applies to this same base digest,
 # then the headless shell's system libraries (playwright-core's own list for this Debian release); the apt lists, logs
-# and ldconfig's aux-cache are removed so the layer stays byte-reproducible.
+# (alternatives.log carries the install time) and ldconfig's aux-cache are removed so the layer stays byte-reproducible.
+# So is fontconfig's system cache (/var/cache/fontconfig): fc-cache writes different bytes on every build (measured: two
+# installs of the same packages, every cache file differs). With a read-only root, fontconfig builds its cache under
+# HOME (/work, the run's tmpfs) when the browser starts.
 RUN apt-get update \
  && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
  && node /app/node_modules/playwright-core/cli.js install-deps chromium-headless-shell \
- && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache /var/cache/apt/*.bin
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+          /var/cache/apt/*.bin /var/cache/fontconfig/*
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=browser /ms-playwright /ms-playwright
