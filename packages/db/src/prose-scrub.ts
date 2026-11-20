@@ -307,6 +307,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.mrmRetestRuns, ["reason"]],
   // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
   [s.endpointAddonRemovals, ["reason"]],
+  // ADR-0338: the admin's reason for a vendor agent control action
+  [s.vendorAgentActions, ["reason"]],
 ];
 
 /**

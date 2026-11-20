@@ -35,7 +35,10 @@
  * action-decision; pm.create_work_item, pm.update_fields
  * (run sync: create, then repair-in-place), pm.transition_state (node status
  * mirror on run events), pm.add_comment (decision mirror); device_policy.sign_payload (ADR-0331: an endpoint agent's directive
- * read of an approved removal, the counting fake being the device-policy signer).
+ * read of an approved removal, the counting fake being the device-policy signer); vendor_agent_control.reverse (ADR-0338: a
+ * restore's execute, the counting fake being the in-memory vendor's control member). vendor_agent_control.apply is the
+ * one declared exemption (NARROWING_WRITE_OPERATIONS, owner decision 2): its row proves the opposite, that a disable
+ * or quarantine flipped into every non-normal dial at the barrier still reaches the vendor exactly once.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
@@ -186,6 +189,8 @@ let piaId: string;
 let anaAuth: { authorization: string }; // the approver (gates, infra proposals, require_approval)
 let anaId: string;
 let workerAgentId: string;
+let vendorFake: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeVendorControl>;
+let vendorCreds: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeCredentials>;
 
 /** which (operation, mode) cells the matrix actually exercised */
 const covered = new Map<string, Set<string>>();
@@ -264,6 +269,29 @@ async function refusedAtBarrier(operation: ExternalWriteOperation, mode: Flipped
   return res;
 }
 
+/**
+ * THE EXEMPTION'S CELL (ADR-0338 §7): the same drive and flip as `refusedAtBarrier`, but the operation narrows, so the
+ * counting fake MUST move exactly once under the flipped dial.
+ */
+async function admittedAtBarrier(operation: ExternalWriteOperation, mode: FlippedMode, drive: () => Promise<Injected>): Promise<Injected> {
+  const before = probe.count(operation);
+  const gate = probe.arm(operation);
+  const inflight = drive();
+  const outcome = await Promise.race([gate.reached.then(() => "reached" as const), inflight.then(() => "finished" as const, () => "finished" as const)]);
+  if (outcome !== "reached") {
+    probe.disarm();
+    const res = await inflight;
+    throw new Error(`${operation}: the drive finished (${res.statusCode} ${res.body.slice(0, 200)}) without reaching the barrier`);
+  }
+  await setMode(mode);
+  gate.release();
+  const res = await inflight;
+  await setMode("normal");
+  expect(probe.count(operation), `${operation} under '${mode}': a narrowing write must still reach the provider`).toBe(before + 1);
+  mark(operation, mode);
+  return res;
+}
+
 /** the row's POSITIVE CONTROL: the same drive under 'normal' reaches the fake */
 async function admitted(operation: ExternalWriteOperation, drive: () => Promise<Injected>, calls = 1): Promise<Injected> {
   const before = probe.count(operation);
@@ -328,7 +356,17 @@ beforeAll(async () => {
     { kind: "directive_signer" as const, keyId: "barrier-directive-key", signPayload: async (b: Buffer) => edSign(null, b, directiveKey) },
     { signPayload: "device_policy.sign_payload" },
   );
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner });
+  // ADR-0338: the in-memory vendor's control member is the counting fake for vendor_agent_control.apply / .reverse
+  const { fakeVendorControl, fakeCredentials } = await import("./testing/vendor-agent-control-fixture.js");
+  vendorFake = fakeVendorControl();
+  vendorCreds = fakeCredentials();
+  const control = probe.counting(vendorFake.control, { apply: "vendor_agent_control.apply", reverse: "vendor_agent_control.reverse" });
+  app = buildApp(db, {
+    bootstrapToken: BOOT,
+    dataKey: DATA_KEY,
+    directiveSigner,
+    vendorAgentControl: { controls: { entra_agent_id: control }, credentialFor: vendorCreds.resolver },
+  });
   const pia = await makeUser(`bm-pia-${RUN}@example.com`);
   piaId = pia.id;
   piaAuth = pia.auth;
@@ -731,6 +769,88 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
       for (const r of restores.reverse()) await r();
       if (prevUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
       else process.env.REGULAIT_PUBLIC_URL = prevUrl;
+    }
+  });
+
+  it("vendor_agent_control.reverse is refused and vendor_agent_control.apply is admitted (ADR-0338 §7: narrowing only)", async () => {
+    const { seedRegistryAgent } = await import("./testing/vendor-agent-control-fixture.js");
+    const { grantStepUpForTest, stepUpRequest } = await import("./testing/step-up-grant.js");
+    const { requestActionSchema, vendorControlDecideStepUp, vendorControlExecuteStepUp, vendorControlRequestStepUp } = await import("./vendor-agent-control.js");
+    const { agentRegistryRecords, users, vendorAgentActions } = await import("@regulait/db");
+    const restores: Array<() => Promise<unknown>> = [];
+    const sourceIds: string[] = [];
+    const URL_ = "/v1/vendor-agent-control/actions";
+    const withGrant = async (who: string, args: Parameters<typeof grantStepUpForTest>[2], url: string, payload: object) => {
+      const r = stepUpRequest(await grantStepUpForTest(db, who, args));
+      return app.inject({ method: "POST", url, headers: r.headers, cookies: r.cookies, payload });
+    };
+    const approvedAction = async (recordId: string, action: string, reverses?: string) => {
+      const b = { recordId, action, approverUserId: anaId, reason: `barrier ${RUN}`, ...(reverses ? { reverses } : {}) };
+      const asked = await withGrant(piaId, vendorControlRequestStepUp(requestActionSchema.parse(b)), URL_, b);
+      expect(asked.statusCode, asked.body).toBe(201);
+      const act = asked.json().action as { id: string; approvalId: string };
+      const [ap] = await db.select().from(approvals).where(eq(approvals.id, act.approvalId));
+      const decided = await withGrant(anaId, vendorControlDecideStepUp(ap!.id, "approved", ap!.argumentsDigest!), `/v1/approvals/${ap!.id}/decide`, { decision: "approved" });
+      expect(decided.statusCode, decided.body).toBe(200);
+      return act.id;
+    };
+    const execute = async (id: string) => {
+      const [row] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
+      return withGrant(piaId, vendorControlExecuteStepUp(row!), `${URL_}/${id}/execute`, {});
+    };
+    const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
+    try {
+      restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+      const [s0] = await db.select({ on: discoverySettings.vendorAgentControlEnabled }).from(discoverySettings).where(eq(discoverySettings.id, 1));
+      restores.push(() => db.update(discoverySettings).set({ vendorAgentControlEnabled: s0?.on ?? false }).where(eq(discoverySettings.id, 1)));
+      await db.update(discoverySettings).set({ vendorAgentControlEnabled: true }).where(eq(discoverySettings.id, 1));
+      const [p0] = await db.select().from(users).where(eq(users.id, piaId));
+      const [a0] = await db.select().from(users).where(eq(users.id, anaId));
+      restores.push(() => db.update(users).set({ isAdmin: p0!.isAdmin, totpEnabled: p0!.totpEnabled }).where(eq(users.id, piaId)));
+      restores.push(() => db.update(users).set({ isAdmin: a0!.isAdmin, totpEnabled: a0!.totpEnabled }).where(eq(users.id, anaId)));
+      // admins (the routes are admin-only), without a second factor: the bootstrap credential keeps flipping the dial
+      await db.update(users).set({ isAdmin: true }).where(inArray(users.id, [piaId, anaId]));
+      const agent = async () => {
+        const a = await seedRegistryAgent(db, { run: RUN, createdBy: piaId, sourceIds });
+        vendorCreds.issue(a.sourceId);
+        return a;
+      };
+
+      // apply: a quarantine flipped into each non-normal dial at the barrier still reaches the vendor once
+      for (const mode of MODES) {
+        const id = await approvedAction((await agent()).recordId, "quarantine");
+        const res = await admittedAtBarrier("vendor_agent_control.apply", mode, () => execute(id));
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().action.status).toBe("succeeded");
+      }
+      const control = await approvedAction((await agent()).recordId, "disable");
+      expect((await admitted("vendor_agent_control.apply", () => execute(control))).json().action.status).toBe("succeeded");
+
+      // reverse: a restore flipped into each non-normal dial at the barrier never reaches the vendor
+      const target = await agent();
+      const taken = await approvedAction(target.recordId, "quarantine");
+      expect((await execute(taken)).json().action.status).toBe("succeeded");
+      for (const mode of MODES) {
+        const id = await approvedAction(target.recordId, "restore", taken);
+        const res = await refusedAtBarrier("vendor_agent_control.reverse", mode, () => execute(id));
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().action).toMatchObject({ status: "failed", outcomeCode: mode === "halted" ? "execution_halted" : mode === "read_only" ? "execution_read_only" : "execution_requires_approval" });
+        expect(vendorFake.states.get(target.externalId)).toBe("quarantined");
+      }
+      const back = await approvedAction(target.recordId, "restore", taken);
+      expect((await admitted("vendor_agent_control.reverse", () => execute(back))).json().action).toMatchObject({ status: "succeeded", observedState: "active" });
+    } finally {
+      if (sourceIds.length) {
+        const recs = await db.select({ id: agentRegistryRecords.id }).from(agentRegistryRecords).where(inArray(agentRegistryRecords.sourceId, sourceIds));
+        if (recs.length) {
+          const rows = await db.select({ id: vendorAgentActions.id, approvalId: vendorAgentActions.approvalId }).from(vendorAgentActions).where(inArray(vendorAgentActions.recordId, recs.map((r) => r.id)));
+          await db.delete(vendorAgentActions).where(sql`${vendorAgentActions.reversesActionId} IS NOT NULL AND ${inArray(vendorAgentActions.recordId, recs.map((r) => r.id))}`);
+          await db.delete(vendorAgentActions).where(inArray(vendorAgentActions.recordId, recs.map((r) => r.id)));
+          if (rows.length) await db.delete(approvals).where(inArray(approvals.id, rows.map((r) => r.approvalId)));
+        }
+        await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
+      }
+      for (const r of restores.reverse()) await r();
     }
   });
 

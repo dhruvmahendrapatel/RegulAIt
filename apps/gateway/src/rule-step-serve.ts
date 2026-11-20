@@ -12,7 +12,7 @@
  * Kept apart from `rule-steps.ts` (the admin routes) so the request path imports no route module.
  */
 import { createHash } from "node:crypto";
-import { and, desc, eq, ruleStepSuggestions, ruleStepSwitches, sql, traceSpans, type Db } from "@regulait/db";
+import { and, costEvents, desc, eq, ruleStepSuggestions, ruleStepSwitches, sql, traceSpans, type Db } from "@regulait/db";
 import { applyInducedRule, extractStepFields, type InducedRule } from "@regulait/optimizer-kernel";
 import { canonicalJson } from "@regulait/shared";
 
@@ -82,4 +82,38 @@ export async function switchedRuleAnswer(
     output: applied.output,
     avgCostPerRunUsd: s.runs > 0 && s.windowCostUsd > 0 ? Number((s.windowCostUsd / s.runs).toFixed(6)) : null,
   };
+}
+
+/**
+ * The one savings record for a rule-served answer, shared by every serve path (compat and native invoke), so the
+ * ledger row cannot drift between them. Nothing was spent, so no `usage_events` row is written; the saving is the
+ * step's measured average AI cost per run. `surface` names the path that served it.
+ */
+export async function recordRuleStepSaving(
+  db: Db,
+  args: {
+    userId: string;
+    requestedAgentId: string;
+    servedAgentId: string;
+    projectId: string | null;
+    ruleAnswer: RuleStepAnswer;
+    surface: string;
+  },
+): Promise<void> {
+  await db.insert(costEvents).values({
+    userId: args.userId,
+    objectType: "agent",
+    objectId: args.servedAgentId,
+    technique: "rule_replacement",
+    requestedAgentId: args.requestedAgentId,
+    servedAgentId: args.servedAgentId,
+    baselineAgentId: args.servedAgentId,
+    estimatedCostSavedUsd: args.ruleAnswer.avgCostPerRunUsd,
+    estimationBasis:
+      "rule-replacement: a switched rule-like step answered by its approved exact-match rule — the step's " +
+      "measured average AI cost per run over its scan window saved (null when no run was priced)",
+    ruleId: "rule-step-served",
+    projectId: args.projectId,
+    detail: { suggestionId: args.ruleAnswer.suggestionId, switchId: args.ruleAnswer.switchId, surface: args.surface },
+  });
 }
