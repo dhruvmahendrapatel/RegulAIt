@@ -112,6 +112,11 @@ export function federationUnsupportedReason(kind: string): string | null {
   if (kind === "saas_inventory_api" || kind === "ml_mlflow") {
     return "this kind of source accepts no external OIDC token, so a federated credential cannot work; store a read-only API token in static mode (a relaxation, confirmed with a step-up)";
   }
+  // ADR-0337: Google Workspace domain-wide delegation signs its own JWT with a service-account key; Salesforce's JWT
+  // bearer flow signs with the connected app's key; Slack takes a stored token. None accepts RegulAIt's OIDC token.
+  if (kind === "entitlement_google_workspace" || kind === "entitlement_salesforce" || kind === "entitlement_slack") {
+    return "this platform accepts no external OIDC token for a delegated admin read, so a federated credential cannot work; store the read-only key or token in static mode (a relaxation, confirmed with a step-up)";
+  }
   return null;
 }
 

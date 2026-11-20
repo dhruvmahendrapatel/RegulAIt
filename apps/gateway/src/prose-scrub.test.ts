@@ -507,6 +507,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "engine_runners.revoke_reason",
     // ADR-0217: an automatic re-test's reason
     "mrm_retest_runs.reason",
+    // ADR-0331: the admin's reason for removing an MCP server from endpoints
+    "endpoint_addon_removals.reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -529,6 +531,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",
+    // ADR-0350 (lane E31): per-device command-rule exceptions
+    "endpoint_command_exceptions.reason",
+    "endpoint_command_exceptions.decision_reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",
@@ -538,6 +543,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    // ADR-0327 addendum — a decision-table version's proposal reason
+    "decision_table_versions.reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
     "connectors.disabled_reason",
     "copilot_proposals.rationale",
@@ -575,6 +582,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "redteam_runs.gate_reason",
     "redteam_runs.note",
     "remediation_proposals.rationale",
+    // ADR-0327 slice 4a — a rule-step switch request's reason and revert reason
+    "rule_step_switches.reason",
+    "rule_step_switches.revert_reason",
     "shadow_ai_findings.disposition_reason",
     "shadow_ai_findings.replacement_note",
     "shadow_ai_imports.reason",
@@ -600,6 +610,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
+    "agent_identity_links.note",
+    "agent_identity_links.decision_note",
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",

@@ -43,10 +43,29 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 export const DELIBERATELY_API_ONLY = new Map([
+  // ADR-0311 (lane E1, G10): MCP Streamable HTTP plumbing, not a governed object. It always answers 405 Allow: POST,
+  // because the stateless proxy issues no session for a client to end, and it deletes nothing.
+  ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
+  ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  ["/v1/endpoint-device-groups/:x/members/:x", "removing a device from a device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  ["/v1/endpoint-device-groups/:x/rules/:x", "removing a device group's narrowing rule (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  // ADR-0337 §6 (lane E18, owner decision 2026-11-17): API-only until the entitlement graph screen on #453; delete these
+  // entries when the screen lands
+  ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/discovery/entitlements/apps/:x/agent-link", "unlinking a vendor app from its agent (audited, declared machine): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
   ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
+  // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
+  // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
+  ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
+  // ADR-0322 (lane E7): the vendor usage pull brief is API-only; the connector screen is posted on #453 (route census
+  // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
+  ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
+  // ADR-0364 S2 (lane E45): the Robots screens are the design builder's (#453); delete this entry when the robot detail screen lands
+  ["/v1/robots/:x/secrets/:x/:x", "clearing a robot secret no submitted version is bound to (audited): API-only until the robot detail screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
 ]);
 
 /**
@@ -56,6 +75,7 @@ export const DELIBERATELY_API_ONLY = new Map([
  * would remove the proof.
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
+  ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],

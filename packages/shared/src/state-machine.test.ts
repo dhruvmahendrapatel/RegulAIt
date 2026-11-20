@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defineMachine, IllegalTransitionError } from "./state-machine.js";
-import { EVAL_RUN_MACHINE, INCIDENT_MACHINE, MCP_ADMISSION_MACHINE, STATE_MACHINES, TRAINING_JOB_MACHINE } from "./state-machines.js";
+import { AGENT_NHI_LINK_MACHINE, EVAL_RUN_MACHINE, INCIDENT_MACHINE, MCP_ADMISSION_MACHINE, STATE_MACHINES, TRAINING_JOB_MACHINE } from "./state-machines.js";
+import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 
@@ -124,6 +125,16 @@ describe("ADR-0348 declared machines", () => {
     for (const a of live) expect(m.can(a, "close")).toBe(true);
     expect(m.sourcesOf("contain_by_halt")).toEqual(["open"]);
     for (const e of m.events) expect(m.can("closed", e)).toBe(false);
+  });
+
+  it("agent_nhi_link: only a staged link is decided, once, by an admin; both outcomes are final", () => {
+    const m = AGENT_NHI_LINK_MACHINE;
+    expect([...m.def.states]).toEqual([...AGENT_NHI_LINK_STATUSES]);
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
+    expect(m.next("staged", "confirm")).toBe("confirmed");
+    expect(m.next("staged", "reject")).toBe("rejected");
+    expect(m.sourcesOf("confirm")).toEqual(["staged"]);
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
   });
 
   it("eval_run: a running run ends completed or error, and nothing leaves a finished run", () => {
