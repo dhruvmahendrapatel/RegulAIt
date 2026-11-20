@@ -14,6 +14,8 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { fmtAt, fmtBytes, frameworkLabel } from "../../api/format";
 import { Lockup } from "../../ui/Brand";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, SkeletonBlock, Textarea, type Tone } from "../../ui/kit";
+import { PortalSecondFactor } from "../../ui/PortalSecondFactor";
+import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactorModel";
 import v from "../views.module.css";
 import s from "./supplier.module.css";
 import {
@@ -131,6 +133,8 @@ function refusalText(status: number, body: { detail?: string } | null, fallback:
 type Phase =
   | { kind: "loading" }
   | { kind: "ready"; data: Assessment }
+  /** ADR-0240: the link is spent; a code from the authenticator opens the session */
+  | { kind: "secondFactor"; start: ExternalMfaStart }
   | { kind: "refused"; title: string; message: string }
   | { kind: "failed"; message: string }
   | { kind: "signedOut" };
@@ -181,7 +185,9 @@ export default function SupplierPortalPage() {
     }
     void (async () => {
       try {
-        const r = await postJson<{ vendorName: string }>("/supplier/v1/session", { token: found.token });
+        const r = await postJson<unknown>("/supplier/v1/session", { token: found.token });
+        // the same 200 is a session or, while the second factor is required, a challenge: told apart by `mfa`
+        if (r.status === 200 && isMfaStart(r.body)) return setPhase({ kind: "secondFactor", start: r.body });
         if (r.status === 200) return void (await load());
         setPhase({ kind: "refused", title: "This link cannot be used", message: refusalText(r.status, r.body, LINK_REFUSAL_DETAIL) });
       } catch (e) {
@@ -189,6 +195,16 @@ export default function SupplierPortalPage() {
       }
     })();
   }, [load]);
+
+  /** ADR-0240: send the code; a session cookie comes back on success */
+  const sendCode = async (code: string): Promise<MfaOutcome> => {
+    const r = await postJson<{ error?: string; detail?: string }>("/supplier/v1/session/mfa", { code });
+    if (r.status === 200) {
+      await load();
+      return { kind: "signedIn" };
+    }
+    return mfaRefusal(r.status, r.body);
+  };
 
   const signOut = async () => {
     try {
@@ -216,6 +232,7 @@ export default function SupplierPortalPage() {
             </div>
           </Card>
         )}
+        {phase.kind === "secondFactor" && <PortalSecondFactor start={phase.start} submit={sendCode} />}
         {phase.kind === "refused" && (
           <Card>
             <ErrorState title={phase.title} message={phase.message} />
