@@ -263,6 +263,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // credential (keys, tokens, provider and integration secrets) with its
       // owner, age, use and flags, read-only, linking to where each is managed.
       { label: "Credentials", to: "/admin/credentials" },
+      // ADR-0315 G7 — the receivers outside RegulAIt that accept an agent's portable credential, beside the inventory
+      { label: "Agent credentials", to: "/admin/agent-credentials" },
       // ADR-0188 S6: each agent principal's own identity, stewards, public
       // credentials and own grants, and a run's delegation tree. Beside the
       // credential inventory, in this group (ADR-0177 §3: no new group).
