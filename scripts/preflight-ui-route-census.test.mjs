@@ -4,11 +4,13 @@ import { globalPathDefs, globalWrappers, parse, uiCalls, wrappers } from "./pref
 import {
   INDIRECT_UI_CALLS,
   KNOWN_UI_GAPS,
-  KNOWN_UI_GAPS_MAX,
+  KNOWN_UI_GAP_PROBLEMS,
   MACHINE_ONLY,
   SUPERSEDED,
   census,
   keyCovers,
+  parseKnownGapFiles,
+  readKnownGapFiles,
   reachedRoutes,
   registryRoutes,
   schedulerJobNames,
@@ -28,7 +30,7 @@ const scan = (...sources) => {
 };
 const sorted = (s) => [...s].sort();
 const route = (key) => ({ method: key.slice(0, key.indexOf(" ")), path: key.slice(key.indexOf(" ") + 1) });
-const empty = { machineOnly: new Map(), superseded: new Map(), indirect: new Map(), knownGaps: new Map(), knownGapsMax: 0 };
+const empty = { machineOnly: new Map(), superseded: new Map(), indirect: new Map(), knownGaps: new Map(), knownGapProblems: [] };
 
 describe("route census matcher: every shape a call is written in", () => {
   it("a type argument with nested generics, and a client call split across lines", () => {
@@ -245,8 +247,7 @@ describe("route census: the gate", () => {
       machineOnly: new Map([["POST /v1/x/sweep", "cron sweep: run by the scheduler"]]),
       superseded: new Map([["GET /v1/old", { replacement: "GET /v1/new", reason: "the new read" }]]),
       indirect: new Map([["POST /v1/held", { file: "f.tsx", evidence: "api.post(pr.url", reason: "state" }]]),
-      knownGaps: new Map([["GET /v1/gap", { does: "a read", tracking: "later" }]]),
-      knownGapsMax: 1,
+      knownGaps: new Map([["GET /v1/gap", { does: "a read", tracking: "ADR-0001, #453", lane: "E1" }]]),
     });
     expect(out.failures).toEqual([]);
     expect(out.counts).toMatchObject({ ui: 1, machineOnly: 1, superseded: 1, indirect: 1, knownGaps: 1, gaps: 0 });
@@ -265,15 +266,15 @@ describe("route census: lists cannot rot", () => {
       machineOnly: new Map([["* /v1/gone/*", { reason: "removed collection, kept by mistake", matches: 0 }]]),
       superseded: new Map([["GET /v1/gone-old", { replacement: "GET /v1/called", reason: "r" }]]),
       indirect: new Map([["POST /v1/gone-held", { file: "f", evidence: "e", reason: "r" }]]),
-      knownGaps: new Map([["GET /v1/gone-gap", { does: "d", tracking: "t" }]]),
-      knownGapsMax: 1,
+      knownGaps: new Map([["GET /v1/gone-gap", { does: "d", tracking: "#453", lane: "E1" }]]),
     });
     expect(kinds(out)).toEqual(["stale * /v1/gone/*", "stale GET /v1/gone-gap", "stale GET /v1/gone-old", "stale POST /v1/gone-held"]);
   });
 
-  it("a known gap that now has a screen is stale (delete the entry and lower the max)", () => {
-    const out = census({ routes, ui, ...empty, knownGaps: new Map([["GET /v1/called", { does: "d", tracking: "t" }], ["GET /v1/uncalled", { does: "d", tracking: "t" }]]), knownGapsMax: 2 });
+  it("a known gap that now has a screen is stale (delete the entry), so the count falls as screens land", () => {
+    const out = census({ routes, ui, ...empty, knownGaps: new Map([["GET /v1/called", { does: "d", tracking: "#453", lane: "E1" }], ["GET /v1/uncalled", { does: "d", tracking: "#453", lane: "E1" }]]) });
     expect(kinds(out)).toEqual(["stale GET /v1/called"]);
+    expect(out.failures[0].detail).toMatch(/^stale entry: delete it/);
   });
 
   it("a machine-only pattern covering a route the UI calls is stale (narrow it)", () => {
@@ -323,45 +324,92 @@ describe("route census: lists cannot rot", () => {
   });
 
   it("a 501 stub on any list is stale, and a route on two lists is refused", () => {
-    const stub = census({ routes, ui, ...empty, notBuilt: new Set(["GET /v1/uncalled"]), knownGaps: new Map([["GET /v1/uncalled", { does: "d", tracking: "t" }]]), knownGapsMax: 1 });
+    const stub = census({ routes, ui, ...empty, notBuilt: new Set(["GET /v1/uncalled"]), knownGaps: new Map([["GET /v1/uncalled", { does: "d", tracking: "#453", lane: "E1" }]]) });
     expect(kinds(stub)).toEqual(["stale GET /v1/uncalled"]);
-    const twice = census({ routes, ui, ...empty, machineOnly: new Map([["GET /v1/uncalled", "machine-only for this test"]]), knownGaps: new Map([["GET /v1/uncalled", { does: "d", tracking: "t" }]]), knownGapsMax: 1 });
+    const twice = census({ routes, ui, ...empty, machineOnly: new Map([["GET /v1/uncalled", "machine-only for this test"]]), knownGaps: new Map([["GET /v1/uncalled", { does: "d", tracking: "#453", lane: "E1" }]]) });
     expect(kinds(twice)).toContain("double-listed GET /v1/uncalled");
   });
 });
 
-describe("route census: KNOWN_UI_GAPS only shrinks", () => {
+describe("route census: KNOWN_UI_GAPS is computed from per-ADR files", () => {
   const routes = [route("GET /v1/a"), route("GET /v1/b")];
   const ui = { get: new Set(), post: new Set(), put: new Set(), patch: new Set(), del: new Set() };
-  const gaps = new Map([["GET /v1/a", { does: "d", tracking: "t" }], ["GET /v1/b", { does: "d", tracking: "t" }]]);
-  const ratchet = (out) => out.failures.filter((f) => f.kind === "gap-ratchet");
+  const gap = { does: "d", tracking: "ADR-0001 #453", lane: "E1" };
+  const gaps = new Map([["GET /v1/a", gap], ["GET /v1/b", gap]]);
 
-  it("a gap list longer than the max fails: a new gap is a screen to build, not an entry", () => {
-    expect(ratchet(census({ routes, ui, ...empty, knownGaps: gaps, knownGapsMax: 1 }))).toHaveLength(1);
+  // ADR-0252 addendum (owner, 2026-11-19): no hand-set KNOWN_UI_GAPS_MAX and no pin. Every route PR edited that one
+  // line, so any two conflicted (M-118). The count is the entries; the no-ui and stale checks keep the protection.
+  it("there is no ceiling: the count is the number of entries", () => {
+    const out = census({ routes, ui, ...empty, knownGaps: gaps });
+    expect(out.failures).toEqual([]);
+    expect(out.counts.knownGaps).toBe(2);
+    const one = census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: new Map([...gaps].slice(0, 1)) });
+    expect(one.failures).toEqual([]);
+    expect(one.counts.knownGaps).toBe(1);
   });
 
-  it("a gap list shorter than the max fails until the max is lowered, so it can never grow back", () => {
-    const one = new Map([...gaps].slice(0, 1));
-    const out = census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: one, knownGapsMax: 2 });
-    expect(ratchet(out)[0].detail).toMatch(/lower KNOWN_UI_GAPS_MAX/);
-    expect(census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: one, knownGapsMax: 1 }).failures).toEqual([]);
+  it("a route with no screen and no entry still fails", () => {
+    const out = census({ routes, ui, ...empty, knownGaps: new Map([...gaps].slice(0, 1)) });
+    expect(out.failures.map((f) => `${f.kind} ${f.key}`)).toEqual(["no-ui GET /v1/b"]);
   });
 
-  it("a gap entry needs what it does and a tracking note", () => {
-    const out = census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: new Map([["GET /v1/a", { does: "d" }]]), knownGapsMax: 1 });
-    expect(out.failures.map((f) => f.kind)).toEqual(["bad-entry"]);
+  it("a gap entry needs what it does, a tracking note naming its issue or ADR, and its owner lane", () => {
+    const bad = (entry) => census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: new Map([["GET /v1/a", entry]]) }).failures.map((f) => f.kind);
+    expect(bad({ tracking: "#453", lane: "E1" })).toEqual(["bad-entry"]);
+    expect(bad({ does: "d", tracking: "later", lane: "E1" })).toEqual(["bad-entry"]);
+    expect(bad({ does: "d", tracking: "#453" })).toEqual(["bad-entry"]);
+    expect(bad({ does: "d", tracking: "#453", lane: "not a lane id" })).toEqual(["bad-entry"]);
+    expect(bad(gap)).toEqual([]);
   });
 
-  // THE PIN. KNOWN_UI_GAPS_MAX only ever goes DOWN: lower it as gaps close, never raise it.
-  // Review C-04 (owner-approved, ADR-0252): MACHINE_ONLY, SUPERSEDED and INDIRECT_UI_CALLS are no longer pinned by
-  // size. Every route PR edited the same three lines, so they were a merge hot spot; each entry's reason and the
-  // stale-entry checks already enforce intent.
-  it("THE PINNED GAP CEILING, and every known gap says what it does and where it is tracked", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(71); // ADR-0342 (lane E23): five API-only process analytics routes, awaiting the dashboard on #453; ADR-0289 (lane L6): two API-only PM importer routes, screen requested on #453, owner answer relayed by the master session 2026-11-15 (recorded in the #828 body); ADR-0310 (lane E1): three API-only managed-settings bundle routes, awaiting the screen on #453 (lane brief rule 3, recorded in ADR-0310); ADR-0327 (lane E12): six API-only rule-like step routes (five plus the suggestions export under the ADR-0226 list contract), raised for the master's review (#453, UI-D builds the screen); lane L7 (P14 + P16): two API-only model-file lineage routes, raised for the master's review (#453); ADR-0230 A2 (P19, Lane L3): three API-only SAP business server routes, master decision in the Lane L3 brief 2026-11-14, recorded in ADR-0230, section Recorded decision (2026-11-14); ADR-0332 (lane E14): three API-only endpoint add-on inventory routes, master brief for lane E14 2026-11-15 (the UI builder builds the screen, #453); ADR-0240: six API-only external-portal second-factor routes (owner decision 2026-11-07, #453; ADR-0056 §5 amendment (lane L7): two API-only copilot red-team gate routes, raised for the master's review (#453); ADR-0256 (P32): four API-only MCP catalogue routes, master decision on #725 2026-11-14 (lane UI-C lowers it); ADR-0303 (lane L11): five API-only SIEM destination routes, awaiting the screen on #453; ADR-0255 (P31): two API-only connector-catalogue routes, master decision on #753 2026-11-14 (temporary; lane UI-C's catalogue screen lowers it); ADR-0238 (P12(d)): six API-only upstream token-exchange routes, master decision 2026-11-08 (#712), awaiting the form on #453; ADR-0241 (P21): seven API-only usage-extractor routes; ADR-0246 (P27): nine API-only pinning and high-risk routes (the manual mark-high-risk route added in review); ADR-0261 (P37): six API-only DefenseClaw ingest admin routes (owner decision 2026-11-07); all raised for the master's review (#453 Governed Designer)
-    expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
+  const file = (doc) => JSON.stringify(doc, null, 2);
+  const good = { adr: "ADR-0001", lane: "E1", tracking: "ADR-0001 (lane E1): screen on #453", gaps: { "GET /v1/a": "reads the a things" } };
+
+  it("parses a gap file into entries that carry their file, lane and tracking", () => {
+    const { gaps: g, problems } = parseKnownGapFiles([["adr-0001-e1-a.json", file(good)]]);
+    expect(problems).toEqual([]);
+    expect(g.get("GET /v1/a")).toEqual({ does: "reads the a things", tracking: good.tracking, lane: "E1", adr: "ADR-0001", file: "adr-0001-e1-a.json" });
+    const noAdr = { lane: "L7", tracking: "#453", gaps: { "GET /v1/b": "reads the b things" } };
+    expect(parseKnownGapFiles([["lane-l7-b.json", file(noAdr)]]).problems).toEqual([]);
+  });
+
+  it("refuses a malformed gap file", () => {
+    const problems = (name, text) => parseKnownGapFiles([[name, text]]).problems.map((p) => p.kind);
+    expect(problems("adr-0001-e1-a.json", "{ not json")).toEqual(["bad-entry"]);
+    expect(problems("adr-0001-e1-a.json", "[]")).toEqual(["bad-entry"]);
+    expect(problems("gaps.json", file(good))).toEqual(["bad-entry", "bad-entry"]); // bad name, and not named after its ADR
+    expect(problems("adr-0002-e1-a.json", file(good))).toEqual(["bad-entry"]); // named after another ADR
+    expect(problems("adr-0001-e1-a.json", file({ ...good, adr: "0001" }))).toContain("bad-entry");
+    expect(problems("adr-0001-e1-a.json", file({ ...good, owner: "x" }))).toEqual(["bad-entry"]);
+    expect(problems("adr-0001-e1-a.json", file({ ...good, lane: undefined }))).toEqual(["bad-entry"]);
+    expect(problems("adr-0001-e1-a.json", file({ ...good, tracking: "later" }))).toEqual(["bad-entry"]);
+    expect(problems("adr-0001-e1-a.json", file({ ...good, gaps: {} }))).toEqual(["bad-entry"]);
+    expect(problems("adr-0001-e1-a.json", file({ ...good, gaps: { "GET /v1/a": "" } }))).toEqual(["bad-entry"]);
+    expect(problems("lane-e1-a.json", file({ ...good, adr: undefined }))).toEqual([]);
+    expect(problems("adr-0001-e1-a.json", file({ ...good, adr: undefined }))).toEqual(["bad-entry"]); // no ADR: lane-<lane>-…
+  });
+
+  it("refuses one route in two gap files, and the census reports it", () => {
+    const { gaps: g, problems } = parseKnownGapFiles([
+      ["adr-0001-e1-a.json", file(good)],
+      ["adr-0002-e2-a.json", file({ ...good, adr: "ADR-0002", lane: "E2" })],
+    ]);
+    expect(problems.map((p) => `${p.kind} ${p.key}`)).toEqual(["double-listed GET /v1/a"]);
+    expect(g.get("GET /v1/a").file).toBe("adr-0001-e1-a.json");
+    const out = census({ routes: routes.slice(0, 1), ui, ...empty, knownGaps: g, knownGapProblems: problems });
+    expect(out.failures.map((f) => f.kind)).toEqual(["double-listed"]);
+  });
+
+  it("every shipped gap file is well formed, and the count is the sum of their entries", () => {
+    expect(KNOWN_UI_GAP_PROBLEMS).toEqual([]);
+    const files = readKnownGapFiles();
+    expect(files.length).toBeGreaterThan(0);
+    const total = files.reduce((n, [, text]) => n + Object.keys(JSON.parse(text).gaps).length, 0);
+    expect(KNOWN_UI_GAPS.size).toBe(total);
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();
-      expect(g.tracking, key).toBeTruthy();
+      expect(g.tracking, key).toMatch(/ADR-\d{4}|#\d+/);
+      expect(g.lane, key).toBeTruthy();
     }
   });
 

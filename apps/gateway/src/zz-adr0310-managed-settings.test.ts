@@ -11,20 +11,29 @@
  *  - with no signing key, or no public URL, the export is refused (never an unsigned bundle);
  *  - the routes are admin-only;
  *  - NEGATIVE (#850 review): a read-tier bundle naming only a write tool, an archived bundle, and a reserved `mcp:`
- *    protocol name each leave their server out; both tables are under forced row-level security (admin or `migration`).
+ *    protocol name each leave their server out; both tables are under forced row-level security (admin or `migration`);
+ *  - slice 2 drift: an enabled server in a managed vendor's MCP config whose identity is not this gateway is drift;
+ *    a gateway server (any case, default port), a disabled server and another host app's config are not; refused with
+ *    no public URL or no exported bundle; admin-only.
  *
  * Everything this suite creates is removed in afterAll (users are disabled, as other suites leave them).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { createHash, createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, verify } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import {
   auditLog,
+  aiEndpointSignatures,
   createDb,
+  discoverySettings,
+  discoverySources,
+  endpointDevices,
+  endpointEnrolmentTokens,
+  endpointMcpServers,
   eq,
   inArray,
   managedSettingsBundles,
@@ -47,6 +56,7 @@ import {
 } from "@regulait/db";
 import { parseCodexRequirements as parseToml } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { managedSettingsDrift } from "./managed-settings.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -78,6 +88,7 @@ let memberId: string;
 let adminId: string;
 let loneId: string;
 let roleId: string;
+let driftSourceId: string | undefined;
 const userIds: string[] = [];
 const serverIds: string[] = [];
 type Srv = "a" | "b" | "halted" | "off" | "fresh" | "bundled" | "bundledWrite" | "archived" | "reserved";
@@ -196,6 +207,7 @@ beforeAll(async () => {
 let restore: () => Promise<void> = async () => {};
 
 afterAll(async () => {
+  if (driftSourceId) await db.delete(discoverySources).where(eq(discoverySources.id, driftSourceId)); // cascades tokens, devices, servers
   if (userIds.length) {
     await db.delete(managedSettingsBundles).where(inArray(managedSettingsBundles.userId, userIds));
     await db.delete(roleAssignments).where(inArray(roleAssignments.userId, userIds));
@@ -409,5 +421,183 @@ describe("ADR-0310: row-level security on the bundle tables (#850 review)", () =
     expect(String(b?.cause?.message ?? b?.message)).toMatch(/row-level security/);
     const f = await writeAs(sql`insert into managed_settings_bundle_files (bundle_id, path, body, sha256) values (${anyBundle!.id}, 'x', 'x', 'x')`);
     expect(String(f?.cause?.message ?? f?.message)).toMatch(/row-level security/);
+  });
+});
+
+describe("ADR-0310 slice 2: drift against the ADR-0259 endpoint MCP inventory", () => {
+  let devA: string;
+  let devB: string;
+  const ids: Record<string, string> = {};
+  const hex = (t: string, n: number) => createHash("sha256").update(`${t}-${RUN}`).digest("hex").slice(0, n);
+
+  let switchWas = false;
+  const setCollection = (on: boolean) => db.update(discoverySettings).set({ endpointMcpConfigEnabled: on }).where(eq(discoverySettings.id, 1));
+  afterAll(async () => {
+    await setCollection(switchWas);
+  });
+
+  beforeAll(async () => {
+    // ADR-0259 collection on for the measured cases (files run serially); restored after
+    switchWas = (await db.select().from(discoverySettings).where(eq(discoverySettings.id, 1)))[0]?.endpointMcpConfigEnabled ?? false;
+    await setCollection(true);
+    // a bundle exists from the suites above; the inventory rows are seeded as ADR-0259's recordMcpServers stores them
+    const [src] = await db
+      .insert(discoverySources)
+      .values({ name: `e1-drift-${RUN}`, kind: "endpoint_agent", target: {}, scope: { orgLevel: true, include: [] }, createdBy: adminId })
+      .returning({ id: discoverySources.id });
+    driftSourceId = src!.id;
+    const [tok] = await db
+      .insert(endpointEnrolmentTokens)
+      .values({ sourceId: driftSourceId, label: "e1", tokenHash: hex("tok", 64), deviceCap: 5, expiresAt: new Date(Date.now() + 86_400_000) })
+      .returning({ id: endpointEnrolmentTokens.id });
+    const device = (t: string) => ({
+      sourceId: driftSourceId!,
+      tokenId: tok!.id,
+      devicePseudonym: `psn:${hex(t, 24)}`,
+      os: "linux" as const,
+      arch: "amd64" as const,
+      agentVersion: "1.0.0",
+      ticketHash: hex(`ticket-${t}`, 64),
+      ticketExpiresAt: new Date(Date.now() + 86_400_000),
+    });
+    [{ id: devA }, { id: devB }] = await db.insert(endpointDevices).values([device("a"), device("b")]).returning({ id: endpointDevices.id }) as [{ id: string }, { id: string }];
+    const now = new Date();
+    const row = (tag: string, deviceId: string, configPath: string, transport: "stdio" | "http" | "sse", id: { host?: string; package?: string }, disabled = false) => ({
+      deviceId,
+      lastReportId: randomUUID(),
+      signatureId: "sig.e1.drift",
+      provider: "e1prov",
+      configRoot: "home" as const,
+      configPath,
+      serverName: tag,
+      transport,
+      host: id.host ?? null,
+      package: id.package ?? null,
+      identityKind: id.package ? ("package" as const) : ("host" as const),
+      identity: (id.package ?? id.host)!,
+      disabled,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    });
+    const inserted = await db
+      .insert(endpointMcpServers)
+      .values([
+        row("gateway", devA, ".cursor/mcp.json", "http", { host: "localhost" }),
+        row("gatewayport", devA, ".cursor/mcp.json", "http", { host: "LOCALHOST:80" }),
+        row("remote", devA, ".claude.json", "http", { host: "mcp.elsewhere.test" }),
+        row("local", devA, ".codex/config.toml", "stdio", { package: "@acme/e1-mcp" }),
+        row("disabled", devA, ".claude.json", "stdio", { package: "@acme/e1-off" }, true),
+        row("desktop", devA, ".config/Claude/claude_desktop_config.json", "stdio", { package: "@acme/e1-desk" }),
+        row("otherport", devA, ".cursor/mcp.json", "http", { host: "localhost:8080" }),
+        row("copilot", devB, ".config/Code/User/mcp.json", "sse", { host: "mcp.elsewhere.test" }),
+      ])
+      .returning({ id: endpointMcpServers.id, name: endpointMcpServers.serverName });
+    for (const r of inserted) ids[r.name] = r.id;
+  });
+
+  const drift = (q: string, key = adminKey) => inject("GET", `/v1/managed-settings/drift${q}`, key);
+
+  it("reports a non-gateway server in a managed vendor's config as drift, per device, and nothing else", async () => {
+    const r = await drift(`?deviceId=${devA}`);
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.gatewayHost).toBe("localhost");
+    expect(body.latestBundle.id).toMatch(/^[0-9a-f-]{36}$/);
+    const byName = new Map<string, any>(body.items.map((i: any) => [i.serverName, i]));
+    expect([...byName.keys()].sort()).toEqual(["local", "otherport", "remote"]);
+    expect(byName.get("remote")).toMatchObject({ vendor: "claude-code", onGateway: false, identity: { kind: "host", value: "mcp.elsewhere.test" }, reportedAfterLatestExport: true });
+    expect(byName.get("remote").verdict).toMatch(/^DRIFT: a remote MCP server/);
+    expect(byName.get("local")).toMatchObject({ vendor: "openai-codex", transport: "stdio", identity: { kind: "package", value: "@acme/e1-mcp" } });
+    expect(byName.get("local").verdict).toMatch(/^DRIFT: a local \(stdio\)/);
+    expect(byName.get("otherport").vendor).toBe("cursor");
+    expect(body.summary).toMatchObject({ driftServers: 3, devices: 1 });
+    // NEGATIVE: the gateway (any case, default port), a disabled server and Claude Desktop's config are not drift
+    for (const n of ["gateway", "gatewayport", "disabled", "desktop"]) expect(byName.has(n)).toBe(false);
+  });
+
+  it("reports per-vendor coverage from the enabled catalogue: an uncollected vendor's drift is unknown (null), never 0 (#902 review)", async () => {
+    const before = (await drift(`?deviceId=${devA}`)).json();
+    expect(before.coverage.map((c: any) => c.vendor).sort()).toEqual(["claude-code", "cursor", "github-copilot", "openai-codex"]);
+    for (const c of before.coverage) {
+      if (c.status === "not_collected") expect(c.driftServers).toBeNull();
+      else expect(typeof c.driftServers).toBe("number");
+    }
+    expect(before.summary.complete).toBe(before.coverage.every((c: any) => c.status === "collected"));
+    if (!before.summary.complete) expect(before.coverageNote).toMatch(/^Not fully measured: .*unknown, not zero/);
+    // the seed's `.codex` directory row does not cover `.codex/config.toml`; a catalogue row for the file does
+    const [sig] = await db
+      .insert(aiEndpointSignatures)
+      .values({ provider: `e1prov-${RUN}`, kind: "assistant_config", value: ".codex/config.toml", matchType: "identifier", provenance: "admin", enabled: true })
+      .returning({ id: aiEndpointSignatures.id });
+    try {
+      const after = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+      expect(after.coverage).toEqual([
+        { vendor: "openai-codex", status: "collected", catalogueStatus: "collected", collectedPaths: [".codex/config.toml"], missingPaths: [], driftServers: 1 },
+      ]);
+      expect(after.summary.complete).toBe(true);
+      // NEGATIVE (#902 review [3]): with the org collection switch off, a catalogued vendor is NOT measured
+      await setCollection(false);
+      try {
+        const offSwitch = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+        expect(offSwitch.collectionEnabled).toBe(false);
+        expect(offSwitch.coverage[0]).toMatchObject({ status: "not_collected", catalogueStatus: "collected", driftServers: null });
+        expect(offSwitch.summary.complete).toBe(false);
+        expect(offSwitch.coverageNote).toMatch(/^Not measured: endpoint MCP config discovery is off/);
+        // every vendor, not only the filtered one
+        const all = (await drift(`?deviceId=${devA}`)).json();
+        expect(all.coverage.every((c: any) => c.status === "not_collected" && c.driftServers === null)).toBe(true);
+      } finally {
+        await setCollection(true);
+      }
+      // turning it back on restores the measurement
+      expect((await drift(`?deviceId=${devA}&vendor=openai-codex`)).json().summary.complete).toBe(true);
+      // NEGATIVE: disabling the row makes it unmeasured again
+      await db.update(aiEndpointSignatures).set({ enabled: false }).where(eq(aiEndpointSignatures.id, sig!.id));
+      const off = (await drift(`?deviceId=${devA}&vendor=openai-codex`)).json();
+      expect(off.coverage[0]).toMatchObject({ status: "not_collected", driftServers: null });
+    } finally {
+      await db.delete(aiEndpointSignatures).where(eq(aiEndpointSignatures.id, sig!.id));
+    }
+  });
+
+  it("filters by vendor and pages by keyset", async () => {
+    const b = (await drift(`?deviceId=${devB}&vendor=github-copilot`)).json();
+    expect(b.items.map((i: any) => i.id)).toEqual([ids.copilot]);
+    expect((await drift(`?deviceId=${devB}&vendor=cursor`)).json().items).toEqual([]);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: any = (await drift(`?deviceId=${devA}&limit=1${cursor ? `&cursor=${cursor}` : ""}`)).json();
+      expect(page.items.length).toBeLessThanOrEqual(1);
+      seen.push(...page.items.map((i: any) => i.serverName));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen.sort()).toEqual(["local", "otherport", "remote"]);
+  });
+
+  it("NEGATIVE: refuses with no public URL, with no exported bundle, and on bad input; admin-only", async () => {
+    const saved = process.env.REGULAIT_PUBLIC_URL;
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      const r = await drift("");
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toBe("public_url_unset");
+    } finally {
+      process.env.REGULAIT_PUBLIC_URL = saved;
+    }
+    // with no bundle at all (rolled back): nothing is managed yet, so nothing is reported as drift
+    const rollback = new Error("rollback");
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.delete(managedSettingsBundles);
+        const out = await managedSettingsDrift(tx as unknown as Db, { limit: 50 }, ORIGIN);
+        expect(out).toMatchObject({ ok: false, status: 409, error: "no_bundle_exported" });
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect((await drift("?vendor=claude-desktop")).statusCode).toBe(400);
+    expect((await drift("?limit=201")).statusCode).toBe(400);
+    expect((await drift("?bogus=1")).statusCode).toBe(400);
+    expect((await drift("", memberKey)).statusCode).toBe(403);
   });
 });

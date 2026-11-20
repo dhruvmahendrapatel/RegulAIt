@@ -120,3 +120,99 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     scan rebuilds them only from spans still held. Trace spans themselves are outside the locator today and are
     bounded by the retention floor; that is unchanged here;
   - **RLS:** both tables are classified deployment-wide in ADR-0234 (no row policy; admin-only routes).
+- Slice 3b, shadow mode (migration `pending/rule_step_shadow.sql`):
+  - `POST /v1/rule-steps/suggestions/:id/shadow` puts an open suggestion in shadow (refused while detection is off), and
+    `.../shadow/stop` ends the period. Both are admin-only and audited in the same transaction. No step-up: shadow
+    changes no routing and relaxes nothing; the switch (slice 4) is an approval.
+  - Each shadow period is a row in `rule_step_shadows` (at most one open per suggestion). Its counters (`runs`,
+    `covered`, `agreed`) are a measured read model of `trace_spans`, advanced by every scan through
+    `evaluated_through`, a microsecond cursor kept as Postgres text, so no span is counted twice. When a pass hits the
+    row limit, spans sharing the last start time wait for the next pass. The counts and the cursor commit with the
+    scan's audit row.
+  - The kernel's `tallyShadow` applies the rule with one key lookup per run (cost `runs + cells`), matching
+    `applyInducedRule`.
+  - While a suggestion is in shadow, a rescan does not touch its row (`setWhere status <> 'shadow'`), so the counts
+    always describe the rule under test. The list shows each suggestion's latest period, with coverage and agreement.
+  - Retention and erasure still apply: deleting a suggestion deletes its periods, which hold counts only.
+- Slice 4a, the switch lifecycle (migration `pending/rule_step_switch.sql`). Nothing here serves the rule yet: slice
+  4b puts it on the request path.
+  - `POST /v1/rule-steps/suggestions/:id/switch` asks for a step in shadow mode to be switched to its rule. It needs a
+    user identity (so the reviewer is provably someone else), a step-up (`settings_relax`), detection on, and a named
+    active administrator other than the requester. It creates a `rule_step_switches` row and an `approvals` row
+    (`object_type` `rule_step_switch`) bound to `rule_sha256`, the canonical-JSON digest of the measured rule, as the
+    approval's ADR-0104 `arguments_digest`. At most one open (pending or switched) request per suggestion.
+  - The one approvals decide path applies the decision in its own transaction. Approved: the suggestion moves
+    shadow -> switched and its shadow period closes, but only while it is still in shadow and its rule still hashes to
+    the bound digest (else the request is recorded `stale`). Denied: `rejected`, and the step stays in shadow. The
+    requester can never decide their own request, by delegation or the admin override
+    (`cannot_approve_own_rule_step_switch`).
+  - `POST /v1/rule-steps/suggestions/:id/revert` takes a switched step back to the AI in one action, with no approval
+    (it only removes the rule). Audited.
+  - Both lifecycles are ADR-0348 machines: the suggestion's (`suggested`, `shadow`, `switched`, `dismissed`, with the
+    new `switch` and `revert` events) and the request's (`RULE_STEP_SWITCH_MACHINE`). A BEFORE UPDATE trigger
+    freezes the request's suggestion, digest, request time and requester. A rescan leaves shadow and switched rows
+    alone. The reasons are prose-scrubbed (ADR-0102). RLS: deployment-wide (ADR-0234 appendix).
+- Slice 4b (next): serve a switched rule through the dispatch core where the ADR-0119 semantic cache serves a
+  cached answer, so governance and the output PII and guardrail checks still run. An input the rule does not cover
+  goes to the AI. Record the `rule_replacement` technique in `cost_events`, and keep rule-served spans out of
+  detection and shadow counts. Switching to a published decision table follows it.
+
+## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
+
+The owner asked that business users can write decision tables: a simple versioned table of conditions and outcomes,
+validated by a schema, compiled to this ADR's rule engine (not a new engine), and published only on an audited
+approval. This addendum records it; no new ADR.
+
+- **Shape.** A table names up to 4 input fields (the names `extractStepFields` produces) and up to 200 rows. Each row
+  gives every field one value, or a list of up to 20 values, and one fixed outcome of up to 200 characters. Values are
+  text, finite numbers, true, false or null. There is no expression language, no ranges and no wildcard: a condition a
+  person cannot write as exact values is not a decision-table condition. The zod schema in `decision-tables.ts` checks
+  the shape; `compileDecisionTable` (`packages/optimizer-kernel/src/decision-table.ts`) checks the rest and reports
+  every problem at once.
+- **One engine.** `compileDecisionTable` expands each row's value lists into exact-match cells and returns the same
+  `InducedRule` the detector produces, held to the same 1 000-cell ceiling, so `applyInducedRule` and the shadow tally
+  run a table unchanged. Hit policy is UNIQUE (DMN's term): two rows that cover the same input are refused, whether the
+  outcomes agree or not, so a table never depends on row order. An input the table does not cover goes to the AI.
+- **Versions and approval.** `decision_tables` binds a table to one AI step (agent and span name, the suggestion key);
+  `decision_table_versions` holds immutable versions. Proposing a version creates it `pending_review` with an
+  `approvals` row (`object_type` `decision_table`) naming an active administrator other than the author. Only the one
+  decide path publishes it (`applyDecisionTableDecision`, in the decision's transaction), and only if the version it
+  was proposed against is still the published one; otherwise it is recorded `stale`. The author can never decide their
+  own version, through delegation or the admin override (`cannot_approve_own_decision_table`). A denial records
+  `rejected` and changes nothing. A version that compiles to the same cells as the published one is refused
+  (`no_change`). At most one published and one pending version per table (partial unique indexes). Create, proposal
+  and every decision outcome are audited (`object_type` `decision_table`).
+- **Frozen and bound (security review of #1020).** A version is frozen once proposed. A BEFORE UPDATE trigger on
+  `decision_table_versions` refuses any change to `body`, `body_sha256`, `table_id`, `version` and `base_version`,
+  and lets `author_user_id` change only to NULL (the users FK's `ON DELETE SET NULL`), so only the status, the approval
+  link and the decision columns move. `body_sha256` is sha256 over ADR-0060's `canonicalJson(body)`; the approval row
+  carries the same value as its ADR-0104 consent fingerprint (`arguments_digest`). Publishing recomputes the digest
+  from the stored body and compares it with both; on a mismatch the version is recorded `stale`
+  (`decision_table_version_digest_mismatch`) and nothing is published.
+- **Why not `config_versions` (ADR-0048).** The reviewer preferred reusing the shared version store, as compliance
+  profiles do. It does not fit without changing a column other lanes depend on. Its lifecycle is draft, canary,
+  active, rolled_back, superseded and retired, with canary percentages; a decision-table version needs `rejected`
+  (the reviewer said no) and `stale` (approved against a base that moved, or a body that no longer matches), and has
+  no canary. Adding them to `CONFIG_VERSION_STATUSES` would put two states into the machine every other artifact type
+  shares. It is also polymorphic (`artifact_type` and `artifact_id` with no foreign key), where this table cascades
+  with its agent. It has no database freeze either, so moving there would not by itself have closed the finding.
+  Re-check if `config_versions` gains a per-type lifecycle.
+- **Lifecycle (owner rule 12).** The shared ADR-0348 machine `DECISION_TABLE_VERSION_MACHINE` (`@regulait/shared`)
+  declares the transitions once (publish, reject, mark stale from `pending_review`; supersede from `published`), and
+  `transitionVersion` enforces each through `whereFrom`, a guarded UPDATE on the event's `from` states. Each version
+  in the detail answer carries the machine's `lifecycle` description.
+- **Routes** (admin-only through the default gate, API only; UI-D builds the editor): `GET`/`POST /v1/decision-tables`
+  (the list under the ADR-0226 contract), `GET /v1/decision-tables/:id` (published and pending versions with readable
+  rows and test cases, plus the latest 20 versions), `POST /v1/decision-tables/:id/versions`.
+- **Publishing changes no routing.** The AI still answers the step. Serving a published table in place of the AI is the
+  slice 4 switch, which will take either a suggestion or a published table and needs its own approval.
+- **Open source (ADR-0176, compared in the slice PR).** DMN evaluators (`@hbtgmbh/dmn-eval-js`, `js-feel`) are stale
+  with open advisories; `json-rules-engine` is outside the maintenance window and evaluates rules at runtime; GoRules
+  ZEN evaluates its own expression language in a native binary; `dmn-js` carries a watermark clause outside the
+  ADR-0176 licence list. None compiles to an exact-match lookup, so the compiler is ours. DMN 1.3 XML import and export
+  through `dmn-moddle` (MIT, maintained, no evaluation) can map onto this shape later, limited to hit policy UNIQUE and
+  literal values.
+- **Data.** A table is configuration a person typed, not a copy of captured spans, so the trace retention floor and the
+  privacy-ops locator do not apply to it; it is kept until its agent is deleted (cascade). RLS: deployment-wide
+  (ADR-0234 appendix).
+

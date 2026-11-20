@@ -28,6 +28,7 @@
  * for an org-scoped report (only an admin may generate one). There is no
  * narrower posture; a team-scoped view is the existing scorecard.
  */
+import { countsAsEvidence, latestAgentRiskProofs } from "./agent-risk-proof-evidence.js";
 import type { FastifyInstance } from "fastify";
 import {
   agents,
@@ -450,6 +451,15 @@ export async function computePostureReport(
   // is stated outright; existing violators are surfaced, never auto-revoked.
   const sod = await sodPostureSection(db);
 
+  // --- ADR-0345: the latest result of every agent-risk proof, as evidence -------
+  const latestProofs = await latestAgentRiskProofs(db);
+  const riskProofs = {
+    total: latestProofs.length,
+    passingWithEvidence: latestProofs.filter((p) => p.latest && countsAsEvidence(p.latest.outcome, p.latest.evidence)).length,
+    notPassing: latestProofs.filter((p) => !p.latest || p.latest.outcome !== "pass").length,
+    unverifiable: latestProofs.filter((p) => p.latest?.evidence.label === "unverifiable").length,
+  };
+
   // --- ADR-0092 (gap L24): access recommendations --------------------------
   // Findings by deterministic rule (queries with reasons), computed at read
   // time; "none" is a computed fact, "not assessable" is stated, and nothing
@@ -574,6 +584,8 @@ export async function computePostureReport(
     agentOwnership,
     certificationCampaigns,
     sod,
+    // ADR-0345: the latest agent-risk proof results, counted by evidence label (an input to the estimate)
+    riskProofs,
     accessRecommendations,
     useCases,
     aiBom,
@@ -587,6 +599,7 @@ export async function computePostureReport(
       agentOwnership,
       certificationCampaigns,
       sod,
+      riskProofs,
     }),
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +

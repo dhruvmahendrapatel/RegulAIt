@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   activeDiscoveryPosture,
+  AGENT_REGISTRIES_BY_KIND,
+  DISCOVERY_FAMILY_SWITCHES_DEFAULT,
+  familySwitchProblem,
   credentialTargetMatch,
   DISCOVERY_KIND_SPECS,
   DISCOVERY_SOURCE_KINDS,
@@ -37,10 +40,28 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
     expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory", "endpoint_agent"]);
   });
 
-  it("every source kind has a spec whose evidence and subject kinds are non-empty", () => {
+  it("every finding-producing source kind has a spec whose evidence and subject kinds are non-empty; an entitlement reader (ADR-0337) returns a graph and no observations", () => {
     for (const k of DISCOVERY_SOURCE_KINDS) {
-      expect(DISCOVERY_KIND_SPECS[k].evidenceKinds.length).toBeGreaterThan(0);
-      expect(DISCOVERY_KIND_SPECS[k].subjectKinds.length).toBeGreaterThan(0);
+      const spec = DISCOVERY_KIND_SPECS[k];
+      // ADR-0314: a vendor agent registry kind produces no findings (it stages registry records instead)
+      if (spec.family === "agent_registry") continue;
+      expect(spec.evidenceKinds.length === 0, k).toBe(spec.entitlements === true);
+      expect(spec.subjectKinds.length === 0, k).toBe(spec.entitlements === true);
+    }
+  });
+
+  it("ADR-0314: every agent registry kind reports no evidence or subject kind, names at least one registry, and is gated off by default", () => {
+    const registryKinds = DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].family === "agent_registry");
+    expect([...registryKinds].sort()).toEqual(["agent_registry_agentcore", "agent_registry_entra", "agent_registry_gemini"]);
+    for (const k of registryKinds) {
+      expect(DISCOVERY_KIND_SPECS[k].evidenceKinds).toEqual([]);
+      expect(DISCOVERY_KIND_SPECS[k].subjectKinds).toEqual([]);
+      expect(AGENT_REGISTRIES_BY_KIND[k]?.length).toBeGreaterThan(0);
+      expect(familySwitchProblem(k, DISCOVERY_FAMILY_SWITCHES_DEFAULT)).toMatch(/switched off/);
+    }
+    // only registry kinds may report registry records
+    for (const k of DISCOVERY_SOURCE_KINDS) {
+      if (DISCOVERY_KIND_SPECS[k].family !== "agent_registry") expect(AGENT_REGISTRIES_BY_KIND[k]).toBeUndefined();
     }
   });
 
