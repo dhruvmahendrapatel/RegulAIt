@@ -122,7 +122,6 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
-import { privacyDispatchGate } from "./privacy-ops.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
@@ -166,7 +165,7 @@ import {
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { withLifecycle } from "./integration-lifecycle.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, grantMintStepUp, requireStepUp } from "./step-up.js";
-import { governedModelGate } from "./governed-core.js";
+import { governedModelGate, governedProcessingLimit } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
@@ -1691,10 +1690,9 @@ async function dispatchAttempt(
   // audited with categories only. Behind `org_settings.privacy_ops_enabled`
   // (shipped off); off, it is one settings read. A cascade `block` already
   // refused above, so this decides only what warn/log let through.
-  const privacyRefusal = await privacyDispatchGate(db, {
+  const privacyRefusal = await governedProcessingLimit(db, {
     userId,
-    agentId: served.id,
-    agentName: served.name,
+    target: { type: "model", agentId: served.id, agentName: served.name },
     projectId: args.projectId ?? null,
     input: args.input,
   });
@@ -4230,10 +4228,9 @@ export function registerAgentConnectorRoutes(
         // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
         // input carrying a category no record permits must be refused and audited, not answered from the semantic
         // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
-        const privacyRefusal = await privacyDispatchGate(db, {
+        const privacyRefusal = await governedProcessingLimit(db, {
           userId,
-          agentId: agent.id,
-          agentName: agent.name,
+          target: { type: "model", agentId: agent.id, agentName: agent.name },
           projectId: projectId ?? null,
           input: body.input ?? "",
         });

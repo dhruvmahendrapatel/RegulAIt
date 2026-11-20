@@ -654,6 +654,30 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     control: onOff("On", "Off"),
     isRelaxed: notEqual(false),
   },
+  // ADR-0224 (P13 c, owner 10-30): shipped off, so no value is looser than the default; once on, turning it off again
+  // is a settings_relax step-up (the gateway's `fromStored(false, …)`)
+  privacyOpsEnabled: {
+    key: "privacyOpsEnabled",
+    label: "Processing limit (records of processing)",
+    strictDefault: false,
+    strict:
+      "Off as shipped: records of processing are kept but refuse nothing. Turn it on to refuse personal data in any " +
+      "model, connector or MCP call whose project has no active record listing its category.",
+    relaxed: "Turning it off again lets personal data through every call without a record of processing.",
+    control: onOff("On", "Off"),
+    isRelaxed: () => false,
+    looser: (v, b) => b === true && v === false,
+  },
+  dsrSlaDays: {
+    key: "dsrSlaDays",
+    label: "Data-subject request due date (days)",
+    strictDefault: 30,
+    strict: "30 days: a request is due one month after it is received (GDPR Article 12(3)). Shorter is stricter.",
+    relaxed: "A longer period (up to 90 days) gives the person a later answer.",
+    control: { kind: "int", min: 1, max: 90, unit: "days" },
+    isRelaxed: atMost(30),
+    looser: largerLooser,
+  },
 };
 
 export const ALL_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
