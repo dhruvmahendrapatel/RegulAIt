@@ -8,6 +8,7 @@
  * grant already never exceeds its sponsor's entitlements or its parent's budget (ADR-0188 S3).
  */
 import { z } from "zod";
+import { CLIENT_ASSERTION_TYPE_JWT_BEARER, TOKEN_EXCHANGE_GRANT_TYPE, TOKEN_TYPE_ACCESS_TOKEN } from "./identity/contract.js";
 
 /** the issuer is `<public URL>` + this path; its metadata and keys live under it */
 export const AGENT_CREDENTIAL_ISSUER_PATH = "/agent-credentials";
@@ -132,3 +133,36 @@ export function agentCredentialDiscoveryDocument(issuer: string): Record<string,
     ],
   };
 }
+
+/**
+ * ADR-0315 §3 (slice 1b): the `POST /oauth/token` form that exchanges the caller's own delegated access token for an
+ * agent credential at ONE registered audience. No scope is asked for: the credential's scope is the grant's,
+ * projected through the audience's scope map. Strict: any other field is refused.
+ */
+export const agentCredentialExchangeRequestSchema = z
+  .object({
+    grant_type: z.literal(TOKEN_EXCHANGE_GRANT_TYPE),
+    subject_token: z.string().min(1).max(16_384),
+    subject_token_type: z.literal(TOKEN_TYPE_ACCESS_TOKEN),
+    requested_token_type: z.literal(AGENT_CREDENTIAL_TOKEN_TYPE),
+    resource: z.string().url().max(512).refine((v) => v.startsWith("https://"), { message: "an https audience" }),
+    client_assertion_type: z.literal(CLIENT_ASSERTION_TYPE_JWT_BEARER).optional(),
+    client_assertion: z.string().min(1).max(16_384).optional(),
+    client_id: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+export type AgentCredentialExchangeRequest = z.infer<typeof agentCredentialExchangeRequestSchema>;
+
+/** the public `error_code` values the agent credential exchange may answer with (beside the delegation ones) */
+export const AGENT_CREDENTIAL_EXCHANGE_ERROR_CODES = [
+  "agent_credential_audience_unknown",
+  "agent_credential_audience_disabled",
+  "agent_credential_subject_invalid",
+  "agent_credential_subject_key_mismatch",
+  "agent_credential_subject_client_mismatch",
+  "agent_credential_grant_not_live",
+  "agent_credential_org_halted",
+  "agent_credential_agent_halted",
+  "agent_credential_budget_exhausted",
+  "agent_credential_scope_empty",
+] as const;
