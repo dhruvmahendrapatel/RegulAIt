@@ -36,6 +36,7 @@ import {
   matchingResourceApprovalRulesWith,
   RESOURCE_RULE_IDS,
   type AbacDecision,
+  type Decision,
   type EntitlementDecision,
   type GovernedResource,
   type GovernedResourceDecision,
@@ -54,6 +55,7 @@ import {
   type ModelConsentState,
   type ModelInvocation,
 } from "./model-call-consent.js";
+import { PRIVACY_RULE_IDS, processingLimitGate, type PrivacyGateResult, type ProcessingLimitInput } from "./privacy-ops.js";
 
 export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
@@ -423,4 +425,20 @@ export async function governedModelGate(
     ruleId: decision.ruleId,
     auditLogId: row?.id ?? null,
   };
+}
+
+/**
+ * ADR-0224 addendum (2026-11-20) — the core's processing-limit step (records of processing), the one check path for
+ * model dispatch, connector calls and MCP calls. Each call path runs it directly after its PII-mode rung (the cascade
+ * decides first) and before anything leaves the gateway, on the text that would leave. Returns null to proceed, or an
+ * already-audited 409 `processing_not_permitted`. It never answers allow on a failure: an error propagates to the
+ * caller, which refuses the call.
+ */
+export async function governedProcessingLimit(db: Db, input: ProcessingLimitInput): Promise<PrivacyGateResult> {
+  return processingLimitGate(db, input);
+}
+
+/** the MCP paths answer a processing refusal as a policy denial, so every caller of those paths reports it as one */
+export function processingRefusalDecision(refusal: NonNullable<PrivacyGateResult>): Decision {
+  return { effect: "deny", ruleId: PRIVACY_RULE_IDS.dispatchRefused, ruleChain: [], reason: refusal.detail };
 }
