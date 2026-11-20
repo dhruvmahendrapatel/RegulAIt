@@ -142,6 +142,9 @@ import {
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
   AGENT_REGISTRIES,
+  // ADR-0336 (lane E17): what a staged registry agent uses
+  REGISTRY_COMPONENT_KINDS,
+  REGISTRY_COMPONENT_PROVIDERS,
   DISCOVERY_EVIDENCE_KINDS,
   // ADR-0261 (P37): third-party security telemetry ingest
   THIRD_PARTY_EVIDENCE_KINDS,
@@ -8244,7 +8247,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8329,7 +8332,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -17310,13 +17313,46 @@ export const agentRegistryRecords = pgTable(
     uniqueIndex("agent_registry_records_vendor_uq").on(t.sourceId, t.registry, t.externalId),
     uniqueIndex("agent_registry_records_agent_uq").on(t.agentId),
     index("agent_registry_records_open_idx").on(t.lastSeenAt).where(sql`${t.agentId} IS NULL`),
-    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore')`),
+    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore', 'copilot_studio')`),
     check("agent_registry_records_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
     check("agent_registry_records_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
     check("agent_registry_records_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 1000`),
     check("agent_registry_records_attributes_check", sql`jsonb_typeof(${t.vendorAttributes}) = 'object' AND pg_column_size(${t.vendorAttributes}) <= 8192`),
     // an imported record says when; a record whose agent was deleted keeps that time (agent_id is set null) and may be imported again
     check("agent_registry_records_imported_check", sql`${t.agentId} IS NULL OR ${t.importedAt} IS NOT NULL`),
+  ],
+);
+
+// ===== ADR-0336 (lane E17): agent platform discovery, the components of a staged registry agent =====================
+// Migration `pending/vendor_agent_platform_components.sql`. One row per (record, kind, vendor reference): the models,
+// tools, MCP servers, connected apps and knowledge sources an agent uses, normalised (a list is a table, ADR-0200).
+// Replaced for a record, in the run's fenced commit, only when that record's components were read completely; kept
+// as they are after a partial read. Never secrets and never instructions or prompt text (ADR-0336 decision 4): a
+// connected app is a connector reference, a knowledge source its name. Row-level security is FORCED: admins, the
+// discovery worker (`system_task`) and migrations only; the parent's routes are admin-only.
+export const agentRegistryRecordComponents = pgTable(
+  "agent_registry_record_components",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    recordId: uuid("record_id")
+      .notNull()
+      .references(() => agentRegistryRecords.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: REGISTRY_COMPONENT_KINDS }).notNull(),
+    /** the vendor's own reference for it: a connector id, a knowledge source's component id, a model name */
+    vendorRef: text("vendor_ref").notNull(),
+    displayName: text("display_name").notNull(),
+    /** whether the vendor reports it switched on; null when the vendor does not say */
+    enabled: boolean("enabled"),
+    /** who supplies a connected app's connection (maker or end user); null when the vendor does not say */
+    providedBy: text("provided_by", { enum: REGISTRY_COMPONENT_PROVIDERS }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_registry_record_components_uq").on(t.recordId, t.kind, t.vendorRef),
+    check("agent_registry_record_components_kind_check", sql`${t.kind} IN ('model', 'tool', 'mcp_server', 'connected_app', 'knowledge')`),
+    check("agent_registry_record_components_provided_by_check", sql`${t.providedBy} IS NULL OR ${t.providedBy} IN ('maker', 'end_user')`),
+    check("agent_registry_record_components_vendor_ref_check", sql`char_length(${t.vendorRef}) BETWEEN 1 AND 512`),
+    check("agent_registry_record_components_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
   ],
 );
 
