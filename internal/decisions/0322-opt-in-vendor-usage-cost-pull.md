@@ -262,3 +262,54 @@ Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gat
   the cost report, so pulling it as spend would double count; it needs an attribution-only design); Anthropic's newer
   Analytics API (`/v1/organizations/analytics/cost`, beta); the settings screen (#453); live-tenant tests (lane E11).
 
+## As built — slice 3 (2026-11-19): GitHub Copilot and Cursor
+
+Code in `packages/shared/src/vendor-usage.ts` (catalogue, config and response schemas, normalisers) and
+`apps/gateway/src/vendor-usage-pull.ts` (the two fetchers); proof in `zz-adr0322-vendor-usage-pull.test.ts` and
+`vendor-usage.test.ts` (fake vendors only). No new route, no migration: `vendor_usage_connectors_vendor_check` already
+allowed `github_copilot` and `cursor`, and the nine slice 2 routes take the new vendors through the same schemas.
+
+Endpoint shapes re-checked against docs.github.com (billing usage, Copilot user management) and cursor.com/docs (teams
+Admin API) on 2026-11-19.
+
+- **GitHub Copilot**: `GET /organizations/{org}/settings/billing/usage` or `/enterprises/{enterprise}/...` with `year`,
+  `month` and `day`, one request per day of the window (the report has no pagination and no range parameter), header
+  `X-GitHub-Api-Version: 2026-03-10`. Only items whose `product` names Copilot are kept; `netAmount` is the amount.
+  The configuration names the account kind and the organisation or enterprise slug, validated as a GitHub login so the
+  path segment cannot be steered.
+  - **Identity**: the report has no person dimension, so a line is billed to its organisation (the repository is in
+    the line's detail and in the fact identity) and resolves to a person only through an admin alias.
+  - **Currency**: GitHub does not state it; the lines are recorded as USD, the currency GitHub bills in, and the
+    catalogue says so.
+  - **Scope posture `unverified`**: GitHub documents read permissions for both reports, but a fine-grained token can
+    also carry write permissions and GitHub does not report them back, so RegulAIt cannot verify the scope.
+  - **Not built**: per-user premium-request usage (`/premium_request/usage?user=`, one request per user), cost-centre
+    names (only on the enterprise premium-request and AI-credit responses), and the Copilot seats list.
+- **Cursor**: `POST https://api.cursor.com/teams/filtered-usage-events` with `startDate` and `endDate` (epoch ms, both
+  inclusive), 1000 events a page, Basic auth with the key as the user name. Events are summed per UTC day, user email
+  (or service account), model, kind and product from each event's `chargedCents`, which Cursor names as the figure
+  that reconciles with team spend. Cents are summed as integer micro-cents. A user resolves to a person by email.
+  - **Difference from §6**: Cursor's docs now require an `admin:*` key for the Admin API, not a `read:*` key, so the
+    credential is `write_capable` and needs the slice 2 acknowledgement, like the Anthropic and OpenAI Admin keys.
+  - **Bounds**: a window of more than 40 pages (40,000 events) stops with `page_limit`; the admin lowers
+    `backfillDays` (at most 30, Cursor's stated range for its other usage endpoints). A page number other than the one
+    asked for is refused as `bad_response`.
+- **Review round (#1069)**:
+  - **An unverified scope needs an attestation** (S4 finding 1, ADR-0180): storing a credential whose posture is
+    `unverified` is refused (409 `unverified_scope_acknowledgement_required`) unless the admin sends
+    `acknowledgeUnverifiedScope: true`, attesting that the token carries read permissions only. The acknowledgement
+    time is recorded on the credential (the existing `write_capable_acknowledged_at` column now holds the
+    acknowledgement of any posture other than `read_only`; no migration). The attestation is in the audit row and on
+    the posture read (`scopeAcknowledgedAt`, `scopeAttestation`).
+  - **Same-key Copilot items are summed** (R4 finding 1): two items with the same day, product, SKU, organisation and
+    repository (for example around a price change) are one fact whose net amount, quantity, gross and discount are
+    summed in integer micro-units. Before this, the pull kept only the last one and dropped the rest of the spend.
+  - **Disclosure** (S4 finding 2): the Cursor catalogue limits state that the user's email is stored as each line's
+    account reference.
+  - **Tracked, not changed**: a Cursor window can reach 32 days after a long gap (R4 finding 2, triage-low #1083).
+- **No metered overlap**: the gateway meters neither Copilot nor Cursor, so neither connector declares gateway ids and
+  the posture read says so instead of the "nothing declared" warning.
+- **Open source first (ADR-0176)**: `@octokit/request` (MIT, maintained) was compared with the guarded fetch already
+  used for Anthropic. It was not added: it is a new dependency whose fetch would have to be replaced by the guarded one
+  anyway, for one unpaginated GET per day. Cursor publishes no SDK for its Admin API.
+
