@@ -21,6 +21,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as edSign, verify as edVerify } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   and,
@@ -47,7 +49,8 @@ import {
 } from "@regulait/db";
 import { BATCH4_STRICT_DEFAULTS, DISCOVERY_STEP_UP_KEYS } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { createRemovalSchema, endpointAddonRemovalDecideStepUp, endpointRemediationStepUp, type DirectiveSigner } from "./endpoint-addon-removal.js";
+import { devicePolicyKeyId, DEVICE_POLICY_KEY_FILE_ENV } from "./device-policy-signer.js";
+import { createRemovalSchema, DIRECTIVE_SIGNATURE_DOMAIN, endpointAddonRemovalDecideStepUp, endpointRemediationStepUp, type DirectiveSigner } from "./endpoint-addon-removal.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
 import { enrolEndpointAgent, seenMcpServer, type EnrolledAgent } from "./testing/endpoint-addon-removal-fixture.js";
@@ -71,7 +74,7 @@ const CONFIG = `.config/a331-${RUN}/mcp.json`;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 process.env.REGULAIT_PUBLIC_URL = ORIGIN;
 
-// a runtime Ed25519 key pair: the test signer the production build never has (SD4 pending)
+// a runtime Ed25519 key pair, injected through the code-only seam (production uses the shared device-policy key)
 const directiveKeys = generateKeyPairSync("ed25519");
 const signer: DirectiveSigner = { kind: "directive_signer", keyId: "test-directive-key", signPayload: async (b) => edSign(null, b, directiveKeys.privateKey) };
 
@@ -204,7 +207,7 @@ beforeAll(async () => {
     if (o0) await db.update(orgSettings).set({ stepUpMode: o0.mode, stepUpActions: o0.actions, executionMode: o0.exec }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner: signer });
-  unsigned = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  unsigned = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner: null });
   await Promise.all([app.ready(), unsigned.ready()]);
   await db.update(orgSettings).set({ stepUpMode: "required", stepUpActions: [...BATCH4_STRICT_DEFAULTS.stepUpActions] }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   const a = await inject(app, "POST", "/v1/users", AUTH, { email: `a331-admin-${RUN}@example.com`, displayName: "a331 admin" });
@@ -410,7 +413,10 @@ describe("ADR-0331: directives and outcomes", () => {
     for (const env of envs) {
       expect(Object.keys(env).sort()).toEqual(["keyId", "payload", "signature"]);
       expect(env.keyId).toBe("test-directive-key");
-      expect(edVerify(null, Buffer.from(env.payload, "base64"), directiveKeys.publicKey, Buffer.from(env.signature, "base64"))).toBe(true);
+      // the signature is over the directive domain and the payload (#1033), never the bare payload a policy is signed over
+      const bytes = Buffer.from(env.payload, "base64");
+      expect(edVerify(null, Buffer.concat([DIRECTIVE_SIGNATURE_DOMAIN, bytes]), directiveKeys.publicKey, Buffer.from(env.signature, "base64"))).toBe(true);
+      expect(edVerify(null, bytes, directiveKeys.publicKey, Buffer.from(env.signature, "base64"))).toBe(false);
       const p = decode(env);
       expect(Object.keys(p)).toEqual(["schema", "directiveId", "removalId", "identityId", "issuedAt", "notAfter", "action", "asset"]);
       expect(Object.keys(p.asset)).toEqual(["signatureId", "root", "path", "serverName", "identityKind", "identity", "packageVersion"]);
@@ -688,6 +694,111 @@ describe("ADR-0331 + ADR-0186: a second administrator approves before anything i
     expect((await approvalOfRemoval(asked.removal.id)).status).toBe("superseded");
     expect((await decide(asked.removal.id)).res.statusCode).not.toBe(200);
     expect(await targetsOf(asked.removal.id)).toEqual([]);
+  });
+});
+
+describe("ADR-0331 addendum: the shared device-policy key signs directives (owner decision B4)", () => {
+  const pkg = `@a331-${RUN}/shared-key`;
+  it("with no injected signer, the configured device-policy key signs; with none configured, 503; a rotation applies at once", async () => {
+    await setSwitch(true);
+    await seen(A, { pkg });
+    const prev = process.env[DEVICE_POLICY_KEY_FILE_ENV];
+    const dir = mkdtempSync(path.join(tmpdir(), "a331-dp-"));
+    const keyFileOf = (name: string) => {
+      const pair = generateKeyPairSync("ed25519");
+      const file = path.join(dir, name);
+      writeFileSync(file, pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const x = (pair.publicKey.export({ format: "jwk" }) as { x: string }).x;
+      return { file, publicKey: pair.publicKey, keyId: devicePolicyKeyId(x) };
+    };
+    // the production wiring: no directiveSigner option at all
+    const shared = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+    try {
+      delete process.env[DEVICE_POLICY_KEY_FILE_ENV];
+      const r = await createRemoval(base({ kind: "device", deviceId: A.deviceId }, { identity: pkg }));
+      const none = await directivesOf(A, shared);
+      expect(none.statusCode).toBe(503);
+      expect(none.json()).toEqual({ error: "directive_signer_unavailable" });
+      const listOff = await inject(shared, "GET", "/v1/discovery/endpoint-addon-removals", adminKey);
+      expect(listOff.json()).toMatchObject({ signerConfigured: false, signerKeyId: null });
+
+      const first = keyFileOf("first.pem");
+      process.env[DEVICE_POLICY_KEY_FILE_ENV] = first.file;
+      const listOn = await inject(shared, "GET", "/v1/discovery/endpoint-addon-removals", adminKey);
+      expect(listOn.json()).toMatchObject({ signerConfigured: true, signerKeyId: first.keyId });
+      const res = await directivesOf(A, shared);
+      expect(res.statusCode, res.body).toBe(200);
+      const env = (res.json().directives as Array<{ keyId: string; payload: string; signature: string }>).find((e) => decode(e).removalId === r.removal.id)!;
+      expect(env.keyId).toBe(first.keyId);
+      expect(env.keyId).toMatch(/^device-policy-[0-9a-f]{24}$/);
+      const bytes = Buffer.from(env.payload, "base64");
+      expect(edVerify(null, Buffer.concat([DIRECTIVE_SIGNATURE_DOMAIN, bytes]), first.publicKey, Buffer.from(env.signature, "base64"))).toBe(true);
+      expect(edVerify(null, bytes, first.publicKey, Buffer.from(env.signature, "base64"))).toBe(false);
+
+      // a replaced key is used by the next read, without rebuilding the app
+      const next = keyFileOf("next.pem");
+      process.env[DEVICE_POLICY_KEY_FILE_ENV] = next.file;
+      expect((await inject(shared, "GET", "/v1/discovery/endpoint-addon-removals", adminKey)).json().signerKeyId).toBe(next.keyId);
+      // a key file that does not parse is no signer, never a guess
+      writeFileSync(path.join(dir, "bad.pem"), "not a key");
+      process.env[DEVICE_POLICY_KEY_FILE_ENV] = path.join(dir, "bad.pem");
+      expect((await directivesOf(A, shared)).statusCode).toBe(503);
+      await app.inject({ method: "POST", url: `/v1/discovery/endpoint-addon-removals/${r.removal.id}/cancel`, headers: adminKey });
+    } finally {
+      if (prev === undefined) delete process.env[DEVICE_POLICY_KEY_FILE_ENV];
+      else process.env[DEVICE_POLICY_KEY_FILE_ENV] = prev;
+      await shared.close();
+    }
+  });
+});
+
+describe("ADR-0331 addendum: an Idempotency-Key on the removal request (#1033)", () => {
+  const pkg = `@a331-${RUN}/idem`;
+  const post = async (body: Record<string, unknown>, key?: string) => {
+    const g = await grantStepUpForTest(db, adminId, stepFor(body));
+    const r = stepUpRequest(g);
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/discovery/endpoint-addon-removals",
+      headers: { ...r.headers, ...(key === undefined ? {} : { "idempotency-key": key }) },
+      cookies: r.cookies,
+      payload: body,
+    });
+    return { res, grantId: g.grantId };
+  };
+  it("a retry with the same key replays the first removal (one approval); another body is refused; a refusal keeps the key free", async () => {
+    await setSwitch(true);
+    await seen(A, { pkg });
+    const body = base({ kind: "device", deviceId: A.deviceId }, { identity: pkg, reason: `idem ${RUN}` });
+    const key = `a331-idem-${RUN}`;
+
+    // a refusal (switch off) rolls the claim back: the same key works once the cause is fixed
+    await setSwitch(false);
+    const refused = await post(body, key);
+    expect(refused.res.statusCode).toBe(403);
+    await setSwitch(true);
+
+    const first = await post(body, key);
+    expect(first.res.statusCode, first.res.body).toBe(201);
+    const created = first.res.json() as { removal: { id: string; status: string }; resolved: number; devices: number };
+    const again = await post(body, key);
+    expect(again.res.statusCode, again.res.body).toBe(200);
+    expect(again.res.headers["idempotent-replay"]).toBe("true");
+    expect(again.res.json()).toMatchObject({ removal: { id: created.removal.id, status: "awaiting_approval" }, resolved: created.resolved, devices: created.devices });
+    // the replay spent nothing and queued nothing
+    expect(await grantSpent(db, again.grantId)).toBe(false);
+    const queued = await db.select().from(endpointAddonRemovals).where(sql`${endpointAddonRemovals.identity} = ${pkg} AND ${endpointAddonRemovals.reason} = ${`idem ${RUN}`}`);
+    expect(queued).toHaveLength(1);
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, created.removal.id), eq(auditLog.ruleId, "endpoint-addon-removal-requested")));
+    expect(audit!.detail).toMatchObject({ idempotencyKey: true });
+
+    const other = await post({ ...body, reason: `idem other ${RUN}` }, key);
+    expect(other.res.statusCode).toBe(422);
+    expect(other.res.json().error).toBe("idempotency_key_reused");
+    const bad = await post(body, "x".repeat(201));
+    expect(bad.res.statusCode).toBe(400);
+    expect(bad.res.json().error).toBe("invalid_idempotency_key");
+    await app.inject({ method: "POST", url: `/v1/discovery/endpoint-addon-removals/${created.removal.id}/cancel`, headers: adminKey });
   });
 });
 

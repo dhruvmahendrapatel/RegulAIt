@@ -105,6 +105,8 @@ export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Rea
     case "entitlement_m365":
     // ADR-0314: Entra Agent ID and Agent 365 through the same Entra workload identity federation
     case "agent_registry_entra":
+    // ADR-0336: Copilot Studio's Dataverse through the same Entra workload identity federation
+    case "agent_registry_copilot_studio":
       return [FEDERATION_AUDIENCES.azure];
     case "cloud_gcp":
     // ADR-0314: Gemini Enterprise through the same workload identity pool provider

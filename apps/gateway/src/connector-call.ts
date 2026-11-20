@@ -58,7 +58,7 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
-import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRules, type GovernedResource } from "@regulait/policy-kernel";
+import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
 import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
 import {
@@ -478,7 +478,12 @@ export async function executeGovernedConnectorCall(
       coreError = err;
     }
     const dialHolds = dial.mode === "require_approval" && body.operation === "write";
-    const matchedRules = coreRestrictions ? matchingResourceApprovalRules(coreResource, coreRestrictions.approvalRules) : [];
+    // ADR-0239 slice 2b: on Cedar, sharing the kernel's one request; an engine error binds no consent here, and the
+    // kernel refuses the call on the same error (governedEvaluateResource below)
+    const matchVerdict = coreRestrictions
+      ? matchingResourceApprovalRulesWith(coreRestrictions.approvalRuleEvaluator, coreResource, coreRestrictions.approvalRules)
+      : null;
+    const matchedRules = matchVerdict?.kind === "matched" ? matchVerdict.rules : [];
     // ADR-0251 review #715 finding 1 — EVERY NAMED APPROVER SIGNS. The dial's approver and each matching rule's approver
     // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
     // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.

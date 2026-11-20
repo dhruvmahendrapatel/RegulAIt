@@ -496,6 +496,10 @@ export interface GovernedDispatchArgs {
    * re-runs every provider-independent input gate and current output controls
    * before returning it, without contacting a provider or writing usage. */
   cachedResponse?: SemanticCacheHit | undefined;
+  /** ADR-0327 slice 4b: set with `cachedResponse` when the candidate answer is an approved rule-like step's rule
+   * output, not a cached model answer. It only relabels the span and audit rows; every gate runs exactly as for a
+   * cache hit. */
+  ruleStepServed?: { suggestionId: string; switchId: string } | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -999,7 +1003,11 @@ async function dispatchOnce(
     requestedAgentId: args.requestedAgentId,
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
-    ...(args.cachedResponse ? { semanticCache: "hit" } : {}),
+    ...(args.ruleStepServed
+      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      : args.cachedResponse
+        ? { semanticCache: "hit" }
+        : {}),
     ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
     ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
       ? { fallbackPosition: detail["fallbackPosition"] ?? null }
@@ -1760,12 +1768,16 @@ async function dispatchAttempt(
 
   if (args.cachedResponse && !labelRedacted) {
     const cached = args.cachedResponse;
+    // where the candidate came from, as the audit rows below record it: never a cache claim for a rule's answer
+    const candidateSource: Record<string, unknown> = args.ruleStepServed
+      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      : { semanticCache: { hit: true } };
     let outputHits: PiiHit[] = [];
     if (piiMode) {
       const check = enforcePII(piiMode, { output: cached.outputText }, piiIntl);
       outputHits = check.hits;
       if (check.action === "block") {
-        const detail = `cached output withheld: contains PII (${piiCategoryList(outputHits)})`;
+        const detail = `${args.ruleStepServed ? "rule" : "cached"} output withheld: contains PII (${piiCategoryList(outputHits)})`;
         const [row] = await db.insert(auditLog).values({
           userId,
           objectType: "agent",
@@ -1773,7 +1785,7 @@ async function dispatchAttempt(
           detail: {
             phase: "pii",
             pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
-            semanticCache: { hit: true },
+            ...candidateSource,
             ...(args.projectId ? { projectId: args.projectId } : {}),
             receiptClass: "decision",
           },
@@ -1806,7 +1818,7 @@ async function dispatchAttempt(
           projectId: args.projectId ?? null,
           evaluation: guardrailOutput,
           outcome,
-          detail: { agentId: served.id, model: served.model, semanticCache: { hit: true } },
+          detail: { agentId: served.id, model: served.model, ...candidateSource },
         });
       }
       if (guardrailOutput.action === "block") {
@@ -1814,7 +1826,7 @@ async function dispatchAttempt(
           ok: false,
           status: 403,
           error: "guardrail_blocked",
-          detail: `cached output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
+          detail: `${args.ruleStepServed ? "rule" : "cached"} output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
           guardrails: {
             action: "block",
             phase: "output",
@@ -1837,14 +1849,14 @@ async function dispatchAttempt(
         detail: {
           phase: "pii",
           pii: { mode: piiMode, action: "warn", inputHits, outputHits },
-          semanticCache: { hit: true },
+          ...candidateSource,
           ...(args.projectId ? { projectId: args.projectId } : {}),
           receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "pii-warned",
         ruleChain: [],
-        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, cached answer served`,
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, ${args.ruleStepServed ? "rule" : "cached"} answer served`,
       });
     }
     const findings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];

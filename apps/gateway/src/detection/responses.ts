@@ -6,6 +6,7 @@
  *   revoke_credential  revoke the acting identity's live short-lived access tokens (`issued_tokens`)
  *   require_approval   a user-scoped, all-servers approval rule for the sponsor, through the one approval-rule create
  *                      (`createApprovalRuleRow`), so every later MCP tool call goes through the Approvals Queue
+ *   quarantine_device  ADR-0333 §6: open (or keep) the endpoint device's one active quarantine (quarantine.ts)
  *
  * A response stronger than `alert` exists only in a pack that passed the `settings_relax` step-up (pack.ts
  * `packChangeIsRelaxation`). The author of that pack version is the acting admin and the approver. The outcome is
@@ -20,6 +21,7 @@ import { ApprovalRuleWriteRefusedError } from "../approval-pool.js";
 import type { DetectionResponse } from "./pack.js";
 import { DETECTION_RESPONSE_MACHINE } from "@regulait/shared";
 import { whereFrom } from "../state-transition.js";
+import { openQuarantine } from "./quarantine.js";
 
 export const DETECTION_RESPONSE_RULE_ID = "detection-response";
 
@@ -30,6 +32,8 @@ export type DetectionResponseCode =
   | "no_sponsor"
   | "no_independent_approver"
   | "approval_rule_refused"
+  | "not_endpoint"
+  | "device_not_found"
   | "response_error";
 
 export interface DetectionResponseTarget {
@@ -44,6 +48,8 @@ export interface DetectionResponseTarget {
   packAuthor: string | null;
   /** the audit row's user when no sponsor or author resolves */
   auditUserId: string;
+  /** `quarantine_device` only: the rule's `quarantineHours`, as stored in the incident's pack version (or null) */
+  quarantineHours?: number | null;
 }
 
 type Outcome = { ok: true; detail: Record<string, unknown> } | { ok: false; code: DetectionResponseCode };
@@ -119,6 +125,12 @@ async function requireApproval(db: Db, t: DetectionResponseTarget): Promise<Outc
   }
 }
 
+async function quarantineDevice(tx: Db, t: DetectionResponseTarget): Promise<Outcome> {
+  const out = await openQuarantine(tx, { incidentId: t.incidentId, groupKey: t.groupKey, hours: t.quarantineHours ?? Number.NaN });
+  if (!out.ok) return { ok: false, code: out.code };
+  return { ok: true, detail: { quarantineId: out.quarantineId, deviceId: out.deviceId, expiresAt: out.expiresAt, existing: out.existing } };
+}
+
 /** The guarded UPDATE matched no row: the incident's response is already terminal (a concurrent or repeated run). */
 class ResponseAlreadyRecorded extends Error {
   constructor() {
@@ -179,7 +191,13 @@ export async function runDetectionResponse(
     return await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       const outcome =
-        t.response === "suspend_grant" ? await suspendGrant(tx, t) : t.response === "revoke_credential" ? await revokeTokens(tx, t) : await requireApproval(tx, t);
+        t.response === "suspend_grant"
+          ? await suspendGrant(tx, t)
+          : t.response === "revoke_credential"
+            ? await revokeTokens(tx, t)
+            : t.response === "quarantine_device"
+              ? await quarantineDevice(tx, t)
+              : await requireApproval(tx, t);
       await opts.afterAction?.();
       return recordOutcome(tx, t, outcome);
     });
