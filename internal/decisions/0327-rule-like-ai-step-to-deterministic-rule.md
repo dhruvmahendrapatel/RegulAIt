@@ -169,8 +169,13 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     itself.
   - **Turning detection off does not unswitch a step.** Revert is the one way back to the AI, so a step's lifecycle
     state is never contradicted by a hidden setting.
-- Slice 4c (next): the same serving on the native `/v1/agents/:agentId/invoke` path. Switching to a published
-  decision table follows it.
+- Slice 4c (built, native path): `/v1/agents/:agentId/invoke` serves a switched step the same way, after the
+  path's hoisted PII and privacy gates and before the semantic cache, through the same dispatch core with the same span
+  label, `rule_replacement` saving and audit row (`ruleStep` in its detail).
+  - **Only a plain single-turn dispatch qualifies.** The rule was measured on spans whose input is `body.input` alone,
+    so a conversation, a system prompt, attachments, a baseline or reference content each go to the AI.
+  - A passthrough user keeps every AI call, as on the compat path.
+  - Next: switching to a published decision table.
 
 ## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
 
