@@ -31,6 +31,7 @@ import {
   workflowInstances,
   workflowTemplates,
   workflowTemplateVersions,
+  complianceProfiles,
   type Db,
 } from "@regulait/db";
 import { canonicalJson, PIPELINE_STEP_CATALOGUE, sha256Hex } from "@regulait/shared";
@@ -215,6 +216,34 @@ describe("ADR-0232 governed pipeline runs", () => {
     const i = await startRun({ templateId: intake });
     expect(i.statusCode, i.body).toBe(409);
     expect(i.json().error).toBe("intake_template_not_runnable");
+  });
+
+  it("derives the same server-side change and cascade as the workflow start route (one shared helper)", async () => {
+    // a role the admin holds, and a classified project whose framework forces a second template in
+    const role = await app.inject({ method: "POST", url: "/v1/roles", headers: AUTH, payload: { name: `pr-${RUN}-role` } });
+    expect(role.statusCode, role.body).toBe(201);
+    const assign = await app.inject({ method: "POST", url: `/v1/users/${adminId}/roles`, headers: AUTH, payload: { roleId: role.json().id } });
+    expect(assign.statusCode, assign.body).toBeLessThan(300);
+    const forced = await newTemplate(`pr-${RUN}-forced`);
+    const tag = `pr-${RUN}-tag`;
+    await db.insert(complianceProfiles).values({ tag, requiredTemplateIds: [forced] });
+    const proj = await app.inject({ method: "POST", url: "/v1/projects", headers: AUTH, payload: { name: `pr-${RUN}-proj`, classifications: [tag] } });
+    expect(proj.statusCode, proj.body).toBe(201);
+    const projectId = proj.json().id as string;
+    const tpl = await newTemplate(`pr-${RUN}-parity`);
+
+    const viaPipeline = await startRun({ templateId: tpl, projectId });
+    expect(viaPipeline.statusCode, viaPipeline.body).toBe(201);
+    const viaWorkflow = await app.inject({ method: "POST", url: "/v1/workflows/instances", ...asAdmin, payload: { templateId: tpl, projectId, change } });
+    expect(viaWorkflow.statusCode, viaWorkflow.body).toBe(201);
+
+    const [a] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, viaPipeline.json().run.workflowInstanceId));
+    const [b] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, viaWorkflow.json().id));
+    expect(a!.templateIds).toEqual([tpl, forced]);
+    expect(a!.templateIds).toEqual(b!.templateIds);
+    expect(a!.change).toEqual(b!.change);
+    expect(a!.change).toMatchObject({ initiatorRoles: [`pr-${RUN}-role`], dataSensitivities: [tag] });
+    expect(canonicalJson(a!.definition)).toBe(canonicalJson(b!.definition));
   });
 
   it("holds the machine in the database: no illegal move, no delete, steps append-only", async () => {

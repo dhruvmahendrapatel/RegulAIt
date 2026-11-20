@@ -26,8 +26,6 @@ import {
   inArray,
   pipelineRuns,
   pipelineRunSteps,
-  roleAssignments,
-  roles,
   sql,
   workflowInstances,
   workflowTemplates,
@@ -44,12 +42,11 @@ import {
   pipelineStepForStageType,
   type PipelineRunState,
 } from "@regulait/shared";
-import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
-import { projectClassifications, requiredTemplateIdsFor } from "./projects.js";
+import { isTerminalStatus, type InstanceState, type TerminalStatus, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
 import { whereFrom } from "./state-transition.js";
 import { definitionContentHash, ensureBaseline } from "./workflow-builder.js";
-import { startWorkflowInstanceWithTemplates } from "./workflows.js";
+import { resolveServerChange, startWorkflowInstanceWithTemplates, withCascadeTemplates } from "./workflows.js";
 import { answerListPage, type ContractList } from "./list-contract-route.js";
 import type { ListSpec } from "./list-contract.js";
 
@@ -59,8 +56,8 @@ export const PIPELINE_RULE_IDS = {
   finished: "pipeline-run-finished",
 } as const;
 
-/** the workflow instance's terminal status → the run event that settles it */
-const SETTLE_EVENT: Readonly<Record<string, "succeed" | "fail" | "cancel">> = {
+/** the workflow instance's terminal status → the run event that settles it (a new terminal status is a compile error) */
+const SETTLE_EVENT: Readonly<Record<TerminalStatus, "succeed" | "fail" | "cancel">> = {
   completed: "succeed",
   aborted: "cancel",
   denied: "fail",
@@ -110,7 +107,7 @@ async function settleRuns(db: Db, runs: PipelineRunRow[]): Promise<PipelineRunRo
   const settled = new Map<string, PipelineRunRow>();
   for (const r of running) {
     const instanceStatus = statusOf.get(r.workflowInstanceId!);
-    const event = instanceStatus ? SETTLE_EVENT[instanceStatus] : undefined;
+    const event = instanceStatus && isTerminalStatus(instanceStatus) ? SETTLE_EVENT[instanceStatus] : undefined;
     if (!event) continue;
     const to = PIPELINE_RUN_MACHINE.def.transitions[event].to;
     const out = await db.transaction(async (rawTx) => {
@@ -132,7 +129,7 @@ async function settleRuns(db: Db, runs: PipelineRunRow[]): Promise<PipelineRunRo
   }
   if (settled.size === 0) return runs;
   // a run another reader settled first is re-read, so the answer is the state that stands
-  const missed = running.filter((r) => !settled.has(r.id) && SETTLE_EVENT[statusOf.get(r.workflowInstanceId!) ?? ""]);
+  const missed = running.filter((r) => !settled.has(r.id) && isTerminalStatus(statusOf.get(r.workflowInstanceId!) ?? ""));
   if (missed.length) {
     for (const row of await db.select().from(pipelineRuns).where(inArray(pipelineRuns.id, missed.map((r) => r.id)))) settled.set(row.id, row);
   }
@@ -190,12 +187,6 @@ export const PIPELINE_RUNS_LIST: ListSpec<RunView> = {
   idCol: pipelineRuns.id,
 };
 
-/** the initiator's role names, server side, exactly as the workflow start route resolves them (ADR-0018 §4) */
-async function initiatorRoles(db: Db, userId: string): Promise<string[]> {
-  const rows = await db.select({ name: roles.name }).from(roleAssignments).innerJoin(roles, eq(roles.id, roleAssignments.roleId)).where(eq(roleAssignments.userId, userId));
-  return [...new Set(rows.map((r) => r.name))];
-}
-
 export function registerPipelineRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}) {
   app.get("/v1/pipelines/catalogue", async () => ({ groups: PIPELINE_STEP_GROUPS, steps: PIPELINE_STEP_CATALOGUE }));
 
@@ -215,12 +206,8 @@ export function registerPipelineRoutes(app: FastifyInstance, db: Db, opts: { dat
         return reply.status(200).send({ run: view, replayed: true });
       }
     }
-    // the same server-side change attributes the workflow start route derives; never from the request body
-    const change = {
-      ...body.change,
-      initiatorRoles: await initiatorRoles(db, userId),
-      dataSensitivities: body.projectId ? await projectClassifications(db, body.projectId) : [],
-    };
+    // the server-side change attributes and the §8.3 cascade, from the one helper the workflow start route uses
+    const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
 
     const out = await db.transaction(async (rawTx): Promise<{ refusal: Refusal } | { run: PipelineRunRow; startRefusal: Refusal | null }> => {
       const tx = rawTx as unknown as Db;
@@ -252,9 +239,8 @@ export function registerPipelineRoutes(app: FastifyInstance, db: Db, opts: { dat
         .returning();
       if (!run) return { refusal: { status: 409, body: { error: "idempotency_key_in_use", detail: "a run with this idempotency key is being started; read it again" } } };
 
-      // §8.3 cascade: a classified project's required templates join, exactly as for an explicit-template start
-      const templateIds = [t.id];
-      if (body.projectId) for (const id of await requiredTemplateIdsFor(tx, body.projectId)) if (!templateIds.includes(id)) templateIds.push(id);
+      // §8.3 cascade: a classified project's required templates join, as for an explicit-template start
+      const templateIds = withCascadeTemplates([t.id], cascadeTemplateIds);
       const started = await startWorkflowInstanceWithTemplates(tx, opts.dataKey, {
         templateIds,
         initiatorUserId: userId,
