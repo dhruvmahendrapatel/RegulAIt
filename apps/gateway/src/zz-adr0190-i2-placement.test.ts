@@ -378,7 +378,20 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const ROBOT_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["robot-browser"]);
     const ex = await newExecutor("robot-l2", "gvisor", [{ digest: ROBOT_DIGEST, cls: "user_space_kernel" }]);
     const projectId = await newProject("internal");
-    const egress = { runId: randomUUID(), targets: [{ host: "portal.example.com", port: 443 }] };
+    // the offer names a real run (execution_offers_robot_run_fk): a draft robot version and its queued test run
+    const hex = "a".repeat(64);
+    const [robot] = rows<{ id: string }>(
+      await db.execute(sql`insert into robots (slug, name, owner_user_id) values (${"placement_" + randomUUID().slice(0, 8)}, 'placement probe', ${adminId}) returning id`),
+    );
+    const [version] = rows<{ id: string }>(
+      await db.execute(sql`insert into robot_versions (robot_id, version, script, script_sha256, input_schema, output_schema, author_user_id)
+        values (${robot!.id}, 1, '[]', ${hex}, '{}'::jsonb, '{}'::jsonb, ${adminId}) returning id`),
+    );
+    const [run] = rows<{ id: string }>(
+      await db.execute(sql`insert into robot_runs (robot_version_id, requested_by, project_id, kind, content_digest)
+        values (${version!.id}, ${adminId}, ${projectId}, 'test', ${hex}) returning id`),
+    );
+    const egress = { runId: run!.id, targets: [{ host: "portal.example.com", port: 443 }] };
     // a test run (no agent) of our own runner image is not an unknown agent: L2, not L3
     const d = await decidePlacement(db, { workloadKind: "robot_browser", projectId, agent: null, egress, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
     expect(d).toMatchObject({ kind: "offered", requirement: { requiredClass: "user_space_kernel", profile: { name: "robot-browser", source: "shipped_default" } } });
