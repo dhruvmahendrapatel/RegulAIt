@@ -15,8 +15,9 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { parseCsvRecords } from "./onboarding.js";
 
-export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai", "github_copilot", "cursor"] as const;
+export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "aws_cur"] as const;
 export type VendorUsagePullVendor = (typeof VENDOR_USAGE_PULL_VENDORS)[number];
 
 export interface VendorUsageCatalogueEntry {
@@ -105,6 +106,36 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
       "A window with more than 40,000 events stops with page_limit: lower backfillDays. The " +
       "gateway does not meter Cursor, so no line is excluded as already metered.",
   },
+  aws_cur: {
+    vendor: "aws_cur",
+    label: "AWS Data Exports (CUR 2.0), Amazon Bedrock lines",
+    host: "sts.{region}.amazonaws.com and {bucket}.s3.{region}.amazonaws.com",
+    endpoints: [
+      "STS AssumeRoleWithWebIdentity (federated mode)",
+      "S3 ListObjectsV2 on {prefix}/{exportName}/metadata/BILLING_PERIOD=YYYY-MM/",
+      "S3 GetObject on the manifest and on its data files under {prefix}/{exportName}/data/BILLING_PERIOD=YYYY-MM/",
+    ],
+    scopePosture: "unverified",
+    scopeNote:
+      "RegulAIt cannot read the role's or the key's IAM policy without asking for more access, so the scope is " +
+      "unverified. Grant only s3:ListBucket on the bucket (limited to the export prefix), s3:GetObject on the " +
+      "export prefix and, for a KMS-encrypted bucket, kms:Decrypt on its key (a minimal policy inferred from AWS's " +
+      "documentation, not stated by AWS). Storing the credential needs the administrator's attestation that it is " +
+      "limited this way; RegulAIt only lists and reads the export.",
+    overlapMatchesOn: [],
+    limits:
+      "Reads a CUR 2.0 export delivered as gzip-compressed CSV; a Parquet export is refused (recreate it as " +
+      "CSV). Use a dedicated export of Bedrock usage: a whole-estate export at a large organisation exceeds the " +
+      "per-run bounds. Only lines whose product code is in the configured list are kept (AmazonBedrock by default; " +
+      "the product codes of Marketplace-billed models are not verified). The amount is line_item_unblended_cost, " +
+      "for every line item type, so savings plans and discounts are not amortised. A line is billed to the IAM " +
+      "principal when the export carries AWS's caller identity (line_item_iam_principal, an opt-in), otherwise to " +
+      "the AWS account; either resolves to a person only through an admin alias. A principal ARN of an assumed " +
+      "role carries its session name, which callers often set to an email, and it is stored as the line's account " +
+      "reference. AWS restates a month for about two weeks: each pull replaces the lines of every month it re-reads, " +
+      "so a line AWS removes is withdrawn. The gateway does not meter Bedrock, so no line is excluded as already " +
+      "metered.",
+  },
 };
 
 const idList = z.array(z.string().trim().min(1).max(200)).max(200);
@@ -146,17 +177,71 @@ export const vendorUsagePublicConfigSchemas = {
       backfillDays: z.number().int().min(1).max(30).default(7),
     })
     .strict(),
+  aws_cur: z
+    .object({
+      /** federated: the customer's role trusts RegulAIt's federation issuer; static: an access-key pair (audited) */
+      credentialMode: z.enum(["federated", "static"]),
+      /** the role RegulAIt assumes by web identity (federated mode only) */
+      roleArn: z.string().trim().max(2048).optional(),
+      region: z.string().trim().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}$/, "an AWS region such as us-east-1"),
+      /** no dots: a dotted bucket name cannot be reached virtual-hosted over TLS */
+      bucket: z.string().trim().regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/, "an S3 bucket name without dots"),
+      /** the export's S3 prefix, "" for the bucket root; plain path segments only */
+      prefix: z
+        .string()
+        .trim()
+        .max(512)
+        .regex(/^(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)?$/, "path segments of letters, digits, '_', '.' and '-'")
+        .refine((v) => !v.split("/").some((seg) => seg === "." || seg === ".."), "no '.' or '..' segments")
+        .default(""),
+      exportName: z.string().trim().regex(/^[A-Za-z0-9_-]{1,128}$/, "the Data Exports export name"),
+      /** line_item_product_code values kept; Marketplace model codes are not verified (ADR-0322 slice 4a) */
+      productCodes: z.array(z.string().trim().regex(/^[A-Za-z0-9_-]{1,128}$/)).min(1).max(20).default(["AmazonBedrock"]),
+      /** billing months the first pull reads, counting the current one */
+      backfillMonths: z.number().int().min(1).max(3).default(1),
+    })
+    .strict()
+    .superRefine((c, ctx) => {
+      if (c.credentialMode === "federated") {
+        const parts = (c.roleArn ?? "").split(":");
+        const ok = parts.length >= 6 && parts[0] === "arn" && parts[1]!.startsWith("aws") && parts[2] === "iam" && /^\d{12}$/.test(parts[4] ?? "") && parts[5]!.startsWith("role/");
+        if (!ok) ctx.addIssue({ code: "custom", path: ["roleArn"], message: "federated mode needs an IAM role ARN" });
+      } else if (c.roleArn !== undefined) {
+        ctx.addIssue({ code: "custom", path: ["roleArn"], message: "static mode takes no role ARN" });
+      }
+    }),
 } as const;
+
+/**
+ * The secret of a connector whose credential is structured. Only `aws_cur` has one: a federated connector stores a
+ * marker (nothing secret exists, but the live credential row still makes store, attest and revoke the switch), and a
+ * static one stores the access-key pair.
+ */
+export const vendorUsageSecretSchemas = {
+  aws_cur: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("federated") }).strict(),
+    z
+      .object({
+        mode: z.literal("static"),
+        accessKeyId: z.string().regex(/^[A-Z0-9]{16,128}$/, "an AWS access key id"),
+        secretAccessKey: z.string().min(16).max(256),
+      })
+      .strict(),
+  ]),
+} as const;
+export type AwsCurSecret = z.infer<(typeof vendorUsageSecretSchemas)["aws_cur"]>;
 
 export type AnthropicPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["anthropic"]>;
 export type OpenAiPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["openai"]>;
 export type GithubCopilotPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["github_copilot"]>;
 export type CursorPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["cursor"]>;
+export type AwsCurPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["aws_cur"]>;
 export type VendorUsagePublicConfig =
   | AnthropicPublicConfig
   | OpenAiPublicConfig
   | GithubCopilotPublicConfig
-  | CursorPublicConfig;
+  | CursorPublicConfig
+  | AwsCurPublicConfig;
 
 /** the largest window one run asks for: both vendors cap a request at 31 daily buckets */
 export const VENDOR_USAGE_MAX_WINDOW_DAYS = 31;
@@ -297,7 +382,7 @@ export interface VendorUsageFact {
   factCanonical: string;
   accountRef: string;
   /** which kind of vendor id `accountRef` names, for the metered-overlap match */
-  accountKind: "api_key" | "project" | "workspace" | "organisation" | "user" | "service_account";
+  accountKind: "api_key" | "project" | "workspace" | "organisation" | "user" | "service_account" | "iam_principal" | "aws_account";
   /** the bare vendor id, or null for the organisation-level remainder */
   accountId: string | null;
   periodStart: string;
@@ -555,7 +640,7 @@ export function factOverlapsMetered(
   detailProjectId?: string | null,
 ): boolean {
   // the gateway does not meter Copilot seats or Cursor usage, so none of their lines is already metered
-  if (vendor === "github_copilot" || vendor === "cursor") return false;
+  if (vendor === "github_copilot" || vendor === "cursor" || vendor === "aws_cur") return false;
   if (vendor === "anthropic") {
     const c = config as AnthropicPublicConfig;
     return fact.accountKind === "workspace" && fact.accountId !== null && c.gatewayWorkspaceIds.includes(fact.accountId);
@@ -572,3 +657,182 @@ export const VENDOR_USAGE_PULL_STATEMENT =
   "RegulAIt and never added to metered spend. Lines billed to a key, project or workspace the gateway itself uses " +
   "are excluded from the imported side because that spend is already metered, and the exclusion is disclosed.";
 
+
+// --------------------------------------------------------------------------------------------------------------------
+// AWS CUR 2.0 (Data Exports), slice 4a. Pure: the reader in @regulait/cloud-discovery hands over the decompressed
+// CSV text of each data file; this turns it into daily Bedrock facts. Owner decisions 2026-11-20 (ADR-0322).
+// --------------------------------------------------------------------------------------------------------------------
+
+/** months one pull may read at most (backfill plus the restated previous month) */
+export const AWS_CUR_MAX_PERIODS = 4;
+/** AWS restates a closed month for about two weeks; it is re-read while today's day of month is at most this */
+export const AWS_CUR_RESTATE_DAYS = 15;
+
+/** the CUR 2.0 manifest (metadata/BILLING_PERIOD=YYYY-MM/...Manifest.json); unknown fields are allowed */
+export const awsCurManifestSchema = z.object({
+  executionId: z.string().min(1).max(200).optional(),
+  columns: z.array(z.object({ name: z.string().min(1).max(200), type: z.string().max(100).optional() })).max(2000).optional(),
+  dataFiles: z.array(z.string().min(1).max(2048)).min(0).max(500),
+});
+export type AwsCurManifest = z.infer<typeof awsCurManifestSchema>;
+
+/** "YYYY-MM" for a UTC instant */
+export function awsCurPeriodOf(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function periodShift(period: string, months: number): string {
+  const [y, m] = period.split("-").map(Number) as [number, number];
+  return awsCurPeriodOf(new Date(Date.UTC(y, m - 1 + months, 1)));
+}
+
+/** the UTC bounds of a billing period */
+export function awsCurPeriodBounds(period: string): { start: Date; end: Date } {
+  const [y, m] = period.split("-").map(Number) as [number, number];
+  return { start: new Date(Date.UTC(y, m - 1, 1)), end: new Date(Date.UTC(y, m, 1)) };
+}
+
+/**
+ * The billing periods the next pull reads, oldest first. The first pull reads the current month and `backfillMonths
+ * - 1` before it; a later pull resumes at the month of `pulledThrough`. The previous month is always included while
+ * AWS may still restate it, and the list never exceeds AWS_CUR_MAX_PERIODS (the most recent ones are kept).
+ */
+export function awsCurBillingPeriods(pulledThrough: Date | null, backfillMonths: number, now: Date): string[] {
+  const current = awsCurPeriodOf(now);
+  let start = pulledThrough ? awsCurPeriodOf(pulledThrough) : periodShift(current, -(backfillMonths - 1));
+  if (now.getUTCDate() <= AWS_CUR_RESTATE_DAYS) {
+    const previous = periodShift(current, -1);
+    if (previous < start) start = previous;
+  }
+  if (start > current) start = current;
+  const out: string[] = [];
+  for (let p = start; p <= current; p = periodShift(p, 1)) out.push(p);
+  return out.slice(-AWS_CUR_MAX_PERIODS);
+}
+
+/** a decimal string to integer micro-units without float arithmetic on plain decimals; refuses anything else */
+export function decimalToMicro(raw: string): number {
+  const t = raw.trim();
+  // at most nine integer digits (a billion), so micro-units stay exact integers; a larger line is a units error
+  const m = /^(-?)(\d{1,9})(?:\.(\d{1,20}))?$/.exec(t);
+  if (m) {
+    const [, sign, int, frac = ""] = m;
+    const six = (frac + "000000").slice(0, 6);
+    // round half away from zero on the seventh digit
+    const up = Number(frac[6] ?? "0") >= 5 ? 1 : 0;
+    const v = Number(int) * 1e6 + Number(six) + up;
+    return sign ? -v : v;
+  }
+  // AWS writes very small amounts in exponent form (1.0E-7); those are rounded through a float, once
+  if (/^-?\d{1,15}(?:\.\d{1,20})?[eE][-+]?\d{1,3}$/.test(t)) {
+    const n = Number(t);
+    if (Number.isFinite(n) && Math.abs(n) < 1e9) return Math.round(n * 1e6);
+  }
+  throw new VendorUsageResponseError("a cost was not a plain decimal number");
+}
+
+const AWS_CUR_REQUIRED_COLUMNS = [
+  "line_item_usage_start_date",
+  "line_item_usage_account_id",
+  "line_item_product_code",
+  "line_item_usage_type",
+  "line_item_line_item_type",
+  "line_item_unblended_cost",
+  "line_item_currency_code",
+] as const;
+const AWS_CUR_OPTIONAL_COLUMNS = ["line_item_usage_amount", "line_item_iam_principal"] as const;
+
+/** rows one pull may read across all data files */
+export const AWS_CUR_MAX_ROWS = 1_000_000;
+
+/**
+ * One CUR 2.0 data file (decompressed CSV text) to daily facts for one billing period, keeping only the configured
+ * product codes. Only the columns named here are read; every other column (tags, resource ids, the free-text line
+ * description) is discarded at parse. Lines are summed per UTC day, account, IAM principal, product code, usage type,
+ * line item type and currency, in integer micro-units. `into` lets several files of one period sum into one map.
+ */
+export function normalizeAwsCurCsv(
+  text: string,
+  period: string,
+  config: Pick<AwsCurPublicConfig, "productCodes">,
+  into: Map<string, { fact: VendorUsageFact; micro: number; qty: number }> = new Map(),
+): { groups: Map<string, { fact: VendorUsageFact; micro: number; qty: number }>; rows: number; kept: number } {
+  const records = parseCsvRecords(text);
+  if (records.length === 0) return { groups: into, rows: 0, kept: 0 };
+  const header = records[0]!.cells.map((c) => c.trim());
+  const index = new Map(header.map((h, i) => [h, i] as const));
+  for (const col of AWS_CUR_REQUIRED_COLUMNS) {
+    if (!index.has(col)) throw new VendorUsageResponseError(`the export has no ${col} column`);
+  }
+  const at = (cells: string[], col: (typeof AWS_CUR_REQUIRED_COLUMNS)[number] | (typeof AWS_CUR_OPTIONAL_COLUMNS)[number]) => {
+    const i = index.get(col);
+    return i === undefined ? "" : (cells[i] ?? "").trim();
+  };
+  const codes = new Set(config.productCodes);
+  const bounds = awsCurPeriodBounds(period);
+  let rows = 0;
+  let kept = 0;
+  for (const rec of records.slice(1)) {
+    if (rec.cells.length === 1 && rec.cells[0] === "") continue;
+    rows += 1;
+    const product = at(rec.cells, "line_item_product_code");
+    if (!codes.has(product)) continue;
+    const startMs = Date.parse(at(rec.cells, "line_item_usage_start_date"));
+    if (Number.isNaN(startMs)) throw new VendorUsageResponseError(`a usage start date on line ${rec.line} was not a valid instant`);
+    // a line dated outside its billing period is AWS's to explain, not ours to move: refuse it
+    if (startMs < bounds.start.getTime() || startMs >= bounds.end.getTime()) {
+      throw new VendorUsageResponseError(`line ${rec.line} is dated outside billing period ${period}`);
+    }
+    const day = utcDay(startMs);
+    const accountId = at(rec.cells, "line_item_usage_account_id");
+    if (!/^\d{12}$/.test(accountId)) throw new VendorUsageResponseError(`line ${rec.line} has no valid AWS account id`);
+    const principal = at(rec.cells, "line_item_iam_principal") || null;
+    if (principal !== null && (principal.length > 2048 || !principal.startsWith("arn:aws"))) {
+      throw new VendorUsageResponseError(`line ${rec.line} has an IAM principal that is not an ARN`);
+    }
+    const usageType = at(rec.cells, "line_item_usage_type");
+    const lineItemType = at(rec.cells, "line_item_line_item_type");
+    const currency = at(rec.cells, "line_item_currency_code").toUpperCase();
+    if (!/^[A-Z]{3}$/.test(currency)) throw new VendorUsageResponseError(`line ${rec.line} has no valid currency`);
+    const micro = decimalToMicro(at(rec.cells, "line_item_unblended_cost"));
+    // a quantity (tokens, requests) can exceed the money bound, so it is summed as a plain number
+    const qtyRaw = at(rec.cells, "line_item_usage_amount");
+    const qty = qtyRaw === "" ? 0 : Number(qtyRaw);
+    if (!Number.isFinite(qty) || !/^-?[\d.]+(?:[eE][-+]?\d+)?$/.test(qtyRaw || "0")) {
+      throw new VendorUsageResponseError(`line ${rec.line} has a usage amount that is not a number`);
+    }
+    const factCanonical = canonical(["aws_cur.v1", period, day.start, accountId, principal, product, usageType, lineItemType, currency]);
+    let g = into.get(factCanonical);
+    if (!g) {
+      g = {
+        fact: {
+          factCanonical,
+          accountRef: principal ?? `aws account ${accountId}`,
+          accountKind: principal ? "iam_principal" : "aws_account",
+          accountId: principal ?? accountId,
+          periodStart: day.start,
+          periodEnd: day.end,
+          amount: 0,
+          currency,
+          service: usageType || product,
+          description: product,
+          quantity: null,
+          unit: null,
+          detail: { source: "aws cur 2.0", billingPeriod: period, awsAccountId: accountId, productCode: product, usageType, lineItemType },
+        },
+        micro: 0,
+        qty: 0,
+      };
+      into.set(factCanonical, g);
+    }
+    g.micro += micro;
+    g.qty += qty;
+    kept += 1;
+  }
+  return { groups: into, rows, kept };
+}
+
+/** the summed groups of a period to facts */
+export function awsCurFacts(groups: Map<string, { fact: VendorUsageFact; micro: number; qty: number }>): VendorUsageFact[] {
+  return [...groups.values()].map(({ fact, micro, qty }) => ({ ...fact, amount: micro / 1e6, quantity: Math.round(qty * 1e6) / 1e6 }));
+}
