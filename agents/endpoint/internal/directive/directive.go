@@ -38,6 +38,10 @@ const (
 	maxEnvelope = 64 << 10
 )
 
+// SignatureDomain is what a directive's signature covers before the payload bytes: the schema and a NUL (ADR-0331
+// addendum, #1033). The gateway signs the same bytes (endpoint-addon-removal.ts: DIRECTIVE_SIGNATURE_DOMAIN).
+var SignatureDomain = []byte(Schema + "\x00")
+
 // Directive is a verified directive's payload.
 type Directive struct {
 	Schema      string    `json:"schema"`
@@ -79,7 +83,7 @@ func Verify(raw []byte, keys enforce.Keyring, identityID string, now time.Time) 
 	if len(raw) > maxEnvelope {
 		return nil, "", errors.Join(ErrRefused, errors.New("envelope too large"))
 	}
-	payload, err := enforce.VerifyEnvelope(raw, keys)
+	payload, err := enforce.VerifyEnvelopeInDomain(raw, keys, SignatureDomain)
 	if err != nil {
 		return nil, "", errors.Join(ErrRefused, err)
 	}

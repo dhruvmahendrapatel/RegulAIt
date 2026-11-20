@@ -510,7 +510,7 @@ async function revokeDeviceTx(t: Db, deviceId: string, actorId: string, revokedB
 export function registerEndpointAgentRoutes(
   app: FastifyInstance,
   db: Db,
-  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; directiveSigner?: DirectiveSigner | null } = {},
+  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; directiveSigner?: DirectiveSigner | null | undefined } = {},
 ): void {
   const registry = opts.registry ?? DISCOVERY_SCANNERS;
 
@@ -804,7 +804,7 @@ export function registerEndpointAgentRoutes(
       audit: (t, sourceId, ruleId, effect, reason, detail) => audit(t, NIL_UUID, "discovery_source", sourceId, ruleId, effect, reason, { adr: "0331", ...detail }),
       refuse,
       jsonOf,
-      signer: opts.directiveSigner ?? null,
+      signer: opts.directiveSigner,
     });
 
     // -- key rotation (ADR-0188 S7 point 4) -----------------------------------------------------------------------
