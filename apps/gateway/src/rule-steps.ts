@@ -22,6 +22,8 @@ import {
   approvals,
   asc,
   auditLog,
+  decisionTables,
+  decisionTableVersions,
   desc,
   eq,
   getTableColumns,
@@ -111,7 +113,7 @@ export const RULE_STEP_AUDIT_RULE_IDS = {
 export const RULE_STEP_SWITCH_PREFIX = "__rule_step_switch__:";
 
 type SwitchEvent = (typeof RULE_STEP_SWITCH_MACHINE.events)[number];
-async function transitionSwitch(
+export async function transitionSwitch(
   db: Db,
   id: string,
   event: SwitchEvent,
@@ -125,7 +127,7 @@ async function transitionSwitch(
   return row ?? null;
 }
 
-async function switchAudit(db: Db, userId: string | null, ruleId: string, effect: "allow" | "deny" | "require_approval", reason: string, detail: Record<string, unknown>) {
+export async function switchAudit(db: Db, userId: string | null, ruleId: string, effect: "allow" | "deny" | "require_approval", reason: string, detail: Record<string, unknown>) {
   await db.insert(auditLog).values({
     userId: userId ?? NO_IDENTITY,
     objectType: "org_settings",
@@ -221,7 +223,7 @@ async function latestShadows(db: Db, suggestionIds: readonly string[]): Promise<
 /** a refusal the table alone cannot know, shown beside the lifecycle (ADR-0348 `describe`) */
 const DETECTION_OFF = "rule-like step detection is off; an admin turns it on in the rule-step settings";
 
-function switchView(w: RuleStepSwitchRow | undefined) {
+export function switchView(w: RuleStepSwitchRow | undefined) {
   if (!w) return null;
   return {
     id: w.id,
@@ -246,7 +248,8 @@ async function latestSwitches(db: Db, suggestionIds: readonly string[]): Promise
     .from(ruleStepSwitches)
     .where(inArray(ruleStepSwitches.suggestionId, [...suggestionIds]))
     .orderBy(ruleStepSwitches.suggestionId, desc(ruleStepSwitches.requestedAt));
-  return new Map(rows.map((r) => [r.suggestionId, r]));
+  // filtered on suggestion ids, so every row has one
+  return new Map(rows.map((r) => [r.suggestionId as string, r]));
 }
 
 function view(
@@ -775,6 +778,23 @@ export function registerRuleStepRoutes(app: FastifyInstance, db: Db): void {
         .from(ruleStepSwitches)
         .where(and(eq(ruleStepSwitches.suggestionId, id), inArray(ruleStepSwitches.status, ["pending_review", "switched"])));
       if (open) return { status: 409, body: { error: "switch_pending", approvalId: open.approvalId } } as const;
+      // one live switch per step: a decision table for the same step that is switched, or asked to be, comes first
+      const [tableSwitch] = await tx
+        .select({ id: ruleStepSwitches.id })
+        .from(ruleStepSwitches)
+        .innerJoin(decisionTableVersions, eq(decisionTableVersions.id, ruleStepSwitches.decisionTableVersionId))
+        .innerJoin(decisionTables, eq(decisionTables.id, decisionTableVersions.tableId))
+        .where(
+          and(
+            eq(decisionTables.agentId, row.agentId),
+            eq(decisionTables.stepName, row.stepName),
+            inArray(ruleStepSwitches.status, ["pending_review", "switched"]),
+          ),
+        )
+        .limit(1);
+      if (tableSwitch) {
+        return { status: 409, body: { error: "step_switched_to_decision_table", detail: "this step is switched, or asked to be, to its decision table; revert that first" } } as const;
+      }
       const digest = ruleStepRuleDigest(row.rule);
       const [w] = await tx.insert(ruleStepSwitches).values({ suggestionId: id, ruleSha256: digest, requestedBy: actor, reason: body.reason }).returning();
       const [a] = await tx
@@ -866,7 +886,8 @@ export async function applyRuleStepSwitchDecision(
   const switchId = switchIdOf(approval);
   if (!switchId) return;
   const [ref] = await tx.select({ suggestionId: ruleStepSwitches.suggestionId }).from(ruleStepSwitches).where(eq(ruleStepSwitches.id, switchId));
-  if (!ref) return;
+  // a decision-table switch (slice 4d) is decided by `applyDecisionTableSwitchDecision`
+  if (!ref?.suggestionId) return;
   // serialized with requests and reverts on the suggestion row; the request is read again under that lock
   const [row] = await tx.select().from(ruleStepSuggestions).where(eq(ruleStepSuggestions.id, ref.suggestionId)).for("update");
   if (!row) return;

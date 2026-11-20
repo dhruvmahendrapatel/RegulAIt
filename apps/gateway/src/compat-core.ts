@@ -1130,7 +1130,7 @@ export async function executeCompatCall(
       ? await switchedRuleAnswer(db, { agentId: prepared.served.id, stepName: prepared.served.name, inputText: flatText })
       : null;
   if (ruleAnswer) {
-    const ruleStep = { suggestionId: ruleAnswer.suggestionId, switchId: ruleAnswer.switchId };
+    const ruleStep = ruleAnswer.ref;
     const governed = await executeGovernedDispatch(db, dataKey, {
       ...dispatchArgs,
       onText: undefined,
