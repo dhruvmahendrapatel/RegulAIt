@@ -167,7 +167,9 @@ describe("POST /v1/governance-config/plan", () => {
     const doc = await exportJson();
     const body = { document: { ...doc, spec: { budgets: [{ project: n("project"), budgetUsd: 400, period: "monthly", approverUserId: approverId }] } } };
     const first = (await plan(body)).json();
-    expect(first.plan.changes[0]).toMatchObject({ section: "budgets", op: "update", effect: "narrows" });
+    // other suites' projects share this database and the budgets section prunes, so pick this project's change by key
+    const mine = first.plan.changes.find((c: { section: string; key: string }) => c.section === "budgets" && c.key === n("project"));
+    expect(mine).toMatchObject({ section: "budgets", op: "update", effect: "narrows" });
     await db.update(projects).set({ budgetUsd: 450 }).where(eq(projects.id, projectId));
     try {
       expect((await plan(body)).json().plan.planHash).not.toBe(first.plan.planHash);

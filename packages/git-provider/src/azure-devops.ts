@@ -191,6 +191,41 @@ export class AzureDevOpsProvider implements GitProvider {
     }
   }
 
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    const { project, repository } = this.split(repo);
+    const refs = (await this.request(
+      "GET",
+      `/${project}/_apis/git/repositories/${repository}/refs?filter=${encodeURIComponent(`heads/${branch}`)}&${API}`,
+    )) as { value?: { name?: string; objectId?: string }[] } | null;
+    // ?filter= is a prefix match — insist on the exact ref; none = already gone
+    const match = (refs?.value ?? []).find((r) => r.name === `refs/heads/${branch}`);
+    if (!match?.objectId) return { deleted: false };
+    const result = (await this.request(
+      "POST",
+      `/${project}/_apis/git/repositories/${repository}/refs?${API}`,
+      [{ name: `refs/heads/${branch}`, oldObjectId: match.objectId, newObjectId: ZERO_SHA }],
+    )) as { value?: { success?: boolean; updateStatus?: string }[] } | null;
+    const update = result?.value?.[0];
+    if (!update?.success) {
+      throw new GitProviderError(
+        `azure_devops ref delete for '${branch}' in '${repo}' failed (updateStatus=${update?.updateStatus ?? "unknown"})`,
+        409,
+      );
+    }
+    return { deleted: true };
+  }
+
+  async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {
+    const pr = await this.getPullRequest(repo, prId);
+    if (pr.state === "merged") throw new GitProviderError(`azure_devops PR ${prId} is completed; abandoning cannot undo it`, 409);
+    if (pr.state === "closed") return { closed: false };
+    const { project, repository } = this.split(repo);
+    await this.request("PATCH", `/${project}/_apis/git/repositories/${repository}/pullrequests/${prId}?${API}`, {
+      status: "abandoned",
+    });
+    return { closed: true };
+  }
+
   async openPullRequest(
     repo: string,
     params: { head: string; base: string; title: string; body: string },
