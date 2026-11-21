@@ -39,7 +39,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const here = path.dirname(fileURLToPath(import.meta.url));
-// a recorded report, with the `inputs` the driver echoes (#843 security review; the recordings predate the echo)
+// a recorded report, with the `inputs` the driver echoes (#843 security review), set to the file this case placed
 const fixture = (name: string, inputs?: ReadonlyArray<{ path: string; sha256: string }>) => {
   const r = JSON.parse(readFileSync(path.resolve(here, "../../../packages/shared/src/engines/fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;
   return Buffer.from(JSON.stringify(inputs ? { ...r, inputs } : r));

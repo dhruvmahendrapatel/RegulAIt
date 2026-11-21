@@ -545,6 +545,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    "a2a_agent_revocations.reason",
     // ADR-0327 addendum — a decision-table version's proposal reason
     "decision_table_versions.reason",
     // ADR-0207: why an admin disabled a connector or an MCP server

@@ -1,0 +1,128 @@
+{
+  "fixture": 1,
+  "name": "intake-returned-and-resubmitted",
+  "note": "ADR-0168 send-back: the sign-off returns to the artifact, a new version is submitted, sign-off re-requested",
+  "definition": {
+    "workflow": "intake-to-merge",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "plan",
+        "type": "planning"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "build",
+        "type": "automated_build",
+        "scope": "requirements"
+      },
+      {
+        "id": "branch",
+        "type": "git_operation",
+        "action": "create_branch",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "pr",
+        "type": "git_operation",
+        "action": "open_pr",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "checks",
+        "type": "automated_check",
+        "checks": [
+          "unit",
+          "lint"
+        ],
+        "retry": {
+          "maxAttempts": 2,
+          "delaySeconds": 30,
+          "backoff": true,
+          "maxDelaySeconds": 3600
+        }
+      },
+      {
+        "id": "merge-approval",
+        "type": "human_approval",
+        "approvers": [
+          "00000000-0000-4000-8000-0000000000a1"
+        ],
+        "quorum": "any"
+      },
+      {
+        "id": "merge",
+        "type": "git_operation",
+        "action": "merge",
+        "connection": "gh",
+        "repo": "acme/app",
+        "strategy": "merge"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    },
+    {
+      "kind": "stage_completed",
+      "stageId": "plan"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    },
+    {
+      "kind": "approval_returned",
+      "stageId": "signoff"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "blocked_on_approval",
+      "currentStageIndex": 3,
+      "stageStatuses": [
+        "completed",
+        "completed",
+        "completed",
+        "active",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "artifactVersions": {
+        "requirements": 2
+      }
+    },
+    "statuses": [
+      "blocked_on_plan",
+      "blocked_on_artifact",
+      "blocked_on_approval",
+      "blocked_on_artifact",
+      "blocked_on_approval"
+    ]
+  }
+}
