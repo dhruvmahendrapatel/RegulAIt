@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS "agent_containments" (
   CONSTRAINT "agent_containments_status_check" CHECK ("status" IN ('proposed', 'contained', 'declined', 'released')),
   CONSTRAINT "agent_containments_explanation_check" CHECK (length("explanation") BETWEEN 1 AND 1000),
   CONSTRAINT "agent_containments_evidence_check" CHECK (jsonb_typeof("evidence") = 'object' AND pg_column_size("evidence") <= 16384),
-  CONSTRAINT "agent_containments_contained_check" CHECK (("status" IN ('contained', 'released')) = ("contained_at" IS NOT NULL)),
+  -- written with = / OR, not IN: the status CHECK above is the one place the states are listed (ADR-0348 test)
+  CONSTRAINT "agent_containments_contained_check" CHECK (("status" = 'contained' OR "status" = 'released') = ("contained_at" IS NOT NULL)),
   CONSTRAINT "agent_containments_released_check" CHECK (
     ("status" = 'released') = ("released_at" IS NOT NULL AND "release_reason" IS NOT NULL AND length(btrim("release_reason")) >= 10)
   ),
