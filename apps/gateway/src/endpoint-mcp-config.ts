@@ -292,6 +292,9 @@ const listQuery = z
   })
   .strict();
 
+/** an admin-typed server identity: the shapes the agent reports for a package, a host or a command (never free text) */
+export const mcpIdentityInput = z.string().regex(ENDPOINT_IDENTITY_RE);
+
 const linkBody = z
   .object({
     identityKind: z.enum(ENDPOINT_MCP_LINK_IDENTITY_KINDS),

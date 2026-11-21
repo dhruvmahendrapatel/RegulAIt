@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defineMachine, IllegalTransitionError } from "./state-machine.js";
 import {
+  AGENT_NHI_LINK_MACHINE,
   APPROVAL_MACHINE,
   EVAL_RUN_MACHINE,
   INCIDENT_MACHINE,
@@ -12,6 +13,7 @@ import {
   USE_CASE_MACHINE,
 } from "./state-machines.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
+import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 
@@ -137,13 +139,22 @@ describe("ADR-0348 declared machines", () => {
     for (const e of m.events) expect(m.can("closed", e)).toBe(false);
   });
 
+  it("agent_nhi_link: only a staged link is decided, once, by an admin; both outcomes are final", () => {
+    const m = AGENT_NHI_LINK_MACHINE;
+    expect([...m.def.states]).toEqual([...AGENT_NHI_LINK_STATUSES]);
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
+    expect(m.next("staged", "confirm")).toBe("confirmed");
+    expect(m.next("staged", "reject")).toBe("rejected");
+    expect(m.sourcesOf("confirm")).toEqual(["staged"]);
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
+  });
+
   it("eval_run: a running run ends completed or error, and nothing leaves a finished run", () => {
     const m = EVAL_RUN_MACHINE;
     expect(m.next("running", "complete")).toBe("completed");
     expect(m.next("running", "crash")).toBe("error");
     for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
   });
-
   it("use_case: every move the intake sync makes is declared, and a retired use case never moves", () => {
     const m = USE_CASE_MACHINE;
     // statusForInstance (use-cases.ts) maps an instance onto these targets; the sync skips decided sources

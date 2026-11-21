@@ -25,6 +25,7 @@
  * lives in `composeGuardrailModes` in the shared package so the resolver, the
  * admin "effective policy" endpoint and the tests all use one definition.
  */
+import { loadPublishedClassifiers } from "./custom-classifiers.js";
 import { z } from "zod";
 import {
   filterParams,
@@ -82,6 +83,7 @@ import {
   type VendoredDetectionPack,
   mergeTrainedOutcomes,
   planTrainedDetectors,
+  type CompiledClassifier,
 } from "@regulait/shared";
 import { complianceProfilesForTags, projectClassifications, projectPiiMode, type PiiMode } from "./projects.js";
 import { loadTrainedDetectorRuntime, runTrainedCalls, type TrainedDetectorRuntime } from "./trained-detectors.js";
@@ -171,6 +173,8 @@ export interface GuardrailPolicy {
    * than the heuristic's forced 'off' — so a trained PII finding is never
    * weaker than the floor. Set whenever `trained` is. */
   trainedModes?: GuardrailModes | undefined;
+  /** ADR-0363 slice 2: the org's published customer classifiers, compiled (empty = none, the default) */
+  classifiers?: readonly CompiledClassifier[] | undefined;
 }
 
 /** P7R-02: the cascade's PII mode in the guardrail vocabulary. A trained
@@ -304,6 +308,11 @@ export async function resolveGuardrailPolicy(
     connectorId?: string | null | undefined;
     /** ADR-0237: the caller, for cost attribution of a third-party guardrail call (absent = unattributed) */
     userId?: string | null | undefined;
+    /**
+     * ADR-0363: compliance tags the CONTENT pulls in (a sensitivity label mapped to a profile), composed into the
+     * floor with the project's own tags. It can only add profiles, so it can only raise the floor.
+     */
+    extraComplianceTags?: readonly string[] | undefined;
   },
 ): Promise<GuardrailPolicy> {
   const scopeId = args.agentId ?? args.connectorId ?? null;
@@ -313,7 +322,7 @@ export async function resolveGuardrailPolicy(
       ? "connector"
       : null;
 
-  const [orgRow, overrideRow, packsRow, trained] = await Promise.all([
+  const [orgRow, overrideRow, packsRow, trained, classifiers] = await Promise.all([
     loadOrgGuardrailConfig(db),
     scope && scopeId
       ? db
@@ -338,6 +347,8 @@ export async function resolveGuardrailPolicy(
       .then((r) => r[0]),
     // ADR-0220: the trained detectors in force (one indexed read; none by default)
     loadTrainedDetectorRuntime(db, { userId: args.userId ?? null, projectId: args.projectId ?? null }),
+    // ADR-0363 slice 2: the published customer classifiers (one indexed read; compiled once per published set)
+    loadPublishedClassifiers(db),
   ]);
 
   const orgModes: Partial<GuardrailModes> = orgRow ? rowModes(orgRow) : { ...GUARDRAIL_DEFAULT_MODES };
@@ -345,8 +356,9 @@ export async function resolveGuardrailPolicy(
 
   // the §8.3 floor: MAX across every profile the project's tags resolve to
   let floor: Partial<GuardrailModes> | null = null;
-  if (args.projectId) {
-    const tags = await projectClassifications(db, args.projectId);
+  const extraTags = args.extraComplianceTags ?? [];
+  if (args.projectId || extraTags.length > 0) {
+    const tags = [...new Set([...(args.projectId ? await projectClassifications(db, args.projectId) : []), ...extraTags])];
     if (tags.length > 0) {
       const profiles = await complianceProfilesForTags(db, tags);
       const declared = profiles
@@ -386,17 +398,20 @@ export async function resolveGuardrailPolicy(
     registry.some((d) => d.phases.includes(phase) && modes[d.id] === "block") ||
     // a trained detector at block (or failing closed at block) must also see
     // the whole text before any of it is delivered
-    planTrainedDetectors(trained?.settings ?? [], phase, trainedModes ?? modes).some((p) => p.mode === "block");
+    planTrainedDetectors(trained?.settings ?? [], phase, trainedModes ?? modes).some((p) => p.mode === "block") ||
+    // a published customer classifier at block also needs the whole text before any of it is delivered
+    classifiers.some((c) => c.mode === "block" && c.phases.includes(phase));
 
   return {
     modes,
     terms,
     provenance,
-    active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off") || (trained?.settings.length ?? 0) > 0,
+    active: GUARDRAIL_DETECTOR_IDS.some((id) => modes[id] !== "off") || (trained?.settings.length ?? 0) > 0 || classifiers.length > 0,
     blocksInput: atBlock("input"),
     blocksOutput: atBlock("output"),
     vendoredPacks: packsRow?.packs,
     ...(trained ? { trained, trainedModes } : {}),
+    ...(classifiers.length ? { classifiers } : {}),
   };
 }
 
@@ -511,6 +526,7 @@ export function runGuardrails(
     terms: policy.terms,
     exclude: ["pii"],
     vendoredPacks: policy.vendoredPacks,
+    classifiers: policy.classifiers,
   });
 }
 

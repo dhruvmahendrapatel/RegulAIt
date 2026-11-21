@@ -135,19 +135,36 @@ func parseConfig(name string, raw []byte) (map[string]any, bool) {
 //   - `mcp_servers` (Codex config.toml; developers.openai.com/codex/config-file/config-reference)
 //   - `projects.<project>.mcpServers` (Claude Code's per-project servers; the project key, a path, is never kept)
 func serverMaps(doc map[string]any) []map[string]any {
-	var out []map[string]any
-	pick := func(v any) {
+	at := serverMapsAt(doc)
+	out := make([]map[string]any, len(at))
+	for i, m := range at {
+		out[i] = m.servers
+	}
+	return out
+}
+
+// serverMap is one server map and the key path to it in the parsed config.
+type serverMap struct {
+	path    []string
+	servers map[string]any
+}
+
+// serverMapsAt is serverMaps with each map's key path, so a removal (ADR-0331) deletes exactly the entry the
+// collector described, at the place it was found.
+func serverMapsAt(doc map[string]any) []serverMap {
+	var out []serverMap
+	pick := func(v any, path ...string) {
 		if m, ok := v.(map[string]any); ok {
-			out = append(out, m)
+			out = append(out, serverMap{path: path, servers: m})
 		}
 	}
-	pick(doc["mcpServers"])
-	pick(doc["servers"])
+	pick(doc["mcpServers"], "mcpServers")
+	pick(doc["servers"], "servers")
 	if mcp, ok := doc["mcp"].(map[string]any); ok {
-		pick(mcp["servers"])
+		pick(mcp["servers"], "mcp", "servers")
 	}
-	pick(doc["context_servers"])
-	pick(doc["mcp_servers"])
+	pick(doc["context_servers"], "context_servers")
+	pick(doc["mcp_servers"], "mcp_servers")
 	if projects, ok := doc["projects"].(map[string]any); ok {
 		keys := make([]string, 0, len(projects))
 		for p := range projects {
@@ -156,7 +173,7 @@ func serverMaps(doc map[string]any) []map[string]any {
 		sort.Strings(keys)
 		for _, p := range keys {
 			if proj, ok := projects[p].(map[string]any); ok {
-				pick(proj["mcpServers"])
+				pick(proj["mcpServers"], "projects", p, "mcpServers")
 			}
 		}
 	}
