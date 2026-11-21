@@ -283,7 +283,11 @@ export interface PrivacyGateContext {
 export type ProcessingLimitTarget =
   | { type: "model"; agentId: string; agentName: string }
   | { type: "connector"; connectorId: string; connectorName: string; operation: string }
-  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string };
+  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string }
+  /** ADR-0224 addendum 2026-11-21: a call to a remote agent (ADR-0219) */
+  | { type: "a2a"; agentId: string; agentName: string; skillId: string | null }
+  /** ADR-0224 addendum 2026-11-21: rows entering a training corpus (ingest or append), before anything is stored */
+  | { type: "training_dataset"; datasetId: string | null; datasetName: string; phase: "ingest" | "append" };
 
 export interface ProcessingLimitInput {
   userId: string;
@@ -332,6 +336,16 @@ function targetAuditColumns(t: ProcessingLimitTarget) {
       };
     case "mcp_tool":
       return { columns: { serverId: t.serverId, toolName: t.toolName }, detail: t.method ? { method: t.method } : {} };
+    case "a2a":
+      return {
+        columns: { objectType: "a2a_agent" as const, objectId: t.agentId, toolName: t.skillId },
+        detail: { agentId: t.agentId, agentName: t.agentName, skillId: t.skillId },
+      };
+    case "training_dataset":
+      return {
+        columns: { objectType: "training_dataset" as const, objectId: t.datasetId },
+        detail: { datasetName: t.datasetName, phase: t.phase },
+      };
   }
 }
 

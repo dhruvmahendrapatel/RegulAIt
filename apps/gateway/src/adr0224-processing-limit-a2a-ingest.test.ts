@@ -1,0 +1,149 @@
+/**
+ * ADR-0224 addendum (2026-11-21) — the records-of-processing limit on the two paths that still skipped it: calls to a
+ * remote agent (A2A, ADR-0219) and rows entering a training corpus (`regulait-llm.ts`, ingest and append). Both reach
+ * the governed core's one check path (`governedProcessingLimit`).
+ *
+ * A2A: the remote agent's url is a private address the egress decision refuses, so a call governance ALLOWS ends at
+ * `a2a-egress-blocked` and nothing is sent (the marker used by zz-adr0251-a2a-core.test.ts). Ingest: a refusal stores
+ * no dataset and no rows.
+ *
+ * Global state (M-068): org settings are restored in afterAll.
+ */
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { a2aAgentGrants, a2aAgents, and, auditLog, eq, orgSettings, ORG_SETTINGS_ID, trainingDatasets } from "@regulait/db";
+import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { A2A_RULE_IDS, executeGovernedA2aCall } from "./a2a.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
+import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
+
+// reserved example values only: the documentation domain and an invalid SSN
+const SUBJECT = "Remote.Subject@example.com";
+const SSN = "123-45-6789";
+const ALLOWED_MARKER = A2A_RULE_IDS.egress;
+
+let k: BuilderKit;
+let caller: Person;
+let agentId = "";
+let restoreOrg: () => Promise<void> = async () => {};
+
+const callA2a = (text: string, projectId: string | null) =>
+  executeGovernedA2aCall(k.db, { userId: caller.id, agentId, skillId: null, text, projectId, ceilingAgentIds: null });
+const ingest = (name: string, input: string, projectId: string | null) =>
+  k.req("POST", "/v1/llm/datasets", k.BOOT, { name, rows: [{ input, output: "ok" }], piiMode: "log", ...(projectId ? { projectId } : {}) });
+const datasetsNamed = async (name: string) => k.db.select({ id: trainingDatasets.id }).from(trainingDatasets).where(eq(trainingDatasets.name, name));
+
+beforeAll(async () => {
+  k = await builderKit("adr0224-a2a-ingest");
+  caller = await k.person("caller");
+  // the org PII floor at 'log', so personal data reaches the processing limit rather than the PII-mode block;
+  // unattributed calls allowed, so the unattributed refusal below is the limit's own
+  restoreOrg = await setOrgSettingsForTest(k.db, {
+    defaultPiiMode: "log",
+    privacyOpsEnabled: false,
+    a2aEnabled: true,
+    a2aAttributionRequired: false,
+    llmTrainingEnabled: true,
+  });
+  const [agent] = await k.db
+    .insert(a2aAgents)
+    .values({ name: `adr0224-a2a-${k.RUN}`, url: "http://10.255.255.1:9/a2a", card: { name: "probe", skills: [{ id: "s1" }] }, allowPrivateRanges: false })
+    .returning();
+  agentId = agent!.id;
+  await k.db.insert(a2aAgentGrants).values({ agentId, userId: caller.id, skillId: null });
+}, 120_000);
+
+afterAll(async () => {
+  await k.db.delete(a2aAgents).where(eq(a2aAgents.id, agentId));
+  await restoreOrg();
+  await k.close();
+});
+
+describe("off (the shipped default): A2A and ingest are not limited", () => {
+  it("an A2A call carrying personal data passes governance (ends at egress)", async () => {
+    expect(await callA2a(`Reply to ${SUBJECT}`, caller.projectId)).toMatchObject({ kind: "denied", ruleId: ALLOWED_MARKER });
+  });
+
+  it("a dataset carrying personal data is stored (flagged by the scan at log)", async () => {
+    const name = `adr0224-off-${k.RUN}`;
+    const res = await ingest(name, `Reply to ${SUBJECT}`, caller.projectId);
+    expect(res.statusCode, res.body).toBe(201);
+  });
+});
+
+describe("on: the limit runs on A2A calls", () => {
+  beforeAll(async () => {
+    await k.db.update(orgSettings).set({ privacyOpsEnabled: true }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  });
+
+  it("personal data with no record of processing is refused 409 before egress, in one audit row without the value", async () => {
+    const out = await callA2a(`Reply to ${SUBJECT}`, caller.projectId);
+    expect(out).toMatchObject({ kind: "denied", status: 409, error: "processing_not_permitted", ruleId: PRIVACY_RULE_IDS.dispatchRefused });
+    expect(JSON.stringify(out)).not.toContain(SUBJECT);
+    const rows = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, agentId), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe((out as { auditId: string }).auditId);
+    expect(rows[0]!.objectType).toBe("a2a_agent");
+    expect((rows[0]!.detail as { callType?: string }).callType).toBe("a2a");
+    expect(JSON.stringify(rows[0]!.detail) + rows[0]!.reason).not.toContain(SUBJECT.toLowerCase().split("@")[0]);
+  });
+
+  it("an unattributed A2A call carrying personal data is refused (no record can permit it)", async () => {
+    const out = await callA2a(`Reply to ${SUBJECT}`, null);
+    expect(out).toMatchObject({ kind: "denied", status: 409, error: "processing_not_permitted" });
+    expect((out as { reason: string }).reason).toContain("names no project");
+  });
+
+  it("a message with no personal data is untouched", async () => {
+    expect(await callA2a("Summarise the plan", caller.projectId)).toMatchObject({ ruleId: ALLOWED_MARKER });
+  });
+});
+
+describe("on: the limit runs on training-corpus ingest and append", () => {
+  it("ingest: personal data with no record is refused 409 and nothing is stored", async () => {
+    const name = `adr0224-on-${k.RUN}`;
+    const res = await ingest(name, `Reply to ${SUBJECT}`, caller.projectId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("processing_not_permitted");
+    expect(res.body).not.toContain(SUBJECT);
+    expect(await datasetsNamed(name)).toHaveLength(0);
+    const rows = await k.db.select().from(auditLog).where(and(eq(auditLog.objectType, "training_dataset"), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+    const mine = rows.filter((r) => (r.detail as { datasetName?: string }).datasetName === name);
+    expect(mine).toHaveLength(1);
+    expect((mine[0]!.detail as { callType?: string; phase?: string })).toMatchObject({ callType: "training_dataset", phase: "ingest" });
+  });
+
+  it("an unattributed ingest carrying personal data is refused", async () => {
+    const name = `adr0224-unattr-${k.RUN}`;
+    const res = await ingest(name, `Reply to ${SUBJECT}`, null);
+    expect(res.statusCode).toBe(409);
+    expect(await datasetsNamed(name)).toHaveLength(0);
+  });
+
+  it("a record permitting email lets the same email through on both paths, and still refuses a category it does not list", async () => {
+    const r = await k.req("POST", "/v1/privacy/processing-records", k.BOOT, {
+      name: `adr0224-a2a-ingest-${k.RUN}`,
+      purpose: "Support replies drafted by a remote agent and a tuned model",
+      lawfulBasis: "contract",
+      dataCategories: ["email"],
+      retentionDays: 90,
+      projectId: caller.projectId,
+    });
+    expect(r.statusCode, r.body).toBe(201);
+
+    expect(await callA2a(`Reply to ${SUBJECT}`, caller.projectId)).toMatchObject({ ruleId: ALLOWED_MARKER });
+    expect(await callA2a(`Reply to ${SUBJECT} about ${SSN}`, caller.projectId)).toMatchObject({ status: 409, error: "processing_not_permitted" });
+
+    const name = `adr0224-permitted-${k.RUN}`;
+    const ok = await ingest(name, `Reply to ${SUBJECT}`, caller.projectId);
+    expect(ok.statusCode, ok.body).toBe(201);
+    const datasetId = ok.json().dataset?.id ?? ok.json().id;
+    expect(typeof datasetId).toBe("string");
+
+    // append: the same limit, so a second upload is no way around it
+    const appended = await k.req("POST", `/v1/llm/datasets/${datasetId}/rows`, k.BOOT, { rows: [{ input: `Tax id ${SSN}`, output: "ok" }] });
+    expect(appended.statusCode).toBe(409);
+    expect(appended.json().error).toBe("processing_not_permitted");
+    const fine = await k.req("POST", `/v1/llm/datasets/${datasetId}/rows`, k.BOOT, { rows: [{ input: `Write to ${SUBJECT}`, output: "ok" }] });
+    expect(fine.statusCode, fine.body).toBeLessThan(300);
+  });
+});

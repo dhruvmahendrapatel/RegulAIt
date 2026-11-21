@@ -180,3 +180,29 @@ upstream, unattributed calls refused, one record permitting the same category on
 
 Still open: per-call declared purpose; per-subject objection enforcement; erasure step-up kind; A2A calls and
 training-corpus ingest (`regulait-llm.ts`) are not yet limited by records of processing.
+
+## Addendum, 2026-11-21: A2A calls and training-corpus ingest (lane E47, slice 2)
+
+Builder lane E47, second slice (dispatched 2026-11-21). The two paths the 2026-11-20 addendum left open now go
+through the same check, `governedProcessingLimit` in the ADR-0251 governed core:
+
+1. **A2A calls** (`a2a.ts`, `executeGovernedA2aCall`). The limit runs as step 6a: after the PII-mode rung (the
+   cascade decides first), before guardrails, egress and the credential. It checks the message text that would leave.
+   A refusal is `denied`, 409 `processing_not_permitted`, rule `processing-not-permitted`. The gate's own row is the
+   call's one audit row (object `a2a_agent`, the skill in `tool_name`), so the call writes no second row.
+2. **Training-corpus ingest and append** (`regulait-llm.ts`, `POST /v1/llm/datasets` and
+   `POST /v1/llm/datasets/:id/rows`). The limit runs after the ingest scan, when the scan has not already blocked,
+   and before anything is stored. It checks each row's input and output. A refusal is 409 `processing_not_permitted`;
+   no dataset or row is written. The gate writes one audit row (object `training_dataset`, `phase` `ingest` or
+   `append`). Append is checked too, so a second upload is no way around the limit. An ingest by the bootstrap
+   credential is audited under the module's existing no-identity sentinel, as its other ingest rows are.
+
+The rule is unchanged: off as shipped (`privacy_ops_enabled`, still an owner question); on, personal data whose
+category no active record for the project permits is refused, and unattributed calls or corpora carrying personal data
+are refused. No migration, no new route, no new dependency (ADR-0176: the detector, the core and the existing audit
+shape are reused).
+
+Tests: `adr0224-processing-limit-a2a-ingest.test.ts` (off passes; on, A2A and ingest each refused before egress or
+storage, unattributed refused, one record permitting the same category on both paths, append limited).
+
+Still open: per-call declared purpose; per-subject objection enforcement; an erasure step-up kind.
