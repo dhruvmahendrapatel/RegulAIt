@@ -148,6 +148,8 @@ import { projectPiiMode } from "./projects.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
+// ADR-0340 slice 2: workflow stage deadlines post through this file's courier
+import { registerWorkflowSlaCourier, workflowSlaNoticeText } from "./workflow-sla-notify.js";
 // ADR-0090 amendment (lane L11): the certification deadline sweep posts through this file's courier
 import { registerCampaignDeadlineCourier, type CampaignDeadlineNotice, type CampaignDeadlineOutcome } from "./grant-certification.js";
 import { errMessage } from "./err-serializer.js";
@@ -257,6 +259,9 @@ export const CHATOPS_RULE_IDS = {
   /** ADR-0202 lane E — resend mail goes to the named approver/owner only */
   postRefusedNoNamedRecipient: "chatops-post-refused-no-named-recipient",
   resendSendRateLimited: "chatops-resend-send-rate-limited",
+  /** ADR-0340 slice 2 — workflow stage deadline notices (to workspaces opted into alerts) */
+  workflowSlaPosted: "chatops-workflow-sla-posted",
+  workflowSlaPostFailed: "chatops-workflow-sla-post-failed",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -1350,6 +1355,54 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       if (!alertMeetsThreshold(message.severity, conn.notifyAlertMinSeverity)) continue;
       if (await postAlert({ ...alert, title: message.text }, conn, conn.defaultChannel, actorUserId)) out.posted += 1;
       else out.failed += 1;
+    }
+    return out;
+  });
+
+  // ADR-0340 slice 2: a workflow stage deadline (a reminder is medium, a breach high) to the workspaces opted into
+  // alerts at that severity, in the same alert card with a content-free text; resend mails the people the stage waits
+  // on (the pending approvers, or the initiator of a cancelled instance), never anyone a request names
+  registerWorkflowSlaCourier(db, async (notice) => {
+    const out = { posted: 0, failed: 0 };
+    const severity = notice.phase === "breach" ? ("high" as const) : ("medium" as const);
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), isNotNull(chatopsConnections.notifyAlertMinSeverity)));
+    const title = workflowSlaNoticeText(notice);
+    const path = `/workflows/instances/${notice.instanceId}`;
+    for (const conn of conns) {
+      if (!alertMeetsThreshold(severity, conn.notifyAlertMinSeverity)) continue;
+      const pub = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider) ? mailPublicUrl() : null;
+      const portalUrl = pub?.ok ? joinPublicUrl(pub.url, `/ui${path}`) : `/ui${path}`;
+      const card = composeAlertCard({ alertId: notice.instanceId, severity, ruleLabel: "Workflow stage deadline", title, portalUrl });
+      const recipients: Array<string | null> =
+        conn.provider === "resend" ? await Promise.all(notice.recipientUserIds.map((id) => activeUserEmail(id))) : [null];
+      for (const namedRecipient of conn.provider === "resend" ? recipients.filter((r): r is string => r !== null) : [null]) {
+        const channel = namedRecipient ?? conn.defaultChannel;
+        let posted: Awaited<ReturnType<typeof postCard>>;
+        try {
+          posted =
+            pub && !pub.ok
+              ? pub
+              : await postCard(conn, channel, card, null, "workflow-sla", outlookMessageForAlert({ severity, ruleLabel: "Workflow stage deadline", title, portalUrl }), namedRecipient);
+        } catch (err) {
+          posted = { ok: false, status: 502, body: { error: errMessage(err) } };
+        }
+        await audit(
+          null,
+          "chatops_connection",
+          conn.id,
+          posted.ok ? CHATOPS_RULE_IDS.workflowSlaPosted : CHATOPS_RULE_IDS.workflowSlaPostFailed,
+          posted.ok ? "allow" : "deny",
+          posted.ok
+            ? `workflow deadline notice (${notice.phase}, ${notice.action}) for instance ${notice.instanceId} posted to ${conn.provider}`
+            : `workflow deadline notice for instance ${notice.instanceId} NOT posted to '${conn.name}': ${String(posted.body.error ?? posted.status)}`,
+          { instanceId: notice.instanceId, stageId: notice.stageId, phase: notice.phase, action: notice.action, ...(posted.ok ? {} : { status: posted.status }) },
+        );
+        if (posted.ok) out.posted += 1;
+        else out.failed += 1;
+      }
     }
     return out;
   });
