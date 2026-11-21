@@ -30,7 +30,7 @@ export const STRICT_SETTINGS: Record<string, unknown> = {
   approvalSignatureMode: "passkey",
   stepUpMode: "required",
   stepUpMaxAgeSeconds: 120,
-  stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"],
+  stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"],
   toolApprovalSensitiveQuorum: 2,
   decisionReceiptsMode: "on",
   auditAnchorTimestampMode: "required",
@@ -140,6 +140,8 @@ test.describe("U3: approval safeguards on Organization", () => {
   test("relaxing the approval lifetime to never says what is weaker, steps up, and sends only that key", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/organization");
+    // I-2 rollout H: the approval safeguards live on the Approvals & gates tab
+    await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: /^Approvals & gates/ }).click();
     const card = page.getByTestId("org-approval-safeguards");
     const row = card.getByTestId("org-setting-approvalTtlHours");
     await expect(row.getByLabel("Approved tool-call lifetime (hours)", { exact: true })).toHaveValue("72");
@@ -165,6 +167,8 @@ test.describe("U3: approval safeguards on Organization", () => {
   test("tightening the bulk cap asks for no step-up and sends only that key", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/organization");
+    // I-2 rollout H: the approval safeguards live on the Approvals & gates tab
+    await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: /^Approvals & gates/ }).click();
     const row = page.getByTestId("org-setting-approvalBulkMaxItems");
     await row.getByLabel("Most approvals in one bulk action", { exact: true }).fill("10");
     await row.getByRole("button", { name: "Review change" }).click();
@@ -180,6 +184,8 @@ test.describe("U3: approval safeguards on Organization", () => {
   test("an out-of-range value cannot be submitted and says why", async ({ page }) => {
     await mockApi(page);
     await page.goto("/ui/admin/organization");
+    // I-2 rollout H: the approval safeguards live on the Approvals & gates tab
+    await page.getByRole("tablist", { name: "Organisation settings" }).getByRole("tab", { name: /^Approvals & gates/ }).click();
     const row = page.getByTestId("org-setting-toolApprovalSensitiveQuorum");
     const input = row.getByLabel("Approvers for calls on sensitive data", { exact: true });
     await input.fill("9");
@@ -210,9 +216,10 @@ test.describe("U3: unreadable settings are never prefilled", () => {
 });
 
 test.describe("U3: each page carries its settings", () => {
-  const PAGES: Array<{ path: string; card: string; keys: string[] }> = [
-    { path: "/ui/admin/organization", card: "org-pii-international", keys: ["piiInternationalCategories"] },
-    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"] },
+  /** `tab`: the tab the card lives on, when its page puts its settings in tabs (I-2) */
+  const PAGES: Array<{ path: string; card: string; keys: string[]; tab?: RegExp }> = [
+    { path: "/ui/admin/organization", card: "org-pii-international", keys: ["piiInternationalCategories"], tab: /^Data & audit/ },
+    { path: "/ui/admin/sso", card: "sso-step-up-settings", keys: ["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"], tab: /^Sessions & step-up/ },
     { path: "/ui/admin/enforcement-posture", card: "evidence-detection-settings", keys: ["decisionReceiptsMode", "auditAnchorTimestampMode", "vendoredDetectionPacks", "outboundCredentialAudience"] },
     { path: "/ui/admin/retention", card: "audit-evidence-retention", keys: ["modeAuditRetention", "canaryObservationRetentionDays"] },
     { path: "/ui/admin/admission", card: "mcp-admission-mode", keys: ["mcpAdmissionMode"] },
@@ -223,6 +230,7 @@ test.describe("U3: each page carries its settings", () => {
     {
       path: "/ui/admin/workload-identities",
       card: "identity-delegation-settings",
+      tab: /^Settings/,
       keys: ["agentEntitlementMode", "delegatedTokenTtlSeconds", "delegationMaxDepth", "workloadClientAuthMethods", "dpopNonceRequired", "workloadKeyMaxAgeDays", "delegationUncappedRootAllowed", "delegationRootDefaultCapMicros", "delegationRootMaxLifetimeSeconds"],
     },
     { path: "/ui/admin/model-risk", card: "mrm-expiry-warn", keys: ["mrmExpiryWarnDays"] },
@@ -231,6 +239,7 @@ test.describe("U3: each page carries its settings", () => {
     test(`${pg.path}: ${pg.card}`, async ({ page }) => {
       await mockApi(page);
       await page.goto(pg.path);
+      if (pg.tab) await page.getByRole("tab", { name: pg.tab }).click();
       const card = page.getByTestId(pg.card);
       for (const key of pg.keys) {
         const row = card.getByTestId(`org-setting-${key}`);
@@ -276,6 +285,7 @@ test.describe("U3: each page carries its settings", () => {
   test("step-up actions: unticking one is a relaxation; the list is sent in vocabulary order", async ({ page }) => {
     const st = await mockApi(page);
     await page.goto("/ui/admin/sso");
+    await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
     const row = page.getByTestId("org-setting-stepUpActions");
     await row.getByLabel("Managing passkeys").uncheck();
     await row.getByRole("button", { name: "Review change" }).click();
@@ -283,7 +293,7 @@ test.describe("U3: each page carries its settings", () => {
     await expect(dialog).toContainText("Each action removed from the list can be done with the session alone.");
     await dialog.getByRole("button", { name: "Relax setting" }).click();
     await expect(dialog).toBeHidden();
-    expect(puts(st)).toEqual([{ stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"] }]);
+    expect(puts(st)).toEqual([{ stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"] }]);
   });
 
   test("audit retention per mode: an override is sent as a map; empty modes are left out", async ({ page }) => {

@@ -61,6 +61,10 @@ export const STEP_UP_ACTION_KINDS = [
   // migration 0203: rotating, revoking or retiring a signing key (the receipt key, the issuer key); a grant of any
   // other kind never authorises one, and a key_management grant authorises nothing else
   "key_management",
+  // ADR-0331 (pending migration endpoint_addon_removal): an admin starting the governed removal of a flagged MCP
+  // server from endpoints. A grant of any other kind never authorises a removal, and an endpoint_remediation grant
+  // authorises nothing else
+  "endpoint_remediation",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 
@@ -95,7 +99,7 @@ export type ApprovalDecisionMethod = (typeof APPROVAL_DECISION_METHODS)[number];
  * `approval_signature_mode` and the sensitive-data quorum apply to.
  * `approvals.signature_mode` / `quorum` are stored on every row but only
  * these kinds consult them. */
-export const TOOL_CALL_APPROVAL_OBJECT_TYPES = ["mcp_tool", "connector_call"] as const;
+export const TOOL_CALL_APPROVAL_OBJECT_TYPES = ["mcp_tool", "connector_call", "model_call"] as const;
 
 /** an approval rule's quorum bounds (`approval_rules.quorum`, `approvals.quorum`,
  * `org_settings.tool_approval_sensitive_quorum`) */
@@ -391,8 +395,9 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
   stepUpActions: {
     label: "Actions that need a step-up",
     strict:
-      "All nine: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner, managing agent identities, revealing a person's name and managing signing keys.",
+      "All ten: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities, revealing a person's name, managing signing keys and removing an " +
+      "MCP server from endpoints.",
     relaxed: "Each action removed from the list can be done with the session alone.",
   },
   toolApprovalSensitiveQuorum: {

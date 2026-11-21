@@ -24,6 +24,7 @@
  * Global state (M-068): org settings this file changes are put back, the issuer keys it activated are retired, and
  * the admin's passkey, sessions and step-up grants are removed (B4S-06) in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import os from "node:os";
@@ -227,7 +228,7 @@ beforeAll(async () => {
   await db.update(orgSettings).set({ mcpProtocolMethods: ["resources/read"] as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   // the strict step-up values (the defaults; the #378 suite writes the same): a relaxation needs a fresh step-up
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s8-issuer-"));
@@ -277,7 +278,7 @@ beforeAll(async () => {
   const [sess] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: adminId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

@@ -294,7 +294,7 @@ export default function LineagePage() {
 
         <RunLineageCard runId={runId} onRunId={setRunId} />
 
-        <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
+        <QueryGate query={overview}>
           <Card title="Graph census">
             <div className={v.stack}>
               {coverage}

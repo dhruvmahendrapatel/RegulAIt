@@ -68,7 +68,6 @@ import {
   and,
   asc,
   auditLog,
-  complianceProfiles,
   count,
   desc,
   eq,
@@ -132,11 +131,13 @@ import {
   type RedTeamSeverity,
   type RedTeamTrialOutcome,
   retireRedTeamLibrarySchema,
+  REDTEAM_LIBRARY_MACHINE,
 } from "@regulait/shared";
+import { whereFrom } from "./state-transition.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { type AgentRow } from "./agents-connectors.js";
 import { buildAgentDecider, runEvalSuite, type EvalRunOutcome } from "./evals.js";
-import { assertProjectAttribution } from "./projects.js";
+import { assertProjectAttribution, complianceProfilesForTags } from "./projects.js";
 import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   auditAdjudication,
@@ -263,52 +264,74 @@ export async function publishRedTeamLibrary(
     return { ok: false, status: 409, error: "dataset_name_taken", detail: datasetName };
   }
 
-  const [dataset] = await db
-    .insert(evalDatasets)
-    .values({
-      name: datasetName,
-      version: 1,
-      note:
-        `ADR-0057 red-team corpus '${library.name}' v${library.version}, materialized. ` +
-        `${probes.length} adversarial probe(s). ${RED_TEAM_COVERAGE_DISCLOSURE}`,
-      // every probe overrides this; the dataset default exists only so the
-      // dataset row is well-formed
-      scorerKind: "contains",
-      scorerConfig: {},
-      createdByUserId: userId,
-    })
-    .returning();
+  // ADR-0348: the dataset, its cases and the move to `published` commit together under the library's row lock, so a
+  // publish racing a retire (or a second publish) cannot turn a retired library back into a published one or leave
+  // an orphaned dataset behind
+  const published = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const [locked] = await tx
+      .select({ status: redteamLibraries.status })
+      .from(redteamLibraries)
+      .where(eq(redteamLibraries.id, library.id))
+      .for("update");
+    if (!locked || !REDTEAM_LIBRARY_MACHINE.can(locked.status, "publish")) return null;
+    const [dataset] = await tx
+      .insert(evalDatasets)
+      .values({
+        name: datasetName,
+        version: 1,
+        note:
+          `ADR-0057 red-team corpus '${library.name}' v${library.version}, materialized. ` +
+          `${probes.length} adversarial probe(s). ${RED_TEAM_COVERAGE_DISCLOSURE}`,
+        // every probe overrides this; the dataset default exists only so the
+        // dataset row is well-formed
+        scorerKind: "contains",
+        scorerConfig: {},
+        createdByUserId: userId,
+      })
+      .returning();
 
-  if (materializable.length > 0) {
-  await db.insert(evalCases).values(
-    materializable.map((p) => ({
-      datasetId: dataset!.id,
-      datasetVersion: dataset!.version,
-      input: p.input,
-      expected: (p.expected ?? null) as never,
-      rubric: null as never,
-      tags: [
-        "redteam",
-        `${PROBE_TAG}${p.probeKey}`,
-        `${CLASS_TAG}${p.attackClass}`,
-        `redteam:severity:${p.severity}`,
-      ],
-      scorerKind: p.scorerKind as EvalScorerKind,
-      scorerConfig: p.scorerConfig,
-    })),
-  );
+    if (materializable.length > 0) {
+    await tx.insert(evalCases).values(
+      materializable.map((p) => ({
+        datasetId: dataset!.id,
+        datasetVersion: dataset!.version,
+        input: p.input,
+        expected: (p.expected ?? null) as never,
+        rubric: null as never,
+        tags: [
+          "redteam",
+          `${PROBE_TAG}${p.probeKey}`,
+          `${CLASS_TAG}${p.attackClass}`,
+          `redteam:severity:${p.severity}`,
+        ],
+        scorerKind: p.scorerKind as EvalScorerKind,
+        scorerConfig: p.scorerConfig,
+      })),
+    );
+    }
+
+    const [updated] = await tx
+      .update(redteamLibraries)
+      .set({
+        status: "published",
+        evalDatasetId: dataset!.id,
+        evalDatasetVersion: dataset!.version,
+        publishedAt: new Date(),
+      })
+      .where(and(eq(redteamLibraries.id, library.id), whereFrom(redteamLibraries.status, REDTEAM_LIBRARY_MACHINE, "publish")))
+      .returning();
+    return { dataset: dataset!, updated: updated! };
+  });
+  if (!published) {
+    return {
+      ok: false,
+      status: 409,
+      error: "library_changed",
+      detail: `'${library.name}' v${library.version} was published or retired by someone else while this publish ran; reload it`,
+    };
   }
-
-  const [updated] = await db
-    .update(redteamLibraries)
-    .set({
-      status: "published",
-      evalDatasetId: dataset!.id,
-      evalDatasetVersion: dataset!.version,
-      publishedAt: new Date(),
-    })
-    .where(eq(redteamLibraries.id, library.id))
-    .returning();
+  const { dataset, updated } = published;
 
   await db.insert(auditLog).values({
     userId: userId ?? NIL_UUID,
@@ -450,8 +473,9 @@ export async function resolveRedTeamPreset(db: Db, projectId: string | null | un
   if (!project) return null;
   const tags = (project.classifications ?? []) as string[];
   if (tags.length === 0) return null;
-  const rows = await db.select().from(complianceProfiles);
-  const matching = rows.filter((p) => tags.includes(p.tag));
+  // ADR-0045 amendment 2026-11-14: through the ONE cascade funnel, so the profile's ACTIVE VERSION governs (ADR-0073). Reading the table
+  // row directly ignored a versioned tightening, and a pack-seeded preset edited through versions never reached a run.
+  const matching = await complianceProfilesForTags(db, tags);
   if (matching.length === 0) return null;
   const preset = composeRedTeamPreset(
     matching.map((p) => ({

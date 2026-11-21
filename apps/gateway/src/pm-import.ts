@@ -244,6 +244,10 @@ async function listAll(
       }
       throw err;
     }
+    // #828 review: a page larger than the limit asked for is a misbehaving tool; refuse it before holding it
+    if (!Array.isArray(page.items) || page.items.length > PM_IMPORT_PAGE_SIZE) {
+      throw new ImportRefusal(502, "pm_provider_error", `the PM tool returned a page of more than ${PM_IMPORT_PAGE_SIZE} work items`);
+    }
     out.push(...page.items);
     if (out.length > maxItems) {
       throw new ImportRefusal(
@@ -279,8 +283,18 @@ async function listAll(
 }
 
 export function registerPmImportRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}): void {
-  const audit = (userId: string | null, objectId: string | null, ruleId: string, effect: "allow" | "deny", reason: string, detail: Record<string, unknown>) =>
-    db.insert(auditLog).values({
+  // #828 review: every audit row is written with the executor of the state change it records, so a committed import,
+  // plan or refusal row never lacks its audit row
+  const audit = (
+    exec: Db,
+    userId: string | null,
+    objectId: string | null,
+    ruleId: string,
+    effect: "allow" | "deny",
+    reason: string,
+    detail: Record<string, unknown>,
+  ) =>
+    exec.insert(auditLog).values({
       userId: userId ?? NIL_UUID,
       objectType: "onboarding_import",
       objectId,
@@ -296,25 +310,27 @@ export function registerPmImportRoutes(app: FastifyInstance, db: Db, opts: { dat
     mode: "dry_run" | "apply",
     payload: unknown,
     r: ImportRefusal,
-  ) => {
-    const [row] = await db
-      .insert(onboardingImports)
-      .values({
-        kind: "pm_work_items",
-        mode,
-        status: "refused",
-        payloadSha256: createHash("sha256").update(JSON.stringify(payload ?? null)).digest("hex"),
-        rowCount: 0,
-        plan: { error: r.error, ...r.extra } as never,
-        result: null,
-        ruleId: ONBOARDING_RULE_IDS.importRejected,
-        reason: `PM import refused: ${r.detail}`,
-        requestedByUserId: userId,
-      })
-      .returning({ id: onboardingImports.id });
-    await audit(userId, row!.id, ONBOARDING_RULE_IDS.importRejected, "deny", `PM import refused: ${r.detail}`, { error: r.error, ...r.extra });
-    return { error: r.error, detail: r.detail, importId: row!.id, ...r.extra };
-  };
+  ) =>
+    db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      const [row] = await tx
+        .insert(onboardingImports)
+        .values({
+          kind: "pm_work_items",
+          mode,
+          status: "refused",
+          payloadSha256: createHash("sha256").update(JSON.stringify(payload ?? null)).digest("hex"),
+          rowCount: 0,
+          plan: { error: r.error, ...r.extra } as never,
+          result: null,
+          ruleId: ONBOARDING_RULE_IDS.importRejected,
+          reason: `PM import refused: ${r.detail}`,
+          requestedByUserId: userId,
+        })
+        .returning({ id: onboardingImports.id });
+      await audit(tx, userId, row!.id, ONBOARDING_RULE_IDS.importRejected, "deny", `PM import refused: ${r.detail}`, { error: r.error, ...r.extra });
+      return { error: r.error, detail: r.detail, importId: row!.id, ...r.extra };
+    });
 
   // ---- POST /v1/onboarding/imports/pm ------------------------------------
   app.post("/v1/onboarding/imports/pm", async (req, reply) => {
@@ -385,27 +401,31 @@ export function registerPmImportRoutes(app: FastifyInstance, db: Db, opts: { dat
 
     if (body.mode === "dry_run") {
       const { plan } = await computePlan(db);
-      const [row] = await db
-        .insert(onboardingImports)
-        .values({
-          kind: "pm_work_items",
-          mode: "dry_run",
-          status: "planned",
-          payloadSha256: plan.planSha256,
-          rowCount: plan.counts.listed,
-          plan: planBody(plan) as never,
-          result: null,
-          ruleId: ONBOARDING_RULE_IDS.importPlanned,
-          reason: `PM import dry run for '${conn.name}': ${plan.counts.add} add, ${plan.counts.update} update, ${plan.counts.missing} missing`,
-          requestedByUserId: userId,
-        })
-        .returning({ id: onboardingImports.id });
-      await audit(userId, row!.id, ONBOARDING_RULE_IDS.importPlanned, "allow", `PM import previewed for '${conn.name}' (nothing changed)`, {
-        connection: conn.name,
-        counts: plan.counts,
-        planSha256: plan.planSha256,
+      const row = await db.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Db;
+        const [inserted] = await tx
+          .insert(onboardingImports)
+          .values({
+            kind: "pm_work_items",
+            mode: "dry_run",
+            status: "planned",
+            payloadSha256: plan.planSha256,
+            rowCount: plan.counts.listed,
+            plan: planBody(plan) as never,
+            result: null,
+            ruleId: ONBOARDING_RULE_IDS.importPlanned,
+            reason: `PM import dry run for '${conn.name}': ${plan.counts.add} add, ${plan.counts.update} update, ${plan.counts.missing} missing`,
+            requestedByUserId: userId,
+          })
+          .returning({ id: onboardingImports.id });
+        await audit(tx, userId, inserted!.id, ONBOARDING_RULE_IDS.importPlanned, "allow", `PM import previewed for '${conn.name}' (nothing changed)`, {
+          connection: conn.name,
+          counts: plan.counts,
+          planSha256: plan.planSha256,
+        });
+        return inserted!;
       });
-      return { mode: "dry_run", importId: row!.id, plan: planBody(plan) };
+      return { mode: "dry_run", importId: row.id, plan: planBody(plan) };
     }
 
     // ---- apply: recompute under the connection's lock and compare ----------
@@ -483,11 +503,17 @@ export function registerPmImportRoutes(app: FastifyInstance, db: Db, opts: { dat
           .set({ missingSince: sql`now()`, lastImportId: importId })
           .where(inArray(pmImportedWorkItems.id, missingIds.slice(i, i + 1000)));
       }
+      await audit(tx, userId, importId, ONBOARDING_RULE_IDS.importApplied, "allow", `PM import applied for '${conn.name}'`, {
+        connection: conn.name,
+        initiativeId,
+        counts: plan.counts,
+        planSha256: plan.planSha256,
+      });
       return { kind: "applied" as const, applied: plan, importId, initiativeId };
     });
 
     if (outcome.kind === "changed") {
-      await audit(userId, null, ONBOARDING_RULE_IDS.importRejected, "deny", `PM import for '${conn.name}' not applied: the plan changed since the preview`, {
+      await audit(db, userId, null, ONBOARDING_RULE_IDS.importRejected, "deny", `PM import for '${conn.name}' not applied: the plan changed since the preview`, {
         connection: conn.name,
         expected: body.planSha256,
         actual: outcome.changed.planSha256,
@@ -498,12 +524,6 @@ export function registerPmImportRoutes(app: FastifyInstance, db: Db, opts: { dat
         plan: planBody(outcome.changed),
       });
     }
-    await audit(userId, outcome.importId, ONBOARDING_RULE_IDS.importApplied, "allow", `PM import applied for '${conn.name}'`, {
-      connection: conn.name,
-      initiativeId: outcome.initiativeId,
-      counts: outcome.applied.counts,
-      planSha256: outcome.applied.planSha256,
-    });
     return { mode: "apply", importId: outcome.importId, initiativeId: outcome.initiativeId, plan: planBody(outcome.applied) };
   });
 

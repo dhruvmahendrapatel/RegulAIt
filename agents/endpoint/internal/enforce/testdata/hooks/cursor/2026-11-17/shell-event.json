@@ -1,0 +1,1 @@
+{"conversation_id":"c-1","generation_id":"g-4","hook_event_name":"beforeShellExecution","cursor_version":"1.7.2","command":"echo secret-argument","cwd":"/work"}

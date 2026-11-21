@@ -99,6 +99,9 @@ const SNIPPETS = "apps/web/src/views/models/snippets.ts";
  * a hit, and there is no whole-file skip, so a vendor name added on any other line of an excepted file is a hit too.
  */
 export const ALLOWED_LINES = [
+  // ADR-0310 (G2): the vendor's own install directory, written into a managed-settings bundle manifest so an admin's
+  // MDM puts the file where the client reads it. A filesystem path, not prose; changing it breaks the install.
+  { file: "apps/gateway/src/managed-settings.ts", contains: 'windows: "%ProgramData%\\\\OpenAI\\\\Codex\\\\requirements.toml",', names: ["OpenAI"], why: "ADR-0310: a vendor install path in a managed-settings bundle manifest (functional, not copy)" },
   { file: CLIENT_ACCESS, contains: '<Field label="POST /v1/messages (Anthropic-shaped)">', names: ["Anthropic"], why: COMPAT },
   { file: CLIENT_ACCESS, contains: '<Field label="POST /v1/chat/completions (OpenAI-shaped)">', names: ["OpenAI"], why: COMPAT },
   { file: "apps/web/src/views/admin/settings/GettingStartedPage.tsx", contains: 'on.push("Anthropic compat on")', names: ["Anthropic"], why: COMPAT },
@@ -134,6 +137,7 @@ export const ALLOWED_LINES = [
   { file: "apps/gateway/src/compat-anthropic.ts", contains: "roles are valid in the Anthropic Messages shape;", names: ["Anthropic"], why: WIRE },
   { file: "apps/gateway/src/compat-anthropic.ts", contains: 'rejectUnsupportedFields(raw, ANTHROPIC_SUPPORTED_FIELDS, "Anthropic")', names: ["Anthropic"], why: WIRE },
   { file: "apps/gateway/src/compat-openai.ts", contains: 'rejectUnsupportedFields(raw, OPENAI_SUPPORTED_FIELDS, "OpenAI")', names: ["OpenAI"], why: WIRE },
+  { file: "apps/gateway/src/compat-responses.ts", contains: 'rejectUnsupportedFields(raw, RESPONSES_SUPPORTED_FIELDS, "OpenAI Responses")', names: ["OpenAI"], why: WIRE },
 
   { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("huggingface", "Hugging Face",', names: ["Hugging Face"], why: CATALOGUE },
   { file: "apps/gateway/src/builder-catalog.ts", contains: 'C("perplexity", "Perplexity",', names: ["Perplexity"], why: CATALOGUE },

@@ -33,6 +33,9 @@ import {
   FEDERATION_JWKS_PATH,
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  AGENT_CREDENTIAL_STATUS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -40,7 +43,12 @@ import {
   OAUTH_REVOCATION_PATH,
   OAUTH_TOKEN_PATH,
   DEFENSECLAW_INGEST_PATH,
+  DEFENSECLAW_OTLP_LOGS_PATH,
+  BROWSER_EXTENSION_PATHS,
 } from "@regulait/shared";
+
+/** ADR-0334: the browser extension route authenticated in-route (registration); the rest take its self token */
+const BROWSER_EXTENSION_AUTH_PATHS: readonly string[] = [BROWSER_EXTENSION_PATHS.register];
 
 /** ADR-0187: the routes only an engine runner credential reaches */
 const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
@@ -76,6 +84,8 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/app",
   "/",
   "/health",
+  // ADR-0343: the readiness probe (503 while draining); like /health it names no data
+  "/ready",
   // ADR-0185 G5 — mounted only when REGULAIT_METRICS_ON_MAIN_LISTENER is on
   // (otherwise no route exists: 404). The scraper holds no RegulAIt
   // credential; the route authenticates IN-ROUTE on REGULAIT_METRICS_TOKEN
@@ -135,6 +145,14 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // in NON_ADMIN_ROUTES too, so `public`.
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  // ADR-0315 (G7) — the agent credential issuer's discovery document and JWKS: public by definition (a third-party
+  // enforcement point verifies offline, holding no RegulAIt credential). Public keys and metadata only. Listed in
+  // NON_ADMIN_ROUTES too, so `public`.
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  // ADR-0315 slice 2 — its signed Token Status List: public by definition (the same verifier fetches it to learn of a
+  // revocation or a kill). Bits and a signature only; no credential, grant or identity is named in it.
+  AGENT_CREDENTIAL_STATUS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -152,12 +170,20 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // audited. Listed in NON_ADMIN_ROUTES too, so they are `public`.
   "/v1/trust-center",
   "/v1/auditor/session",
+  // ADR-0240: the auditor's second factor (challenge cookie + TOTP code; authenticated in-route)
+  "/v1/auditor/session/mfa",
   "/v1/auditor/items/:slug",
   // ADR-0221 (P4) — the SUPPLIER PORTAL: the routes a supplier, who holds no platform credential, signs in to and
   // answers one assessment through. They authenticate IN-ROUTE on the supplier's own cookie (supplier-portal.ts) and
   // never read a platform session or key; they answer 404 while `supplier_portal_enabled` is off (the shipped
   // default). Listed in NON_ADMIN_ROUTES too, so they are `public` to the platform hooks.
   ...SUPPLIER_ROUTE_PATHS,
+  // ADR-0223 amendment 1 — the drift monitor's WRITE-ONLY ingestion credential. A pipeline holds no platform
+  // credential: the route authenticates IN-ROUTE on `Authorization: Bearer rgldi_…` only (drift-ingest-credentials.ts;
+  // only its SHA-256 stored, always expiring, revocable, bound to one monitor by the row), never reads a platform
+  // session or key, and is rate-limited per address and per credential. Only POST is registered on this path, so
+  // the credential reads nothing. Listed in NON_ADMIN_ROUTES too, so it is `public` to the platform hooks.
+  "/v1/model-drift/ingest/:monitorId/reports",
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
@@ -183,6 +209,12 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // ADR-0261 (P37): a DefenseClaw exporter holds no RegulAIt session or API key; the route authenticates IN-ROUTE on
   // the source's write-only `rgti_` token (hash lookup), and that token reaches nothing else.
   DEFENSECLAW_INGEST_PATH,
+  // ADR-0302 decision 2: the same exporter channel over OTLP/HTTP logs, the same in-route `rgti_` token
+  DEFENSECLAW_OTLP_LOGS_PATH,
+  // ADR-0334 (lane E16): a browser extension's registration holds no RegulAIt session or key yet: it authenticates
+  // IN-ROUTE on the bulk enrolment token (`rgbe_`, SHA-256 lookup) and refuses while browser governance is off. Its
+  // other routes take its DPoP-bound self token only (the endpoint agent's pattern).
+  ...BROWSER_EXTENSION_AUTH_PATHS,
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
@@ -197,6 +229,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /mcp/:serverId",
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
+  // ADR-0311: DELETE (end a session) answers 405 too: no session is ever issued
+  "DELETE /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
   // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
   "POST /v1/a2a/agents/:agentId/messages",
@@ -250,6 +284,18 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/builder/integrations",
   "GET /v1/builder/toolbox-options",
   "GET /v1/builder/usage",
+  // ADR-0364 (lane E45 S2) — robots. Each route is gated in the handler to the robot's owner or an admin (404
+  // unknown_robot otherwise); a version's review is decided in the one approvals queue, never here.
+  "GET /v1/robots",
+  "POST /v1/robots",
+  "GET /v1/robots/:robotId",
+  "POST /v1/robots/:robotId/retire",
+  "POST /v1/robots/:robotId/versions",
+  "PUT /v1/robots/:robotId/versions/:version",
+  "POST /v1/robots/:robotId/versions/:version/submit",
+  "POST /v1/robots/:robotId/versions/:version/retire",
+  "PUT /v1/robots/:robotId/secrets/:name/:scope",
+  "DELETE /v1/robots/:robotId/secrets/:name/:scope",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
@@ -272,6 +318,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // deliberately NOT here: writing the posture stays admin-only.
   "POST /v1/messages",
   "POST /v1/chat/completions",
+  // ADR-0287: the OpenAI Responses dialect of the same developer path.
+  "POST /v1/responses",
   // ADR-0066 §1 — the discovery endpoint. Non-admin for exactly the reason the
   // two shims above are: it is the DEVELOPER's setup call, and its governance
   // is the per-caller entitlement filter inside the handler, not admin-ness.
@@ -382,6 +430,13 @@ export const NON_ADMIN_ROUTES = new Set([
   // already read (an agent they steward, a use case they own or may read; everything for an admin)
   "GET /v1/reports/posture/assets",
   "GET /v1/reports/posture/assets/:kind/:assetId",
+  // ADR-0339 — one agent's risk score and its history: any user, scoped in the handler to an admin or the agent's own
+  // steward/owner (404 otherwise). The ranked list and the recompute stay admin through the default gate.
+  "GET /v1/agent-risk/:kind/:subjectId",
+  "GET /v1/agent-risk/:kind/:subjectId/history",
+  // ADR-0339 slice 2 — one agent's author, runner and identity links: same scoping as its risk score. The findings
+  // list and the link writes stay admin through the default gate.
+  "GET /v1/agent-identity/:kind/:subjectId",
   "GET /v1/risks",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
@@ -442,6 +497,16 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0312: a non-admin pages the outcomes of workflows they initiated (handler predicate and the table's RLS)
+  "GET /v1/cost-outcomes",
+  // ADR-0312 (pilot addendum): a person reads their own spend budget and spend (refused in-handler otherwise)
+  "GET /v1/users/:userId/spend-budget",
+  // ADR-0342 (lane E23): process analytics. Each read applies `evaluateReportAccess` in the handler and is narrowed to
+  // the projects in scope the caller is a member of (org scope is admin-only); refresh stays admin.
+  "GET /v1/process-analytics/templates",
+  "GET /v1/process-analytics/stages",
+  "GET /v1/process-analytics/heatmap",
+  "GET /v1/process-analytics/throughput",
   // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
   // Every one of these four is self-scoped INSIDE the handler: a non-admin who
   // passes `userId` for somebody else gets a 403 rather than a silently-ignored
@@ -572,6 +637,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context",
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
+  // ADR-0365 (lane E46): the live context graph's reads. Any signed-in principal; every result is filtered in-route by
+  // the caller's own project memberships (and by row-level security), and a node they cannot read is a 404. The
+  // source binding and sync routes stay admin-only (absent here).
+  "GET /v1/context-graph/nodes",
+  "GET /v1/context-graph/nodes/:nodeId",
+  "GET /v1/context-graph/nodes/:nodeId/neighbours",
   "GET /v1/projects/:projectId/compliance",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",
@@ -602,6 +673,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /app",
   "GET /",
   "GET /health",
+  // ADR-0343: the readiness probe; no credential, no data
+  "GET /ready",
   // ADR-0185 G5 — see AUTH_EXEMPT_ROUTES: the metrics token is the credential
   "GET /metrics",
   // ADR-0026: the SPA shell, same static-page reasoning as /app above
@@ -666,6 +739,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/openapi.json",
   "GET /v1/api/versioning",
   "GET /v1/me",
+  // ADR-0348: the declared lifecycle tables (definitions only, no record), for every signed-in caller and agent
+  "GET /v1/state-machines",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
@@ -798,12 +873,17 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/feedback/l/:token",
   // ADR-0221 (P4): the supplier routes (see AUTH_EXEMPT_ROUTES)
   ...SUPPLIER_ROUTES,
+  // ADR-0223 amendment 1: the ingestion credential's one route (see AUTH_EXEMPT_ROUTES). Issuing, rotating, revoking
+  // and listing credentials (/v1/model-drift/monitors/:monitorId/ingest-credentials*) are DELIBERATELY ABSENT, so
+  // ADMIN-ONLY, each write with an identity_manage step-up.
+  "POST /v1/model-drift/ingest/:monitorId/reports",
   //
   // --- ADR-0225 (P13 d): the public trust pages ---------------------------------
   // Everything under /v1/trust/* (drafting, publishing, the heading, auditor grants) is DELIBERATELY ABSENT, so
   // ADMIN-ONLY. These are the public reads and the auditor portal (also in AUTH_EXEMPT_ROUTES above).
   "GET /v1/trust-center",
   "POST /v1/auditor/session",
+  "POST /v1/auditor/session/mfa",
   "GET /v1/auditor/session",
   "DELETE /v1/auditor/session",
   "GET /v1/auditor/items/:slug",
@@ -873,6 +953,10 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/model-artifacts/:artifactId",
   // ADR-0216: the uploader attaches a signature to their own artifact (an admin to any), checked in-handler
   "POST /v1/model-artifacts/:artifactId/signature",
+  // lane L7 (P14 + P16): the child's uploader records its derivation (an admin any); reads under the same rule.
+  // Checked in-handler; a relative the caller cannot see is a count, never an id
+  "POST /v1/model-artifacts/:artifactId/lineage",
+  "GET /v1/model-artifacts/:artifactId/lineage",
 
   // ADR-0188 (batch 6 item 1) — the public identity surface (auth-exempt above
   // too): the JWKS and the token endpoint family.
@@ -883,6 +967,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
   `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
   `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
+  // ADR-0315 (G7) — the agent credential issuer's public metadata (auth-exempt above too)
+  `GET ${AGENT_CREDENTIAL_DISCOVERY_PATH}`,
+  `GET ${AGENT_CREDENTIAL_JWKS_PATH}`,
+  `GET ${AGENT_CREDENTIAL_STATUS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,
@@ -896,6 +984,10 @@ export const NON_ADMIN_ROUTES = new Set([
   ...ENDPOINT_AGENT_ENROLMENT_PATHS.map((p) => `POST ${p}`),
   // ADR-0261 (P37): the third-party exporter route (authenticated in-route by its source token)
   `POST ${DEFENSECLAW_INGEST_PATH}`,
+  // ADR-0302 decision 2: its OTLP/HTTP logs twin
+  `POST ${DEFENSECLAW_OTLP_LOGS_PATH}`,
+  // ADR-0334 (lane E16): the browser extension's registration (auth-exempt above too; in-route enrolment token)
+  ...BROWSER_EXTENSION_AUTH_PATHS.map((p) => `POST ${p}`),
 
   // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
   // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE
@@ -935,6 +1027,67 @@ export const NON_ADMIN_ROUTES = new Set([
 export type RouteAuthClass = "public" | "scim-token" | "engine-runner" | "user" | "admin";
 
 const SCIM_ROUTE_SET: ReadonlySet<string> = new Set<string>(SCIM_ROUTES);
+
+/** ADR-0234 batch 7a: the exempt routes that create or link a user from an identity provider's assertion */
+const IDENTITY_PROVISIONING_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/auth/oidc/callback",
+  "/auth/link/confirm",
+  "/auth/saml/:providerId/acs",
+]);
+/** ADR-0234 batch 7a: the exempt routes that route or decide an approval (signed in-route by the platform) */
+const APPROVAL_EXEMPT: ReadonlySet<string> = new Set<string>([
+  "/v1/pm/webhooks/:connectionName",
+  "/v1/chatops/:connectionName/interactions",
+]);
+
+/** the closed set of reasons an auth-exempt route may run under (a subset of RLS_SYSTEM_REASONS) */
+export type ExemptRouteRlsReason = "authenticate" | "identity_provisioning" | "approval_maintenance" | "public_ingest";
+
+/**
+ * ADR-0234 batch 7a: the named RLS system reason an auth-exempt route runs under. Such a route resolves no principal,
+ * so it used to run with no scope at all (every row on a superuser login, zero rows on a non-superuser one). Each now
+ * runs under the narrowest registered reason that fits what it does:
+ *   - SCIM, and the sign-in callbacks that create or link a user: `identity_provisioning`;
+ *   - every other `/auth/*` route (login, MFA, logout, provider lists): `authenticate`;
+ *   - the PM webhook and the chat approval callback: `approval_maintenance`;
+ *   - everything else (health, portals, ingest, agents, OAuth endpoints, chat events): `public_ingest`, the
+ *     narrowest reason (users read, audit append), because these take attacker-shaped input.
+ */
+export function exemptRouteRlsReason(url: string): ExemptRouteRlsReason {
+  if (SCIM_ROUTE_SET.has(url) || IDENTITY_PROVISIONING_EXEMPT.has(url)) return "identity_provisioning";
+  if (url.startsWith("/auth/")) return "authenticate";
+  if (APPROVAL_EXEMPT.has(url)) return "approval_maintenance";
+  return "public_ingest";
+}
+
+/**
+ * ADR-0234 batch 7a: the RLS scope a request runs under once authentication has resolved (or not), in order:
+ *   - a user id (a person, an API key, a session, a workload identity's sponsor): that principal, never a system scope;
+ *   - an auth-exempt route: the reason its class needs (`exemptRouteRlsReason`), before any credential branch, so an
+ *     exempt route never lands in `bootstrap_admin` or `credential_request`;
+ *   - the bootstrap token (an admin with no user row): `bootstrap_admin`;
+ *   - any other credential (engine runner or enrolment token, PDP client, endpoint agent): `credential_request`,
+ *     which reads users and appends to the ledger and nothing else (#809 review);
+ *   - no credential at all: no scope (the authentication hook has already refused it).
+ */
+export type RequestRlsScope =
+  | { kind: "principal"; userId: string }
+  | { kind: "exempt"; reason: ExemptRouteRlsReason }
+  | { kind: "bootstrap" }
+  | { kind: "credential"; via: string }
+  | { kind: "none" };
+
+export function requestRlsScope(
+  ctx: { userId: string | null; isAdmin: boolean; via: string } | undefined,
+  routeUrl: string,
+): RequestRlsScope {
+  const userId = ctx?.userId;
+  if (typeof userId === "string" && userId.length > 0) return { kind: "principal", userId };
+  if (AUTH_EXEMPT_ROUTES.has(routeUrl)) return { kind: "exempt", reason: exemptRouteRlsReason(routeUrl) };
+  if (ctx?.isAdmin === true) return { kind: "bootstrap" };
+  if (ctx) return { kind: "credential", via: ctx.via };
+  return { kind: "none" };
+}
 
 export function routeAuthClass(method: string, url: string): RouteAuthClass {
   if (SCIM_ROUTE_SET.has(url)) return "scim-token";

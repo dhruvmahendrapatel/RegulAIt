@@ -13,7 +13,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
-import { ago, plural } from "../../api/format";
+import { ago, plural, errorText } from "../../api/format";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
@@ -172,7 +172,7 @@ function ReviewForm(props: { data: AnnotationItemResponse; onDone: () => void })
       toast(res.item.status === "completed" ? "Review recorded — the item is complete" : "Review recorded", "success");
       props.onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }

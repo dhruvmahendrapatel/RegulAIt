@@ -276,6 +276,28 @@ function overageActive(project: ProjectRow, periodKey: string): boolean {
   return project.overageApprovedPeriod === periodKey;
 }
 
+/**
+ * Metered spend (pillar 5 actuals, `usage_events`) per project or per person, batched: one GROUP BY for many ids.
+ * `since` null is lifetime-cumulative; otherwise only spend at or after it counts (a 'monthly' window's
+ * `periodStart`). The ONE reader of budget spend: the project gate below and the budget alerts (ADR-0312,
+ * budget-alerts.ts) both read it, so the alert window and the enforcement window cannot drift apart.
+ */
+export async function meteredSpendUsdBy(
+  db: Db,
+  column: "project_id" | "user_id",
+  ids: readonly string[],
+  since: Date | null,
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const res = await db.execute<{ k: string; usd: number }>(sql`
+    SELECT ${sql.raw(column)}::text AS k, coalesce(sum(cost_usd), 0)::float8 AS usd
+      FROM usage_events
+     WHERE ${sql.raw(column)} = ANY(${sql`ARRAY[${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)}]`})
+       ${since ? sql`AND at >= ${since.toISOString()}::timestamptz` : sql``}
+     GROUP BY 1`);
+  return new Map(res.rows.map((r) => [r.k, Number(r.usd)]));
+}
+
 /** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
  * budget only spend within the current calendar-month window counts; otherwise
  * it is lifetime-cumulative (default, back-compat). */
@@ -284,15 +306,8 @@ async function projectSpendUsd(
   projectId: string,
   opts?: { monthly?: boolean; now?: Date },
 ): Promise<number> {
-  const where =
-    opts?.monthly
-      ? and(eq(usageEvents.projectId, projectId), gte(usageEvents.at, periodStart(opts.now)))
-      : eq(usageEvents.projectId, projectId);
-  const [row] = await db
-    .select({ spent: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
-    .from(usageEvents)
-    .where(where);
-  return row?.spent ?? 0;
+  const since = opts?.monthly ? periodStart(opts.now) : null;
+  return (await meteredSpendUsdBy(db, "project_id", [projectId], since)).get(projectId) ?? 0;
 }
 
 async function escalateProjectBudget(
@@ -364,6 +379,13 @@ type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
 const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, redact: 2, block: 3 };
 
+/** ADR-0363: the stricter of two PII modes (null = no enforcement, the least strict), by the cascade's own order */
+export function stricterPiiMode(a: PiiMode | null, b: PiiMode | null): PiiMode | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return PII_STRICTNESS[b]! > PII_STRICTNESS[a]! ? b : a;
+}
+
 /** §8.3: the effective policy of a SET of framework profiles. The spec gives
  * no strictness ordering among frameworks, so profiles compose additively:
  * required templates union, mcp defaults tighten to read_only if ANY profile
@@ -416,7 +438,21 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
       : profiles.some((p) => p.budgetEnforcement === "warn_only")
         ? ("warn_only" as const)
         : null,
+    // ADR-0045 amendment 2026-11-14: model risk management is required if ANY framework requires it (OR: strictest wins)
+    mrmRequiredBy: profiles.filter((p) => p.mrmRequired === true).map((p) => p.tag).sort(),
   };
+}
+
+/**
+ * ADR-0045 amendment 2026-11-14 — the §8.3 cascade half of ADR-0045 §4: the classification tags on a project whose compliance profile
+ * (its ACTIVE version, through the one `profilesForTags` funnel) requires model risk management. Empty for an
+ * unattributed dispatch, an unknown or unclassified project, or profiles with no MRM requirement.
+ */
+export async function projectMrmRequiredBy(db: Db, projectId: string | null | undefined): Promise<string[]> {
+  if (!projectId) return [];
+  const tags = await projectClassifications(db, projectId);
+  if (tags.length === 0) return [];
+  return effectiveCompliancePolicy(await profilesForTags(db, tags)).mrmRequiredBy;
 }
 
 /** Exported for the pillar-3 infra layer (§8.3 cascade consumption): the
@@ -2237,6 +2273,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       redteamFailOnSeverity: body.redteamFailOnSeverity ?? null,
       // ADR-0190 decision 7 item 3: the isolation floor this framework forces (MAX-composed; null = no opinion)
       minIsolationClass: body.minIsolationClass ?? null,
+      // ADR-0045 amendment 2026-11-14: the framework requires model risk management (OR-composed; null = no requirement)
+      mrmRequired: body.mrmRequired ?? null,
     };
     // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
     // silent no-op for enforcement.

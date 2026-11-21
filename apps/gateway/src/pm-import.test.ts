@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, desc, eq, onboardingImports, pmImportedWorkItems, runMigrations, type Db } from "@regulait/db";
 import { resolvePmProvider, type MockPmProvider } from "@regulait/pm-provider";
 import { buildApp } from "./app.js";
 import { itemProblem, planPmImport } from "./pm-import.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 
 /**
  * ADR-0289 — the PM project / work-item importer (ADR-0054 §3).
@@ -20,6 +23,8 @@ import { itemProblem, planPmImport } from "./pm-import.js";
  *  4. Refused whole, recorded and audited: an over-large project, a malformed
  *     or unsafe item, and an adapter that cannot list.
  *  5. Admin only.
+ *  6. Through the routes, against a fake receiver: a generic-webhook listing imports, an adapter that cannot list is
+ *     refused, and a failing tool is a 502 (#828 review).
  *
  * Shares one database with the other gateway suites; objects are prefixed pmi-.
  */
@@ -204,5 +209,108 @@ describe("refused whole, recorded and audited", () => {
     expect(r.statusCode).toBe(403);
     const g = await app.inject({ method: "GET", headers: { authorization: `Bearer ${k.json().token}` }, url: `/v1/onboarding/imports/pm/items?connectionName=${CONN}` });
     expect(g.statusCode).toBe(403);
+  });
+});
+
+describe("through the routes against a fake receiver (#828 review)", () => {
+  const RUN = Date.now();
+  const GEN = `pmi-generic-${RUN}`;
+  const GEN_FAIL = `pmi-generic-fail-${RUN}`;
+  const JIRA = `pmi-jira-${RUN}`;
+  let server: http.Server;
+  let allowHostId: string;
+  const lists: Array<{ url: string; event: string }> = [];
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        let event = "";
+        try {
+          event = String((JSON.parse(body) as { event?: unknown }).event ?? "");
+        } catch {
+          /* not JSON */
+        }
+        lists.push({ url: req.url ?? "", event });
+        res.setHeader("content-type", "application/json");
+        if (req.url?.startsWith("/fail")) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: "boom" }));
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            items: [
+              { id: "g-1", url: "https://pm.example/g-1", type: "Story" },
+              { id: "g-2", url: "https://pm.example/g-2", type: "Bug" },
+            ],
+            nextCursor: null,
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const allow = await relaxStepUpAround(db, () =>
+      app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/egress-allow-hosts",
+        payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "pm-import suite: fake PM receiver" },
+      }),
+    );
+    expect(allow.statusCode, allow.body).toBe(201);
+    allowHostId = allow.json().id as string;
+    for (const [name, provider, baseUrl] of [
+      [GEN, "generic_webhook", `${base}/ok`],
+      [GEN_FAIL, "generic_webhook", `${base}/fail`],
+      [JIRA, "jira", `${base}/jira`],
+    ] as const) {
+      const c = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/pm/connections",
+        payload: { name, provider, project: "PMI", baseUrl, token: provider === "jira" ? "bot@example.com:api-token" : "pmi-signing-secret" },
+      });
+      expect(c.statusCode, c.body).toBe(201);
+    }
+  });
+
+  afterAll(async () => {
+    (await removeEgressAllowEntry(app, AUTH, { id: allowHostId })).assertRemoved();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("a generic-webhook connection lists over its signed contract and imports", async () => {
+    const dry = await importPm({ connectionName: GEN, initiative: { name: `${GEN}-initiative` } });
+    expect(dry.statusCode, dry.body).toBe(200);
+    expect(dry.json().plan.counts).toMatchObject({ listed: 2, add: 2 });
+    expect(lists.some((l) => l.url.startsWith("/ok") && l.event === "work_item.list")).toBe(true);
+    const apply = await importPm({ connectionName: GEN, initiative: { name: `${GEN}-initiative` }, mode: "apply", planSha256: dry.json().plan.planSha256 });
+    expect(apply.statusCode, apply.body).toBe(200);
+    const items = await app.inject({ method: "GET", headers: AUTH, url: `/v1/onboarding/imports/pm/items?connectionName=${GEN}` });
+    expect(items.json().items.map((i: { externalId: string }) => i.externalId).sort()).toEqual(["g-1", "g-2"]);
+  });
+
+  it("an adapter that cannot list is refused whole and recorded", async () => {
+    const r = await importPm({ connectionName: JIRA, initiative: { name: `${JIRA}-initiative` } });
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("pm_import_unsupported_provider");
+    const [row] = await db.select().from(onboardingImports).where(eq(onboardingImports.id, r.json().importId));
+    expect(row?.status).toBe("refused");
+    const [a] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, r.json().importId), eq(auditLog.effect, "deny")));
+    expect(a).toBeDefined();
+  });
+
+  it("a failing PM tool is a 502, recorded and audited", async () => {
+    const r = await importPm({ connectionName: GEN_FAIL, initiative: { name: `${GEN_FAIL}-initiative` } });
+    expect(r.statusCode, r.body).toBe(502);
+    expect(r.json().error).toBe("pm_provider_error");
+    const [row] = await db.select().from(onboardingImports).where(eq(onboardingImports.id, r.json().importId));
+    expect(row?.status).toBe("refused");
+    const [a] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, r.json().importId), eq(auditLog.effect, "deny")));
+    expect(a).toBeDefined();
   });
 });

@@ -823,11 +823,21 @@ describe("GenericWebhookProvider (signed normalized envelopes, injectable fetch,
     const ref = await hook.createWorkItem("proj-1", "task", { title: "Build API", description: "initial" });
     expect(calls[0]!.url).toBe("https://recv.example/regulait");
     expect(calls[0]!.headers["content-type"]).toBe("application/json");
-    // the signature is a deterministic HMAC-SHA256 of the EXACT body under the
-    // connection token — recomputed here from the captured body
+    // S-03 follow-up (a): the signature is HMAC-SHA256 of "<timestamp>.<EXACT body>"
+    // under the connection token, the inbound generic contract — recomputed here
+    // from the captured header and body
+    const ts = calls[0]!.headers["x-regulait-timestamp"]!;
+    expect(ts).toMatch(/^\d{10}$/);
+    expect(Math.abs(Number(ts) - Date.now() / 1000)).toBeLessThan(60);
     expect(calls[0]!.headers["x-regulait-signature"]).toBe(
+      "sha256=" + createHmac("sha256", "shared-secret").update(`${ts}.${calls[0]!.raw}`).digest("hex"),
+    );
+    // the body-only signature of the first cut is gone (no grandfathering)
+    expect(calls[0]!.headers["x-regulait-signature"]).not.toBe(
       "sha256=" + createHmac("sha256", "shared-secret").update(calls[0]!.raw).digest("hex"),
     );
+    // the signed header and the envelope's ISO timestamp name the same instant
+    expect(Math.floor(Date.parse(calls[0]!.body.timestamp as string) / 1000)).toBe(Number(ts));
     expect(calls[0]!.body).toMatchObject({
       event: "work_item.create",
       project: "proj-1",

@@ -56,10 +56,16 @@ evidence logic is RegulAIt's own governance surface, so it is the "genuinely Reg
   Re-running is safe.
 - The importer creates no runs and no `pm_links`. Linking a run node to an imported item instead of creating a new
   one is a follow-up on the pm-sync path, recorded in PENDING.
-- The two routes are API-only. The screen is requested on #453, and `KNOWN_UI_GAPS_MAX` goes from 44 to 46, raised
-  for the master's review.
-- The new tables are not under row-level security, like the other PM tables (`pm_links`, `pm_webhook_deliveries`).
-  The RLS slices have not reached the PM surface.
+- The two routes are API-only. The screen is requested on #453. `KNOWN_UI_GAPS_MAX` rises by 2 over main's value at
+  each merge (66 to 68 at the latest). The master session relayed the owner's answer (2026-11-15, recorded in the
+  #828 body) that the cap may rise for API-only routes while the entry is kept.
+- **Row-level security (#828 review; owner decision 2026-11-15: RLS on every PM table).** Both new tables are
+  ENABLED and FORCED, readable and writable by an admin principal (or the bootstrap token) and the `migration` reason
+  only. The same PR brings the existing PM tables under RLS (`pm_connections`, `pm_links`, `pm_sync_events`,
+  `pm_webhook_deliveries`), with a new `pm_sync` reason for the mirror and link work done for a non-admin principal.
+  ADR-0234 records the batch (`pending/rls_pm_tables.sql`).
+- **The audit row commits with its state change** (#828 security review): the dry-run record, every refusal record
+  and the applied import each write their audit row in the same transaction.
 
 ## As built, slice 4b (2026-11-14): the five vendor adapters list
 

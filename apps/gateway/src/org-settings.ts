@@ -47,7 +47,9 @@ import {
   type Db,
   type OrgSettingsRow,
   type SQL,
+  runWithoutRlsScope,
 } from "@regulait/db";
+import { ownerDbFor } from "./owner-db.js";
 import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey } from "./org-setting-strictness.js";
 import {
   ACCOUNTABILITY_SETTING_KEYS,
@@ -79,8 +81,9 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
-import { revokeAuditorAccessOnDisable } from "./trust-pages-revoke.js";
+import { revokeAuditorAccessOnDisable, revokeAuditorSessionsOnMfaRequired } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
 import {
   approvalRuleStepUp,
   breakGlassChange,
@@ -91,6 +94,7 @@ import {
   settingsRelaxStepUpRefusal,
   stepUpRefusal,
 } from "./step-up.js";
+import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 
 export type { OrgSettingsRow };
 
@@ -293,20 +297,31 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
 /** One prune pass under the composed floor. Deletes nothing when no floor is
  * set. The prune is itself audited (a meta row newer than every cutoff), with
  * `auto` marking scheduler-driven passes apart from the admin's POST. */
-export async function runAuditPruneOnce(
-  db: Db,
-  actorUserId: string | null,
-  auto: boolean,
-): Promise<{
+export interface AuditPruneResult {
   deleted: number;
   /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
   tracesDeleted: number;
+  /** ADR-0327: rule-like step suggestions (which copy span input values) removed under the same floor */
+  ruleStepSuggestionsDeleted: number;
   retainedDays: number | null;
   floorSource: string[];
-}> {
+}
+
+/**
+ * ADR-0234 batch 7a: the prune deletes audit_log rows, and the app role every RLS scope runs as has no DELETE on
+ * audit_log (0272: the ledger is append-only for it). So the pass always leaves the caller's scope (an admin's POST,
+ * a bootstrap-token request, the timer). Batch 7b: it runs on the OWNER (migrator) connection, the only login that
+ * may delete from the ledger, under the owner-only `audit_retention` reason (FORCE row-level security binds the owner
+ * too; the app role cannot use the reason, and has no DELETE).
+ */
+export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
+  return runWithoutRlsScope(() => runAuditPruneOnceUnscoped(ownerDbFor(db), actorUserId, auto));
+}
+
+async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
-    return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
+    return { deleted: 0, tracesDeleted: 0, ruleStepSuggestionsDeleted: 0, retainedDays: null, floorSource: [] };
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
@@ -320,6 +335,8 @@ export async function runAuditPruneOnce(
   const retainedDays = f.retainedDays;
   const deleted = await db.transaction(async (rawTx) => {
     const tx = rawTx as unknown as Db;
+    // ADR-0234 batch 7b: the delete, and the read behind it, under the owner-only retention reason
+    await tx.execute(sql`select pg_catalog.set_config('regulait.system_context', 'audit_retention', true)`);
     const removed = await tx
       .delete(auditLog)
       .where(prunableWhere(cutoff, f.modeOverrides))
@@ -388,9 +405,21 @@ export async function runAuditPruneOnce(
     // never let trace pruning fail the audit prune it rides along with
     tracesDeleted = 0;
   }
+  // ADR-0327 slice 3 — RULE-LIKE STEP SUGGESTIONS FOLLOW THE SAME FLOOR. A suggestion's rule copies input values out
+  // of trace spans, and its scan window ends at `detected_at`, so a suggestion detected before the cutoff draws only on
+  // spans this pass has just removed (a held trace keeps its evidence, not the suggestion derived from it). Deleted,
+  // not redacted: the next scan rebuilds it from spans still held.
+  let ruleStepSuggestionsDeleted = 0;
+  try {
+    ruleStepSuggestionsDeleted = await pruneRuleStepSuggestions(db, f.cutoff);
+  } catch {
+    // like the trace prune, never let it fail the audit prune it rides along with
+    ruleStepSuggestionsDeleted = 0;
+  }
   return {
     deleted: deleted.length,
     tracesDeleted,
+    ruleStepSuggestionsDeleted,
     retainedDays: f.retainedDays,
     floorSource: f.floorSource,
   };
@@ -428,11 +457,16 @@ export async function auditPruneTick(db: Db, state: SchedulerTickState): Promise
   }
 }
 
-export function startAuditPruneScheduler(db: Db): () => void {
+export function startAuditPruneScheduler(db: Db): () => Promise<void> {
   const state: SchedulerTickState = { lastRunAt: 0 };
-  const timer = setInterval(() => void auditPruneTick(db, state), 3600 * 1000);
+  // ADR-0343: one replica of the cluster prunes, not every replica
+  const leader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.auditPrune);
+  const timer = setInterval(leaderOnly(leader, () => auditPruneTick(db, state)), 3600 * 1000);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await leader.release();
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +481,10 @@ const ENV_KEY_NAMES: ReadonlyArray<{ provider: string; envVar: string; aliases: 
   { provider: "openai", envVar: "OPENAI_API_KEY", aliases: [] },
   { provider: "google", envVar: "GOOGLE_API_KEY", aliases: ["GEMINI_API_KEY"] },
   { provider: "xai", envVar: "XAI_API_KEY", aliases: [] },
+  // ADR-0352
+  { provider: "mistral", envVar: "MISTRAL_API_KEY", aliases: [] },
+  { provider: "cohere", envVar: "COHERE_API_KEY", aliases: ["CO_API_KEY"] },
+  { provider: "qwen", envVar: "DASHSCOPE_API_KEY", aliases: ["ALIBABA_API_KEY"] },
 ];
 
 /** which conventional platform-key env vars are currently PRESENT on this
@@ -983,6 +1021,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
       // ADR-0225 (review M1): trust pages turned off ends every auditor's access in this same commit; on again revives none
       if (locked.trustPagesEnabled && !after.trustPagesEnabled) {
         await revokeAuditorAccessOnDisable(tx as unknown as Db, req.authCtx.userId);
+      } else if (!locked.trustAuditorMfaRequired && after.trustAuditorMfaRequired) {
+        // ADR-0240 (#709 review): re-tightening ends the sessions a link alone opened while the factor was relaxed
+        await revokeAuditorSessionsOnMfaRequired(tx as unknown as Db, req.authCtx.userId);
       }
       return { after };
     });

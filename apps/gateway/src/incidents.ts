@@ -111,7 +111,7 @@ import {
 import {
   ART_73_6_PARAGRAPH,
   ART_73_6_QUOTE,
-  EU_AI_ACT_CLOCK_CAVEAT,
+  INCIDENT_CLOCK_REGIME_CAVEAT,
   INCIDENT_CLOCK_DISCLAIMER,
   INCIDENT_CLOCK_RECIPIENT,
   applicableIncidentClocks,
@@ -151,6 +151,7 @@ import {
   type IncidentStatus,
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
+  INCIDENT_MACHINE,
 } from "@regulait/shared";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings, type OrgSettingsRow } from "./org-settings.js";
@@ -158,6 +159,7 @@ import { haltAgentInTx } from "./execution-control.js";
 // X15-H01: hold creation takes the evidence-hold lock exclusively (agent-evidence-hold.ts has no static edge back here)
 import { lockEvidenceHoldsExclusive } from "./agent-evidence-hold.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { whereFrom } from "./state-transition.js";
 import { stepUpRefusal } from "./step-up.js";
 import {
   filterParams,
@@ -451,10 +453,25 @@ async function writable(db: Writer, actor: IncidentActor, id: string, what: stri
     });
     throw new IncidentError(403, "forbidden", `only the incident's owner or an admin may ${what}`);
   }
-  if (incident.status === "closed") {
+  if (INCIDENT_MACHINE.isTerminal(incident.status)) {
     throw new IncidentError(409, "incident_closed", `incident ${incident.ref} is closed; a closed incident is not changed`);
   }
   return { incident, access };
+}
+
+/**
+ * ADR-0348: the incident re-read under a row lock inside the writing transaction. `update` for a write to the
+ * incident itself, `share` for a write to one of its children (a corrective action), which then cannot land
+ * beside a close committing at the same moment. A close that committed after the request's first read is seen
+ * here and refused, instead of being overwritten.
+ */
+async function lockedIncident(tx: Db, incidentId: string, mode: "update" | "share") {
+  const [row] = await tx.select().from(aiIncidents).where(eq(aiIncidents.id, incidentId)).for(mode);
+  if (!row) throw new IncidentError(404, "not_found", "no such incident");
+  if (INCIDENT_MACHINE.isTerminal(row.status)) {
+    throw new IncidentError(409, "incident_closed", `incident ${row.ref} is closed; a closed incident is not changed`);
+  }
+  return row;
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +781,8 @@ function clockView(n: typeof aiIncidentNotifications.$inferSelect, now: Date) {
     period: def ? incidentClockDueLabel(def.due) : null,
     immediately: def?.due.kind === "immediately",
     allowsInitialReport: def?.allowsInitialReport ?? false,
-    caveat: n.regime === "eu-ai-act" ? EU_AI_ACT_CLOCK_CAVEAT : null,
+    // ADR-0296: each regime's own caveat (EU AI Act role; GDPR/NIS2/DORA/CRA applicability)
+    caveat: INCIDENT_CLOCK_REGIME_CAVEAT[n.regime as IncidentClockRegime] ?? null,
     recipient: n.recipient,
     clockStart: n.clockStart.toISOString(),
     dueAt: n.dueAt.toISOString(),
@@ -775,6 +793,31 @@ function clockView(n: typeof aiIncidentNotifications.$inferSelect, now: Date) {
     reference: n.reference,
     reason: n.reason,
   };
+}
+
+/** ADR-0348: the refusals the incident table cannot know: who may act, and what still blocks a close */
+function incidentRefusals(
+  incident: AiIncidentRow,
+  actor: IncidentActor,
+  canEdit: boolean,
+  notifications: ReadonlyArray<{ id: string; clockId: string; status: string }>,
+  actions: ReadonlyArray<{ id: string; status: string }>,
+): Partial<Record<(typeof INCIDENT_MACHINE.events)[number], string>> {
+  if (!canEdit) {
+    const why = "only the incident's owner or an admin may change it";
+    return { contain: why, contain_by_halt: why, resolve: why, reopen: why, close: why };
+  }
+  const out: Partial<Record<(typeof INCIDENT_MACHINE.events)[number], string>> = {};
+  if (!actor.isAdmin) out.contain_by_halt = "halting an agent to contain the incident is an admin's";
+  const b = incidentCloseBlockers({ status: incident.status, rootCause: "-", lessonsLearned: "-", notifications, actions });
+  if (incidentCloseNeedsAdmin(incident) && !actor.isAdmin) {
+    out.close = "closing a serious, high or critical incident releases the deploy gate, so only an admin may close it";
+  } else if (b.openClocks.length > 0) {
+    out.close = `every notification clock must be final first (open: ${b.openClocks.join(", ")})`;
+  } else if (b.openActions.length > 0) {
+    out.close = `every corrective action must be done or cancelled first (${b.openActions.length} open)`;
+  }
+  return out;
 }
 
 async function incidentDetail(db: Writer, incident: AiIncidentRow, access: Access, actor: IncidentActor, org: OrgSettingsRow) {
@@ -889,6 +932,8 @@ async function incidentDetail(db: Writer, incident: AiIncidentRow, access: Acces
       canClose: canEdit && (actor.isAdmin || !incidentCloseNeedsAdmin(incident)),
       isAdmin: actor.isAdmin,
     },
+    // ADR-0348: the status and every next step for THIS reader, allowed or not and why, from the one declared table
+    lifecycle: INCIDENT_MACHINE.describe(incident.status, incidentRefusals(incident, actor, canEdit, notifications, actions)),
     disclaimer: INCIDENT_CLOCK_DISCLAIMER,
   };
 }
@@ -1573,6 +1618,21 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const updated = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         await lockEvidenceHoldsExclusive(tx); // X15-H01: serious, status or use case may begin or widen the hold
+        // ADR-0348: `next` was built from the request's first read. If anyone changed the incident since (another
+        // responder's edit, a containment, a close), writing it would silently undo their change, so the edit is
+        // refused and the caller reloads.
+        const fresh = await lockedIncident(tx, incident.id, "update");
+        if (fresh.updatedAt.getTime() !== incident.updatedAt.getTime()) {
+          throw new IncidentError(
+            409,
+            "incident_changed",
+            `incident ${incident.ref} was changed by someone else while this edit was being made; reload it and apply the edit again`,
+            { lifecycle: INCIDENT_MACHINE.describe(fresh.status) },
+          );
+        }
+        if (next.status !== fresh.status && !INCIDENT_MACHINE.canMove(fresh.status, next.status)) {
+          throw new IncidentError(409, "illegal_transition", `incident ${incident.ref} cannot move from '${fresh.status}' to '${next.status}'`);
+        }
         const [row] = await tx.update(aiIncidents).set({ ...next, updatedAt: new Date() }).where(eq(aiIncidents.id, incident.id)).returning();
         if (next.status !== incident.status) {
           await addEvent(tx, incident.id, "status", actor.userId, { from: incident.status, to: next.status });
@@ -1663,6 +1723,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       }
       const action = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockedIncident(tx, incident.id, "share"); // ADR-0348: no new open action beside a close committing now
         const [row] = await tx
           .insert(aiIncidentActions)
           .values({
@@ -1738,6 +1799,7 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       );
       const updated = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        await lockedIncident(tx, incident.id, "share"); // ADR-0348: an action is not re-opened beside a close committing now
         const [row] = await tx.update(aiIncidentActions).set(set).where(eq(aiIncidentActions.id, action.id)).returning();
         await addEvent(
           tx,
@@ -1961,66 +2023,84 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
           issues: parsed.error.issues,
         });
       }
-      const clocks = await db
-        .select({ id: aiIncidentNotifications.id, clockId: aiIncidentNotifications.clockId, status: aiIncidentNotifications.status })
-        .from(aiIncidentNotifications)
-        .where(eq(aiIncidentNotifications.incidentId, incident.id));
-      const actionRows = await db
-        .select({ id: aiIncidentActions.id, status: aiIncidentActions.status })
-        .from(aiIncidentActions)
-        .where(eq(aiIncidentActions.incidentId, incident.id));
-      const blockers = incidentCloseBlockers({ status: incident.status, ...parsed.data, notifications: clocks, actions: actionRows });
-      if (blockers.openClocks.length > 0) {
-        await audit(db, {
-          userId: actor.userId,
-          objectId: incident.id,
-          ruleId: INCIDENT_RULE_IDS.closeRefused,
-          effect: "deny",
-          reason: `incident ${incident.ref}: close refused — notification clock(s) not final: ${blockers.openClocks.join(", ")}`,
-          detail: { openClocks: blockers.openClocks },
-        });
-        return reply.status(409).send({
-          error: "incident_clocks_open",
-          detail:
-            "every notification clock must be final before the incident closes: record the complete report, or an " +
-            "admin marks it not required or tolled with a reason",
-          openClocks: blockers.openClocks,
-        });
-      }
-      if (blockers.openActions.length > 0) {
-        await audit(db, {
-          userId: actor.userId,
-          objectId: incident.id,
-          ruleId: INCIDENT_RULE_IDS.closeRefused,
-          effect: "deny",
-          reason: `incident ${incident.ref}: close refused — corrective action(s) still open: ${blockers.openActions.join(", ")}`,
-          detail: { openActions: blockers.openActions },
-        });
-        return reply.status(409).send({
-          error: "incident_actions_open",
-          detail: "every corrective action must be done (with its evidence) or cancelled (with a reason) before the incident closes",
-          openActions: blockers.openActions,
-        });
-      }
+      // ADR-0348: what stands in the way of closing, read once before the transaction (the fast refusal) and again
+      // under the incident's row lock inside it, so a clock or an action added meanwhile cannot slip past
+      const closeFacts = async (q: Db) => {
+        const clocks = await q
+          .select({ id: aiIncidentNotifications.id, clockId: aiIncidentNotifications.clockId, status: aiIncidentNotifications.status })
+          .from(aiIncidentNotifications)
+          .where(eq(aiIncidentNotifications.incidentId, incident.id));
+        const actionRows = await q
+          .select({ id: aiIncidentActions.id, status: aiIncidentActions.status })
+          .from(aiIncidentActions)
+          .where(eq(aiIncidentActions.incidentId, incident.id));
+        return { clocks, blockers: incidentCloseBlockers({ status: incident.status, ...parsed.data, notifications: clocks, actions: actionRows }) };
+      };
+      const refuseClose = async (blockers: ReturnType<typeof incidentCloseBlockers>) => {
+        if (blockers.openClocks.length > 0) {
+          await audit(db, {
+            userId: actor.userId,
+            objectId: incident.id,
+            ruleId: INCIDENT_RULE_IDS.closeRefused,
+            effect: "deny",
+            reason: `incident ${incident.ref}: close refused — notification clock(s) not final: ${blockers.openClocks.join(", ")}`,
+            detail: { openClocks: blockers.openClocks },
+          });
+          return reply.status(409).send({
+            error: "incident_clocks_open",
+            detail:
+              "every notification clock must be final before the incident closes: record the complete report, or an " +
+              "admin marks it not required or tolled with a reason",
+            openClocks: blockers.openClocks,
+          });
+        }
+        if (blockers.openActions.length > 0) {
+          await audit(db, {
+            userId: actor.userId,
+            objectId: incident.id,
+            ruleId: INCIDENT_RULE_IDS.closeRefused,
+            effect: "deny",
+            reason: `incident ${incident.ref}: close refused — corrective action(s) still open: ${blockers.openActions.join(", ")}`,
+            detail: { openActions: blockers.openActions },
+          });
+          return reply.status(409).send({
+            error: "incident_actions_open",
+            detail: "every corrective action must be done (with its evidence) or cancelled (with a reason) before the incident closes",
+            openActions: blockers.openActions,
+          });
+        }
+        return null;
+      };
+      const first = await closeFacts(db);
+      const refusedFirst = await refuseClose(first.blockers);
+      if (refusedFirst) return refusedFirst;
       const now = new Date();
       const closed = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
+        const fresh = await lockedIncident(tx, incident.id, "update");
+        if (incidentCloseNeedsAdmin(fresh) && !actor.isAdmin) {
+          throw new IncidentError(403, "incident_close_admin_only", "the incident was raised to serious, high or critical while this close was made; only an admin may close it now");
+        }
+        const again = await closeFacts(tx);
+        if (again.blockers.openClocks.length > 0 || again.blockers.openActions.length > 0) return { kind: "refused" as const, blockers: again.blockers };
+        const clocks = again.clocks;
         const [row] = await tx
           .update(aiIncidents)
-          .set({ status: "closed", closedAt: now, closedBy: actor.userId, rootCause: parsed.data.rootCause, lessonsLearned: parsed.data.lessonsLearned, updatedAt: now })
-          .where(eq(aiIncidents.id, incident.id))
+          .set({ status: INCIDENT_MACHINE.next(fresh.status, "close"), closedAt: now, closedBy: actor.userId, rootCause: parsed.data.rootCause, lessonsLearned: parsed.data.lessonsLearned, updatedAt: now })
+          .where(and(eq(aiIncidents.id, incident.id), whereFrom(aiIncidents.status, INCIDENT_MACHINE, "close")))
           .returning();
-        await addEvent(tx, incident.id, "status", actor.userId, { from: incident.status, to: "closed" });
+        await addEvent(tx, incident.id, "status", actor.userId, { from: fresh.status, to: "closed" });
         await audit(tx, {
           userId: actor.userId,
           objectId: incident.id,
           ruleId: INCIDENT_RULE_IDS.closed,
           reason: `incident ${incident.ref} closed with its root cause and lessons learned recorded`,
-          detail: { transitions: { status: { from: incident.status, to: "closed" } }, clocks: clocks.map((c) => ({ clockId: c.clockId, status: c.status })) },
+          detail: { transitions: { status: { from: fresh.status, to: "closed" } }, clocks: clocks.map((c) => ({ clockId: c.clockId, status: c.status })) },
         });
-        return row!;
+        return { kind: "closed" as const, row: row! };
       });
-      return incidentDetail(db, closed, await accessTo(db, actor, closed), actor, await loadOrgSettings(db));
+      if (closed.kind === "refused") return (await refuseClose(closed.blockers)) ?? reply;
+      return incidentDetail(db, closed.row, await accessTo(db, actor, closed.row), actor, await loadOrgSettings(db));
     } catch (e) {
       return send(reply, e);
     }
@@ -2036,6 +2116,9 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
       const result = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         await lockEvidenceHoldsExclusive(tx); // X15-H01: containment links the agent (widens the hold); before the halt's row lock
+        // ADR-0348: the status the containment moves from is the one under the lock, not the request's first read,
+        // so a containment never re-opens an incident resolved or closed meanwhile (closed is refused, and rolls back)
+        const fresh = await lockedIncident(tx, incident.id, "update");
         const halt = await haltAgentInTx(tx, body.agentId, `incident ${incident.ref} containment: ${body.reason}`, {
           userId: actor.userId,
           via: actor.via,
@@ -2051,16 +2134,20 @@ export function registerIncidentRoutes(app: FastifyInstance, db: Db, _opts: { da
           await addEvent(tx, incident.id, "link", actor.userId, { objectType: "agent", objectId: body.agentId, added: true, byContainment: true });
         }
         await addEvent(tx, incident.id, "containment", actor.userId, { agentId: body.agentId, halted: true, changed: halt.changed }, body.reason);
-        if (incident.status === "open") {
-          await tx.update(aiIncidents).set({ status: "contained", updatedAt: new Date() }).where(eq(aiIncidents.id, incident.id));
-          await addEvent(tx, incident.id, "status", actor.userId, { from: "open", to: "contained" });
+        const contains = INCIDENT_MACHINE.can(fresh.status, "contain_by_halt");
+        if (contains) {
+          await tx
+            .update(aiIncidents)
+            .set({ status: INCIDENT_MACHINE.next(fresh.status, "contain_by_halt"), updatedAt: new Date() })
+            .where(and(eq(aiIncidents.id, incident.id), whereFrom(aiIncidents.status, INCIDENT_MACHINE, "contain_by_halt")));
+          await addEvent(tx, incident.id, "status", actor.userId, { from: fresh.status, to: "contained" });
         }
         await audit(tx, {
           userId: actor.userId,
           objectId: incident.id,
           ruleId: INCIDENT_RULE_IDS.contained,
           reason: `incident ${incident.ref}: contained by halting agent ${body.agentId}${halt.changed ? "" : " (it was already halted)"}: ${body.reason}`,
-          detail: { agentId: body.agentId, haltChanged: halt.changed, statusFrom: incident.status, statusTo: incident.status === "open" ? "contained" : incident.status },
+          detail: { agentId: body.agentId, haltChanged: halt.changed, statusFrom: fresh.status, statusTo: contains ? "contained" : fresh.status },
         });
         return halt;
       });

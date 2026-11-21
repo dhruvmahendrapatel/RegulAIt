@@ -103,7 +103,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 
 - Every base image is pinned by digest: `python:3.12-slim-trixie@sha256:4840d514…`, `node:22-trixie-slim@sha256:be1e2a3d…`
   for the licence gate, `python:3.12-trixie@sha256:cad37dd2…` to build yara-python (all CPython 3.12.16), and
-  `golang:1.27-trixie@sha256:af1bfc26…` (Go 1.27.3) to rebuild skill-scanner's CEL helper.
+  `golang:1.27-trixie@sha256:f18c3d73…` (Go 1.27.4; was `af1bfc26…`, Go 1.27.3, until CVE-2026-97054) to rebuild skill-scanner's CEL helper.
 - The closure comes from our lockfile (`requirements.txt`): every wheel is pinned by sha256 and installed with
   `--require-hashes --no-deps --only-binary :all:`. That is 110 wheels for mcp-scanner and 99 for skill-scanner,
   resolved for cp312 manylinux x86_64. pip is removed from the image.
@@ -119,7 +119,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
     lockfiles override filelock to 4.2.9. garak already ships filelock 4.x with litellm; the smoke scans prove both
     engines still run.
   - skill-scanner's wheel bundles a Go CEL helper built with Go 1.27.1, whose standard library carries four advisories.
-    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.3 (`golang:1.27-trixie`, pinned
+    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.4 (`golang:1.27-trixie`, pinned
     by digest) and the flags of its packaging script. `cel-helper.py` swaps it in and rewrites the four
     build-describing fields of its manifest, which skill-scanner checks at every start. The module downloads are
     checked against the sdist's `go.sum` and happen at build time only.
@@ -285,6 +285,8 @@ and nothing changes. The engine's say reaches the existing states in two places:
 
 ## Open questions for the owner
 
+All five were answered on 2026-11-15: see **Owner decisions (2026-11-15)** at the end of this ADR.
+
 1. **Licences.** May the licence acceptances recorded for garak (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0,
    CNRI-Python; and decision 106 for numpy) cover the same packages in these two images? The builder applied them.
 2. **Clearance versus a later engine verdict.** Should an admin's `cleared` or `admitted` decision given before the
@@ -296,3 +298,213 @@ and nothing changes. The engine's say reaches the existing states in two places:
    Accept them as listed, or prune skill-scanner's Office-document check (and with it oletools)?
 5. **The hold line for skill bundles with scripts.** On the `anthropics/skills` corpus, 10 of 19 full bundles hold at
    `medium` (§7.1). Keep `medium` for bundles, or raise it and tune rules first?
+
+## Amendment — lane L4, phase 2 and the §7 follow-ups (2026-11-14)
+
+Built by lane L4 (backend only) in sequential PRs. The five open questions above are still the owner's. Lane L4 builds
+with the secure default for each one it touches, and records it here; nothing above is edited.
+
+### L4.1 SKILL.md frontmatter validation at import (§7.3)
+
+`POST /v1/builder/skills/import` now runs `validateSkillMarkdown` (`apps/gateway/src/skill-frontmatter.ts`) before
+anything is saved, and the lenient `parseSkillMarkdown` line parser in `@regulait/shared` is removed (it had no other
+caller).
+
+- **Format.** The Agent Skills SKILL.md format: a `---` frontmatter that closes within 8 KiB, parsed as YAML with
+  js-yaml 4.3.2's `CORE_SCHEMA` (MIT; already in the shipped closure, now a direct exact pin; duplicate keys and
+  custom tags are errors). Allowed fields: `name` (1–64 lowercase letters, digits and single hyphens), `description`
+  (1–1024, required), and the optional `license`, `compatibility` (≤ 500), `metadata` (string to string, ≤ 32) and
+  `allowed-tools`. Any other field is refused.
+- **Progressive-loading layout.** The body is at most 500 lines, and every relative file it links stays inside the
+  skill (no absolute path, `..`, backslash or `file:` URL). Bundled files are not accepted yet, so a reference is
+  checked for shape only.
+- **Errors.** `skill_frontmatter_missing`, `skill_frontmatter_too_large`, `skill_frontmatter_invalid` and
+  `skill_layout_invalid` (all 422), with fixed text that never echoes the file.
+- **Open source first.** No maintained Node validator for the format exists (the reference `skills-ref` is Python).
+  The YAML parse is js-yaml and the field rules are a zod schema; only the format's rules are ours.
+- **Effect on names.** A skill imported from a SKILL.md now has a format-conformant name (`evidence-summary`, not
+  `Evidence summary`). The other save doors (create, update, template seeding, bundle import) are unchanged: they are
+  the product's own forms, not SKILL.md files.
+- **Re-imports.** A SKILL.md the old lenient parser accepted can now be refused with 422: a name such as `My Skill`, a
+  field the format does not define, or a multi-line `description`. This is intended (ADR-0180: secure by default, no
+  grandfathering); the file is fixed and imported again. Skills already stored are untouched.
+- **One-line fields.** `description`, `license`, `compatibility` and `allowed-tools` are single lines: a line break,
+  tab or other control character is refused (a YAML `>` block's trailing newline is trimmed first). The body cap
+  (20,000 characters) is checked inside the validator, before the layout scan reads the body.
+
+### L4.2 Owner question 2: a later fail revokes an earlier clearance (secure default)
+
+`recordAdmissionEngineScan` now re-holds an admin's `cleared` MCP server or `admitted` skill when the engine reports
+`fail` for the cleared digest **and the admin had not already seen that fail**: no `fail` scan of the same digest
+under the same rule set (`rules_sha256`) was recorded at or before the clearance. So a re-scan that repeats the flag
+the admin reviewed leaves the clearance alone, while a fail on a digest cleared before any engine verdict, or a fail
+from a new rule set, revokes it.
+
+- The clearance fields are cleared with it (as a drift re-hold already does), the skill's pinned copies that were
+  `admitted` at that digest become `held`, and the audit row is `admission-engine-clearance-revoked` (effect deny).
+- An `unknown` (an engine error) is not evidence and revokes nothing.
+- **Superseded on 2026-11-15** by owner decision Q2 below: every later fail re-holds, even one the admin had seen.
+
+### L4.3 Subject target and queueing (§6 items 1 and 2)
+
+The gateway can now run the two admission-scan engines itself. Pending migration `admission_scan_subject_target`.
+
+- **The `subject` target.** `engine_runs.target_kind` gains `subject` and `trigger` gains `admission`. A subject run
+  names one MCP server (`target_mcp_server_id`, mcpscanner only) or one builder skill (`target_builder_skill_id`,
+  skillscanner only), both real foreign keys, plus the digest it scans. The widened `engine_runs_target_check` makes a
+  subject run person-less and project-less (no agent, judge, artifact, run-as or project), always trigger
+  `admission`, and keeps every other run free of subject columns. Two partial unique indexes keep one live (queued or
+  leased) run per engine, subject and digest.
+- **No person starts one.** `POST /v1/engine-runs` (and so a schedule or a workflow) answers 422
+  `engine_target_mismatch` for an admission-scan engine.
+- **Queueing** (`apps/gateway/src/admission-scan-runs.ts`, `enqueueAdmissionScanRun`), only while the engine is on;
+  with it off (the shipped default) nothing is queued:
+  - at every skill save door, through `sightSkill`, which create, import, update, template seeding and bundle import
+    all call;
+  - at every MCP manifest scan (`scanAndPersistManifest`), which serves live sync and the ADR-0100 re-scan;
+  - in the skill re-scan sweep, for each examined current and pinned digest.
+
+  A subject that already has a `pass` or `fail` at the digest under the shipped rule set is not queued again, so a
+  rules upgrade (a new `rulesSha256`) re-scans everything.
+- **The MCP snapshot.** A held manifest is never stored in `mcp_tools`, so the canonical tool list the digest covers
+  is captured when the run is queued. It is stored encrypted under the data key in `target_subject_input_ciphertext`
+  (an ADR-0200 exception, commented on the column), cleared at the run's end, and never returned by a route. With no
+  data key, no run is queued, the refusal is audited (`admission-scan-not-queued`), and the server stays held.
+- **Lease and task start.** The gateway builds the run's one input file from its own records: `tools.json` from the
+  snapshot, or `SKILL.md` from the stored name and body or a pinned copy with that digest. It checks the file against
+  the run's digest. The lease names it (`subject: {file, sha256, size}`) and carries no key. The task input places it
+  inline, so the runner never supplies its bytes.
+  **Security review of #843 (2026-11-15):** that file is the run's only input. Task start refuses any runner `files`
+  on a subject run, and the subject's path must be exactly `tools.json` or `SKILL.md` at the input root (the names
+  the drivers read), so a runner cannot place a decoy for the scanner to read instead. **Driver-echoed input
+  (2026-11-15, the follow-up slice):** each driver reports `inputs`, the relative path and sha256 of every file it
+  was given (at most 64, sorted). Task start records the sha256 of the file it placed on the run
+  (`engine_runs.target_subject_input_sha256`, migration `admission_scan_subject_target_input_sha`). The run's end
+  records a verdict only when `inputs` is exactly that one file at that path; anything else, or no recorded
+  expectation, is `unknown`, which holds. This sits on top of the executor's signed input-manifest digest
+  (`input_digest_mismatch`) and proves what the scanner process itself read. It proves which bytes an honest
+  driver read; it is not a defence against a compromised runner or executor, which could fail the run just as well
+  (the ADR-0190 runner-trust boundary). A mismatched report is `unknown`, which holds, and revokes no clearance. The committed report fixtures predate
+  the echo (Docker Hub refused the base-image pull with 429 when they were to be re-recorded), so the tests add the
+  `inputs` field to them; they are re-recorded with the image publish. A subject that is gone, whose digest is superseded, or whose
+  snapshot is missing ends the run `not_run` (`subject_gone`, `subject_superseded`, `subject_input_gone`).
+- **Placement.** A subject run has no project, so its placement names its own sensitivity: `confidential`, the floor
+  whose shipped class is the gVisor sandbox §6.1 asks for. The org's floors still decide the class
+  (`PlacementRequest.sensitivity`, read only when there is no project). **Builder's default; the owner may raise it.**
+- **The result.** The runner posts the driver's `regulait.admission-scan.v1` report as the envelope's raw report.
+  `recordAdmissionEngineScanTx` records it in the run's own end transaction, linked to the run.
+  - A completed run records its report. A failed or timed-out run records `unknown`, which holds.
+  - A cancelled, refused or expired run, or one whose task was never placed, records nothing; the subject stays
+    pending, which also holds.
+  - The subject row is locked `FOR NO KEY UPDATE`, so the run-then-subject lock order cannot deadlock with a
+    queueing.
+- **Left for later L4 slices:** the Node shim per image and the sandbox-limit proof (§6.1 and §6.4), publishing and
+  locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
+  ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.
+
+### L4.4 The runner shim (§6.1, 2026-11-16)
+
+`packages/engine-admission-scan` is the Node runner and task shim for both images, built in each Dockerfile's new
+`shim` stage exactly as modelscan's (pinned node stage, `pnpm deploy`, the normalised `.modules.yaml`; the node binary
+in the runtime with its libstdc++ and libgcc checked against the runtime base). The scanner stages and the smoke scans
+are unchanged. The image's default command is now the runner (`node /app/dist/main.js`, `REGULAIT_ADMISSION_ENGINE`
+set by the image and validated, fail closed).
+
+- **The task entry changed.** The manifest named the driver itself (`python -I scan.py /in /out/report.json`) as the
+  sandbox workload. That cannot run under ADR-0190 I5: the input is mounted at `/jobs`, the root is read-only, the
+  workload's stdout is the frame channel and nothing else, and the sandbox init passes the workload no environment but
+  PATH and HOME. The entry is now `node /app/dist/task-main.js <engine>` (the engine in argv). That task checks the input
+  root holds exactly the gateway's subject file, writes the worker self-test, runs the driver on the input root as a
+  child process group (10 minutes, inside the profile's wall clock) with an environment it builds (the offline switch, a
+  scratch HOME and TMPDIR), and sends the report back as frames.
+- **A subject run on the task bridge** (`@regulait/engine-runner` `task-subject.ts`). The runner's job directory holds
+  only `subject.json` (`{"path": "tools.json" | "SKILL.md"}`); the bridge starts the task with no files, no artifact,
+  no secret and that root subject path, which is what the gateway's task start requires. The task cannot know its run
+  id (the input has no run directory), so it writes under `subject/` and the bridge writes those frames under
+  `<runId>/`.
+- **The result.** The report is posted as the envelope's raw report, byte for byte (base64, sha256, bytes); the runner
+  never parses or logs it. A missing report, one that is not the bytes the task hashed, or one over the gateway's
+  raw-report cap (`ENGINE_RESULT_LIMITS.maxRawReportBytes`, 3 MiB) is posted as `failed` with no report; the gateway
+  records `unknown`. A driver that exited non-zero posts `failed` (`scan_failed`) with its own report attached.
+- **The worker-attested switch.** As spikee's: the task's self-test reports the offline switch only with the switch set
+  in the driver's environment, no remote-analyzer credential there (the drivers' `REMOTE_SWITCHES`, kept in lockstep by
+  a test), no runner credential in reach and nothing reachable. Before the first enable there is no report, so the
+  runner reports it false and the gateway rests it on the executor's attestation.
+- **The publish gate** (`scripts/engine-images-gate.mjs`) now counts the shim package's closure as both images' inputs
+  (`ENGINE_PACKAGES`), so the reproducible build archives a commit that has it. Both engines stay in
+  `UNPUBLISHED_ENGINE_IDS`; publishing, the lock entries, compose services and the §6.4 sandbox-limit proof are later
+  slices. The Dockerfile change has not been built locally (Docker Hub rate-limits this sandbox); CI's
+  `engine-images-build` builds it twice and compares.
+- **Shared helpers, not copies (#874 review).** The job-directory exchange (`JobExchange`, `jobDirRunId`: staging,
+  rename to live, the cancel file, release, reconcile) and the worker self-test's generic part (the report file, its
+  maximum age, the runner credential's locations, the common report schema, the isolation failures) live in
+  `@regulait/engine-runner` (`src/job-exchange.ts`, `src/worker-selftest.ts`); the admission scan keeps only its done
+  file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
+  own copies and move onto these helpers next (PENDING).
+
+### L4.5 Publish (§6.3, 2026-11-17)
+
+Both images are now publishable by the existing pipeline, exactly as spikee was made publishable (ADR-0245). Nothing
+is published by this change: CI's `engine-images.yml` publishes, signs keylessly and records them on its next run on
+main, and the lock-update branch is merged by a person.
+
+- **The published set.** `mcpscanner` and `skillscanner` join `ENGINE_IDS` (`scripts/engine-images-lock.mjs`), so the
+  publish gate plans them (`never published` until their first publish), the lock validates them and the lock bot
+  records them. `UNPUBLISHED_ENGINE_IDS` (`scripts/engine-images-gate.mjs`) is now empty; the reproducible-build
+  check still covers both. `scripts/build-engine-image.sh push` no longer refuses them.
+- **The lock.** `engines/images.lock.json` carries an all-null entry for each with `publishGeneration` 0, and the
+  generated `packages/shared/src/engines/images-lock.ts` and the compose defaults were regenerated with
+  `node scripts/engine-images-lock.mjs --write`.
+- **The manifest.** Each engine reads `imageDigest`, `taskImage` and its generation step (`1 + publishGeneration`)
+  from `ENGINE_IMAGES_LOCK`, as spikee does. The generation is unchanged (1) while the entry is null. The null digest
+  still keeps both engines un-enableable until a signed publish is recorded (secure by default): no runner passes the
+  self-test (`image_not_built`) and no task is placed (`taskImage` null). The `unverified` line now says the engine is
+  publishable with no publish recorded; skillscanner's yara-x line cites owner decision Q3 instead of "awaiting".
+- **Compose.** `engine-mcpscanner` and `engine-skillscanner` runners (profile `engines`) merge the hardened
+  `x-engine-runner` template on the internal `engines` network, digest-pinned by one variable each
+  (`REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `_DIGEST`, defaults written from the lock: all-zero until a publish, so
+  nothing starts), with their own state volume and two tmpfs exchange volumes (16 MiB jobs: the job directory holds
+  only `subject.json`; 64 MiB results: frames, one report of at most 3 MiB and the self-test). The environment is
+  what `packages/engine-admission-scan/src/main.ts` reads: the gateway URL, a per-engine enrolment token, the image
+  reference and digest, `REGULAIT_ADMISSION_ENGINE` (the same value the image sets) and the jobs and results
+  directories. Build-only `engine-<id>-image` services (profile `engine-images`) build each Dockerfile, as the other
+  engines'. There is no per-engine executor configuration: the executor starts a task by the manifest's `taskImage`.
+- **Also mirrored from spikee:** Dependabot pip entries for both engine directories and both in the base-image
+  digest group.
+- **Already in place, so unchanged:** the build-and-compare matrix (`engine-images-build.yml`), the publish workflow's
+  path filter (`packages/engine-admission-scan/**`), and the image-level Trivy and SBOM scan in `security.yml`,
+  which discovers every `engines/*/Dockerfile`.
+- **Not mirrored:** the air-gapped bundle (`scripts/build-image-bundle.sh --with-engines`) and the installer's bundled
+  tags still name promptfoo, modelscan and garak only, as for spikee: adding an engine with no recorded publish
+  would make `--with-engines` fail. They join the bundle with spikee once the first publish is recorded.
+- **Still open:** the first publish itself (CI), the §6.4 sandbox-limit proof, re-recording the report fixtures with
+  the published image, and the Q5 tuning on the `anthropics/skills` corpus.
+
+## Owner decisions (2026-11-15)
+
+The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).
+
+1. **Q1, licences: yes.** The garak acceptances (ADR-0187 decision 193: PSF-2.0, MPL-2.0, MIT-0, CNRI-Python; and
+   decision 106 for numpy) cover the same packages in both scanner images. Both `THIRD_PARTY.md` files cite this.
+2. **Q2, clearance versus a later verdict: re-hold.** This changes the default L4.2 built. Every engine `fail`
+   recorded after an admin's `cleared` (MCP) or `admitted` (skill) decision on the current digest re-holds it. That
+   includes a re-scan that repeats a flag the admin already reviewed, and a fail under the same rule set
+   (`recordAdmissionEngineScan` no longer looks for an earlier fail).
+   - **Notify the admin.** The revocation raises a governance alert (`admission-engine-clearance-revoked`, high,
+     subject `<kind>:<id>`, one open alert per subject), carrying counts and locations only, written in the scan's own
+     transaction. It lands in the admins' governance-alert queue; a chat push for it is not wired yet (a direct
+     import of the chat courier would add a gateway import cycle).
+   - **The audited override is the existing route.** `POST /v1/servers/:id/admission/clear` and the skill admit route
+     need a `settings_relax` step-up, a reason and a signed AI BOM snapshot, and each writes an audit row naming the
+     findings. The override is pinned to the digest and is undone by the next `fail`.
+   - The other rules are unchanged: an `unknown` revokes nothing; the clearance fields are emptied; pinned skill copies
+     at that digest become `held`; the audit row is `admission-engine-clearance-revoked`.
+3. **Q3, yara-x's statically linked crates: accepted.** Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 are
+   owner-accepted exceptions, recorded in `engines/skillscanner/THIRD_PARTY.md` with this decision cited.
+4. **Q4, oletools' `thirdparty/`: accepted.** The public-domain `oledump` and the BSD `tablestream` and `xglob` are
+   owner-accepted exceptions, recorded the same way. skill-scanner's Office check stays.
+5. **Q5, the bundle hold line: keep `medium`.** The noisy rules are tuned against the `anthropics/skills` corpus to cut
+   false holds, with false-hold counts measured before and after (§7.1 measured 10 of 19 full bundles held). That
+   tuning ships with the image work (the L4 runner-shim and publish slice), where the image can be run on the corpus.
+6. **#843 placement: keep `confidential`.** A no-project admission scan is placed at the `confidential` floor
+   (the gVisor class). This is now the owner's decision, not only the builder's default.

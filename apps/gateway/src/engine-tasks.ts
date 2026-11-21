@@ -54,6 +54,7 @@ import {
   type Db,
   type EngineRunRow,
   type ExecutorRow,
+  runWithRlsSystem,
 } from "@regulait/db";
 import {
   ENGINE_RUN_ENTITLEMENT_PHASE,
@@ -84,6 +85,7 @@ import { resolveRequirement } from "./execution-placement.js";
 import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSession } from "./executor-stdio.js";
 import { buildAgentDecider } from "./evals.js";
 import { artifactAccessible, type ArtifactStore } from "./model-artifacts.js";
+import { ADMISSION_SCAN_SENSITIVITY, subjectInputTx } from "./admission-scan-runs.js";
 import { assertProjectAttribution } from "./projects.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -375,6 +377,16 @@ async function startEngineTaskTx(
     if (run.targetKind === "artifact" ? body.artifact === null || run.targetArtifactId === null : body.artifact !== null) {
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an artifact scan's input places the run's artifact; an agent run's has none" };
     }
+    // ADR-0242 L4.3: a subject run's input places its one subject file (written by the gateway); no other run's does
+    const isSubjectRun = run.targetKind === "subject";
+    if (isSubjectRun !== Boolean(body.subject)) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's input places the run's subject file; no other run's does" };
+    }
+    // security review of #843: the gateway's subject file is a subject run's ONLY input. The drivers read fixed names
+    // at the input root, so a runner file there (or anywhere) could stand in for, or add to, what is scanned
+    if (isSubjectRun && body.files.length > 0) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's only input is the gateway's subject file; the runner adds no files" };
+    }
     if (m.needsModelAccess !== (body.secret !== null)) {
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "the task secret is the run's key: present exactly when the engine calls models" };
     }
@@ -383,6 +395,20 @@ async function startEngineTaskTx(
     if (body.artifact && artifactRow) {
       if (!deps.artifactStore()) return { kind: "refused_request" as const, status: 409, error: "artifact_store_unavailable" };
       files.push({ meta: { path: body.artifact.path, size: artifactRow.sizeBytes, sha256: artifactRow.sha256 }, source: { kind: "artifact", artifactId: artifactRow.id, storageKey: artifactRow.storageKey } });
+    }
+
+    // ADR-0242 L4.3: the subject file, built from the gateway's own records and checked against the run's digest
+    const subjectInput = isSubjectRun ? await subjectInputTx(tx, run) : null;
+    if (subjectInput?.ok) {
+      // exactly the name the driver reads, at the input root: a nested copy would leave the root name to anything else
+      if (body.subject!.path !== subjectInput.file) {
+        return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the subject file is placed as ${subjectInput.file}, at the input root` };
+      }
+      files.push({ meta: { path: body.subject!.path, size: subjectInput.bytes.length, sha256: subjectInput.sha256 }, source: { kind: "inline", bytes: subjectInput.bytes } });
+      // #843 security review: what the run's end checks the driver's echoed input against (this transaction, so a
+      // refused start that rolls back leaves no expectation behind). A later start overwrites it on purpose: the last
+      // placement is the one the engine scans
+      await tx.update(engineRuns).set({ targetSubjectInputSha256: subjectInput.sha256 }).where(eq(engineRuns.id, run.id));
     }
 
     const userId = run.runAsUserId ?? NO_IDENTITY;
@@ -397,7 +423,9 @@ async function startEngineTaskTx(
       ? await tx.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, run.runAsUserId))
       : [];
     let deny: { ruleId: string; ruleChain: unknown[]; reason: string; code: string } | null = null;
-    if (!person || person.disabledAt) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person is gone", code: "run_as_gone" };
+    if (subjectInput) {
+      if (!subjectInput.ok) deny = { ruleId: "engine-run-subject", ruleChain: [], reason: `the run's subject cannot be scanned (${subjectInput.code})`, code: subjectInput.code };
+    } else if (!person || person.disabledAt) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person is gone", code: "run_as_gone" };
     else if (isAgentRun) {
       const [target] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
       const [judge] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
@@ -451,7 +479,14 @@ async function startEngineTaskTx(
     // 2. the placement (decision 7), keyed to the decision written below
     const image = m.taskImage ?? "";
     let placed: { kind: "offered"; placementId: string; offerId: string; executorId: string } | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null };
-    const requirement = await resolveRequirement(txDb, { workloadKind: "engine_worker", projectId: run.projectId, agent: null, parentGrantId: null });
+    // ADR-0242 L4.3: an admission scan belongs to no project; it names its own sensitivity (ADMISSION_SCAN_SENSITIVITY)
+    const requirement = await resolveRequirement(txDb, {
+      workloadKind: "engine_worker",
+      projectId: run.projectId,
+      agent: null,
+      parentGrantId: null,
+      ...(isSubjectRun ? { sensitivity: ADMISSION_SCAN_SENSITIVITY } : {}),
+    });
     if (requirement.kind !== "required") {
       placed = { kind: "refused", code: "policy_unresolved", placementId: await refusedLinkedPlacement(txDb, decisionAuditId, { workloadKind: "engine_worker", imageDigest: image }, "policy_unresolved") };
     } else if (liveStdioSessions() >= STDIO_MAX_LIVE_SESSIONS) {
@@ -610,7 +645,8 @@ function watchRun(db: Db, deps: EngineTaskDeps, task: EngineTask): void {
       clearInterval(timer);
       return;
     }
-    void (async () => {
+    // ADR-0234 batch 7a (#809 review): server-side work, not the runner request that started the task
+    void runWithRlsSystem("system_task", "timer.engine-task-watchdog", async () => {
       const [r] = await db.select({ status: engineRuns.status }).from(engineRuns).where(eq(engineRuns.id, task.runId));
       if (!r || r.status !== "leased") {
         clearInterval(timer);
@@ -618,7 +654,7 @@ function watchRun(db: Db, deps: EngineTaskDeps, task: EngineTask): void {
         return;
       }
       await taskState(db, deps, task);
-    })().catch(() => undefined);
+    }).catch(() => undefined);
   }, ENGINE_TASK_WATCHDOG_MS);
   timer.unref?.();
 }

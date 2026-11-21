@@ -20,13 +20,26 @@
  *     record it, and redact refuses because no A2A redaction path exists yet (fail closed);
  *  7. the egress decision on the CURRENT posture (the MCP allow-list and private-range default), then the guarded
  *     fetch for every request (re-validated, pinned, redirect-refused);
+ *  6b. the ADR-0042 guardrails on the message (the org default, MAX-composed with the project's compliance floor): a
+ *     block refuses and nothing is sent; warn and log are recorded;
+ *  7. the egress decision on the CURRENT posture (see below);
  *  8. the credential, opened at send time and sent only to the registered origin.
+ * THE REPLY (ADR-0219 follow-up, P10): the remote agent's text is checked before anyone sees it, with the same PII mode
+ * and guardrail policy. A block WITHHOLDS the reply (a marker naming the categories, never the text) and the call is
+ * still charged, because the remote agent did the work: bill-and-withhold, as on the connector and model paths.
  * The outcome is written in ONE transaction: the pillar-5 `usage_events` row (`object_type` 'a2a_agent', the agent's
- * flat price, the project) and the audit row.
+ * flat price, the project) and the audit row, both with the PII and guardrail COUNTS only.
  *
  * ADMIN. Registration, the card refresh, the credential and the grants are admin-only (the default gate) and audited in
  * the same transaction as the write. Registration reads the agent card through the guarded fetch and refuses a card
- * whose JSON-RPC interface is on another origin than the registered url. A private-range opt-in and every credential
+ * whose JSON-RPC or HTTP+JSON interface is on another origin than the registered url, or speaks a protocol version
+ * other than 0.3.x or 1.x.
+ *
+ * BINDINGS (ADR-0231 §3, slice B1). The gateway speaks the JSON-RPC and the HTTP+JSON (REST) bindings, each in A2A 1.x
+ * and in the legacy 0.3.x that SAP's Agent Gateway speaks. A 0.3 card (no `supportedInterfaces`) is converted to the
+ * 1.0 shape by the SDK's own compatibility layer at read time, and every converted interface carries version '0.3'.
+ * Which transport a call uses is decided from the STORED card's interface version, never from anything the remote
+ * sends at call time. We write no transport: the SDK's factories, with `legacyCompat`, pick the 0.3 or 1.0 one. A private-range opt-in and every credential
  * write need a `settings_relax` step-up. The secret is the data-key envelope and no read returns it.
  *
  * Open source first (ADR-0176): the A2A wire protocol is the A2A project's own SDK (`@a2a-js/sdk`, Apache-2.0, pinned,
@@ -37,7 +50,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AgentCard, Role, type Message, type Part, type Task } from "@a2a-js/sdk";
-import { ClientFactory, DefaultAgentCardResolver, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
+import { ClientFactory, DefaultAgentCardResolver, JsonRpcTransportFactory, RestTransportFactory } from "@a2a-js/sdk/client";
 import {
   a2aAgentCredentials,
   a2aAgentGrants,
@@ -56,7 +69,9 @@ import { mcpUpstreamHeaderNameProblem, mcpUpstreamSecretProblem, setMcpUpstreamC
 import { createGuardedFetch, EGRESS_REDIRECT_REASON, egressRedirectRefused, egressRefusal, egressResponseTooLarge } from "./egress-guard.js";
 import { checkMcpServerUrl, loadMcpEgressPosture } from "./mcp-egress.js";
 import { loadOrgSettings, piiInternationalCategories } from "./org-settings.js";
-import { assertProjectAttribution, enforcePII, piiCategoryList, preDispatchProjectGate, projectPiiMode } from "./projects.js";
+import { assertProjectAttribution, enforcePII, piiCategoryList, piiWithheldMarker, preDispatchProjectGate, projectPiiMode } from "./projects.js";
+import { guardrailCategoryList, guardrailWithheldMarker } from "@regulait/shared";
+import { flattenFindings, guardrailOutcome, recordGuardrailDecision, resolveGuardrailPolicy, runGuardrailsAsync, type DispatchGuardrails } from "./guardrails.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
@@ -66,8 +81,12 @@ import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
-/** the JSON-RPC binding is the one transport this gateway speaks to a remote agent */
+/** the two bindings this gateway speaks to a remote agent (ADR-0231 §3); gRPC and anything else is filtered out */
 const JSONRPC = "JSONRPC";
+const HTTP_JSON = "HTTP+JSON";
+export const A2A_BINDINGS: readonly string[] = Object.freeze([JSONRPC, HTTP_JSON]);
+/** the SDK's v0.3 compatibility layer, on in the card resolver and both transport factories */
+const LEGACY_COMPAT = { legacyCompat: { enabled: true } } as const;
 /** a stored card is at most this many bytes of JSON (the 0253 CHECK allows a little more for jsonb overhead) */
 export const A2A_CARD_MAX_BYTES = 60_000;
 /** what a caller may send and what we hand back, in characters */
@@ -82,7 +101,7 @@ export const A2A_REPLY_MAX_CHARS = 64_000;
 export const A2A_CARD_RESPONSE_MAX_BYTES = 256 * 1024;
 export const A2A_RPC_RESPONSE_MAX_BYTES = 1024 * 1024;
 /** headers the A2A transport sets itself, so a credential may never name them */
-const A2A_RESERVED_HEADERS = ["a2a-version", "a2a-extensions"];
+const A2A_RESERVED_HEADERS = ["a2a-version", "a2a-extensions", "x-a2a-extensions"];
 
 export const A2A_RULE_IDS = Object.freeze({
   registered: "a2a-agent-registered",
@@ -110,6 +129,7 @@ export const A2A_RULE_IDS = Object.freeze({
   projectBudget: "project-budget-cap",
   piiBlocked: "pii-blocked",
   piiUnsupported: "a2a-pii-unsupported",
+  guardrailBlocked: "guardrail-blocked",
 });
 
 // ---------------------------------------------------------------------------
@@ -151,25 +171,56 @@ const originOf = (raw: string): string | null => {
 };
 
 /**
- * Why `card` cannot be registered at `registeredUrl`, or null. It needs a JSON-RPC interface, and every JSON-RPC
- * interface must be on the registered origin: the card is the remote party's own claim, so it may not move our calls
- * (or the credential) to another host.
+ * ADR-0231 §3: the protocol versions the gateway speaks, 0.3.x (the legacy wire, through the SDK's compatibility
+ * transports) and 1.x. Anything else, an empty version included, is refused rather than guessed: the SDK would treat an
+ * empty version as 0.3, and a version we never tested is not one we send a person's message over.
+ */
+export function a2aProtocolVersionSupported(version: string | undefined): boolean {
+  if (typeof version !== "string") return false;
+  return /^0\.3(\.\d{1,4})?$/.test(version) || /^1(\.\d{1,4}){0,2}$/.test(version);
+}
+/** 0.3.x is the legacy wire; the version comes from the stored card, never from the remote at call time */
+export const isLegacyA2aVersion = (version: string | undefined): boolean => typeof version === "string" && /^0\.3(\.|$)/.test(version);
+
+/** the interfaces a card offers in a binding the gateway speaks */
+const spokenInterfaces = (card: AgentCard) => card.supportedInterfaces.filter((i) => A2A_BINDINGS.includes(i.protocolBinding));
+
+/**
+ * Why `card` cannot be registered at `registeredUrl`, or null. It needs a JSON-RPC or HTTP+JSON interface; every such
+ * interface must be on the registered origin, because the card is the remote party's own claim and may not move our
+ * calls (or the credential) to another host; and each must speak a supported protocol version. Interfaces in other
+ * bindings (gRPC) are ignored: the client is never built with them.
  */
 export function cardProblem(card: AgentCard, registeredUrl: string): string | null {
   const origin = originOf(registeredUrl);
-  const rpc = card.supportedInterfaces.filter((i) => i.protocolBinding === JSONRPC);
-  if (rpc.length === 0) return "the agent card offers no JSON-RPC interface, the one transport the gateway uses";
-  const elsewhere = rpc.find((i) => originOf(i.url) !== origin);
-  if (elsewhere) return `the agent card names a JSON-RPC interface on another origin (${originOf(elsewhere.url) ?? "an invalid url"}) than the registered url`;
+  const spoken = spokenInterfaces(card);
+  if (spoken.length === 0) return "the agent card offers no JSON-RPC or HTTP+JSON interface, the transports the gateway uses";
+  const elsewhere = spoken.find((i) => originOf(i.url) !== origin);
+  if (elsewhere) return `the agent card names a ${elsewhere.protocolBinding} interface on another origin (${originOf(elsewhere.url) ?? "an invalid url"}) than the registered url`;
+  const unsupported = spoken.find((i) => !a2aProtocolVersionSupported(i.protocolVersion));
+  if (unsupported) return `the agent card names a ${unsupported.protocolBinding} interface with protocol version '${(unsupported.protocolVersion ?? "").slice(0, 32)}'; the gateway speaks 0.3.x and 1.x only`;
   if (Buffer.byteLength(JSON.stringify(AgentCard.toJSON(card)), "utf8") > A2A_CARD_MAX_BYTES) return `the agent card is larger than ${A2A_CARD_MAX_BYTES} bytes`;
   return null;
 }
 
-/** the card the client is built from: only the JSON-RPC interfaces on the registered origin */
+/** the bindings and versions a stored card offers to the gateway, for the admin view and the trail (bounded) */
+export function cardBindings(stored: Record<string, unknown>): Array<{ binding: string; protocolVersion: string; legacy: boolean }> {
+  let card: AgentCard;
+  try {
+    card = AgentCard.fromJSON(stored);
+  } catch {
+    return [];
+  }
+  return spokenInterfaces(card)
+    .slice(0, 20)
+    .map((i) => ({ binding: i.protocolBinding, protocolVersion: (i.protocolVersion ?? "").slice(0, 32), legacy: isLegacyA2aVersion(i.protocolVersion) }));
+}
+
+/** the card the client is built from: only the JSON-RPC and HTTP+JSON interfaces on the registered origin, in a supported version */
 function clientCard(stored: Record<string, unknown>, registeredUrl: string): AgentCard {
   const card = AgentCard.fromJSON(stored);
   const origin = originOf(registeredUrl);
-  return { ...card, supportedInterfaces: card.supportedInterfaces.filter((i) => i.protocolBinding === JSONRPC && originOf(i.url) === origin) };
+  return { ...card, supportedInterfaces: spokenInterfaces(card).filter((i) => originOf(i.url) === origin && a2aProtocolVersionSupported(i.protocolVersion)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +276,7 @@ export function a2aCredentialView(row: A2aAgentCredentialRow | undefined | null)
 async function fetchCard(db: Db, url: string, allowPrivateRanges: boolean | null, deps: A2aDeps): Promise<{ ok: true; card: AgentCard } | { ok: false; code: string; detail: string }> {
   const fetchImpl = await agentFetch(db, { url, allowPrivateRanges }, null, A2A_CARD_RESPONSE_MAX_BYTES, deps);
   try {
-    const card = await new DefaultAgentCardResolver({ fetchImpl }).resolve(url);
+    const card = await new DefaultAgentCardResolver({ fetchImpl, ...LEGACY_COMPAT }).resolve(url);
     const problem = cardProblem(card, url);
     return problem ? { ok: false, code: "card_refused", detail: problem } : { ok: true, card };
   } catch (err) {
@@ -265,7 +316,19 @@ export interface GovernedA2aCallArgs {
 }
 
 export type GovernedA2aCallOutcome =
-  | { kind: "allowed"; reply: string; taskState: string | null; costUsd: number | null; usageEventId: string; auditId: string }
+  | {
+      kind: "allowed";
+      reply: string;
+      taskState: string | null;
+      costUsd: number | null;
+      usageEventId: string;
+      auditId: string;
+      /** true when the reply was replaced by a marker because a PII or guardrail check on it blocked */
+      withheld: boolean;
+      /** COUNTS ONLY, when the reply's checks found anything */
+      pii: { mode: string; action: string; outputHits: unknown[] } | null;
+      guardrails: DispatchGuardrails | null;
+    }
   | { kind: "denied"; status: number; error: string; ruleId: string; reason: string; auditId: string }
   | { kind: "upstream_error"; status: 502; error: "a2a_upstream_error"; reason: string; auditId: string };
 
@@ -377,6 +440,23 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     if (chk.action === "block") return deny(403, "pii_blocked", A2A_RULE_IDS.piiBlocked, `the message contains PII (${piiCategoryList(chk.hits)})`, label, { pii: piiDetail });
   }
 
+  // 6b. the ADR-0042 guardrails on the message (PII has its own path above, so the detectors exclude it). There is no
+  //     per-agent override scope for a remote agent yet: the org default, MAX-composed with the project's floor.
+  const guardrailPolicy = await resolveGuardrailPolicy(db, { projectId, userId: args.userId });
+  let guardrailInput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
+  if (guardrailPolicy.active) {
+    guardrailInput = await runGuardrailsAsync(guardrailPolicy, "input", args.text);
+    if (guardrailInput.action === "block") {
+      // the one audit row is the refusal itself, with the counts; the guardrail rule id so one query finds every block
+      return deny(403, "guardrail_blocked", A2A_RULE_IDS.guardrailBlocked, `the message was blocked by a guardrail (${guardrailCategoryList(guardrailInput.blocking)})`, label, {
+        // the shape `recordGuardrailDecision` writes, so the guardrail violations view lists this refusal too
+        guardrail: { phase: "input", outcome: "blocked", action: "block", findings: flattenFindings(guardrailInput.findings) },
+      });
+    }
+    const outcome = guardrailOutcome(guardrailInput);
+    if (outcome) await recordGuardrailDecision(db, { userId: args.userId, objectType: "a2a_agent", objectId: agent.id, projectId, evaluation: guardrailInput, outcome, detail: { skillId } });
+  }
+
   // 7. the egress decision on the current posture
   const { decision } = await checkMcpServerUrl(db, agent.url, agent.allowPrivateRanges);
   if (!decision.ok) return deny(403, "egress_blocked", A2A_RULE_IDS.egress, decision.reason, label, { code: decision.code });
@@ -389,7 +469,12 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   let result: Message | Task;
   try {
     const fetchImpl = await agentFetch(db, agent, opened.credential, A2A_RPC_RESPONSE_MAX_BYTES, deps);
-    const client = await new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })], preferredTransports: [JSONRPC] }).createFromAgentCard(clientCard(agent.card, agent.url));
+    // ADR-0231 §3: both bindings, JSON-RPC preferred; with `legacyCompat` each factory picks the SDK's 0.3 transport
+    // when the STORED interface's version is 0.3.x, and the 1.0 one otherwise
+    const client = await new ClientFactory({
+      transports: [new JsonRpcTransportFactory({ fetchImpl, ...LEGACY_COMPAT }), new RestTransportFactory({ fetchImpl, ...LEGACY_COMPAT })],
+      preferredTransports: [JSONRPC, HTTP_JSON],
+    }).createFromAgentCard(clientCard(agent.card, agent.url));
     result = await client.sendMessage(
       {
         tenant: "",
@@ -416,21 +501,58 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     return { kind: "upstream_error", status: 502, error: "a2a_upstream_error", reason, auditId: row!.id };
   }
 
-  const { text, taskState } = replyText(result);
+  const { text: rawReply, taskState } = replyText(result);
+  // THE REPLY'S CHECKS (bill-and-withhold): the remote agent's text is untrusted content; nobody sees it until it passes
+  let text = rawReply;
+  let withheld = false;
+  let replyPii: { mode: string; action: string; outputHits: ReturnType<typeof enforcePII>["hits"] } | null = null;
+  if (piiMode) {
+    const chk = enforcePII(piiMode, { output: rawReply }, await piiInternationalCategories(db));
+    if (chk.hits.length) replyPii = { mode: piiMode, action: chk.action, outputHits: chk.hits };
+    if (chk.action === "block") {
+      withheld = true;
+      text = piiWithheldMarker(chk.hits);
+    }
+  }
+  let guardrailOutput: Awaited<ReturnType<typeof runGuardrailsAsync>> | null = null;
+  if (guardrailPolicy.active && !withheld) {
+    guardrailOutput = await runGuardrailsAsync(guardrailPolicy, "output", rawReply);
+    if (guardrailOutput.action === "block") {
+      withheld = true;
+      text = guardrailWithheldMarker(guardrailOutput.blocking);
+    }
+  }
+  const guardrailFindings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];
+  const guardrailView: DispatchGuardrails | null = guardrailFindings.length
+    ? {
+        action: guardrailOutput?.action === "block" ? "block" : guardrailFindings.some((f) => f.action === "warn") ? "warn" : "log",
+        phase: guardrailOutput?.findings.length ? "output" : "input",
+        findings: flattenFindings(guardrailFindings),
+        withheld: guardrailOutput?.action === "block",
+      }
+    : null;
+  const checks = {
+    ...(replyPii ? { replyPii: { mode: replyPii.mode, action: replyPii.action, outputHits: replyPii.outputHits } } : {}),
+    ...(guardrailView ? { guardrails: { action: guardrailView.action, findings: guardrailView.findings, withheld: guardrailView.withheld } } : {}),
+    ...(withheld ? { withheld: true } : {}),
+  };
   const costUsd = agent.pricePerCallUsd;
   // the spend and the decision, together
   const written = await db.transaction(async (tx) => {
     const [usage] = await tx
       .insert(usageEvents)
-      .values({ userId: args.userId, objectType: "a2a_agent", operation: skillId ?? "message", costUsd, projectId, detail: { a2aAgentId: agent.id, agentName: agent.name, taskState } })
+      .values({ userId: args.userId, objectType: "a2a_agent", operation: skillId ?? "message", costUsd, projectId, detail: { a2aAgentId: agent.id, agentName: agent.name, taskState, ...checks } })
       .returning({ id: usageEvents.id });
     const [audit] = await tx
       .insert(auditLog)
-      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, outcome: "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: text.length, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received` })
+      .values({ userId: args.userId, objectType: "a2a_agent", objectId: agent.id, toolName: skillId, detail: { ...grantDetail, ...checks, outcome: withheld ? "replied_withheld" : "replied", taskState, usageEventId: usage!.id, costUsd, replyChars: rawReply.length, receiptClass: "decision" }, effect: "allow", ruleId: A2A_RULE_IDS.callAllowed, ruleChain: [A2A_RULE_IDS.callAllowed], reason: `${label}: message sent${skillId ? ` for skill '${skillId}'` : ""} and a reply received${withheld ? `, but the reply was withheld (${replyPii?.action === "block" ? `PII: ${piiCategoryList(replyPii.outputHits)}` : `guardrail: ${guardrailCategoryList(guardrailOutput?.blocking ?? [])}`}); the call was charged` : ""}` })
       .returning({ id: auditLog.id });
+    // the reply's guardrail finding, in the same transaction as the spend it rode on
+    const outcome = guardrailOutput ? guardrailOutcome(guardrailOutput) : null;
+    if (guardrailOutput && outcome) await recordGuardrailDecision(tx, { userId: args.userId, objectType: "a2a_agent", objectId: agent.id, projectId, evaluation: guardrailOutput, outcome, detail: { skillId, usageEventId: usage!.id } });
     return { usageEventId: usage!.id, auditId: audit!.id };
   });
-  return { kind: "allowed", reply: text, taskState, costUsd, ...written };
+  return { kind: "allowed", reply: text, taskState, costUsd, ...written, withheld, pii: replyPii, guardrails: guardrailView };
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +585,7 @@ export function a2aAgentView(row: A2aAgentRow, credential: A2aAgentCredentialRow
     cardDescription: typeof card.description === "string" ? card.description.slice(0, 2000) : "",
     cardVersion: typeof card.version === "string" ? card.version.slice(0, 64) : "",
     skills: cardSkills(card),
+    bindings: cardBindings(card),
     cardFetchedAt: row.cardFetchedAt.toISOString(),
     allowPrivateRanges: row.allowPrivateRanges,
     pricePerCallUsd: row.pricePerCallUsd,
@@ -530,6 +653,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
         allowPrivateRanges,
         pricePerCallUsd: created.pricePerCallUsd,
         skills: cardSkills(card).map((s) => s.id),
+        bindings: cardBindings(card),
         ...(allowPrivateRanges === true ? { relaxation: true } : {}),
       });
       return created;
@@ -553,7 +677,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
       if (!updated) return null;
       const before = cardSkills(agent.card).map((s) => s.id);
       const after = cardSkills(card).map((s) => s.id);
-      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.cardRefreshed, "allow", `Remote agent '${agent.name}': card refreshed (${after.length} skill(s))`, { phase: "card-refresh", skillsBefore: before, skillsAfter: after });
+      await audit(tx as unknown as Db, req, agentId, A2A_RULE_IDS.cardRefreshed, "allow", `Remote agent '${agent.name}': card refreshed (${after.length} skill(s))`, { phase: "card-refresh", skillsBefore: before, skillsAfter: after, bindingsBefore: cardBindings(agent.card), bindingsAfter: cardBindings(card) });
       return updated;
     });
     if (!row) return reply.status(404).send({ error: "unknown_agent" });
@@ -739,7 +863,8 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "forbidden", detail: "a remote agent is called as a person; this credential has none" });
     const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
-    if (out.kind === "allowed") return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId };
+    if (out.kind === "allowed")
+      return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId, withheld: out.withheld, ...(out.pii ? { pii: out.pii } : {}), ...(out.guardrails ? { guardrails: out.guardrails } : {}) };
     return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
   });
 }

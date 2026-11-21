@@ -58,8 +58,9 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
-import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRules, type GovernedResource } from "@regulait/policy-kernel";
-import { governedEvaluateResource, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
+import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
+import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
+import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
   ConnectorProviderError,
@@ -82,6 +83,7 @@ import {
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
   contentTrustRefusalReason,
+  PROCESSING_NOT_PERMITTED,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { killSwitchState, loadExecutionDial, postureOf } from "./execution-posture.js";
@@ -315,6 +317,9 @@ async function connectorWriteBinding(
   };
 }
 
+/** ADR-0207 (G3): the rule id of the refusal a disabled connector answers with */
+export const CONNECTOR_DISABLED_RULE_ID = "connector-disabled-refused";
+
 export async function executeGovernedConnectorCall(
   db: Db,
   dataKey: string | undefined,
@@ -407,6 +412,18 @@ export async function executeGovernedConnectorCall(
   /** ADR-0251 finding 1: one consent per required approver (the dial's and each matching rule's) */
   let bindings: Array<{ approverUserId: string | null; binding: ConnectorWriteBinding }> = [];
   const attempt = async (out: ConnectorReplyRecorder): Promise<ConnectorAttemptResult> => {
+    // ADR-0207 (G3): a disabled connector refuses every governed call, first and before any other check, so a call
+    // that waited for an approval is refused when it comes back to run, and nothing is sent or metered.
+    if (connector.disabledAt) {
+      const reason =
+        `Connector '${connector.name}' is disabled (since ${connector.disabledAt.toISOString()}): every governed call ` +
+        "to it is refused until an admin enables it again";
+      await db.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+        detail: { phase: "connector-disabled", operation: body.operation, ...(projectId ? { projectId } : {}), ...(args.detail ?? {}),
+          receiptClass: "decision" },
+        effect: "deny", ruleId: CONNECTOR_DISABLED_RULE_ID, ruleChain: [], reason });
+      return out.status(403).send({ error: "connector_disabled", ruleId: CONNECTOR_DISABLED_RULE_ID, detail: reason });
+    }
     // pillar 5 + ADR-0011: attribution must point at a real project the caller
     // may bill to — mirror the model invoke path. Checked up front, before any
     // execution or metering can happen.
@@ -455,12 +472,18 @@ export async function executeGovernedConnectorCall(
     let coreRestrictions: ResourceRestrictions | null = null;
     let coreError: unknown = null;
     try {
-      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource });
+      // the window is counted once, under the rate lock, by governedEvaluateResource below (hard windows)
+      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, projectId, counts: false });
     } catch (err) {
       coreError = err;
     }
     const dialHolds = dial.mode === "require_approval" && body.operation === "write";
-    const matchedRules = coreRestrictions ? matchingResourceApprovalRules(coreResource, coreRestrictions.approvalRules) : [];
+    // ADR-0239 slice 2b: on Cedar, sharing the kernel's one request; an engine error binds no consent here, and the
+    // kernel refuses the call on the same error (governedEvaluateResource below)
+    const matchVerdict = coreRestrictions
+      ? matchingResourceApprovalRulesWith(coreRestrictions.approvalRuleEvaluator, coreResource, coreRestrictions.approvalRules)
+      : null;
+    const matchedRules = matchVerdict?.kind === "matched" ? matchVerdict.rules : [];
     // ADR-0251 review #715 finding 1 — EVERY NAMED APPROVER SIGNS. The dial's approver and each matching rule's approver
     // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
     // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.
@@ -726,6 +749,47 @@ export async function executeGovernedConnectorCall(
       });
     }
 
+    // ADR-0255 (P31) — a CATALOGUE PIECE runs only while an admin has it enabled, never on an air-gapped deployment,
+    // and never against a typed baseUrl (the connector's or its credential's). Checked on every invoke (an enablement
+    // can be withdrawn after the connector was created), after the entitlement decision and the budget gate, and
+    // BEFORE the approvals hold, so an approver is never asked to consent to a call that would be refused. It can only
+    // refuse, and its answer carries its own deny decision, matching the audit row.
+    if (connector.providerKind && isConnectorProviderKind(connector.providerKind)) {
+      const [pieceCred] = await db
+        .select({ baseUrl: connectorCredentials.baseUrl })
+        .from(connectorCredentials)
+        .where(eq(connectorCredentials.connectorId, connectorId));
+      const pieceRefusal = await refusePieceConnector(db, {
+        providerKind: connector.providerKind,
+        baseUrl: pieceCred?.baseUrl ?? connector.baseUrl ?? null,
+        label: `connector '${connector.name}' (${connector.providerKind})`,
+      });
+      if (pieceRefusal) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "piece_gate",
+            error: pieceRefusal.error,
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            ...(projectId ? { projectId } : {}),
+            receiptClass: "decision",
+          },
+          effect: "deny",
+          ruleId: CONNECTOR_PIECE_GATE_RULE_ID,
+          ruleChain: [],
+          reason: pieceRefusal.detail,
+        });
+        return out.status(pieceRefusal.status).send({
+          decision: { effect: "deny", ruleId: CONNECTOR_PIECE_GATE_RULE_ID, ruleChain: [], reason: pieceRefusal.detail },
+          error: pieceRefusal.error,
+          detail: pieceRefusal.detail,
+        });
+      }
+    }
+
     // ADR-0173 batch 2b — THE HOLD. After the entitlement deny and the budget
     // gate (a write that cannot run is never queued), before the credential,
     // PII, guardrails, egress and the provider: a held write executes nothing.
@@ -959,6 +1023,19 @@ export async function executeGovernedConnectorCall(
           pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
         });
       }
+    }
+
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on what would leave the gateway (after any redaction). After the PII-mode rung, so a cascade `block`
+    // has already refused; before guardrails and provider.invoke, so a refusal executes nothing and bills nothing.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "connector", connectorId, connectorName: connector.name, operation: body.operation },
+      projectId,
+      input: JSON.stringify({ object: effectiveInvocation.object ?? null, payload: effectiveInvocation.payload ?? null }),
+    });
+    if (processingRefusal) {
+      return out.status(processingRefusal.status).send({ decision, error: processingRefusal.error, detail: processingRefusal.detail });
     }
 
     // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
@@ -1493,6 +1570,8 @@ export async function executeGovernedConnectorCall(
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
     const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused" ||
+      // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal either
+      errCode === PROCESSING_NOT_PERMITTED ||
       // ADR-0186 decision 32: the refused input carries a credential
       errCode === CREDENTIAL_AUDIENCE_ERROR;
     const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;

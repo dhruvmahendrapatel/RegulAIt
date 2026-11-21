@@ -24,7 +24,7 @@ import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, InfoButton, Input, Select, SeverityBadge, SkeletonBlock, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
@@ -249,7 +249,7 @@ export default function RedTeamPage() {
             (runs.error && !runs.data ? (
               <ErrorState
                 title="Couldn't load the red-team runs"
-                message={runs.error instanceof Error ? runs.error.message : String(runs.error)}
+                message={errorText(runs.error)}
                 onRetry={() => void runs.refetch()}
               />
             ) : !runs.data ? (

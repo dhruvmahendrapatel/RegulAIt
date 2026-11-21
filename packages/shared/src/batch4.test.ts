@@ -63,6 +63,7 @@ describe("ADR-0186 strict defaults and relaxations", () => {
         "identity_manage",
         "pseudonym_reveal",
         "key_management",
+        "endpoint_remediation",
       ],
       toolApprovalSensitiveQuorum: 2,
       decisionReceiptsMode: "on",
@@ -160,7 +161,7 @@ describe("ADR-0186 vocabularies", () => {
     for (const id of DETECTION_MONITOR_RULE_IDS) expect(MONITOR_RULES[id].label.length).toBeGreaterThan(0);
     expect(RECEIPT_OBJECT_TYPES).toEqual(["mcp_tool", "agent", "connector", "approval"]);
     expect(VENDORED_DETECTION_PACKS).toHaveLength(4);
-    expect(STEP_UP_ACTION_KINDS).toHaveLength(9); // ADR-0188 added identity_manage; ADR-0195 pseudonym_reveal; migration 0203 key_management
+    expect(STEP_UP_ACTION_KINDS).toHaveLength(10); // ADR-0188 added identity_manage; ADR-0195 pseudonym_reveal; migration 0203 key_management; ADR-0331 endpoint_remediation
   });
   it("the receipt's signed bytes are the canonical payload", () => {
     const p: DecisionReceiptPayload = {
@@ -200,15 +201,24 @@ describe("ADR-0186 B: the approval signing payload", () => {
       { nonce: "BBBBBBBBBBBBBBBBBBBBBB" },
       { approvalId: "00000000-0000-4000-a000-000000000009" },
       { serverId: null, connectorId: "00000000-0000-4000-a000-000000000002" },
+      // ADR-0251: a model call's payload names the agent, and differs from a tool or connector payload on the same id
+      { serverId: null, agentId: "00000000-0000-4000-a000-000000000002" },
     ];
     for (const v of variants) {
       expect(approvalSigningChallenge(approvalSigningPayload({ ...base, ...v } as never)), JSON.stringify(v)).not.toBe(c);
     }
   });
+  it("ADR-0251: a model-call payload names only its agent; MCP and connector payloads carry no agentId key", () => {
+    const m = approvalSigningPayload({ ...base, serverId: null, agentId: "00000000-0000-4000-a000-000000000003" });
+    expect(m).toEqual({ v: APPROVAL_SIGN_VERSION, ...base, serverId: undefined, agentId: "00000000-0000-4000-a000-000000000003" });
+    expect(Object.keys(m)).not.toContain("serverId");
+    expect(Object.keys(approvalSigningPayload(base))).not.toContain("agentId");
+  });
   it("refuses a payload that cannot be bound", () => {
     expect(() => approvalSigningPayload({ ...base, argumentsDigest: "x" })).toThrow(/argumentsDigest/);
     expect(() => approvalSigningPayload({ ...base, connectorId: "c" })).toThrow(/exactly one/);
     expect(() => approvalSigningPayload({ ...base, serverId: null })).toThrow(/exactly one/);
+    expect(() => approvalSigningPayload({ ...base, agentId: "a" })).toThrow(/exactly one/);
     expect(() => approvalSigningPayload({ ...base, nonce: "short" })).toThrow(/nonce/);
     expect(() => approvalSigningPayload({ ...base, toolName: "" })).toThrow(/toolName/);
   });

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -36,8 +37,8 @@ const (
 	GapDisabledByOrgPolicy   = "disabled_by_org_policy"
 	GapDisabledByLocalPolicy = "disabled_by_local_policy"
 	GapListingTruncated      = "listing_truncated"
-	// GapMCPConfigUnparsed: an MCP host config that is not plain JSON (JSONC with comments, TOML). No maintained
-	// JSONC or TOML parser passes ADR-0176 yet (ADR-0259), so its servers are not read.
+	// GapMCPConfigUnparsed: an MCP host config that is not an object in its format (damaged JSON, JSONC or TOML),
+	// so its servers are not read. JSONC and TOML are parsed since the ADR-0259 amendment of 2026-11-14.
 	GapMCPConfigUnparsed = "mcp_config_unparsed"
 	// GapMCPServersTruncated: a config listed more servers than one fact set may carry.
 	GapMCPServersTruncated = "mcp_servers_truncated"
@@ -62,6 +63,21 @@ type Env struct {
 	StartupFiles []string
 	// MaxFileBytes caps each file read (R15 §2.3: for example 256 KiB).
 	MaxFileBytes int64
+	// UserRoots are the user-writable roots (home, appdata, localappdata) as os.Root handles. Only the add-on removal
+	// applier (ADR-0331) writes through them; no collector does.
+	UserRoots map[contract.Root]*os.Root
+
+	// opened holds every os.Root NewEnv opened, for Close.
+	opened []*os.Root
+}
+
+// Close releases the roots NewEnv opened. The agent keeps them for the life of the process; tests close them so
+// their temporary directories can be removed (Windows refuses to delete a directory with an open handle).
+func (e *Env) Close() {
+	for _, r := range e.opened {
+		_ = r.Close()
+	}
+	e.opened = nil
 }
 
 // PathDir is one PATH directory: Root is RootHome (Path relative to the home) or RootPath (Path absolute, never

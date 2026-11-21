@@ -341,7 +341,7 @@ export interface HardenOutcome {
 export function registerPosturePresetRoutes(
   app: FastifyInstance,
   db: Db,
-  opts: { sink?: AnchorSink | null; bootstrapConfigured?: boolean } = {},
+  opts: { sink?: AnchorSink | null; bootstrapConfigured?: boolean; bootstrapRetired?: () => Promise<boolean> } = {},
 ) {
   // AER-012: ONE sink for the life of the app — the same object the audit-chain
   // and posture routes hold when `buildApp` passes it, else resolved from the
@@ -364,7 +364,11 @@ export function registerPosturePresetRoutes(
       // ADR-0186 B: passkey-signed approvals with no relying party fail closed — say so
       approvalSigning: approvalSigningPosture(settings.approvalSignatureMode),
       // B4S-06: the bootstrap credential passes a step-up only during first-admin setup
-      bootstrap: await bootstrapStepUpPosture(db, opts.bootstrapConfigured === true),
+      bootstrap: await bootstrapStepUpPosture(
+        db,
+        opts.bootstrapConfigured === true,
+        opts.bootstrapConfigured === true && opts.bootstrapRetired ? await opts.bootstrapRetired() : false,
+      ),
       // ADR-0189 R25 item 12: where the receipt signing key came from. Reported, never a control:
       // it does not count toward `hardened` and blocks nothing (a missing key already refuses sign-offs).
       receiptSigningKey: receiptSigningKeyPosture(process.env),

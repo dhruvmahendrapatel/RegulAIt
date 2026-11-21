@@ -101,6 +101,7 @@ import {
   semanticCacheSavings,
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
+import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { abacPrincipalFromRequest } from "./abac-principal.js";
@@ -145,6 +146,9 @@ export async function liveEngineRunGrant(db: Db, engineRunId: string): Promise<s
 
 export const COMPAT_ANTHROPIC_ROUTE = "POST /v1/messages";
 export const COMPAT_OPENAI_ROUTE = "POST /v1/chat/completions";
+/** ADR-0287 — the OpenAI Responses dialect. Same vendor surface as Chat
+ * Completions, so it rides `openaiCompatEnabled` (and its scope rules). */
+export const COMPAT_RESPONSES_ROUTE = "POST /v1/responses";
 export const MCP_PROXY_ROUTE = "POST /mcp/:serverId";
 /** ADR-0066 §1 — the discovery endpoint both provider SDKs call at setup.
  * ONE route serving TWO envelopes, chosen by the `anthropic-version` header. */
@@ -171,6 +175,7 @@ export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([
 export const INTERCEPTION_GATED_ROUTES: ReadonlySet<string> = new Set([
   COMPAT_ANTHROPIC_ROUTE,
   COMPAT_OPENAI_ROUTE,
+  COMPAT_RESPONSES_ROUTE,
   COMPAT_MODELS_ROUTE,
   MCP_PROXY_ROUTE,
 ]);
@@ -215,7 +220,7 @@ export async function interceptionSurfaceEnabled(db: Db, route: string): Promise
   if (!INTERCEPTION_GATED_ROUTES.has(route)) return null;
   const s = await loadInterceptionSettings(db);
   if (route === COMPAT_ANTHROPIC_ROUTE) return s.anthropicCompatEnabled;
-  if (route === COMPAT_OPENAI_ROUTE) return s.openaiCompatEnabled;
+  if (route === COMPAT_OPENAI_ROUTE || route === COMPAT_RESPONSES_ROUTE) return s.openaiCompatEnabled;
   return s.mcpInterceptionEnabled;
 }
 
@@ -438,6 +443,8 @@ export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "xai",
   "google",
+  // ADR-0352: Vertex runs the same @ai-sdk/google implementation as "google"
+  "vertex",
   "mock",
 ]);
 
@@ -681,6 +688,14 @@ export async function prepareCompatCall(
     via = "agent_header";
     if (!requested) {
       // DEFAULT-DENY. An unknown/disabled named agent is never a pass-through.
+      // ADR-0326: audited, so a model an admin blocks by disabling its agent leaves a record in every coding tool.
+      await auditUnresolvedCompatCall(db, userId, {
+        error: "agent_not_resolvable",
+        agentId: namedAgentId,
+        requestedModel: args.requestedModel,
+        resolutionMode: mode,
+        projectId,
+      });
       return {
         ok: false,
         status: 403,
@@ -707,6 +722,14 @@ export async function prepareCompatCall(
       // THE BATCH-H INVARIANT. An unmapped model is DEFAULT-DENY — never a
       // silent pass-through to the vendor, which is the entire point of
       // intercepting in the first place.
+      // ADR-0326: audited, so an unmapped or disabled model leaves a deny record.
+      await auditUnresolvedCompatCall(db, userId, {
+        error: "model_not_mapped",
+        agentId: null,
+        requestedModel: args.requestedModel,
+        resolutionMode: mode,
+        projectId,
+      });
       return {
         ok: false,
         status: 403,
@@ -970,7 +993,7 @@ export async function executeCompatCall(
   dataKey: string | undefined,
   prepared: CompatPrepared,
   args: {
-    surface: "anthropic" | "openai";
+    surface: "anthropic" | "openai" | "openai_responses";
     messages: ModelChatMessage[];
     system?: string | undefined;
     /** pillar-6 prompt caching, mapped from an Anthropic `cache_control`
@@ -1095,6 +1118,81 @@ export async function executeCompatCall(
     },
   };
 
+  // -------------------------------------------------------------------------
+  // ADR-0327 SLICE 4B — A SWITCHED RULE-LIKE STEP IS ANSWERED BY ITS RULE.
+  //
+  // Only a step a named reviewer switched (slice 4a), only while its rule still hashes to what they approved, and only
+  // for an input the rule's exact-match cells cover; anything else goes to the AI exactly as before. A tool-bearing or
+  // tool-forcing turn, a structured-output request and a passthrough call are never rule-served: the rule was measured
+  // on plain answers. The answer goes through the one dispatch core as a candidate, so every input gate and the
+  // output PII and guardrail checks still run, and its span is marked so detection never measures the rule itself.
+  // -------------------------------------------------------------------------
+  const ruleAnswer =
+    prepared.routingMode !== "passthrough" && !args.tools && !args.toolChoice && !args.responseFormat
+      ? await switchedRuleAnswer(db, { agentId: prepared.served.id, stepName: prepared.served.name, inputText: flatText })
+      : null;
+  if (ruleAnswer) {
+    const ruleStep = ruleAnswer.ref;
+    const governed = await executeGovernedDispatch(db, dataKey, {
+      ...dispatchArgs,
+      onText: undefined,
+      onThinking: undefined,
+      cachedResponse: { outputText: ruleAnswer.output, model: null, inputTokens: 0, outputTokens: 0, createdAt: new Date() },
+      ruleStepServed: ruleStep,
+    });
+    if (!governed.ok) return compatHoldStatus(governed);
+    args.onText?.(governed.result.outputText);
+    await recordRuleStepSaving(db, {
+      userId: prepared.userId,
+      requestedAgentId: prepared.requested.id,
+      servedAgentId: prepared.served.id,
+      projectId: prepared.projectId ?? null,
+      ruleAnswer,
+      surface: `compat_${args.surface}`,
+    });
+    await db.insert(auditLog).values({
+      userId: prepared.userId,
+      objectType: "agent",
+      objectId: prepared.requested.id,
+      detail: {
+        surface: `compat_${args.surface}`,
+        mode: COMPAT_MODE,
+        resolution: prepared.resolution,
+        servedAgentId: prepared.served.id,
+        ruleStep,
+        ...(prepared.projectId ? { projectId: prepared.projectId } : {}),
+        receiptClass: "decision",
+      },
+      effect: "allow",
+      ruleId: "compat-rule-step-served",
+      ruleChain: [],
+      reason:
+        `intercepted ${args.surface}-shaped call answered by the approved rule for step ${prepared.served.name} — ` +
+        `no provider was contacted and nothing was billed`,
+    });
+    // No usage_events: nothing was spent. The ledger records the saving.
+    return {
+      ok: true,
+      result: {
+        servedAgentId: governed.result.servedAgentId,
+        // the wire response needs a valid model identifier; the audit row and the span record that a rule answered
+        model: governed.result.model,
+        outputText: governed.result.outputText,
+        stopReason: "end_turn",
+        refusal: false,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        costUsd: 0,
+        measuredCostSavedUsd: ruleAnswer.avgCostPerRunUsd,
+        credentialSource: "none",
+        projectBudgetAlerted: false,
+        ...(governed.result.pii ? { pii: governed.result.pii } : {}),
+        ...(governed.result.guardrails ? { guardrails: governed.result.guardrails } : {}),
+        ...(governed.result.useCaseGate ? { useCaseGate: governed.result.useCaseGate } : {}),
+      },
+      ...(governed.trace ? { trace: governed.trace } : {}),
+    };
+  }
+
   if (cacheKey) {
     const hit = await lookupSemanticCache(db, {
       userId: prepared.userId,
@@ -1112,7 +1210,7 @@ export async function executeCompatCall(
         onThinking: undefined,
         cachedResponse: hit,
       });
-      if (!governed.ok) return governed;
+      if (!governed.ok) return compatHoldStatus(governed);
       // A streaming caller still gets a stream: the cached answer is emitted
       // as one delta, so the wire contract is unchanged and an IDE cannot tell
       // a hit from a very fast model.
@@ -1238,7 +1336,17 @@ export async function executeCompatCall(
     }
   }
 
-  return outcome;
+  return compatHoldStatus(outcome);
+}
+
+/**
+ * ADR-0251 — a model call held for approval is a 202 on the native surfaces, but an OpenAI- or Anthropic-shaped
+ * client treats any 2xx as a completion and would try to parse the error body as one. On the compat surfaces the
+ * hold is answered 403 `approval_pending` (an error those SDKs do not retry), with the approval id in the message.
+ */
+function compatHoldStatus(outcome: DispatchOutcome): DispatchOutcome {
+  if (outcome.ok || outcome.status !== 202) return outcome;
+  return { ...outcome, status: 403 };
 }
 
 /** Disclosure headers every compat response carries, in BOTH shapes. The body
@@ -1564,5 +1672,42 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
         resolutionMode: policy.settings.resolutionMode,
       },
     };
+  });
+}
+
+/**
+ * ADR-0326 (pilot criterion 1): the two resolution refusals (`agent_not_resolvable`, `model_not_mapped`) used to
+ * return 403 with no audit row, so a model an admin "blocked" by disabling or unmapping its agent left no record.
+ * One deny row each, on the agent object (objectId null when no agent was named).
+ */
+async function auditUnresolvedCompatCall(
+  db: Db,
+  userId: string,
+  a: {
+    error: "agent_not_resolvable" | "model_not_mapped";
+    agentId: string | null;
+    requestedModel: string;
+    resolutionMode: string;
+    projectId: string | null | undefined;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: a.agentId,
+    detail: {
+      surface: "compat",
+      mode: COMPAT_MODE,
+      requestedModel: a.requestedModel,
+      resolutionMode: a.resolutionMode,
+      ...(a.projectId ? { projectId: a.projectId } : {}),
+      receiptClass: "decision",
+    },
+    effect: "deny",
+    ruleId: a.error,
+    ruleChain: [],
+    reason: a.error === "model_not_mapped"
+      ? `model '${a.requestedModel}' maps to no enabled governed agent`
+      : `no enabled governed agent with the named id`,
   });
 }

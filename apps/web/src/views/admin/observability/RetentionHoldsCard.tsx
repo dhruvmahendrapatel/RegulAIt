@@ -88,7 +88,7 @@ export function RetentionHoldsCard() {
           {query.problem}
         </p>
       )}
-      <QueryGate loading={holds.isLoading} error={holds.error} onRetry={() => void holds.refetch()}>
+      <QueryGate query={holds}>
         <Table<RetentionHold>
           rows={rows}
           rowKey={(h) => h.traceId}

@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   74
+// Operations:   76
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -138,7 +138,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Liveness probe. The only route that is never rate limited.
+ * Liveness probe. Never rate limited (nor is the internal readiness probe, /ready).
  * @stability public-stable — auth: public
    */
   getHealth<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -441,6 +441,15 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input.
+ * @stability public-beta — auth: user
+ * @compat body/response shaped by the upstream vendor: https://platform.openai.com/docs/api-reference/responses
+   */
+  postV1Responses<T = unknown>(body: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", `/v1/responses`, body, options);
+  }
+
+  /**
  * List roles.
  * @stability public-stable — auth: admin
    */
@@ -536,6 +545,14 @@ export class GeneratedRegulAItClient extends BaseClient {
    */
   getV1SpendForecast<T = unknown>(options?: RequestOptions): Promise<T> {
     return this.request<T>("GET", `/v1/spend/forecast`, undefined, options);
+  }
+
+  /**
+ * GET /v1/state-machines
+ * @stability public-beta — auth: user
+   */
+  getV1StateMachines<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/state-machines`, undefined, options);
   }
 
   /**
@@ -928,6 +945,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "path": "/v1/reports/runs/{id}"
   },
   {
+    "id": "postV1Responses",
+    "method": "POST",
+    "path": "/v1/responses"
+  },
+  {
     "id": "getV1Roles",
     "method": "GET",
     "path": "/v1/roles"
@@ -986,6 +1008,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1SpendForecast",
     "method": "GET",
     "path": "/v1/spend/forecast"
+  },
+  {
+    "id": "getV1StateMachines",
+    "method": "GET",
+    "path": "/v1/state-machines"
   },
   {
     "id": "getV1UsageEvents",

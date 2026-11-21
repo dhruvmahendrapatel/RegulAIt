@@ -7,7 +7,8 @@
  * (`evaluateAgent`, `evaluateConnector`, `evaluateA2a`). The fixed order, the same for every type:
  *
  *   entitlement deny → stays a deny (a restriction never rescues a call, and never manufactures a grant)
- *   attribution mandate → rate limits → ABAC forbid → approval (ABAC require_approval, then approval rules)
+ *   attribution mandate → rate limits → ABAC forbid → ABAC require_approval (refuses: no consent binds the policy yet,
+ *   ADR-0251 slice 4) → approval rules
  *
  * A call over its limit is refused before it is queued for anyone's sign-off, and an approval only ever turns an
  * allow into a hold: it is consulted strictly after an entitlement allow (AER-017's order on the MCP path).
@@ -64,10 +65,51 @@ export interface ResourceApprovalRule extends ResourceBound {
 }
 
 /** The approval rules that bind this call, most specific first (the first one names the approver). The gateway uses
- * the same predicate to decide whether a consent binding is needed, so the two can never disagree. */
+ * the same predicate to decide whether a consent binding is needed, so the two can never disagree.
+ *
+ * ADR-0239 slice 2b: the hand-written predicate. The gateway matches on Cedar (`matchingResourceApprovalRulesWith` with
+ * `@regulait/policy-kernel/resource-approval-rule-cedar`); this stays the kernel's default for one release, and the
+ * differential test holds Cedar to it. */
 export function matchingResourceApprovalRules<R extends ResourceApprovalRule>(resource: GovernedResource, rules: readonly R[]): R[] {
   const write = resourceIsWrite(resource);
   return rules.filter((r) => binds(r, resource) && (!r.writeOnly || write)).sort(bySpecificity);
+}
+
+/** ADR-0239 slice 2b — a resource approval-rule engine's answer: the binding rules (any order), or an error (a DENY). */
+export type ResourceApprovalRuleVerdict<R extends ResourceApprovalRule = ResourceApprovalRule> =
+  | { kind: "matched"; rules: R[] }
+  | { kind: "error"; message: string };
+
+/**
+ * ADR-0239 slice 2b — the approval-rule MATCH engine for model, connector and A2A calls (Cedar in the gateway). It
+ * answers only WHICH rules bind the call, as elements of the array it was given; the specificity order that names the
+ * approver stays here, in TypeScript, because Cedar returns an unordered set.
+ */
+export interface ResourceApprovalRuleEvaluator {
+  readonly engine: string;
+  matching(rules: readonly ResourceApprovalRule[], resource: GovernedResource): ResourceApprovalRuleVerdict;
+}
+
+/**
+ * ADR-0239 slice 2b — the match on an injected engine, most specific first. No engine = the hand-written predicate.
+ * An engine error, a throw, or an answer that is not a subset of the input is an error verdict, never "nothing
+ * matched": the kernel turns it into a deny, and a gateway caller must not read it as "no rule binds this call".
+ */
+export function matchingResourceApprovalRulesWith<R extends ResourceApprovalRule>(
+  evaluator: ResourceApprovalRuleEvaluator | null | undefined,
+  resource: GovernedResource,
+  rules: readonly R[],
+): ResourceApprovalRuleVerdict<R> {
+  if (!evaluator || rules.length === 0) return { kind: "matched", rules: matchingResourceApprovalRules(resource, rules) };
+  try {
+    const v = evaluator.matching(rules, resource);
+    if (v.kind === "error") return v;
+    const given = new Set<ResourceApprovalRule>(rules);
+    if (v.rules.some((r) => !given.has(r))) return { kind: "error", message: "the approval-rule engine answered with a rule it was not given" };
+    return { kind: "matched", rules: [...new Set(v.rules as R[])].sort(bySpecificity) };
+  } catch (e) {
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** `currentCount` = allowed calls already inside the window, counted by the gateway on the database clock. */
@@ -110,6 +152,8 @@ export const RESOURCE_RULE_IDS = {
   abacForbid: "abac-forbid",
   abacApproval: "abac-require-approval",
   approvalRule: "resource-approval-rule",
+  /** ADR-0239 slice 2b: the approval-rule engine failed (the same id as the MCP path's) */
+  approvalEngineError: "approval-rule-engine-error",
   approvalUnqueueable: "approval-not-queueable",
   coreError: "governed-core-error",
 } as const;
@@ -123,6 +167,9 @@ export interface ComposeResourceInput {
   attributionRequired: boolean;
   rateLimits?: readonly ResourceRateLimit[];
   approvalRules?: readonly ResourceApprovalRule[];
+  /** ADR-0239 slice 2b: the approval-rule match engine; absent = the hand-written predicate (for one release). An
+   * engine error or throw DENIES the call (`approval-rule-engine-error`). */
+  approvalRuleEvaluator?: ResourceApprovalRuleEvaluator | null;
   /** ADR-0040 verdict for this call; null/undefined = no active policy applies (no rule-chain entry) */
   abacDecision?: AbacDecision | null;
   /** a bound, fresh consent the gateway found for exactly this call */
@@ -177,7 +224,7 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
   }
   if (limits.length) chain.push({ rule: RESOURCE_RULE_IDS.rateLimit, outcome: "allow" });
 
-  // 3. ABAC never grants: forbid refuses, require_approval joins the approval step
+  // 3. ABAC never grants: forbid refuses, and so does require_approval (below)
   const abac = input.abacDecision ?? null;
   if (abac?.effect === "forbid") {
     chain.push({ rule: RESOURCE_RULE_IDS.abacForbid, outcome: "deny", ...(abac.policyId ? { grantId: abac.policyId } : {}) });
@@ -188,26 +235,50 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
     });
   }
 
-  // 4. approval: the entitlement's own hold (the execution dial), ABAC's, and every matching approval rule
-  const matched = matchingResourceApprovalRules(resource, input.approvalRules ?? []);
+  //    ADR-0251 slice 4 (review #836): an ABAC `require_approval` REFUSES a model, connector or A2A call (fail
+  //    closed). These paths bind consent to approval rules and the execution dial only, so the hold could otherwise be
+  //    released by another rule's consent, or queued with no consent bound to the policy version. Here, in the kernel,
+  //    so no caller can skip it; the audit chain then says `deny`, never `satisfied-by-approval`.
+  const verdict = matchingResourceApprovalRulesWith(input.approvalRuleEvaluator, resource, input.approvalRules ?? []);
+  if (verdict.kind === "error") {
+    // ADR-0239 slice 2b: an engine failure is a deny, never "no rule binds" (ADR-0180)
+    chain.push({ rule: RESOURCE_RULE_IDS.approvalRule, outcome: "deny", grantId: RESOURCE_RULE_IDS.approvalEngineError });
+    return out({
+      effect: "deny",
+      ruleId: RESOURCE_RULE_IDS.approvalEngineError,
+      reason: `approval-rule evaluation failed for ${subject}, so the call is refused; nothing was sent: ${verdict.message}`,
+    });
+  }
+  const matched = verdict.rules;
   const matchedIds = matched.map((r) => r.id);
-  const abacApprover = abac?.effect === "require_approval" ? (abac.approverUserId ?? null) : null;
-  const needsApproval = base.effect === "require_approval" || matched.length > 0 || abac?.effect === "require_approval";
+  if (abac?.effect === "require_approval") {
+    chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "deny", ...(abac.policyId ? { grantId: abac.policyId } : {}) });
+    return out(
+      {
+        effect: "deny",
+        ruleId: abac.policyId ?? RESOURCE_RULE_IDS.abacApproval,
+        reason:
+          `${subject} requires approval under policy ${abac.policyName ? `'${abac.policyName}'` : (abac.policyId ?? "")}, and an ` +
+          "ABAC approval hold cannot be queued or released on this call type yet, so it is refused; nothing was sent",
+      },
+      matchedIds,
+    );
+  }
+
+  // 4. approval: the entitlement's own hold (the execution dial) and every matching approval rule
+  const needsApproval = base.effect === "require_approval" || matched.length > 0;
   if (!needsApproval) {
     return out({ effect: "allow", ruleId: base.ruleId, reason: base.reason });
   }
   for (const r of matched) chain.push({ rule: RESOURCE_RULE_IDS.approvalRule, outcome: "require-approval", grantId: r.id });
-  if (abac?.effect === "require_approval") {
-    chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "require-approval", ...(abac.policyId ? { grantId: abac.policyId } : {}) });
-  }
   if (input.approvedApprovalId && base.effect !== "require_approval") {
     chain.push({ rule: "approval", outcome: "satisfied-by-approval", grantId: input.approvedApprovalId });
     return out({ effect: "allow", ruleId: base.ruleId, reason: `${base.reason}; released by approval ${input.approvedApprovalId}` }, matchedIds);
   }
   const first = matched[0];
-  const approverUserId = base.effect === "require_approval" ? base.approverUserId : (first?.approverUserId ?? abacApprover ?? undefined);
-  const approverName = base.effect === "require_approval" ? null : (first?.approverName ?? abac?.approverName ?? null);
-  const ruleId = base.effect === "require_approval" ? base.ruleId : (first?.id ?? abac?.policyId ?? RESOURCE_RULE_IDS.abacApproval);
+  const approverUserId = base.effect === "require_approval" ? base.approverUserId : first?.approverUserId;
+  const approverName = base.effect === "require_approval" ? null : (first?.approverName ?? null);
+  const ruleId = base.effect === "require_approval" ? base.ruleId : (first?.id ?? RESOURCE_RULE_IDS.approvalRule);
   const who = approverName ?? approverUserId ?? "a named approver";
   if (!approverUserId) {
     // a hold with no one to sign it can never be released: refuse rather than queue an orphan

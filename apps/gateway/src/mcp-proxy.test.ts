@@ -7615,12 +7615,15 @@ describe("generic webhook pm adapter: signed normalized events end-to-end", () =
           project?: string;
           payload?: Record<string, unknown>;
         };
-        const expected = "sha256=" + createHmac("sha256", TOKEN).update(body).digest("hex");
+        // S-03 follow-up (a): the receiver verifies "<timestamp>.<body>" and applies a window
+        const ts = String(req.headers["x-regulait-timestamp"] ?? "");
+        const fresh = /^\d+$/.test(ts) && Math.abs(Number(ts) - Date.now() / 1000) <= 300;
+        const expected = "sha256=" + createHmac("sha256", TOKEN).update(`${ts}.${body}`).digest("hex");
         events.push({
           event: String(parsed.event ?? ""),
           project: String(parsed.project ?? ""),
           payload: parsed.payload ?? {},
-          signatureValid: req.headers["x-regulait-signature"] === expected,
+          signatureValid: fresh && req.headers["x-regulait-signature"] === expected,
           // the token is a signing secret — it must never travel raw
           rawTokenPresent: req.headers.authorization !== undefined || body.includes(TOKEN),
         });
@@ -8031,5 +8034,44 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
       decision: "approved",
     });
     expect(entry.reason).toContain("Ole is on leave");
+  });
+});
+
+describe("ADR-0311 (G10): transport conformance on /mcp/:serverId", () => {
+  const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } } };
+  const mcpHeaders = (extra: Record<string, string>) => ({ "content-type": "application/json", accept: "application/json, text/event-stream", ...extra });
+
+  it("answers GET and DELETE with 405 Allow: POST (no sessions are issued)", async () => {
+    const auth = await authFor(aliceId);
+    for (const method of ["GET", "DELETE"] as const) {
+      const r = await app.inject({ method, url: `/mcp/${serverId}`, headers: auth });
+      expect([r.statusCode, r.headers.allow, r.json().error]).toEqual([405, "POST", "method_not_allowed"]);
+    }
+  });
+
+  it("refuses a browser Origin other than the gateway's own before anything reaches the upstream", async () => {
+    const auth = await authFor(aliceId);
+    const prev = process.env.REGULAIT_PUBLIC_URL;
+    process.env.REGULAIT_PUBLIC_URL = "https://gw.example.test";
+    try {
+      const evil = await app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: mcpHeaders({ ...auth, origin: "https://evil.example.test" }), payload: initialize });
+      expect([evil.statusCode, evil.json().error]).toEqual([403, "mcp_origin_refused"]);
+      const own = await app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: mcpHeaders({ ...auth, origin: "https://gw.example.test" }), payload: initialize });
+      expect(own.statusCode).toBe(200);
+    } finally {
+      if (prev === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+      else process.env.REGULAIT_PUBLIC_URL = prev;
+    }
+    // no Origin: not a browser page, as every MCP client in this suite
+    const plain = await app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: mcpHeaders(auth), payload: initialize });
+    expect(plain.statusCode).toBe(200);
+  });
+
+  it("refuses a JSON-RPC batch from protocol 2025-06-18 on with a JSON-RPC Invalid Request", async () => {
+    const auth = await authFor(aliceId);
+    const batch = [{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }];
+    const r = await app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: mcpHeaders({ ...auth, "mcp-protocol-version": "2025-11-25" }), payload: batch });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32600 } });
   });
 });

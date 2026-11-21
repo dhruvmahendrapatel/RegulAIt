@@ -34,13 +34,13 @@ import { createHash } from "node:crypto";
 import { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 import { KEY_FRAGMENT_KEPT, normalizeEvidenceHost } from "./shadow-ai.js";
 import {
-  SHADOW_AI_CATALOG_V2,
   matchCatalogV2AssistantConfig,
   matchCatalogV2Endpoint,
   matchCatalogV2Extension,
   matchCatalogV2Package,
   type ShadowCatalogV2Entry,
 } from "./shadow-catalog-v2.js";
+import { SHADOW_AI_CATALOG_V3 } from "./shadow-catalog-v3.js";
 import { manifestKindForPath, readManifest, type RepoEcosystem } from "./repo-manifests.js";
 import { envNamePresenceInText } from "./discovery/presence-signatures.js";
 
@@ -460,7 +460,7 @@ const MCP_CONFIG_IDS = new Set(["cfg-mcp-json", "cfg-vscode-mcp-json", "cfg-gemi
 
 export async function analyseRepo(input: RepoAnalysisInput): Promise<RepoAnalysisResult> {
   const limits: RepoAnalysisLimits = { ...REPO_ANALYSIS_DEFAULTS, ...(input.limits ?? {}) };
-  const catalog = input.catalog ?? SHADOW_AI_CATALOG_V2;
+  const catalog = input.catalog ?? SHADOW_AI_CATALOG_V3;
   const keep = input.alsoKeep ?? (() => false);
   const commitSha = input.commitSha;
   const observations: RepoObservation[] = [];

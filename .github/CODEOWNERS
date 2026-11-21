@@ -8,6 +8,13 @@
 /.github/CODEOWNERS                  @dhruvmahendrapatel
 /scripts/security-*                  @dhruvmahendrapatel
 /Dockerfile                          @dhruvmahendrapatel
+# ADR-0324: who may sign a release, and how a release is verified.
+/infra/release-keys/                 @dhruvmahendrapatel
+/scripts/verify-release.sh           @dhruvmahendrapatel
+/scripts/verify-update-bundle.sh     @dhruvmahendrapatel
+/scripts/release-ceremony.sh         @dhruvmahendrapatel
+/scripts/release-provenance.sh       @dhruvmahendrapatel
+/scripts/lib/release-trust.sh        @dhruvmahendrapatel
 # ADR-0189 B7 (security review F5): the release AI BOM's switch, builder and CLI
 # decide what is signed and published; the workflow is covered by /.github/workflows/ above.
 /scripts/release-ai-bom.mjs                       @dhruvmahendrapatel
@@ -16,12 +23,14 @@
 /packages/shared/src/bom/release-sbom-identity.ts @dhruvmahendrapatel
 /.github/workflows/release-ai-bom.yml             @dhruvmahendrapatel
 # PR #374 review: the UI census gates and their exception lists (MACHINE_ONLY,
-# SUPERSEDED, INDIRECT_UI_CALLS, KNOWN_UI_GAPS) live in these scripts, and the
-# list sizes are pinned in the census test; a new exception needs the owner.
+# SUPERSEDED, INDIRECT_UI_CALLS, KNOWN_UI_GAPS) live in these scripts, and
+# KNOWN_UI_GAPS is one file per ADR and lane in scripts/known-ui-gaps/ (ADR-0252
+# addendum); a new exception needs the owner.
 /scripts/preflight-ui-affordances.mjs             @dhruvmahendrapatel
 /scripts/preflight-ui-affordances.test.mjs        @dhruvmahendrapatel
 /scripts/preflight-ui-route-census.mjs            @dhruvmahendrapatel
 /scripts/preflight-ui-route-census.test.mjs       @dhruvmahendrapatel
+/scripts/known-ui-gaps/                           @dhruvmahendrapatel
 # ADR-0190 I4 follow-ups (#387 review): the import-cycle ratchet and its baseline; a baseline that grows, or a
 # check that stops counting an edge, needs the owner.
 /scripts/preflight-import-cycles.mjs              @dhruvmahendrapatel
@@ -43,3 +52,4 @@
 /.github/actions/                                 @dhruvmahendrapatel
 /scripts/ci-scope.mjs                             @dhruvmahendrapatel
 /scripts/ci-scope.test.mjs                        @dhruvmahendrapatel
+/scripts/ci-plan.mjs                              @dhruvmahendrapatel

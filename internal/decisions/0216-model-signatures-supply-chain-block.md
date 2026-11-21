@@ -100,3 +100,24 @@ never opens a risk entry, and the register has no supply-chain category (PENDING
   slot and Revoke in the last slot, the same slots on a revoked row.
 - `expiresAt` on a relaxation is required (it was defaulted per request, which no step-up could ever match).
 - An oversized signature bundle keeps only its size. Only the newest signature presented counts (point 5).
+
+## Amendment (2026-11-14) — lineage from a derived model file to its parent (lane L7, P14 remainder)
+
+P14's last sentence ("record lineage from a repackaged or derived file back to its parent artifact") is built:
+
+- **Data.** `model_artifact_lineage` (migration `pending/model_artifact_lineage.sql`, numbered at merge): a join
+  table of (child, parent, relation, method, recorded by, at). The relations are `repackaged`, `converted`,
+  `fine_tuned` and `quantized`, each with exactly one parent, and `merged`, with two or more. A DB CHECK refuses a
+  self-edge.
+- **Routes.** `POST /v1/model-artifacts/:artifactId/lineage` is for the child's uploader or an admin. It records the
+  derivation once per child and never edits it. It refuses a parent the caller cannot see (exactly like a missing
+  one) and a cycle, checked under a row lock on the child. Every write is audited (`model-artifact-lineage-recorded`
+  or `-refused`) with every sha256, so the record outlives a deleted file.
+  `GET /v1/model-artifacts/:artifactId/lineage` returns the file's parents, its ancestors (to depth 16) and its
+  direct children. A relative the caller cannot see is reported as a count only. Both routes are API-only and listed
+  as known UI gaps on #453.
+- **Not yet.** A derived file does not inherit its parent's signature or scan verdict, and the supply-chain block
+  (above) still judges each file on its own. Whether a repackaging of a signed file should count as signed is an
+  owner question; the secure default is that it does not.
+- **RLS.** The table follows `model_artifacts`, which ADR-0234's row-level-security slices have not reached.
+  Visibility is enforced in the handler by the same `artifactAccessible` rule as the artifact routes.

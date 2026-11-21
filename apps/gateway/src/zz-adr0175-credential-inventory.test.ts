@@ -38,7 +38,11 @@ import {
   gitConnections,
   governanceAlerts,
   inArray,
+  agents,
+  modelCards,
   modelCredentials,
+  modelDriftIngestCredentials,
+  modelDriftMonitors,
   oidcProviders,
   orgSettings,
   pmConnections,
@@ -172,6 +176,20 @@ beforeAll(async () => {
   ids.vk = vk!.id;
   const [scim] = await db.insert(scimTokens).values({ name: `g175c-scim-${RUN}`, tokenHash: hash("scim") }).returning({ id: scimTokens.id });
   ids.scim = scim!.id;
+  // ADR-0223 amendment 1: a drift ingestion credential needs a monitor on a model card
+  const [driftAgent] = await db.insert(agents).values({ name: `g175c-drift-agent-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+  ids.driftAgent = driftAgent!.id;
+  const [driftCard] = await db.insert(modelCards).values({ agentId: driftAgent!.id, intendedUse: `g175c drift ${RUN}` }).returning({ id: modelCards.id });
+  ids.driftCard = driftCard!.id;
+  const [driftMonitor] = await db
+    .insert(modelDriftMonitors)
+    .values({ cardId: driftCard!.id, name: `g175c-monitor-${RUN}`, reference: [], referenceSha256: "0".repeat(64), featureCount: 1, referenceSamples: 1 })
+    .returning({ id: modelDriftMonitors.id });
+  const [dic] = await db
+    .insert(modelDriftIngestCredentials)
+    .values({ monitorId: driftMonitor!.id, name: `g175c-dic-${RUN}`, tokenHash: hash("drift-ingest"), expiresAt: new Date(Date.now() + 30 * DAY) })
+    .returning({ id: modelDriftIngestCredentials.id });
+  ids.driftIngest = dic!.id;
   const [mc] = await db.insert(modelCredentials).values({ provider: `g175c-prov-${RUN}`, keyCiphertext: cipher("model") }).returning({ id: modelCredentials.id });
   ids.modelCred = mc!.id;
   const [umc] = await db
@@ -262,6 +280,9 @@ afterAll(async () => {
   await db.delete(connectors).where(eq(connectors.id, ids.connector!));
   await db.delete(virtualKeys).where(eq(virtualKeys.id, ids.vk!));
   await db.delete(scimTokens).where(eq(scimTokens.id, ids.scim!));
+  // the card cascades to its monitor and the monitor's ingestion credential
+  if (ids.driftCard) await db.delete(modelCards).where(eq(modelCards.id, ids.driftCard));
+  if (ids.driftAgent) await db.delete(agents).where(eq(agents.id, ids.driftAgent));
   await db.delete(userModelCredentials).where(eq(userModelCredentials.id, ids.userModelCred!));
   await db.delete(modelCredentials).where(eq(modelCredentials.id, ids.modelCred!));
   await db.delete(customModelProviders).where(eq(customModelProviders.id, ids.custom!));

@@ -19,6 +19,8 @@ import { putOrgSettings, withStepUp, api as stepUpApi } from "../../stepup/stepU
 import { RefusalNotice } from "../../ui/RefusalNotice";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Input, Modal, RowActions, Select, Table, Tabs, Textarea, tabIds } from "../../ui/kit";
 import { KV, QueryGate, RevealCard, useAction, type RevealedSecret } from "../admin/adminKit";
+import { ExternalSecondFactorDialog } from "../admin/ExternalSecondFactorDialog";
+import type { ExternalFactorResetResult, ExternalFactorView } from "../admin/externalSecondFactor";
 import v from "../views.module.css";
 import t from "./trust.module.css";
 import {
@@ -313,7 +315,7 @@ function NewControlDraft(props: { onCreated: (p: TrustPublication) => void }) {
   };
   return (
     <Card title="Start a draft from a control">
-      <QueryGate loading={sources.isLoading} error={sources.error} onRetry={() => void sources.refetch()}>
+      <QueryGate query={sources}>
         {controls.length === 0 ? (
           <EmptyState title="No active compliance pack" body="Activate a compliance pack first; its controls appear here." />
         ) : (
@@ -359,7 +361,7 @@ function NewCardDraft(props: { onCreated: (p: TrustPublication) => void }) {
     }, "Card drafted from the register and the model cards. Edit it before publishing.");
   return (
     <Card title="Start an AI system card from the register">
-      <QueryGate loading={sources.isLoading} error={sources.error} onRetry={() => void sources.refetch()}>
+      <QueryGate query={sources}>
         {useCases.length === 0 ? (
           <EmptyState title="No registered use cases" body="Register a use case first; its card is drafted from that record." />
         ) : (
@@ -505,6 +507,7 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
   const [detail, setDetail] = useState<string | null>(null);
   // review of #631: revoking cannot be undone (a new grant needs a step-up and a new link), so it is confirmed
   const [revoking, setRevoking] = useState<AuditorGrant | null>(null);
+  const [factorFor, setFactorFor] = useState<AuditorGrant | null>(null);
   const enabled = grants.data?.enabled ?? false;
   const refresh = () => void grants.refetch();
   const showLink = (who: string, link: { path: string; expiresAt: string }) =>
@@ -576,9 +579,16 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
                     ) : undefined
                   }
                   secondary={
-                    <Button size="sm" aria-label={`Activity of ${g.auditorName}`} onClick={() => setDetail(g.id)}>
-                      Activity
-                    </Button>
+                    <>
+                      <Button size="sm" aria-label={`Activity of ${g.auditorName}`} onClick={() => setDetail(g.id)}>
+                        Activity
+                      </Button>{" "}
+                      {g.state === "active" || g.state === "scheduled" ? (
+                        <Button size="sm" variant="ghost" aria-label={`Second factor for ${g.auditorName}`} onClick={() => setFactorFor(g)}>
+                          Second factor
+                        </Button>
+                      ) : null}
+                    </>
                   }
                   rest={
                     g.state === "active" || g.state === "scheduled" ? (
@@ -594,6 +604,15 @@ function AuditorsTab(props: { published: TrustPublication[] }) {
         />
       </Card>
       {detail && <GrantDetailModal grantId={detail} onClose={() => setDetail(null)} />}
+      {/* ADR-0240: read only while open; the reset asks for a reason, then step-up */}
+      <ExternalSecondFactorDialog
+        holder={factorFor?.auditorName ?? null}
+        queryKey={[...KEY, "grants", factorFor?.id ?? "none", "mfa"]}
+        load={() => api.get<ExternalFactorView>(`/v1/trust/auditor-grants/${factorFor!.id}/mfa`)}
+        reset={(reason) => withStepUp((h) => stepUpApi.post<ExternalFactorResetResult>(`/v1/trust/auditor-grants/${factorFor!.id}/mfa/reset`, { reason }, h))}
+        onClose={() => setFactorFor(null)}
+        onReset={() => grants.refetch()}
+      />
       <ConfirmModal
         open={revoking !== null}
         title={`Revoke access for ${revoking?.auditorName ?? ""}?`}
@@ -723,7 +742,7 @@ function GrantDetailModal(props: { grantId: string; onClose: () => void }) {
   const q = useQuery({ queryKey: [...KEY, "grant", props.grantId], queryFn: () => api.get<GrantDetail>(`/v1/trust/auditor-grants/${props.grantId}`) });
   return (
     <Modal open wide title="Auditor activity" onClose={props.onClose} actions={<Button onClick={props.onClose}>Close</Button>}>
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {q.data && (
           <div className={v.stack}>
             <KV
@@ -773,7 +792,7 @@ function HeadingTab() {
       .then((ok) => ok && setDraft(null));
   return (
     <Card title="Trust centre heading">
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         <div className={v.stack}>
           <Field label="Organisation name, as shown">
             <Input value={value.displayName} maxLength={120} onChange={(e) => setDraft({ ...value, displayName: e.target.value })} />

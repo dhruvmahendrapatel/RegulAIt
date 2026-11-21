@@ -637,6 +637,20 @@ one `CEILING_EXCEPTIONS` row.
   raise fits ADR-0198's freeze-week allowance of at most +1 kB of entry raises.
 - After the demo the entry is trimmed back under 138.5 kB and this ceiling restored.
 
+## Addendum / As built (2026-10-31) — the P3 identity-and-access long-page split adds ~0 to the entry bundle
+
+The P3 split (the SSO, workload-identities, ChatOps, agents and licensing pages keep a preview and move each full list to
+its own page) first declared every sub-page as its own lazy route in `App.tsx`, which left almost no headroom under the
+138.5 kB entry ceiling once the other lanes are counted.
+
+- Each area is now **one** lazy route with a splat (`sso/*`, `workload-identities/*`, `chatops/*`, `agents/*`,
+  `licensing/*`). The area's module owns a nested `<Routes>` — the overview at the index, each full list on its own
+  nested route — reached through the section's existing screen barrel, so `App.tsx` adds no new import specifier and no
+  new entry chunk reference. Every URL, the `#agent-<id>` deep-link redirect, every access gate and breadcrumb is
+  unchanged.
+- Entry JS measured 138,266 B before and 137,998 B after on the same lockfile; all JS fell to 1,066,609 B. No ceiling
+  changes; entry stays well under 138.5 kB.
+
 ## Addendum / As built (2026-10-31) — the P3 operations/cost long-page split adds ~0 to the entry bundle
 
 The P3 split (the long cost-consolidation, Engines, MCP servers and Infrastructure pages keep a five-row preview and
@@ -668,3 +682,37 @@ list to its own page) first declared every sub-page as its own lazy route in `Ap
 - The SPA route census (`scripts/ui-spa-routes.mjs`) now follows a splat whose element is such a lazy area module —
   through its screen barrel's `export … from` re-export — into that module's `<Routes>`, so every sub-page is still
   enumerated for the enterprise harness and the census output is unchanged.
+
+## Addendum / As built (2026-11-01) — the P3 account split adds 12 B to the entry bundle
+
+The P3 split on the Account page (devices and sessions, passkeys: a five-row preview each, every row on its own page)
+follows the identity-and-access addendum above: `/account/*` is one lazy route whose module
+(`views/account/AccountSubpages.tsx`) owns a nested `<Routes>` with the Account page at the index and
+`sessions` and `passkeys` beneath it. The route census follows it unchanged. The Organisation settings page has no list
+that grows, so nothing on it moved.
+
+- Entry JS measured 138,097 B before and 138,109 B after on the same lockfile; all JS 1,077,999 B before and
+  1,078,404 B after. No ceiling changes.
+
+## Addendum / As built (2026-11-15) — all JS 1,150 → 1,160 kB (the P21 usage-counts card)
+
+The owner decided this raise on 2026-11-15: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6903109405>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1150 kB` to `1160 kB` (+10 kB). The entry JS, entry CSS and lazy chunk ceilings are unchanged.
+- Why: main measured 1,148,326 B gzip (1.7 kB of headroom), and the owner-approved P21 usage-counts card and mapping
+  editor on the Agents page (#744, approved on #453 on 2026-11-07) adds 6,227 B, almost all of it in the lazy
+  `admin-integrations` chunk. Lazy-loading the card would not lower the total, which counts every chunk.
+- The owner chose this over trimming main first or cutting the approved screen. Crossing 1,160 kB goes back to the owner.
+
+## Addendum / As built (2026-11-20) — all JS 1,160 → 1,170 kB (the ADR-0056 narrator red-team gate card)
+
+The owner decided this raise on 2026-11-20: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7029051527>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1160 kB` to `1170 kB` (+10 kB). The entry JS, entry CSS and other chunk ceilings are unchanged; the new
+  `CopilotRedteamGateCard` chunk gets its own ceiling from `ui-chunk-budgets --write`.
+- Why: main measured 1,159,922 B gzip (78 B of headroom), and the narrator red-team gate card on the Copilot page
+  (ADR-0056 §5 amendment, lane UI-B) brings the total to 1,163,455 B. It is lazy-loaded so the `admin-overview` chunk
+  stays within its ceiling; lazy-loading cannot lower the total, which counts every chunk.
+- The owner chose the raise over trimming main first. Crossing 1,170 kB goes back to the owner.

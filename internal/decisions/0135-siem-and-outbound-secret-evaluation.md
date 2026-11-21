@@ -1,6 +1,6 @@
 # ADR-0135 - SIEM delivery and outbound secret detection scope
 
-- Status: Proposed
+- Status: Accepted for SIEM delivery, built by [ADR-0303](0303-siem-delivery-of-the-audit-chain.md) (2026-11-14); the outbound secret gate stays Proposed
 - Date: 2026-09-30
 - Scope: P3 evaluation only; no live SIEM sender or outbound block is enabled
 
@@ -66,3 +66,12 @@ policy and integration tests that prove zero provider calls on a refusal.
   https://docs.aws.amazon.com/security-lake/latest/userguide/custom-sources.html
 - Existing detector inspiration, not a substitute for product evaluation:
   https://github.com/trufflesecurity/trufflehog/blob/main/hack/docs/Adding_Detectors_external.md
+
+## As built (2026-11-14, ADR-0303)
+
+The "Proposed SIEM delivery contract" above is built by
+[ADR-0303](0303-siem-delivery-of-the-audit-chain.md): the `regulait.siem.audit.v1` envelope (point 1), a
+`siem_destinations` cursor over `audit_log.seq` that moves only on a 2xx (point 2), the data-key-encrypted Standard
+Webhooks secret, the egress guard, backoff, dead-letter, lag and admin recovery (point 3), and one adapter, a signed JSON
+batch over HTTPS, pinned by its receiver test (point 4). No Azure Monitor, Security Lake, Splunk, Sentinel, Datadog or
+LogScale adapter is claimed. The "Proposed outbound secret gate" section is unchanged and not built.

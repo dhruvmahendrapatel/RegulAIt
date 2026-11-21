@@ -93,6 +93,8 @@ import {
   MONITOR_RULES,
   alertMeetsThreshold,
   composeAlertCard,
+  composeCampaignDeadlineCard,
+  outlookMessageForCampaignDeadline,
   chatContentFenced,
   chatDecidable,
   composeApprovalCard,
@@ -146,6 +148,10 @@ import { projectPiiMode } from "./projects.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
+// ADR-0340 slice 2: workflow stage deadlines post through this file's courier
+import { registerWorkflowSlaCourier, workflowSlaNoticeText } from "./workflow-sla-notify.js";
+// ADR-0090 amendment (lane L11): the certification deadline sweep posts through this file's courier
+import { registerCampaignDeadlineCourier, type CampaignDeadlineNotice, type CampaignDeadlineOutcome } from "./grant-certification.js";
 import { errMessage } from "./err-serializer.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { wantsListContract } from "./list-contract.js";
@@ -219,6 +225,8 @@ function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; 
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const CHATOPS_RULE_IDS = {
+  /** ADR-0207 (G3): an inbound callback on a workspace whose connector is disabled, refused after its signature */
+  connectorDisabledRefused: "chatops-connector-disabled-refused",
   connectionRegistered: "chatops-connection-registered",
   connectionDeleted: "chatops-connection-deleted",
   identityLinked: "chatops-identity-linked",
@@ -234,6 +242,10 @@ export const CHATOPS_RULE_IDS = {
   alertPosted: "chatops-alert-posted",
   alertPostFailed: "chatops-alert-post-failed",
   alertSettingsChanged: "chatops-alert-settings-changed",
+  /** ADR-0090 amendment (lane L11) — certification-campaign deadline notices */
+  campaignNoticePosted: "chatops-campaign-notice-posted",
+  campaignNoticePostFailed: "chatops-campaign-notice-post-failed",
+  campaignNoticeSettingsChanged: "chatops-campaign-notice-settings-changed",
   /** ADR-0173 batch 2b — the Teams Bot Framework endpoint */
   botSettingsChanged: "chatops-bot-settings-changed",
   botRefusedTenant: "chatops-bot-refused-tenant",
@@ -247,6 +259,9 @@ export const CHATOPS_RULE_IDS = {
   /** ADR-0202 lane E — resend mail goes to the named approver/owner only */
   postRefusedNoNamedRecipient: "chatops-post-refused-no-named-recipient",
   resendSendRateLimited: "chatops-resend-send-rate-limited",
+  /** ADR-0340 slice 2 — workflow stage deadline notices (to workspaces opted into alerts) */
+  workflowSlaPosted: "chatops-workflow-sla-posted",
+  workflowSlaPostFailed: "chatops-workflow-sla-post-failed",
 } as const;
 
 /** ADR-0173 batch 2b review — the Slack workspace (team) a signed body came
@@ -354,6 +369,8 @@ const createConnectionSchema = z
     allowFencedDecide: z.boolean().default(false),
     /** ADR-0162 — opt-in; null/absent = governance alerts are not posted here */
     notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
+    /** ADR-0090 amendment (lane L11) — opt-in; absent = no certification-campaign deadline notices here */
+    notifyCampaignDeadlines: z.boolean().optional(),
     enabled: z.boolean().default(true),
     ...botFields,
     /** ADR-0173 batch 2b review — optional, slack only: the one workspace accepted */
@@ -382,6 +399,16 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   // genuinely old timestamp, so the suite proves the real wall rather than a
   // test seam that could be true while the shipped path is not.
   const now = () => Math.floor(Date.now() / 1000);
+
+  /** ADR-0207 (G3): true (and one deny audit row) when the workspace's connector is disabled */
+  const refuseDisabledChatConnector = async (conn: { id: string; name: string; connectorId: string }, kind: string): Promise<boolean> => {
+    const [c] = await db.select({ name: connectors.name, disabledAt: connectors.disabledAt }).from(connectors).where(eq(connectors.id, conn.connectorId));
+    if (!c?.disabledAt) return false;
+    await audit(null, "chatops_connection", conn.id, CHATOPS_RULE_IDS.connectorDisabledRefused, "deny",
+      `an inbound ${kind} on ChatOps workspace '${conn.name}' was refused: its connector '${c.name}' is disabled (ADR-0207)`,
+      { connection: conn.name, connectorId: conn.connectorId, inbound: kind });
+    return true;
+  };
 
   const audit = (
     actorUserId: string | null,
@@ -466,6 +493,8 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         enabled: r.enabled,
         // ADR-0162 — the alert threshold, so a saved selection survives reload
         notifyAlertMinSeverity: r.notifyAlertMinSeverity,
+        // ADR-0090 amendment (lane L11)
+        notifyCampaignDeadlines: r.notifyCampaignDeadlines,
         createdAt: r.createdAt,
         // the signing secret is NEVER returned: a reader who could see it could
         // forge callbacks, which is strictly worse than reading a bot token
@@ -523,6 +552,13 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     }
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, body.connectorId));
     if (!connector) return reply.status(400).send({ error: "invalid_reference", detail: "connectorId names no connector" });
+    // ADR-0207 (G3), review of #605: a disabled connector carries nothing, so no new workspace is registered on it
+    if (connector.disabledAt) {
+      return reply.status(409).send({
+        error: "connector_disabled",
+        detail: `connector '${connector.name}' is disabled: enable it again before registering a ChatOps workspace on it`,
+      });
+    }
     // the OUTBOUND credential must already live in the ordinary connector store
     if (connector.providerKind !== body.provider) {
       return reply.status(400).send({
@@ -651,6 +687,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         defaultChannel: body.defaultChannel,
         allowFencedDecide: body.allowFencedDecide,
         notifyAlertMinSeverity: body.notifyAlertMinSeverity ?? null,
+        notifyCampaignDeadlines: body.notifyCampaignDeadlines ?? false,
         enabled: body.enabled,
         botAppId: body.botAppId ?? null,
         botTenantId: body.botTenantId ?? null,
@@ -835,6 +872,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
   ): Promise<{ ok: true; messageRef: string | null } | { ok: false; status: number; body: Record<string, unknown> }> {
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, conn.connectorId));
     if (!connector) return { ok: false, status: 400, body: { error: "invalid_reference", detail: "the ChatOps connector was deleted" } };
+    // ADR-0207 (G3): a disabled connector carries nothing, the product's own cards and mails included
+    if (connector.disabledAt) {
+      return { ok: false, status: 403, body: { error: "connector_disabled", detail: `connector '${connector.name}' is disabled` } };
+    }
     // ADR-0113 — TEAMS OUTBOUND EXISTS NOW. `connector-provider` grew a real
     // Bot Framework Connector adapter, so the courier routes through the
     // RESOLVED provider for the connection's own provider rather than assuming
@@ -1228,6 +1269,77 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     return out;
   });
 
+  // ADR-0090 amendment (lane L11): certification-campaign deadline notices to the workspaces opted in. A resend
+  // workspace mails each notice to its named reviewer; any other provider posts ONE channel notice per campaign (the
+  // campaign total), never a per-reviewer message to a shared channel. Nothing operator-typed is in either.
+  registerCampaignDeadlineCourier(db, async ({ campaign, notices, done, maxSends }, actorUserId) => {
+    const out: { workspaces: number; results: Array<{ target: string; outcome: CampaignDeadlineOutcome }> } = { workspaces: 0, results: [] };
+    if (notices.length === 0) return out;
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), eq(chatopsConnections.notifyCampaignDeadlines, true)));
+    out.workspaces = conns.length;
+    for (const conn of conns) {
+      const isMail = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider);
+      const pub = isMail ? mailPublicUrl() : null;
+      const targets: Array<{ key: string; notice: CampaignDeadlineNotice | null; audience: "reviewer" | "channel" }> =
+        conn.provider === "resend"
+          ? notices.map((n) => ({ key: `${conn.id}:reviewer:${n.reviewerUserId}`, notice: n, audience: "reviewer" as const }))
+          : [{ key: `${conn.id}:channel`, notice: null, audience: "channel" as const }];
+      for (const t of targets) {
+        if (done.has(t.key)) continue;
+        // the per-run cap: the rest wait for the next run, unmarked
+        if (out.results.length >= maxSends) return out;
+        const path = t.audience === "reviewer" ? "/inbox" : "/admin/certification";
+        const input = {
+          campaignId: campaign.id,
+          kind: campaign.kind,
+          dueAt: campaign.dueAt,
+          undecided: t.notice ? t.notice.undecidedForReviewer : campaign.undecidedTotal,
+          audience: t.audience,
+          portalUrl: pub?.ok ? joinPublicUrl(pub.url, `/ui${path}`) : `/ui${path}`,
+        };
+        const namedRecipient = t.notice ? await activeUserEmail(t.notice.reviewerUserId) : null;
+        const channel = conn.provider === "resend" ? (namedRecipient ?? RESEND_RECIPIENT_MODE) : conn.defaultChannel;
+        let posted: Awaited<ReturnType<typeof postCard>>;
+        try {
+          if (pub && !pub.ok) posted = pub;
+          else if (conn.provider === "resend" && !namedRecipient) posted = { ok: false, status: 422, body: { error: "no_named_recipient" } };
+          else posted = await postCard(conn, channel, composeCampaignDeadlineCard(input), actorUserId, "campaign-deadline", outlookMessageForCampaignDeadline(input), namedRecipient);
+        } catch (err) {
+          posted = { ok: false, status: 502, body: { error: errMessage(err) } };
+        }
+        // a 4xx other than 408/429 is a refusal a retry cannot fix (no recipient, credential or provider refused,
+        // config missing): final. A 5xx, a network error, 408 or 429 is retried while the notice's window is open.
+        // A provider's own refusal arrives as a 502 `chatops_post_failed` carrying `upstreamStatus`; judge by that.
+        const upstream = !posted.ok && typeof posted.body.upstreamStatus === "number" ? posted.body.upstreamStatus : null;
+        const effective = posted.ok ? 200 : (upstream ?? posted.status);
+        const terminal = !posted.ok && effective >= 400 && effective < 500 && effective !== 408 && effective !== 429;
+        await audit(
+          actorUserId,
+          "chatops_connection",
+          conn.id,
+          posted.ok ? CHATOPS_RULE_IDS.campaignNoticePosted : CHATOPS_RULE_IDS.campaignNoticePostFailed,
+          posted.ok ? "allow" : "deny",
+          posted.ok
+            ? `certification campaign ${campaign.id} ${campaign.kind} notice sent through '${conn.name}' (${conn.provider})`
+            : `certification campaign ${campaign.id} ${campaign.kind} notice NOT sent through '${conn.name}': ${String(posted.body.error ?? posted.status)}` +
+              (terminal ? " (final, not retried)" : " (retried next run)"),
+          {
+            campaignId: campaign.id,
+            kind: campaign.kind,
+            audience: t.audience,
+            ...(t.notice ? { reviewerUserId: t.notice.reviewerUserId } : {}),
+            ...(posted.ok ? {} : { status: posted.status, ...(upstream !== null ? { upstreamStatus: upstream } : {}), retry: !terminal }),
+          },
+        );
+        out.results.push({ target: t.key, outcome: posted.ok ? "posted" : terminal ? "terminal" : "transient" });
+      }
+    }
+    return out;
+  });
+
   // ADR-0182 S5 (PF-14): the SLA sweep's breach and unowned escalations, to
   // the same opted-in workspaces, with the sweep's own PII-free text in place
   // of the alert's title
@@ -1247,12 +1359,61 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     return out;
   });
 
+  // ADR-0340 slice 2: a workflow stage deadline (a reminder is medium, a breach high) to the workspaces opted into
+  // alerts at that severity, in the same alert card with a content-free text; resend mails the people the stage waits
+  // on (the pending approvers, or the initiator of a cancelled instance), never anyone a request names
+  registerWorkflowSlaCourier(db, async (notice) => {
+    const out = { posted: 0, failed: 0 };
+    const severity = notice.phase === "breach" ? ("high" as const) : ("medium" as const);
+    const conns = await db
+      .select()
+      .from(chatopsConnections)
+      .where(and(eq(chatopsConnections.enabled, true), isNotNull(chatopsConnections.notifyAlertMinSeverity)));
+    const title = workflowSlaNoticeText(notice);
+    const path = `/workflows/instances/${notice.instanceId}`;
+    for (const conn of conns) {
+      if (!alertMeetsThreshold(severity, conn.notifyAlertMinSeverity)) continue;
+      const pub = MAIL_PROVIDERS.includes(conn.provider as ChatOpsProvider) ? mailPublicUrl() : null;
+      const portalUrl = pub?.ok ? joinPublicUrl(pub.url, `/ui${path}`) : `/ui${path}`;
+      const card = composeAlertCard({ alertId: notice.instanceId, severity, ruleLabel: "Workflow stage deadline", title, portalUrl });
+      const recipients: Array<string | null> =
+        conn.provider === "resend" ? await Promise.all(notice.recipientUserIds.map((id) => activeUserEmail(id))) : [null];
+      for (const namedRecipient of conn.provider === "resend" ? recipients.filter((r): r is string => r !== null) : [null]) {
+        const channel = namedRecipient ?? conn.defaultChannel;
+        let posted: Awaited<ReturnType<typeof postCard>>;
+        try {
+          posted =
+            pub && !pub.ok
+              ? pub
+              : await postCard(conn, channel, card, null, "workflow-sla", outlookMessageForAlert({ severity, ruleLabel: "Workflow stage deadline", title, portalUrl }), namedRecipient);
+        } catch (err) {
+          posted = { ok: false, status: 502, body: { error: errMessage(err) } };
+        }
+        await audit(
+          null,
+          "chatops_connection",
+          conn.id,
+          posted.ok ? CHATOPS_RULE_IDS.workflowSlaPosted : CHATOPS_RULE_IDS.workflowSlaPostFailed,
+          posted.ok ? "allow" : "deny",
+          posted.ok
+            ? `workflow deadline notice (${notice.phase}, ${notice.action}) for instance ${notice.instanceId} posted to ${conn.provider}`
+            : `workflow deadline notice for instance ${notice.instanceId} NOT posted to '${conn.name}': ${String(posted.body.error ?? posted.status)}`,
+          { instanceId: notice.instanceId, stageId: notice.stageId, phase: notice.phase, action: notice.action, ...(posted.ok ? {} : { status: posted.status }) },
+        );
+        if (posted.ok) out.posted += 1;
+        else out.failed += 1;
+      }
+    }
+    return out;
+  });
+
   /** opt a workspace in or out of alert delivery (admin) */
   app.patch("/v1/chatops/connections/:connectionId", async (req, reply) => {
     const { connectionId } = z.object({ connectionId: z.string().uuid() }).parse(req.params);
     const body = z
       .object({
         notifyAlertMinSeverity: z.enum(["medium", "high"]).nullable().optional(),
+        notifyCampaignDeadlines: z.boolean().optional(),
         ...botFields,
         slackTeamId: slackTeamIdField,
         // ADR-0185 — further exact recipient mailboxes for an outlook workspace
@@ -1307,6 +1468,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       .update(chatopsConnections)
       .set({
         ...(body.notifyAlertMinSeverity !== undefined ? { notifyAlertMinSeverity: body.notifyAlertMinSeverity } : {}),
+        ...(body.notifyCampaignDeadlines !== undefined ? { notifyCampaignDeadlines: body.notifyCampaignDeadlines } : {}),
         ...(botChange ? bot : {}),
         ...(body.slackTeamId !== undefined ? { slackTeamId: body.slackTeamId } : {}),
         ...(recipients !== undefined ? { outlookRecipientAllowList: recipients } : {}),
@@ -1340,6 +1502,11 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.alertSettingsChanged, "allow",
         `governance alerts to '${before.name}': ${before.notifyAlertMinSeverity ?? "off"} → ${body.notifyAlertMinSeverity ?? "off"}`,
         { from: before.notifyAlertMinSeverity, to: body.notifyAlertMinSeverity });
+    }
+    if (body.notifyCampaignDeadlines !== undefined && body.notifyCampaignDeadlines !== before.notifyCampaignDeadlines) {
+      await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.campaignNoticeSettingsChanged, "allow",
+        `certification-campaign deadline notices to '${before.name}': ${before.notifyCampaignDeadlines ? "on" : "off"} → ${body.notifyCampaignDeadlines ? "on" : "off"}`,
+        { from: before.notifyCampaignDeadlines, to: body.notifyCampaignDeadlines });
     }
     if (botChange) {
       await audit(req.authCtx.userId, "chatops_connection", connectionId, CHATOPS_RULE_IDS.botSettingsChanged, "allow",
@@ -1498,6 +1665,13 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         // is still visible — it is an HTTP 401 on a public route behind the
         // ordinary rate limiter (ADR-0031).
         return reply.status(401).send({ error: "unauthenticated", code: sig.code });
+      }
+
+      // ---- ADR-0207 (G3), review of #605: a disabled connector decides nothing
+      // Checked after the signature (the platform is proven, so the deny row is
+      // not an amplification) and before anything is parsed or acted on.
+      if (await refuseDisabledChatConnector(conn, "interaction")) {
+        return reply.status(403).send({ error: "connector_disabled", detail: "this workspace's connector is disabled; nothing sent through it is acted on" });
       }
 
       // ---- the workspace pin (batch 2b review), before anything is acted on
@@ -1691,6 +1865,9 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         nowSeconds: now(),
       });
       if (!sig.ok) return { ok: false, code: sig.code };
+      // ADR-0207 (G3), review of #605: a disabled connector acts on nothing (after the signature, so the deny row is
+      // never written for an unproven packet)
+      if (await refuseDisabledChatConnector(conn, provider === "slack" ? "event" : "message")) return { ok: false, code: "connector_disabled" };
       return { ok: true, v: { conn, rawBody, headers } };
     };
 

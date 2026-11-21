@@ -36,6 +36,8 @@
  *   its prompt/parse halves are unit-tested, but it has never scored a real
  *   model's output. Its judgment is therefore unproven; only its plumbing is.
  */
+import { hashPrompt } from "./prompt-hash.js";
+import { whereFrom } from "./state-transition.js";
 import crypto from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -120,6 +122,7 @@ import {
   type EvalScorerKind,
   type JudgeBackedScorerKind,
   retireEvalDatasetSchema,
+  EVAL_RUN_MACHINE,
 } from "@regulait/shared";
 import {
   agentProviderToken,
@@ -154,10 +157,6 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 /** how much of a model output is retained on a result row */
 const OUTPUT_SNIPPET_MAX = 4000;
 
-function hashPrompt(prompt: string | null): string | null {
-  if (!prompt) return null;
-  return crypto.createHash("sha256").update(prompt).digest("hex").slice(0, 16);
-}
 
 // ---------------------------------------------------------------------------
 // The judge, behind an interface
@@ -636,6 +635,30 @@ export async function runEvalSuite(
   dataKey: string | undefined,
   opts: EvalRunOptions,
 ): Promise<EvalRunOutcome> {
+  // ADR-0348: once the run row exists it always leaves `running`. A throw anywhere after the insert (a judge, a
+  // provider, the database) records `error` with its message instead of stranding the run, which would also
+  // block its red-team library's retirement for good.
+  const started: { runId: string | null } = { runId: null };
+  try {
+    return await runEvalSuiteSteps(db, dataKey, opts, started);
+  } catch (err) {
+    if (started.runId) {
+      await db
+        .update(evalRuns)
+        .set({ status: "error", error: errMessage(err).slice(0, 2000), finishedAt: new Date() })
+        .where(and(eq(evalRuns.id, started.runId), whereFrom(evalRuns.status, EVAL_RUN_MACHINE, "crash")))
+        .catch(() => undefined); // the original failure is the one to report
+    }
+    throw err;
+  }
+}
+
+async function runEvalSuiteSteps(
+  db: Db,
+  dataKey: string | undefined,
+  opts: EvalRunOptions,
+  started: { runId: string | null },
+): Promise<EvalRunOutcome> {
   const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, opts.datasetId));
   if (!dataset) return { ok: false, status: 404, error: "unknown_dataset" };
   // ADR-0208 G9: a retired dataset takes no new run — a manual run, a scheduled or config-change re-run, a red-team
@@ -1095,6 +1118,7 @@ export async function runEvalSuite(
     }
     throw e;
   }
+  started.runId = run!.id;
 
   // ADR-0173 batch 2c — the panel members, each a governed judge on this run
   const panelMembers: PanelMember[] = panelAgents.map((m) => {
@@ -1569,7 +1593,7 @@ export async function runEvalSuite(
       scoreCi: scoreCi as unknown as Record<string, unknown> | null,
       finishedAt: new Date(),
     })
-    .where(eq(evalRuns.id, run!.id))
+    .where(and(eq(evalRuns.id, run!.id), whereFrom(evalRuns.status, EVAL_RUN_MACHINE, "complete")))
     .returning();
 
   // ONE audit row per run, into the SINGLE audit log, with object_type

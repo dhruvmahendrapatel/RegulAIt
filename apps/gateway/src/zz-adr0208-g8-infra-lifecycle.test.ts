@@ -18,6 +18,7 @@
  * Global state (M-068): the org settings it changes are put back; its resources and policies (including the fleet
  * policy it may create) and the admin's passkey, sessions and step-up grants are removed in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -138,7 +139,7 @@ beforeAll(async () => {
     .where(eq(orgSettings.id, ORG_SETTINGS_ID));
   prevStepUp = os ? { mode: os.mode, actions: os.actions } : null;
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
@@ -154,7 +155,7 @@ beforeAll(async () => {
   const [sess] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: adminId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

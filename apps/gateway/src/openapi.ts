@@ -203,7 +203,7 @@ const auditRefusalSchema = z.object({
  * `x-regulait-schema: "unspecified"` rather than pretending.
  */
 export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
-  "GET /health": { summary: "Liveness probe. The only route that is never rate limited." },
+  "GET /health": { summary: "Liveness probe. Never rate limited (nor is the internal readiness probe, /ready)." },
   "GET /v1/me": {
     summary: "Identity echo — who the presented credential is, and the org size ceilings a client needs to pre-validate uploads.",
   },
@@ -303,6 +303,27 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "of a fresh preview, plus `acceptChangedOutcomes` and `acceptReason` when outcomes change.",
     body: retireTemplateSchema.extend(decisionRegressionAcceptanceFields),
   },
+  // ADR-0341 — the visual pipeline builder (admin)
+  "GET /v1/workflows/builder/templates": { summary: "Workflow templates as the pipeline builder lists them: live version, open draft, whether the builder may edit it." },
+  "POST /v1/workflows/builder/templates/:templateId/draft": {
+    summary:
+      "Open the template's one draft, from the live definition or `fromVersion`. The first open records the live definition as version 1 (`baseline`). Audited.",
+  },
+  "GET /v1/workflows/builder/templates/:templateId/draft": { summary: "The open draft with its validation result and its diff against the live template." },
+  "PUT /v1/workflows/builder/templates/:templateId/draft": {
+    summary: "Save `{revision, definition}` (compare-and-set on `revision`; at most 256 kB). Answers the validation result and the diff.",
+  },
+  "DELETE /v1/workflows/builder/templates/:templateId/draft": { summary: "Discard the open draft. Audited." },
+  "POST /v1/workflows/builder/validate": {
+    summary: "Validate a definition without storing it: schema, unknown fields, the forced plan gate, the governed deploy tail and the reference checks.",
+  },
+  "POST /v1/workflows/builder/templates/:templateId/publish": {
+    summary:
+      "Publish the draft as the next version and make it live. Refused while invalid or stale; a relaxation needs `acceptRelaxations` and a `reason`; " +
+      "needs a `settings_relax` step-up bound to the template, the version replaced and the content hash. Audited.",
+  },
+  "GET /v1/workflows/builder/templates/:templateId/versions": { summary: "The template's published versions, newest first (`before` pages)." },
+  "GET /v1/workflows/builder/templates/:templateId/versions/:version": { summary: "One version's definition and its diff against the live template." },
   "GET /v1/workflows/instances/:instanceId": {
     summary: "One workflow instance with its stage history.",
     responseNote:
@@ -357,6 +378,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "POST /v1/messages": { summary: "Anthropic-shaped compatibility surface (ADR-0020). Off-the-shelf Anthropic clients point here unchanged." },
   "POST /v1/chat/completions": { summary: "OpenAI-shaped compatibility surface (ADR-0024). Off-the-shelf OpenAI clients point here unchanged." },
+  "POST /v1/responses": { summary: "Responses-API-shaped compatibility surface (ADR-0287), on the same switch as /v1/chat/completions. Stateless: send store:false and the full history in input." },
   "POST /mcp/:serverId": { summary: "The governed MCP proxy. Speaks the MCP wire protocol; every tool call is entitlement-checked." },
   "POST /v1/runs": { summary: "Start a multi-agent orchestration run (pillar 7)." },
   "GET /v1/runs": { summary: "Orchestration runs, newest first. Bounded: `limit` (default 200, max 1000); `status` narrows. With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226)." },

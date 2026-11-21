@@ -125,6 +125,12 @@ export interface DiscoverySettingsView {
   endpointRetentionDays: number;
   /** absent from a gateway older than the wider sources: read as all off */
   families?: FamilySwitches;
+  /** MCP host-config discovery on employee machines; absent from an older gateway: read as off */
+  endpointMcpConfig?: boolean;
+  /** ADR-0337 §4: Google Workspace sources may use the Directory token listing; absent from an older gateway: read as off */
+  googleDirectoryTokens?: boolean;
+  /** ADR-0331: governed removal of flagged MCP servers from endpoints; absent from an older gateway: read as off */
+  endpointAddonRemoval?: boolean;
   version: number;
 }
 

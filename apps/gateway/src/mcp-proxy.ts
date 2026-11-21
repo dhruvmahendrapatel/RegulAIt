@@ -1,4 +1,6 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
+import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
+import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -38,6 +40,7 @@ import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
   APPROVAL_SIGNATURE_RECHECK_FAILED_RULE,
+  approvalArgumentsDigest,
   approvalArgumentsPreview,
   setToolPriceSchema,
   guardrailCategoryList,
@@ -48,6 +51,7 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpServedDefinitions,
+  type McpServerTransport,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -72,6 +76,7 @@ import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-prin
 import {
   auditMcpUpstreamUnreachable,
   checkUpstreamDestination,
+  servedInProcess,
   guardedMcpConnect,
   McpEgressBlockedError,
   McpUpstreamRefusedError,
@@ -105,12 +110,16 @@ import {
 import {
   assertAdmitted,
   McpAdmissionHeldError,
+  McpServerDisabledError,
+  MCP_SERVER_DISABLED_RULE_ID,
   McpReleaseQuarantinedError,
   recordManifestScan,
   type McpAdmissionTrigger,
 } from "./mcp-admission.js";
 import { definitionPinRefusal, recordDefinitionPins } from "./mcp-definition-pins.js";
 import { highRiskRefusal, recordRiskClassification } from "./mcp-high-risk.js";
+import { prepareSapWrite, readSapOutcome, recordSapOutcome, recordSapRefusal, sapWriteRefusal, type SapCallFacts, type SapWritePreparation } from "./mcp-sap-business.js";
+import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { loadEntitlements } from "./entitlements.js";
 // ADR-0185 G3 — the non-tool MCP methods
 import {
@@ -143,6 +152,8 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -230,6 +241,9 @@ export async function preflightUpstream(
   serverRow: McpUpstreamRow,
 ): Promise<void> {
   await assertAdmitted(db, serverRow.id);
+  // ADR-0364: a first-party server on the gateway's fixed list is served in-process — there is no destination to
+  // decide. Admission (above) and every per-call decision still apply; any other first-party row is refused below.
+  if (await servedInProcess(db, serverRow)) return;
   // ADR-0185 G4: the destination decision (today the URL egress check, audited
   // and thrown exactly as before) — the G4 slice branches it on transport
   await checkUpstreamDestination(db, serverRow);
@@ -286,6 +300,38 @@ export async function refuseStdioWithoutEntitlement(
     serverId: args.serverId,
     toolName: args.toolName ?? null,
     detail: { phase: "stdio-entitlement", method: args.phase, projectId: args.projectId ?? null, receiptClass: "decision" },
+    ...decision,
+  });
+  return decision;
+}
+
+/** ADR-0207 (G4): the rule id of the refusal a disabled MCP server answers with (defined beside the connect gate) */
+export { MCP_SERVER_DISABLED_RULE_ID };
+
+/** the refusal, with its deny audit row, for any call on a disabled server */
+export async function refuseDisabledServer(
+  db: Db,
+  args: {
+    userId: string;
+    serverRow: { id: string; name: string; disabledAt: Date | null; disabledReason: string | null };
+    toolName?: string | null;
+    projectId?: string | null;
+    phase: "tools/list" | "tools/call" | "mcp";
+  },
+): Promise<Decision> {
+  const decision: Decision = {
+    effect: "deny",
+    ruleId: MCP_SERVER_DISABLED_RULE_ID,
+    ruleChain: [],
+    reason:
+      `MCP server '${args.serverRow.name}' is disabled (since ${args.serverRow.disabledAt?.toISOString() ?? "an unknown time"}): ` +
+      "every call on it is refused until an admin enables it again",
+  };
+  await db.insert(auditLog).values({
+    userId: args.userId,
+    serverId: args.serverRow.id,
+    toolName: args.toolName ?? null,
+    detail: { phase: "server-disabled", method: args.phase, projectId: args.projectId ?? null, receiptClass: "decision" },
     ...decision,
   });
   return decision;
@@ -453,7 +499,7 @@ export async function spendBoundApproval(
     argumentsDigest: string;
     contextDigest: string;
     /** ADR-0186 B: the target and tool of the call being run (the signed payload's other facts) */
-    call?: { serverId?: string | null; connectorId?: string | null; toolName: string } | undefined;
+    call?: { serverId?: string | null; connectorId?: string | null; agentId?: string | null; toolName: string } | undefined;
   },
 ): Promise<BoundApprovalSpend> {
   return db.transaction(async (tx) => {
@@ -536,13 +582,16 @@ export function signatureRecheckDenial(approvalId: string): Decision {
  * audit row then sits on the connector instead of an MCP tool.
  */
 export async function supersedeStaleConsent(
-  db: Db,
+  // a handle or a transaction: the model-call hold and replay retire stale consents inside their own transaction
+  db: Pick<Db, "update" | "insert">,
   rows: readonly RetiredApproval[],
   ctx:
-    | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined }
-    | { userId: string; connector: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined },
+    | { userId: string; serverId: string; toolName: string; projectId: string | null; connector?: undefined; agent?: undefined }
+    | { userId: string; connector: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined; agent?: undefined }
+    // ADR-0251: a model-call consent, audited on the agent
+    | { userId: string; agent: { id: string; name: string }; projectId: string | null; serverId?: undefined; toolName?: undefined; connector?: undefined },
 ): Promise<string[]> {
-  const subject = ctx.connector ? `connector '${ctx.connector.name}'` : `tool '${ctx.toolName}'`;
+  const subject = ctx.connector ? `connector '${ctx.connector.name}'` : ctx.agent ? `model '${ctx.agent.name}'` : `tool '${ctx.toolName}'`;
   const retired: string[] = [];
   for (const row of rows) {
     const moved = await db
@@ -562,7 +611,9 @@ export async function supersedeStaleConsent(
       userId: ctx.userId,
       ...(ctx.connector
         ? { objectType: "connector" as const, objectId: ctx.connector.id }
-        : { serverId: ctx.serverId, toolName: ctx.toolName }),
+        : ctx.agent
+          ? { objectType: "agent" as const, objectId: ctx.agent.id }
+          : { serverId: ctx.serverId, toolName: ctx.toolName }),
       // the approval id rides in `detail.approvalId`, exactly as ADR-0046's
       // `approval-routed` / `approval-sla-breached` rows do, so "what happened
       // to this approval" stays ONE query on one objectType.
@@ -756,7 +807,10 @@ export async function executeGovernedToolCall(
       // withhold, that is the marker, not the payload.
       // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
       inputText:
-        capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
+        capture && traceInput.value &&
+        !(outcome.kind === "denied" && (outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID ||
+          // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal
+          outcome.decision.ruleId === PRIVACY_RULE_IDS.dispatchRefused))
           ? toolPayloadPreview(traceInput.value, max)
           : null,
       outputText:
@@ -792,6 +846,9 @@ async function executeGovernedToolCallInner(
   const piiIntl = await piiInternationalCategories(db);
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "unknown_tool" };
+  // ADR-0207 (G4): a disabled server refuses every tool call, for people, agents and delegated workers alike. Checked
+  // before any connect, grant or approval lookup, so nothing is attempted upstream and no approval is queued or spent.
+  if (serverRow.disabledAt) return { kind: "denied", decision: await refuseDisabledServer(db, { userId, serverRow, toolName, projectId, phase: "tools/call" }) };
 
   const [toolRow] = await db
     .select()
@@ -955,6 +1012,10 @@ async function executeGovernedToolCallInner(
       // (a tool this sync found is approved: under 'block' syncUpstreamTools returns no other)
       kind = toolKind(found);
     }
+    // ADR-0230 A2 (review #798): on an SAP business server a tool's kind is NOT taken from the upstream's own
+    // `readOnlyHint`. Every tool is a write, so the approval rule, the write-only rate limit and the project
+    // requirement cannot be skipped by a manifest that annotates a posting tool as read-only.
+    if (serverRow.systemClass === "sap_business") kind = "write";
 
     // ADR-0246 addendum: a high-risk (offensive) server needs its policy template and an authorised target, and
     // every call's arguments are audited, redacted; refused here before the kernel decision and any tool call
@@ -962,6 +1023,29 @@ async function executeGovernedToolCallInner(
     if (highRisk) {
       if (upstream) await operationSucceeded();
       return { kind: "denied", decision: { effect: "deny", ruleId: highRisk.ruleId, ruleChain: [], reason: highRisk.reason } };
+    }
+
+    // ADR-0230 A3: an SAP business write carries a caller key, replaced here by the derived stored key before the
+    // decision, so the approval's payload binding covers it. A refusal (no key, no data key, a key reused with other
+    // arguments) is HELD and returned only after the entitlement decision, as the project requirement is (review
+    // #798): an unentitled caller gets the kernel's refusal and learns nothing about the server's class.
+    let sapFacts: SapCallFacts | null = null;
+    let sapPrepRefusal: Extract<SapWritePreparation, { kind: "refused" }> | null = null;
+    {
+      const sapPrep = await prepareSapWrite(db, dataKey, {
+        userId,
+        server: { id: serverId, url: serverRow.url, name: serverRow.name, systemClass: serverRow.systemClass },
+        toolName,
+        toolKind: kind,
+        projectId: projectId ?? null,
+        arguments: args.arguments,
+        argumentsDigestOf: (a) => approvalArgumentsDigest({ projectId: projectId ?? null, arguments: a }),
+      });
+      if (sapPrep.kind === "refused") sapPrepRefusal = sapPrep;
+      if (sapPrep.kind === "prepared") {
+        sapFacts = sapPrep.facts;
+        args = { ...args, arguments: sapPrep.arguments, detail: { ...(args.detail ?? {}), sap: sapPrep.facts } };
+      }
     }
 
     // The generation was read before the server/tool snapshot above. A first
@@ -1027,7 +1111,7 @@ async function executeGovernedToolCallInner(
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
       // ADR-0188 S4: a delegated call is decided with the stored chain, read now; a person's own call is `null`
-      { actor: delegatedActor },
+      { actor: delegatedActor, bindArguments: sapFacts !== null },
     );
     // ADR-0188 S4 (decision 30): when the delegation's scope refuses a call the PERSON could not make either,
     // the reason shown is the person's own (their grant, or the §5.1 lead ceiling folded into the worker's
@@ -1036,9 +1120,34 @@ async function executeGovernedToolCallInner(
     if (delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope") {
       const own = await governedEvaluate(
         db, userId, serverId, { serverId, name: toolName, kind }, args.arguments, args.ceilingTools ?? null, projectId,
-        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null },
+        args.principal, undefined, preparedPii, approvalTargetForServer(serverId, serverRow), { actor: null, bindArguments: sapFacts !== null },
       );
       if (own.decision.effect === "deny") decision = own.decision;
+    }
+
+    // ADR-0230 A2: a write to an SAP business server must be attributed to a live, budgeted project. Checked AFTER the
+    // entitlement decision (review #798): a caller the kernel refuses gets that refusal, so the requirement never tells
+    // an unentitled caller that the server is SAP business. Refused before the decision row, any approval is queued
+    // or any tool call; audited and never costed.
+    if (decision.effect !== "deny") {
+      const sapRefusal = await sapWriteRefusal(db, {
+        userId,
+        serverId,
+        serverName: serverRow.name,
+        systemClass: serverRow.systemClass,
+        toolName,
+        toolKind: kind,
+        projectId: projectId ?? null,
+      });
+      if (sapRefusal) {
+        if (upstream) await operationSucceeded();
+        return { kind: "denied", decision: { effect: "deny", ruleId: sapRefusal.ruleId, ruleChain: [], reason: sapRefusal.reason } };
+      }
+      if (sapPrepRefusal) {
+        await recordSapRefusal(db, { userId, serverId, toolName, toolKind: kind, projectId: projectId ?? null }, sapPrepRefusal);
+        if (upstream) await operationSucceeded();
+        return { kind: "denied", decision: { effect: "deny", ruleId: sapPrepRefusal.ruleId, ruleChain: [], reason: sapPrepRefusal.reason } };
+      }
     }
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
@@ -1403,6 +1512,17 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on the arguments that would reach the upstream (after any redaction). Still before the approval is
+    // consumed and before the upstream is contacted; answered as a policy denial so every caller reports it as one.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "mcp_tool", serverId, toolName },
+      projectId,
+      input: JSON.stringify(preparedPii?.effectiveArguments ?? args.arguments ?? null),
+    });
+    if (processingRefusal) return { kind: "denied", decision: processingRefusalDecision(processingRefusal) };
+
     // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
     // the other two for prompt-injection specifically: ADR-0034's amendment
     // showed a governed pipe can carry ATTACKER-CHOSEN BYTES back, so tool
@@ -1634,6 +1754,10 @@ async function executeGovernedToolCallInner(
     // gate filter on projectId. Unpriced server → null, never an invented
     // figure. Denied calls and upstream failures still bill nothing.
     // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
+    // ADR-0230 A3: an SAP business call's outcome (document number, replay, SAP error code), from the raw result
+    const sapOutcome = sapFacts ? readSapOutcome(sapFacts, content) : null;
+    // an idempotent replay returned an earlier result and did no new work: recorded, not charged
+    const chargedUsd = sapOutcome?.replayed ? 0 : pricePerCallUsd;
     const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
       ...actorColumns(),
       userId,
@@ -1642,12 +1766,13 @@ async function executeGovernedToolCallInner(
       // (as it carries the operation on connector rows) and the server id
       // rides the detail jsonb.
       operation: toolName,
-      // O10: tool-first price, server-flat fallback (resolved above)
-      costUsd: pricePerCallUsd,
+      // O10: tool-first price, server-flat fallback (resolved above); ADR-0230 A3: a replay is not charged
+      costUsd: chargedUsd,
       projectId,
       detail: {
         serverId,
         toolName,
+        ...(sapOutcome ? { sap: sapOutcome } : {}),
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
         // ADR-0042 COUNTS ONLY, same contract
@@ -1666,10 +1791,13 @@ async function executeGovernedToolCallInner(
     if (toolGrantId) {
       await db.transaction(async (tx) => {
         const [u] = await toolUsageWrite(tx as unknown as Db);
-        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(pricePerCallUsd) });
+        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(chargedUsd) });
       });
     } else {
       await toolUsageWrite(db);
+    }
+    if (sapOutcome) {
+      await recordSapOutcome(db, { userId, serverId, toolName, projectId: projectId ?? null, approvalId: approvedApprovalId ?? null, decisionAuditId }, sapOutcome);
     }
     if (mgOutput) {
       const outcome = guardrailOutcome(mgOutput);
@@ -2069,7 +2197,7 @@ async function observeServedDefinitions(
   client: Client,
   tools: readonly unknown[],
   /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
-  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+  observe: { serverId: string; transport?: McpServerTransport | null | undefined },
 ): Promise<McpServedDefinitions> {
   const caps = client.getServerCapabilities() ?? {};
   const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
@@ -2093,7 +2221,7 @@ export async function syncUpstreamTools(
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
   /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
-  transport?: McpUpstreamTransport | null,
+  transport?: McpServerTransport | null,
   /** the on-demand sync's audit row (mcp-tool-sync.ts), written in the transaction that stores the manifest */
   onStored?: (tx: Db, tools: Tool[]) => Promise<void>,
 ): Promise<Tool[]> {
@@ -2133,19 +2261,22 @@ export async function syncUpstreamTools(
     // ADR-0246 addendum: offensive tooling makes the server high-risk (over the whole served manifest)
     await recordRiskClassification(tx, serverId, tools, trigger);
     returned = pins.blockedTools.size > 0 ? tools.filter((t) => !pins.blockedTools.has(t.name)) : tools;
+    // security review #798: on an SAP business server every stored kind is 'write', whatever the hint says
+    // code review #798: FOR SHARE, so a sync waits for a mark in progress instead of storing hint kinds after it
+    const systemClass = await serverSystemClass(tx, serverId, { lock: true });
     for (const tool of returned) {
       await tx
         .insert(mcpTools)
         .values({
           serverId,
           name: tool.name,
-          kind: toolKind(tool),
+          kind: sapStoredToolKind(systemClass, toolKind(tool)),
           description: tool.description ?? null,
           inputSchema: tool.inputSchema,
         })
         .onConflictDoUpdate({
           target: [mcpTools.serverId, mcpTools.name],
-          set: { kind: toolKind(tool), description: tool.description ?? null, inputSchema: tool.inputSchema },
+          set: { kind: sapStoredToolKind(systemClass, toolKind(tool)), description: tool.description ?? null, inputSchema: tool.inputSchema },
         });
     }
     if (onStored) await onStored(tx, returned);
@@ -2265,7 +2396,11 @@ export function mcpPreHijackRefusal(err: unknown): { status: 403 | 409; body: Re
     // `mcp_stdio_image_unpinned`, `mcp_transport_disabled`)
     return { status: 403, body: { error: err.error, code: err.decision.code, detail: err.decision.reason } };
   }
-  // ADR-0175 A5 (#609 review): the release-age cooldown is not a scan hold, so it has its own code and names its
+  // ADR-0207 (G4): a disabled server, refused at the connect gate (a subclass of the held error, so checked first)
+  if (err instanceof McpServerDisabledError) {
+    return { status: 403, body: { error: "mcp_server_disabled", ruleId: MCP_SERVER_DISABLED_RULE_ID, detail: err.detail } };
+  }
+    // ADR-0175 A5 (#609 review): the release-age cooldown is not a scan hold, so it has its own code and names its
   // remedy. Checked BEFORE the held branch: the cooldown's error is a subclass of the held one.
   if (err instanceof McpReleaseQuarantinedError) {
     return {
@@ -2332,13 +2467,20 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
   // server-to-client SSE stream with GET. This proxy is stateless (one
   // transport per POST, no session id), so it offers none, and the spec's
   // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
-  // client report a transport error after every `initialize`. (No DELETE: a
-  // client sends it only to end a session, and no session id is ever issued.)
+  // client report a transport error after every `initialize`. DELETE ends a
+  // session, and none is ever issued, so it is 405 too (ADR-0311: the spec's
+  // answer for a server without sessions, where a 404 read as "session gone").
   // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
-  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
-    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
+  const postOnly = async (_req: unknown, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" });
+  app.get("/mcp/:serverId", postOnly);
+  app.delete("/mcp/:serverId", postOnly);
 
   app.post("/mcp/:serverId", async (req, reply) => {
+    // ADR-0311: the transport MUSTs the SDK does not enforce for us, before anything reaches an upstream
+    const originRefused = mcpOriginRefusal(req.headers.origin, resolvePublicUrl());
+    if (originRefused) return reply.status(originRefused.status).send({ error: originRefused.error, detail: originRefused.detail });
+    if (mcpBatchRefused(req.body, req.headers["mcp-protocol-version"])) return reply.status(400).send(MCP_BATCH_REFUSAL);
     const { serverId } = proxyParams.parse(req.params);
     const queryParse = proxyQuery.safeParse(req.query);
     if (!queryParse.success) {
@@ -2361,6 +2503,12 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!serverRow) {
       return reply.status(404).send({ error: "unknown_server" });
+    }
+    // ADR-0207 (G4): refused before the reply is hijacked into an MCP transport, with a plain HTTP error and its
+    // deny audit row; no upstream connect, manifest sync or process start happens for a disabled server
+    if (serverRow.disabledAt) {
+      const refused = await refuseDisabledServer(db, { userId, serverRow, phase: "mcp" });
+      return reply.status(403).send({ error: "mcp_server_disabled", ruleId: refused.ruleId, detail: refused.reason });
     }
 
     // ADR-0019 pillar-5 attribution. Validated EXACTLY like the invoke paths

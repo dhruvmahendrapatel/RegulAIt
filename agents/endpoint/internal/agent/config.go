@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/transport"
 )
 
@@ -26,6 +28,11 @@ type LocalConfig struct {
 	Issuer        string          `json:"issuer"`
 	CABundleFile  string          `json:"caBundleFile,omitempty"`
 	DisabledKinds []contract.Kind `json:"disabledKinds,omitempty"`
+	// DevicePolicyKeys pins the control plane's device-policy signer (owner decision B4, ADR-0330 §8): the public
+	// keys the on-device enforcement hook verifies signed policies with, the current key and at most one next key.
+	// Pinning authorises policies signed by these keys, and so whatever they allow; a pin never overrides a compiled
+	// key, and nothing here relaxes the agent without such a signed policy.
+	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
 }
 
 // Config is the validated local config.
@@ -33,16 +40,18 @@ type Config struct {
 	Issuer   string
 	CABundle []byte
 	Disabled map[contract.Kind]bool
+	// DevicePolicyKeys is the validated pinned device-policy keyring (empty when none is pinned).
+	DevicePolicyKeys enforce.Keyring
 }
 
 // LoadConfig reads and validates the config file and its CA bundle.
 func LoadConfig(path string, owner int) (*Config, error) {
-	raw, err := readChecked(path, owner, WorldRead)
+	raw, err := readChecked(path, owner, fsutil.WorldRead)
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	var lc LocalConfig
-	if err := strictJSON(raw, &lc); err != nil {
+	if err := fsutil.StrictJSON(raw, &lc); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	if lc.Schema != contract.SchemaConfigFile {
@@ -52,7 +61,11 @@ func LoadConfig(path string, owner int) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}}
+	keys, err := enforce.KeyringFrom(lc.DevicePolicyKeys)
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}, DevicePolicyKeys: keys}
 	for _, k := range lc.DisabledKinds {
 		known := false
 		for _, kk := range contract.Kinds {
@@ -67,7 +80,7 @@ func LoadConfig(path string, owner int) (*Config, error) {
 		if !filepath.IsAbs(lc.CABundleFile) {
 			return nil, errors.New("config: caBundleFile must be an absolute path")
 		}
-		ca, err := readChecked(lc.CABundleFile, owner, WorldRead)
+		ca, err := readChecked(lc.CABundleFile, owner, fsutil.WorldRead)
 		if err != nil {
 			return nil, fmt.Errorf("config: CA bundle: %w", err)
 		}
@@ -128,14 +141,6 @@ func validSecret(s string) bool {
 
 func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }
 
 // uuidV4 formats 16 random bytes as an RFC 9562 version-4 UUID.

@@ -140,12 +140,14 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why: "POST /v1/rules/rate-limits — CREATE ONLY, identical reasoning to the approvals insert above.",
   },
   {
-    file: "mcp-high-risk.ts",
+    file: "rule-creates.ts",
     method: "insert",
     expr: "rateLimits",
     why:
-      "POST /v1/servers/:serverId/high-risk-policy (ADR-0246 addendum) — CREATE ONLY of the template's fleet rate " +
-      "limit, in the same transaction as its audit row; a new row has no versions, so nothing is discarded at dispatch.",
+      "`seedServerPolicyTemplate` (code review #798) — CREATE ONLY of a server policy template's fleet rate limit, shared " +
+      "by POST /v1/servers/:serverId/high-risk-policy (ADR-0246 addendum) and POST /v1/servers/:serverId/system-class " +
+      "(ADR-0230 A2), each in the same transaction as its caller's audit row; a new row has no versions, so nothing is " +
+      "discarded at dispatch.",
   },
   {
     file: "projects.ts",
@@ -255,6 +257,15 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why:
       "the RegulAIt-LLM bootstrap registration — CREATE ONLY, same shape as POST /v1/agents: a fresh row with " +
       "a random id and no ON CONFLICT, which cannot yet have versions.",
+  },
+  {
+    file: "agent-registry-routes.ts",
+    method: "insert",
+    expr: "agents",
+    why:
+      "ADR-0314 POST /v1/agent-registry/records/:recordId/import — CREATE ONLY: a fresh row with a random id, " +
+      "disabled and `proposed`, no grant rows. Its ON CONFLICT (name) DO NOTHING writes nothing on a clash (the " +
+      "route answers 409), so it never touches an existing agent and a new row cannot yet have versions.",
   },
   {
     file: "org-settings.ts",

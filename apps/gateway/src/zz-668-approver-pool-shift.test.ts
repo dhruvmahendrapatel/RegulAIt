@@ -10,6 +10,7 @@
  *
  * Runs on its OWN scratch database (prefix `p668_`), dropped in afterAll (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -136,7 +137,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   const mkUser = async (label: string, isAdmin = false) => {
@@ -150,7 +151,7 @@ beforeAll(async () => {
   expect(key.statusCode, key.body).toBe(201);
   const token = "rgls_" + randomBytes(32).toString("hex");
   await db.insert(authSessions).values({
-    tokenHash: createHash("sha256").update(token).digest("hex"),
+    tokenHash: hashToken(token),
     userId: adminId,
     origin: "password",
     expiresAt: new Date(Date.now() + 3_600_000),

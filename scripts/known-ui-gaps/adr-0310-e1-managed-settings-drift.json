@@ -1,0 +1,8 @@
+{
+  "adr": "ADR-0310",
+  "lane": "E1",
+  "tracking": "ADR-0310 slice 2 (G2, lane E1): the brief is API-only; the drift view is requested on #453 (Governed Designer). raised under the lane E1 brief rule 3 (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0310)",
+  "gaps": {
+    "GET /v1/managed-settings/drift": "lists MCP servers configured on enrolled devices outside the exported managed allowlist (ADR-0259 inventory)"
+  }
+}

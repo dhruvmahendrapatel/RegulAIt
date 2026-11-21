@@ -14,10 +14,12 @@
  * database, because "the gateway refuses to start" is a claim about starting.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { auditLog, createDb, eq, runMigrations, runtimeLoginRoleFor, sql, type Db } from "@regulait/db";
 import { startGateway } from "./boot.js";
 import {
   DEV_SECRETS_OVERRIDE_ENV,
@@ -50,7 +52,8 @@ describe("the decision", () => {
     expect(a.findings).toEqual([]);
     expect(a.refuse).toBe(false);
     expect(a.bootstrapLine).toContain("CONFIGURED");
-    expect(a.bootstrapLine).toContain("remove REGULAIT_BOOTSTRAP_TOKEN");
+    // S-02: the token now retires itself once the first admin signs in
+    expect(a.bootstrapLine).toContain("retires itself once the first admin exists");
   });
 
   it("no bootstrap token: the door is reported shut", () => {
@@ -61,18 +64,27 @@ describe("the decision", () => {
 
   it("a real admin already existing is said out loud — the token has done its one job", () => {
     const a = assessDevSecrets(clean, { bootstrapToken: REAL_TOKEN, dataKey: REAL_KEY, realAdminExists: true });
-    expect(a.bootstrapLine).toContain("a real admin already exists");
+    // S-02: and it is RETIRED, not merely reported
+    expect(a.bootstrapLine).toContain("RETIRED");
+    expect(a.bootstrapLine).toContain("remove REGULAIT_BOOTSTRAP_TOKEN");
+    const relaxed = assessDevSecrets(clean, { bootstrapToken: REAL_TOKEN, realAdminExists: true, bootstrapAfterAdmin: true });
+    expect(relaxed.bootstrapLine).toContain("REGULAIT_BOOTSTRAP_AFTER_ADMIN=1");
   });
 
-  it("the published defaults are named, and refused ONLY on a deployed box", () => {
+  it("the published defaults are named, and accepted ONLY on a loopback-only listener of an undeployed box (S-02)", () => {
     for (const token of ["dev-bootstrap", "seed-bootstrap"]) {
-      const laptop = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY });
+      const laptop = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "127.0.0.1" });
       expect(laptop.findings).toHaveLength(2);
       expect(laptop.refusing).toHaveLength(2);
-      expect(laptop.refuse).toBe(false); // nothing says this box is deployed
+      expect(laptop.refuse).toBe(false); // loopback only, and nothing says this box is deployed
       expect(laptop.networkFacingSignal).toBeNull();
 
-      const box = assessDevSecrets(deployed, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY });
+      // S-02: every interface (a container, a bare `pnpm start`) refuses with no deploy signal at all
+      const container = assessDevSecrets(clean, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "0.0.0.0" });
+      expect(container.refuse).toBe(true);
+      expect(container.exposure).toContain("0.0.0.0");
+
+      const box = assessDevSecrets(deployed, { bootstrapToken: token, dataKey: PUBLISHED_DATA_KEY, listenHost: "127.0.0.1" });
       expect(box.refuse).toBe(true);
       expect(box.networkFacingSignal).toBe("REGULAIT_DEPLOY_MODE=hosted");
     }
@@ -103,10 +115,21 @@ describe("the decision", () => {
     expect(short.refuse).toBe(false);
   });
 
-  it("the override boots a deployed box anyway, and says so", () => {
+  it("the override never boots a deployed box (S-02 review: a quickstart .env must not open tls/hosted/tunnel)", () => {
     const a = assessDevSecrets({ ...deployed, [DEV_SECRETS_OVERRIDE_ENV]: "1" } as NodeJS.ProcessEnv, {
       bootstrapToken: "dev-bootstrap",
       dataKey: PUBLISHED_DATA_KEY,
+    });
+    expect(a.refuse).toBe(true);
+    expect(a.overridden).toBe(false);
+    expect(a.refusing).toHaveLength(2);
+  });
+
+  it("the override boots a reachable listener on an undeployed box, and says so", () => {
+    const a = assessDevSecrets({ [DEV_SECRETS_OVERRIDE_ENV]: "1" } as NodeJS.ProcessEnv, {
+      bootstrapToken: "dev-bootstrap",
+      dataKey: PUBLISHED_DATA_KEY,
+      listenHost: "0.0.0.0",
     });
     expect(a.refuse).toBe(false);
     expect(a.overridden).toBe(true);
@@ -117,6 +140,7 @@ describe("the decision", () => {
     const a = assessDevSecrets(deployed, { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY });
     const err = new DevSecretsBootError(a);
     expect(err.message).toContain("REGULAIT_DEPLOY_MODE=hosted");
+    expect(err.message).toContain("HOST=127.0.0.1");
     expect(err.message).toContain("dev-bootstrap");
     expect(err.message).toContain("REGULAIT_DATA_KEY is the published dev default");
     expect(err.message).toContain("scripts/install.sh");
@@ -133,6 +157,7 @@ const scratchUrl = DATABASE_URL.replace(/\/[^/?]+(\?|$)/, `/${SCRATCH_DB}$1`);
 let admin: Db;
 let db: Db;
 let port = 0;
+const installDirs = new Map<string, string>();
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -153,13 +178,29 @@ async function boot(
   opts: { bootstrapToken?: string; dataKey?: string },
   extraEnv: Record<string, string> = {},
   target: Db = db,
+  host = "127.0.0.1",
 ) {
   const log: string[] = [];
+  // ADR-0234 batch 7b: a DEPLOYED box refuses the dev privileged-login opt-in, so those boots serve requests on the
+  // install-generated runtime login (one secrets directory per database), as a deployment does
+  const deployed = extraEnv.REGULAIT_DEPLOY_MODE !== undefined;
+  const targetUrl = target === dbReal ? scratchUrlReal : scratchUrl;
+  if (deployed && !installDirs.has(targetUrl)) installDirs.set(targetUrl, mkdtempSync(path.join(os.tmpdir(), "devsecrets-install-")));
+  const login = deployed ? { REGULAIT_INSTALL_SECRETS_DIR: installDirs.get(targetUrl)! } : { REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" };
   // a CLEAN env: the suite's own process.env must not decide the outcome
-  const env = { PATH: process.env.PATH, VITEST: "1", ...extraEnv } as NodeJS.ProcessEnv;
+  const env = { PATH: process.env.PATH, VITEST: "1", ...login, ...extraEnv } as NodeJS.ProcessEnv;
   port = await freePort();
   try {
-    const started = await startGateway({ db: target, migrationsFolder, port, host: "127.0.0.1", ...opts, log: (l) => log.push(l), env });
+    const started = await startGateway({
+      db: target,
+      ...(deployed ? { connectionString: targetUrl } : {}),
+      migrationsFolder,
+      port,
+      host,
+      ...opts,
+      log: (l) => log.push(l),
+      env,
+    });
     return { app: started.app, log, error: null as unknown };
   } catch (error) {
     return { app: null, log, error };
@@ -196,6 +237,13 @@ afterAll(async () => {
     async () => endPool(dbReal),
     async () => dropScratchDatabase(admin, SCRATCH_DB),
     async () => dropScratchDatabase(admin, SCRATCH_DB_REAL),
+    // roles are cluster-wide: the runtime logins the deployed boots created go with their databases
+    async () => admin.execute(sql.raw(`DROP ROLE IF EXISTS ${runtimeLoginRoleFor(SCRATCH_DB)}`)),
+    async () => admin.execute(sql.raw(`DROP ROLE IF EXISTS ${runtimeLoginRoleFor(SCRATCH_DB_REAL)}`)),
+    async () => {
+      for (const d of installDirs.values()) rmSync(d, { recursive: true, force: true });
+    },
+    async () => admin.$client.end(),
   ]);
 });
 
@@ -230,17 +278,49 @@ describe("the real boot", () => {
     expect(reachable).toBe(false);
   });
 
-  it("the override boots the deployed box and the posture block says it is booting anyway", async () => {
+  it("the override does NOT boot a deployed box: it still refuses, with nothing listening", async () => {
     const r = await boot(
       { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY },
       { REGULAIT_DEPLOY_MODE: "hosted", [DEV_SECRETS_OVERRIDE_ENV]: "1" },
     );
+    expect(r.app).toBeNull();
+    expect(r.error, String(r.error)).toBeInstanceOf(DevSecretsBootError);
+  });
+
+  it("the override boots a reachable listener on an undeployed box, with a banner and an audit row", async () => {
+    const r = await boot(
+      { bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY },
+      { [DEV_SECRETS_OVERRIDE_ENV]: "1" },
+      db,
+      "0.0.0.0",
+    );
     expect(r.error).toBeNull();
     try {
-      expect(r.log.find((l) => l.includes("booting anyway"))).toBeTruthy();
+      // S-02: a banner, and the boot is recorded
+      expect(r.log.find((l) => l.includes("DEV SECRETS ACCEPTED"))).toBeTruthy();
+      expect(r.log.find((l) => l.includes("Audit: recorded"))).toBeTruthy();
     } finally {
       await r.app!.close();
     }
+  });
+
+  it("the retirement relaxation is recorded at boot: a log line naming the audit rule, and the row", async () => {
+    const count = async () =>
+      (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, "bootstrap-after-admin-relaxed"))).length;
+    const before = await count();
+    const r = await boot({ bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY }, { REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1" });
+    expect(r.error).toBeNull();
+    try {
+      expect(r.log.find((l) => l.includes("rule bootstrap-after-admin-relaxed"))).toBeTruthy();
+      expect(await count()).toBe(before + 1);
+    } finally {
+      await r.app!.close();
+    }
+    // without the relaxation: no row
+    const plain = await boot({ bootstrapToken: "dev-bootstrap", dataKey: PUBLISHED_DATA_KEY });
+    expect(plain.error).toBeNull();
+    await plain.app!.close();
+    expect(await count()).toBe(before + 1);
   });
 
   it("real secrets on a deployed box boot clean: no DEV-GRADE line at all", async () => {
