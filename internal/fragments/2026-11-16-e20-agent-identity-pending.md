@@ -1,7 +1,6 @@
 <!-- fold: pending -->
 
 - **Agent identity follow-ups (ADR-0339 slice 2, lane E20).**
-  - The screen for the four `/v1/agent-identity` routes (UI builder, #453).
   - Once the vendor registry import (PR #855) merges: write `vendor_record` authorship with the vendor creator's
     pseudonym, and stage the vendor identity it read (Entra Agent ID object id, AgentCore runtime ARN, Gemini agent
     resource name) as an `importer` link.

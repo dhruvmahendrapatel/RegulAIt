@@ -51,7 +51,7 @@ import {
 } from "@regulait/shared";
 import { databaseNow } from "./db-clock.js";
 import type { ListSpec } from "./list-contract.js";
-import { answerListPage, type ContractList } from "./list-contract-route.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import { whereFrom } from "./state-transition.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -319,6 +319,13 @@ export function registerAgentIdentityRoutes(app: FastifyInstance, db: Db): void 
     const k = z.object({ kind: z.enum(AGENT_RISK_SUBJECT_KINDS).default("agent") }).safeParse({ kind: (req.query as { kind?: unknown } | undefined)?.kind });
     if (!k.success) return reply.status(400).send({ error: "invalid_query", issues: issues(k.error) });
     return answerListPage(db, req, reply, findings[k.data.kind]);
+  });
+  /** Admin: the same findings as an Excel download (ADR-0226), every matching row, with the columns on screen */
+  app.get("/v1/agent-identity/ownership-findings/export.xlsx", async (req, reply) => {
+    privateNoStore(reply);
+    const k = z.object({ kind: z.enum(AGENT_RISK_SUBJECT_KINDS).default("agent") }).safeParse({ kind: (req.query as { kind?: unknown } | undefined)?.kind });
+    if (!k.success) return reply.status(400).send({ error: "invalid_query", issues: issues(k.error) });
+    return answerListExport(db, req, reply, findings[k.data.kind]);
   });
 
   /** Admin: stage a non-human identity link. Staged confers nothing; a second admin confirms it. Audited in the same transaction. */
