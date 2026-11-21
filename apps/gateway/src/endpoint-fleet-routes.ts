@@ -7,9 +7,10 @@
  *   fleet settings     self-update, OFF by default: turning it on is a `settings_relax` step-up bound to the source,
  *                      recorded on the row (a CHECK holds "on" to a recorded relaxation); turning it off is free
  *   update rollouts    one target version over ordered stages (one ADR-0350 group each; a device in several groups is
- *                      offered the update by the first stage that holds it); the lifecycle is the declared table in
- *                      `endpoint-fleet-lifecycle.ts`, and every state write is a guarded UPDATE over its source states,
- *                      so a stale or concurrent write matches no row and is refused (409), never overwriting
+ *                      offered the update by the first stage that holds it); the lifecycles are ADR-0348 machines
+ *                      (ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE in @regulait/shared, registered in
+ *                      STATE_MACHINES), and every state write is guarded with `whereFrom`, so a stale or concurrent
+ *                      write matches no row and is refused (409), never overwriting
  *   one-line enrolment a single-use (device cap 1), short-lived (15 minutes by default, at most 60), source-scoped
  *                      enrolment token, optionally placing the device in one ADR-0350 group (a group only narrows a
  *                      device's policy, so joining one is never a relaxation). Only its SHA-256 is kept; no audit
@@ -39,7 +40,15 @@ import {
   type EndpointUpdateRolloutStageRow,
 } from "@regulait/db";
 import { ENDPOINT_BULK_TOKEN_PREFIX, ENDPOINT_ENROL_FILE_SCHEMA } from "./endpoint-agent.js";
-import { ROLLOUT_MACHINE, ROLLOUT_STAGE_MACHINE, describe, sourcesOf, type RolloutEvent, type RolloutState } from "./endpoint-fleet-lifecycle.js";
+import {
+  ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE,
+  ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE,
+  type EndpointRolloutEvent as RolloutEvent,
+  type EndpointRolloutState as RolloutState,
+} from "@regulait/shared";
+import type { ListSpec } from "./list-contract.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
+import { whereFrom } from "./state-transition.js";
 import { identityIssuer } from "./oauth/common.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
@@ -48,7 +57,6 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** bounds (secure by default, ADR-0180: each is the strict value, none is a setting) */
 export const ROLLOUT_MAX_STAGES = 20;
-export const ROLLOUTS_LISTED = 100;
 export const ONE_LINE_TOKEN_DEFAULT_MINUTES = 15;
 export const ONE_LINE_TOKEN_MAX_MINUTES = 60;
 
@@ -58,6 +66,20 @@ export const selfUpdateRelaxStepUp = (sourceId: string): StepUpCheckArgs => ({
   kind: "settings_relax",
   facts: { op: "endpoint_fleet_self_update", sourceId, selfUpdate: true },
 });
+
+/** ADR-0226: a source's rollouts, newest first (the keyset cursor on created_at) */
+const ROLLOUTS_LIST: ListSpec<{ id: string; targetVersion: string; state: string; createdAt: string }> = {
+  id: "endpoint-update-rollouts",
+  sorts: { created: { expr: endpointUpdateRollouts.createdAt, keysetAt: endpointUpdateRollouts.createdAt } },
+  columns: {
+    targetVersion: { label: "Target version", value: (r) => r.targetVersion },
+    state: { label: "State", value: (r) => r.state },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: endpointUpdateRollouts.id,
+};
 
 const uuid = z.string().uuid();
 const settingsSchema = z.object({ selfUpdate: z.boolean() }).strict();
@@ -139,7 +161,7 @@ function rolloutView(r: EndpointUpdateRolloutRow, stages: EndpointUpdateRolloutS
       startedAt: s.startedAt?.toISOString() ?? null,
       completedAt: s.completedAt?.toISOString() ?? null,
     })),
-    lifecycle: describe(ROLLOUT_MACHINE, r.state as RolloutState, blocked),
+    lifecycle: ROLLOUT_MACHINE.describe(r.state as RolloutState, blocked),
   };
 }
 
@@ -220,13 +242,29 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     return { r, stages };
   };
 
+  // ADR-0226: the rollouts are evidence, so the list pages (keyset on created_at) rather than stopping at a fixed count
+  const rolloutsList: ContractList<ReturnType<typeof rolloutView> & { _cursorAt?: unknown }, Record<string, never>> = {
+    spec: ROLLOUTS_LIST,
+    filters: z.object({}).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db.select({ r: endpointUpdateRollouts, _cursorAt: q.cursorAt }).from(endpointUpdateRollouts).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+        if (rows.length === 0) return [];
+        const ids = rows.map((x) => x.r.id);
+        const stages = await db.select().from(endpointUpdateRolloutStages).where(inArray(endpointUpdateRolloutStages.rolloutId, ids));
+        const on = await selfUpdateOn(db, rows[0]!.r.sourceId);
+        return rows.map((x) => ({ ...rolloutView(x.r, stages.filter((st) => st.rolloutId === x.r.id), on), _cursorAt: x._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(endpointUpdateRollouts).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req) => eq(endpointUpdateRollouts.sourceId, (req.params as { sourceId: string }).sourceId),
+  };
+
   app.get("/v1/discovery/sources/:sourceId/update-rollouts", async (req, reply) => {
     const source = await agentSource(reply, param(req, "sourceId"));
     if (!source) return reply;
-    const rows = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.sourceId, source.id)).orderBy(desc(endpointUpdateRollouts.createdAt), desc(endpointUpdateRollouts.id)).limit(ROLLOUTS_LISTED);
-    const stages = rows.length ? await db.select().from(endpointUpdateRolloutStages).where(inArray(endpointUpdateRolloutStages.rolloutId, rows.map((r) => r.id))) : [];
-    const on = await selfUpdateOn(db, source.id);
-    return reply.send({ rollouts: rows.map((r) => rolloutView(r, stages.filter((s) => s.rolloutId === r.id), on)), limit: ROLLOUTS_LISTED });
+    return answerListPage(db, req, reply, rolloutsList);
   });
 
   app.post("/v1/discovery/sources/:sourceId/update-rollouts", async (req, reply) => {
@@ -287,20 +325,25 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
         const stages = (await tx.select().from(endpointUpdateRolloutStages).where(eq(endpointUpdateRolloutStages.rolloutId, id)).for("update")).sort((a, b) => a.ordinal - b.ordinal);
         const on = await selfUpdateOn(tx, r.sourceId);
         const view = rolloutView(r, stages, on).lifecycle.transitions.find((t) => t.event === action)!;
-        if (!view.allowed) throw new Refusal(409, ROLLOUT_MACHINE.transitions[action].from.includes(r.state as RolloutState) ? "transition_blocked" : "illegal_transition", view.reason ?? "not allowed now");
-        const to = ROLLOUT_MACHINE.transitions[action].to;
+        if (!view.allowed) throw new Refusal(409, ROLLOUT_MACHINE.can(r.state as RolloutState, action) ? "transition_blocked" : "illegal_transition", view.reason ?? "not allowed now");
+        const to = ROLLOUT_MACHINE.next(r.state as RolloutState, action);
         // the guarded write: only from the declared source states (a concurrent write matches no row)
         const moved = await tx
           .update(endpointUpdateRollouts)
           .set({ state: to, updatedAt: sql`now()` })
-          .where(and(eq(endpointUpdateRollouts.id, id), inArray(endpointUpdateRollouts.state, sourcesOf(ROLLOUT_MACHINE, action))))
+          .where(and(eq(endpointUpdateRollouts.id, id), whereFrom(endpointUpdateRollouts.state, ROLLOUT_MACHINE, action)))
           .returning();
         if (moved.length === 0) throw new Refusal(409, "changed_concurrently", "the rollout changed while this was decided; read it again");
-        const stageMove = async (ordinal: number, event: "activate" | "finish") =>
-          tx
+        const stageMove = async (ordinal: number, event: "activate" | "finish") => {
+          const to = ROLLOUT_STAGE_MACHINE.def.transitions[event].to;
+          const rows = await tx
             .update(endpointUpdateRolloutStages)
-            .set(event === "activate" ? { state: "active", startedAt: sql`now()` } : { state: "done", completedAt: sql`now()` })
-            .where(and(eq(endpointUpdateRolloutStages.rolloutId, id), eq(endpointUpdateRolloutStages.ordinal, ordinal), inArray(endpointUpdateRolloutStages.state, sourcesOf(ROLLOUT_STAGE_MACHINE, event))));
+            .set(to === "active" ? { state: to, startedAt: sql`now()` } : { state: to, completedAt: sql`now()` })
+            .where(and(eq(endpointUpdateRolloutStages.rolloutId, id), eq(endpointUpdateRolloutStages.ordinal, ordinal), whereFrom(endpointUpdateRolloutStages.state, ROLLOUT_STAGE_MACHINE, event)))
+            .returning({ ordinal: endpointUpdateRolloutStages.ordinal });
+          // the stage rows are locked FOR UPDATE above, so a miss is a broken invariant: roll the whole move back
+          if (rows.length === 0) throw new Refusal(409, "changed_concurrently", "a stage changed while this was decided; read the rollout again");
+        };
         const active = stages.find((s) => s.state === "active");
         if (action === "start") await stageMove(stages[0]!.ordinal, "activate");
         if (action === "advance" && active) {

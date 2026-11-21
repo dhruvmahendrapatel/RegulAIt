@@ -602,7 +602,8 @@ export function registerEndpointAgentRoutes(
             identityCap: ENDPOINT_TICKET_IDENTITY_CAP,
           })
           .returning();
-        // ADR-0360 §5: a one-line token places its device in the token's group (same source: the composite FK)
+        // ADR-0360 §5: a one-line token places its device in the token's ADR-0350 group (only narrows its policy; the
+        // INSERT policy admits exactly this row: a live device whose single-use token names the group)
         if (locked.row.deviceGroupId) {
           await t.insert(endpointDeviceGroupMembers).values({ deviceId: row!.id, groupId: locked.row.deviceGroupId, addedBy: locked.row.createdBy }).onConflictDoNothing();
         }

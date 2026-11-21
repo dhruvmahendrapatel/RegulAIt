@@ -11,9 +11,9 @@
 --
 -- Row-level security, ENABLED and FORCED on every new table: an active admin principal (regulait_rls_is_admin(), which
 -- also admits the bootstrap token) and the `system_task` and `migration` reasons. The one addition to an existing
--- table is an INSERT-only policy on ADR-0350's endpoint_device_group_members under `public_ingest`: the agent's ticket
--- redemption (an exempt route) places the device in its one-line token's group in the same transaction that creates
--- the device. Joining a group only narrows a device's policy (ADR-0350 rules are ask or deny), so this grants nothing.
+-- table is an INSERT-only policy on ADR-0350's endpoint_device_group_members under `public_ingest`, scoped to the one
+-- row a redemption writes (a live device whose single-use token names that group): the agent's ticket redemption (an
+-- exempt route) places the device in its one-line token's group in the same transaction that creates the device. Joining a group only narrows a device's policy (ADR-0350 rules are ask or deny), so this grants nothing.
 --
 -- Hand-authored, additive and idempotent. No functions or triggers (zz-dbguard-0185 checked by hand).
 CREATE TABLE IF NOT EXISTS "endpoint_fleet_settings" (
@@ -114,4 +114,15 @@ CREATE POLICY "endpoint_update_rollout_stages_admin" ON "endpoint_update_rollout
 DROP POLICY IF EXISTS "endpoint_device_group_members_redeem" ON "endpoint_device_group_members";
 --> statement-breakpoint
 CREATE POLICY "endpoint_device_group_members_redeem" ON "endpoint_device_group_members" FOR INSERT
-  WITH CHECK ((SELECT regulait_rls_system_reason()) = 'public_ingest');
+  WITH CHECK (
+    (SELECT regulait_rls_system_reason()) = 'public_ingest'
+    -- only the row a one-line redemption writes: a live device enrolled by a single-use token naming this group
+    AND EXISTS (
+      SELECT 1 FROM "endpoint_devices" d
+      JOIN "endpoint_enrolment_tokens" t ON t."id" = d."token_id"
+      WHERE d."id" = "endpoint_device_group_members"."device_id"
+        AND d."revoked_at" IS NULL
+        AND t."single_use"
+        AND t."device_group_id" = "endpoint_device_group_members"."group_id"
+    )
+  );

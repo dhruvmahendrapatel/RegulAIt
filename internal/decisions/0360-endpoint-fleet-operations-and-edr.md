@@ -91,7 +91,7 @@ adds no group concept of its own (first drafted as per-source rings; replaced on
 ### 2. Self-update: off by default, a relaxation
 
 - The per-source setting `selfUpdate` is `false` by default (`endpoint_fleet_settings`, absent row = off). Turning it on
-  is a `settings_relax` step-up bound to the source (`requireRelaxStepUp`), audited, and the step-up method and audit
+  is a `settings_relax` step-up whose facts bind it to the source (`requireStepUp` with `{op, sourceId, selfUpdate}`, so a grant for another source or setting does not count), audited, and the step-up method and audit
   row are recorded on the settings row (a CHECK holds "on" to a recorded relaxation, as migration 0208 does for long
   token expiry). Turning it off needs no step-up and is audited.
 - The agent's local config cannot turn it on: `config.go` names self-update a server-side relaxation, and the config
@@ -102,7 +102,7 @@ adds no group concept of its own (first drafted as per-source rings; replaced on
 A rollout names one target version and an ordered list of stages, each one ADR-0350 device group. At most one rollout per
 source is open (not `completed` or `aborted`; a partial unique index).
 
-Rollout lifecycle (`endpoint_update_rollouts.state`, declared once in `endpoint-fleet-lifecycle.ts`):
+Rollout lifecycle (`endpoint_update_rollouts.state`, declared once as `ENDPOINT_ROLLOUT_MACHINE` in `@regulait/shared`):
 
 | Event | From | To | By |
 |---|---|---|---|
@@ -119,8 +119,9 @@ done`, `done` terminal. Every write is a guarded `UPDATE … WHERE state IN (sou
 stale write matches no row and is refused (409), never overwriting a newer state. Turning self-update off does not
 change a rollout's state; it stops every directive at once (the device route answers "no update" while it is off).
 
-The tables are declared in lane E29's `MachineDef` shape (PR #920) (states, initial, terminal, transitions with from, to, by
-and summary) so they move onto `defineMachine` when lane E29's PR merges, without a behaviour change.
+Both tables are ADR-0348 machines declared with `defineMachine` (`packages/shared/src/endpoint-fleet.ts`) and
+registered in `STATE_MACHINES`, so `GET /v1/state-machines` lists them and the CHECK-equality test covers both columns.
+Every state write is guarded with `whereFrom(column, machine, event)`, and the API returns `machine.describe(state)`.
 
 ### 4. The device side (slice 1b and 1c)
 
@@ -147,6 +148,16 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
   again; a failure restores the previous binary. Every outcome (`installed`, `rolled_back`, `refused`, `failed`) is
   written with a fixed code to a result file the per-user agent reports, and a `rolled_back` or `failed` result halts
   the rollout.
+- **Hardening the updater must meet (review of #962, checked against the slice 1b/1c code):**
+  - the spool is read with `O_NOFOLLOW` (`openat` under the spool directory), bounded by the manifest's `length`, and
+    copied into a root-only staging file before it is hashed, so the bytes hashed are the bytes run;
+  - versions are compared with `golang.org/x/mod/semver` on a valid `v`-prefixed form only (an invalid version is
+    refused, never treated as equal), and an install needs `semver.Compare(target, running) > 0`.
+- **What self-update does not protect against (stated, not hidden).** There is no device-side off switch once the
+  admin pins a release key and turns self-update on: a compromised gateway can direct a device to any *newer* release
+  that the offline release key signed. It cannot supply an unsigned or older binary, a key, or a release the release
+  key never signed. The mitigations are the offline release key, the source-level switch (off by default, a step-up to
+  turn on), staged rollouts, and the halt on the first failed install.
 
 ### 5. One-line enrolment
 

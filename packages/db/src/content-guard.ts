@@ -115,7 +115,6 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
-  // ADR-0360 (lane E41): a device group (staging ring) an admin names
   // ADR-0261 (P37): a third-party ingest source an admin names
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names

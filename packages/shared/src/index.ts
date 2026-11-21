@@ -5096,6 +5096,7 @@ export * from "./agent-identity.js";
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-fleet.js";
 export * from "./endpoint-actions.js";
 
 // ADR-0341: RFC 6902 patches for diff views

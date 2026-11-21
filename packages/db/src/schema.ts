@@ -185,6 +185,9 @@ import {
   VENDOR_AGENT_ACTION_STATES,
   VENDOR_AGENT_CONTROL_ACTIONS,
   VENDOR_AGENT_STATES,
+  // ADR-0360 (migration endpoint_fleet_operations): the rollout and stage lifecycles, ADR-0348 machines
+  ENDPOINT_ROLLOUT_STATES,
+  ENDPOINT_ROLLOUT_STAGE_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -20112,11 +20115,8 @@ export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // The per-source self-update setting (off unless relaxed with a recorded step-up) and staged update rollouts whose
 // stages are ADR-0350 device groups (lane E31's table, reused: no second group concept). A device may be in several
 // groups; it is offered an update by the first stage, in ordinal order, whose group holds it. The lifecycles are
-// declared once in the gateway's `endpoint-fleet-lifecycle.ts`; every state write is a guarded UPDATE over that
-// table's source states.
-
-export const ENDPOINT_ROLLOUT_STATES = ["draft", "running", "paused", "halted", "completed", "aborted"] as const;
-export const ENDPOINT_ROLLOUT_STAGE_STATES = ["pending", "active", "done"] as const;
+// ENDPOINT_ROLLOUT_MACHINE and ENDPOINT_ROLLOUT_STAGE_MACHINE (@regulait/shared, ADR-0348, in STATE_MACHINES);
+// every state write is a guarded UPDATE over the event's source states (`whereFrom`).
 
 /** absent row = every setting at its strict default (self-update off) */
 export const endpointFleetSettings = pgTable(
