@@ -502,6 +502,7 @@ import {
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerAgentRiskProofRoutes } from "./agent-risk-proof-routes.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
@@ -6276,6 +6277,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpToolSyncRoutes(app, db);
   // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
   registerMcpDefinitionPinRoutes(app, db);
+  registerAgentRiskProofRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
   registerMcpSapBusinessRoutes(app, db);
