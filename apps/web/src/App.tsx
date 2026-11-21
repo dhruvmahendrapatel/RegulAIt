@@ -90,8 +90,8 @@ const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "In
 const CampaignsPage = screen(() => import("./screens/admin-access-reviews"), "CampaignsPage");
 const RecommendationsPage = screen(() => import("./screens/admin-access-reviews"), "RecommendationsPage");
 const SodRulesPage = screen(() => import("./screens/admin-access-reviews"), "SodRulesPage");
-const AgentRiskPage = screen(() => import("./screens/admin-access-reviews"), "AgentRiskPage");
-const AgentRiskDetailPage = screen(() => import("./screens/admin-access-reviews"), "AgentRiskDetailPage");
+const AgentRiskPage = screen(() => import("./screens/admin-agent-risk"), "AgentRiskPage");
+const AgentRiskDetailPage = screen(() => import("./screens/admin-agent-risk"), "AgentRiskDetailPage");
 const PosturePage = screen(() => import("./screens/admin-overview"), "PosturePage");
 const RedTeamPage = screen(() => import("./screens/admin-quality-security"), "RedTeamPage");
 const AdmissionReviewPage = screen(() => import("./screens/admin-integrations"), "AdmissionReviewPage");
