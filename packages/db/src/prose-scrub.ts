@@ -225,7 +225,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // controls are jsonb, which this registry cannot reach (see the exclusions).
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
-  [s.builderAgents, ["autonomyNote"]],
+  [s.builderAgents, ["autonomyNote", "autonomyEnforcementReason"]],
   // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
   // admin's note on the decision
   [s.agentIdentityLinks, ["note", "decisionNote"]],

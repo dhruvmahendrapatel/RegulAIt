@@ -799,6 +799,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // every other builder route above.
   "GET /v1/builder/agents/:id/autonomy",
   "PUT /v1/builder/agents/:id/autonomy",
+  // DELIBERATELY ABSENT, so ADMIN-ONLY (ADR-0180 addendum, lane E51): PUT
+  // /v1/builder/agents/:id/autonomy/enforcement. Relaxing the oversight gate
+  // loosens a strict default; it takes a step-up and is audited.
   //
   // --- A10: risk tolerance and acceptance ------------------------------------
   // The acceptance HISTORY reads like the risk detail: owner-or-admin in the
