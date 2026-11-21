@@ -481,6 +481,10 @@ const ENV_KEY_NAMES: ReadonlyArray<{ provider: string; envVar: string; aliases: 
   { provider: "openai", envVar: "OPENAI_API_KEY", aliases: [] },
   { provider: "google", envVar: "GOOGLE_API_KEY", aliases: ["GEMINI_API_KEY"] },
   { provider: "xai", envVar: "XAI_API_KEY", aliases: [] },
+  // ADR-0352
+  { provider: "mistral", envVar: "MISTRAL_API_KEY", aliases: [] },
+  { provider: "cohere", envVar: "COHERE_API_KEY", aliases: ["CO_API_KEY"] },
+  { provider: "qwen", envVar: "DASHSCOPE_API_KEY", aliases: ["ALIBABA_API_KEY"] },
 ];
 
 /** which conventional platform-key env vars are currently PRESENT on this
