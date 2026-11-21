@@ -103,6 +103,8 @@ import {
   type TrainingJobRow,
 } from "@regulait/db";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
+import { TRAINING_JOB_MACHINE } from "@regulait/shared";
+import { whereFrom } from "./state-transition.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
@@ -113,6 +115,7 @@ import {
   type GuardrailMode,
   type GuardrailModes,
   type PiiHit,
+  type CompiledClassifier,
 } from "@regulait/shared";
 import {
   ArtifactModelProvider,
@@ -195,7 +198,12 @@ export function scanTrainingRows(
    * scanned to the SAME breadth as a prompt, or the corpus becomes the way a
    * jurisdiction's identifiers reach a provider unscanned. */
   piiInternational: readonly InternationalPiiCategory[],
+  /** ADR-0363 slice 2: the published customer classifiers (`policy.classifiers`). A corpus row carries prompt and
+   * completion alike, so each classifier scans it whatever its phases: an EDM-protected value must not reach a
+   * fine-tune corpus that a prompt carrying it would have been refused for. */
+  classifiers: readonly CompiledClassifier[] = [],
 ): { findings: ScanFindings; piiHits: PiiHit[]; hasPii: boolean; guardrailBlocked: boolean } {
+  const corpusClassifiers = classifiers.map((c) => ({ ...c, phases: ["input"] as const }));
   const piiCounts = new Map<string, number>();
   const guardrailCounts = new Map<string, { detector: string; category: string; count: number }>();
   const allHits: PiiHit[] = [];
@@ -219,6 +227,7 @@ export function scanTrainingRows(
       modes: guardrailModes,
       terms: {},
       exclude: ["pii"],
+      classifiers: corpusClassifiers,
     });
     if (evaluation.action === "block") guardrailBlocked = true;
     for (const finding of evaluation.findings) {
@@ -662,10 +671,17 @@ export async function runTrainingJob(
   if (!job) throw new Error(`unknown training job ${jobId}`);
 
   const started = new Date();
-  await db
+  // ADR-0348: only a queued job starts. A job cancelled between its approval and this post-commit start (or
+  // started twice) matches no row, and nothing runs or bills.
+  const [claimed] = await db
     .update(trainingJobs)
     .set({ status: "running", startedAt: started, progress: 0 })
-    .where(eq(trainingJobs.id, jobId));
+    .where(and(eq(trainingJobs.id, jobId), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "start")))
+    .returning();
+  if (!claimed) {
+    const [current] = await db.select().from(trainingJobs).where(eq(trainingJobs.id, jobId));
+    return { job: current ?? job, artifact: null, refusal: null };
+  }
 
   const resolution = await resolveTrainingBackendForUse(db, job.backend as TrainingBackendKind, opts);
   if (!resolution.ok) {
@@ -743,9 +759,9 @@ export async function pollTrainingJob(
     const [updated] = await db
       .update(trainingJobs)
       .set({ progress: report.progress })
-      .where(eq(trainingJobs.id, job.id))
+      .where(and(eq(trainingJobs.id, job.id), eq(trainingJobs.status, "running")))
       .returning();
-    return { job: updated!, artifact: null, refusal: null };
+    return updated ? { job: updated, artifact: null, refusal: null } : settledElsewhere(db, job);
   }
   if (report.status === "failed") return finishFailed(db, job, report.error ?? "the backend reported failure");
   if (report.status === "cancelled") return finishCancelled(db, job);
@@ -759,40 +775,49 @@ export async function pollTrainingJob(
   }
 
   const finishedAt = new Date();
-  const [artifact] = await db
-    .insert(trainingArtifacts)
-    .values({
-      jobId: job.id,
-      name: job.name,
-      method: job.method,
-      baseModel: job.baseModel,
-      kind: payload.kind,
-      payload: payload.payload ?? null,
-      location: payload.location ?? null,
-      metrics: payload.metrics,
-    })
-    .onConflictDoNothing()
-    .returning();
 
   // In-process training bills nothing; a remote job's real cost is whatever the
   // vendor charged, which this deployment cannot observe — so it records the
   // ESTIMATE and the ledger detail says which it is.
   const costUsd = isInProcessMethod(job.method as TrainingMethod) ? 0 : job.estimatedCostUsd;
 
-  const [finished] = await db
-    .update(trainingJobs)
-    .set({
-      status: "succeeded",
-      progress: 1,
-      finishedAt,
-      durationMs: job.startedAt ? finishedAt.getTime() - job.startedAt.getTime() : null,
-      costUsd,
-      error: null,
-    })
-    .where(eq(trainingJobs.id, job.id))
-    .returning();
+  // ADR-0348: the job moves to succeeded first, and its artifact is recorded only if it did. A job cancelled
+  // while the backend was finishing keeps its cancel, and no artifact or charge appears beside it.
+  const settled = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const [finished] = await tx
+      .update(trainingJobs)
+      .set({
+        status: "succeeded",
+        progress: 1,
+        finishedAt,
+        durationMs: job.startedAt ? finishedAt.getTime() - job.startedAt.getTime() : null,
+        costUsd,
+        error: null,
+      })
+      .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "succeed")))
+      .returning();
+    if (!finished) return null;
+    const [artifact] = await tx
+      .insert(trainingArtifacts)
+      .values({
+        jobId: job.id,
+        name: job.name,
+        method: job.method,
+        baseModel: job.baseModel,
+        kind: payload.kind,
+        payload: payload.payload ?? null,
+        location: payload.location ?? null,
+        metrics: payload.metrics,
+      })
+      .onConflictDoNothing()
+      .returning();
+    return { finished, artifact };
+  });
+  if (!settled) return settledElsewhere(db, job);
+  const { finished, artifact } = settled;
 
-  await meterTrainingJob(db, finished!, {
+  await meterTrainingJob(db, finished, {
     status: "succeeded",
     costUsd,
     detail: {
@@ -840,7 +865,7 @@ export async function pollTrainingJob(
     },
   });
 
-  return { job: finished!, artifact: artifact ?? null, refusal: null };
+  return { job: finished, artifact: artifact ?? null, refusal: null };
 }
 
 async function finishRefused(db: Db, job: TrainingJobRow, code: string, detail: string): Promise<RunJobResult> {
@@ -848,9 +873,10 @@ async function finishRefused(db: Db, job: TrainingJobRow, code: string, detail: 
   const [updated] = await db
     .update(trainingJobs)
     .set({ status: "refused", finishedAt, error: detail, progress: 0 })
-    .where(eq(trainingJobs.id, job.id))
+    .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "refuse")))
     .returning();
-  await meterTrainingJob(db, updated!, { status: "refused", costUsd: 0, detail: { refusalCode: code } });
+  if (!updated) return settledElsewhere(db, job);
+  await meterTrainingJob(db, updated, { status: "refused", costUsd: 0, detail: { refusalCode: code } });
   await audit(db, {
     userId: job.initiatedByUserId,
     objectType: "training_job",
@@ -860,7 +886,7 @@ async function finishRefused(db: Db, job: TrainingJobRow, code: string, detail: 
     reason: `training job '${job.name}' was REFUSED before any work happened (${code}): ${detail}`,
     detail: { phase: "training", backend: job.backend, method: job.method, refusalCode: code },
   });
-  return { job: updated!, artifact: null, refusal: { code, detail } };
+  return { job: updated, artifact: null, refusal: { code, detail } };
 }
 
 async function finishFailed(db: Db, job: TrainingJobRow, message: string): Promise<RunJobResult> {
@@ -868,9 +894,10 @@ async function finishFailed(db: Db, job: TrainingJobRow, message: string): Promi
   const [updated] = await db
     .update(trainingJobs)
     .set({ status: "failed", finishedAt, error: message })
-    .where(eq(trainingJobs.id, job.id))
+    .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "fail")))
     .returning();
-  await meterTrainingJob(db, updated!, { status: "failed", costUsd: 0, detail: { error: message } });
+  if (!updated) return settledElsewhere(db, job);
+  await meterTrainingJob(db, updated, { status: "failed", costUsd: 0, detail: { error: message } });
   await audit(db, {
     userId: job.initiatedByUserId,
     objectType: "training_job",
@@ -880,17 +907,25 @@ async function finishFailed(db: Db, job: TrainingJobRow, message: string): Promi
     reason: `training job '${job.name}' failed: ${message}`,
     detail: { phase: "training", backend: job.backend, method: job.method, error: message },
   });
-  return { job: updated!, artifact: null, refusal: null };
+  return { job: updated, artifact: null, refusal: null };
 }
 
-async function finishCancelled(db: Db, job: TrainingJobRow): Promise<RunJobResult> {
+async function finishCancelled(db: Db, job: TrainingJobRow): Promise<RunJobResult & { moved: boolean }> {
   const [updated] = await db
     .update(trainingJobs)
     .set({ status: "cancelled", finishedAt: new Date() })
-    .where(eq(trainingJobs.id, job.id))
+    .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "cancel")))
     .returning();
-  await meterTrainingJob(db, updated!, { status: "cancelled", costUsd: 0 });
-  return { job: updated!, artifact: null, refusal: null };
+  if (!updated) return { ...(await settledElsewhere(db, job)), moved: false };
+  await meterTrainingJob(db, updated, { status: "cancelled", costUsd: 0 });
+  return { job: updated, artifact: null, refusal: null, moved: true };
+}
+
+/** ADR-0348: another writer settled the job first (a cancel, a sweep, a second poll). Its state stands; this
+ * pass reports it and writes, meters and audits nothing. */
+async function settledElsewhere(db: Db, job: TrainingJobRow): Promise<RunJobResult> {
+  const [current] = await db.select().from(trainingJobs).where(eq(trainingJobs.id, job.id));
+  return { job: current ?? job, artifact: null, refusal: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -961,17 +996,20 @@ export async function applyTrainingJobApprovalDecision(
   // UNIQUE (approval_id) WHERE approval_id IS NOT NULL — deliberately a
   // constraint rather than the `ORDER BY` ADR-0107 declined to add.
   const [job] = await tx.select().from(trainingJobs).where(eq(trainingJobs.approvalId, approvalRow.id));
-  if (!job || job.status !== "pending_approval") return null;
+  if (!job || !TRAINING_JOB_MACHINE.can(job.status, decision === "denied" ? "deny" : "approve")) return null;
 
   if (decision === "denied") {
-    await tx
+    const [denied] = await tx
       .update(trainingJobs)
       .set({
         status: "cancelled",
         finishedAt: new Date(),
         error: `training was refused in the Approvals Queue${approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : ""}`,
       })
-      .where(eq(trainingJobs.id, job.id));
+      .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "deny")))
+      .returning({ id: trainingJobs.id });
+    // ADR-0348: the requester cancelled it first; there is nothing left to refuse
+    if (!denied) return null;
     await tx.insert(auditLog).values({
       userId: deciderUserId,
       objectType: "training_job",
@@ -990,7 +1028,13 @@ export async function applyTrainingJobApprovalDecision(
     return null;
   }
 
-  await tx.update(trainingJobs).set({ status: "queued" }).where(eq(trainingJobs.id, job.id));
+  const [queued] = await tx
+    .update(trainingJobs)
+    .set({ status: "queued" })
+    .where(and(eq(trainingJobs.id, job.id), whereFrom(trainingJobs.status, TRAINING_JOB_MACHINE, "approve")))
+    .returning({ id: trainingJobs.id });
+  // ADR-0348: cancelled while it waited for approval; an approval does not resurrect it
+  if (!queued) return null;
   await tx.insert(auditLog).values({
     userId: deciderUserId,
     objectType: "training_job",
@@ -1812,6 +1856,9 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
       trainedOn: dataset ?? null,
       artifact: artifact ? publicArtifact(artifact) : null,
       inProcess: isInProcessMethod(job.method as TrainingMethod),
+      // ADR-0348: the job's state and every next step with whether it is allowed and why not, read-only, from
+      // the one declared table (the poll door is open only while the job runs)
+      lifecycle: TRAINING_JOB_MACHINE.describe(job.status),
     };
   });
 
@@ -1819,7 +1866,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     const { id } = idParam.parse(req.params);
     const [job] = await db.select().from(trainingJobs).where(eq(trainingJobs.id, id));
     if (!job) return reply.status(404).send({ error: "unknown_training_job" });
-    if (["succeeded", "failed", "cancelled", "refused"].includes(job.status)) {
+    if (!TRAINING_JOB_MACHINE.can(job.status, "cancel")) {
       return reply.status(409).send({ error: "job_already_terminal", detail: `job is '${job.status}'` });
     }
     if (job.status === "running") {
@@ -1837,6 +1884,10 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
       }
     }
     const result = await finishCancelled(db, job);
+    // ADR-0348: the job finished (or was cancelled) while this request ran; its state stands, and nothing is audited
+    if (!result.moved) {
+      return reply.status(409).send({ error: "job_already_terminal", detail: `job is '${result.job.status}'` });
+    }
     await audit(db, {
       userId: actor(req),
       objectType: "training_job",
@@ -2132,7 +2183,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     const mode = effectiveIngestMode(requested, piiFloor);
     // The detectors run at their configured strength for content classes, and
     // PII runs at the composed ingest mode above.
-    const scan = scanTrainingRows(rows, policy.modes, await piiInternationalCategories(database));
+    const scan = scanTrainingRows(rows, policy.modes, await piiInternationalCategories(database), policy.classifiers);
     const findings = scan.findings;
     const anything = scan.hasPii || findings.guardrails.length > 0;
     if (!anything) {

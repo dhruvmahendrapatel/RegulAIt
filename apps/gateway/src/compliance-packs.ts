@@ -55,6 +55,7 @@ import { wantsListContract, type ListSpec } from "./list-contract.js";
 import { answerListExport, answerListPage, regenerableBy, type ContractList } from "./list-contract-route.js";
 import {
   abacPolicies,
+  agentRiskProofResults,
   aiIncidents,
   aiPolicyAcknowledgements,
   aiUseCases,
@@ -92,6 +93,7 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  agentRiskProofs,
   COMPLIANCE_PACK_DISCLAIMER,
   COMPLIANCE_PACK_UPDATE_POLICY,
   DEFAULT_COMPLIANCE_PACKS,
@@ -110,6 +112,7 @@ import {
   type PackScorecard,
   type PackVersionSnapshot,
 } from "@regulait/shared";
+import { checkAgentRiskProofEvidence, countsAsEvidence } from "./agent-risk-proof-evidence.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { countTestedEvaluators } from "./eval-catalog.js";
@@ -141,6 +144,10 @@ export const COMPLIANCE_PACK_RULE_IDS = {
 // ---------------------------------------------------------------------------
 // THE EVIDENCE COLLECTORS — every one a real SELECT
 // ---------------------------------------------------------------------------
+
+/** ADR-0345: a pack evaluation reads at most this many proof results per control and period (a daily proof over
+ * a year is 365; the cap keeps a misconfigured interval from making one control read unbounded) */
+const AGENT_RISK_PROOF_COLLECTOR_MAX_ROWS = 5_000;
 
 export interface CollectorContext {
   periodStart: Date;
@@ -461,6 +468,31 @@ export async function runCollector(
           ),
         );
       return row?.n ?? 0;
+    }
+
+    case "agent_risk_proofs": {
+      // ADR-0345: passing proof results in the period whose evidence still holds, for the proofs whose risk cites
+      // this control. A result row carries no project, so only an org-scoped report counts it (fail closed, as
+      // `isolation_placements`). Without a control there is nothing to scope to, so nothing counts.
+      if (projectIds !== null || !ctx.controlRef) return 0;
+      const keys = agentRiskProofs()
+        .filter(({ risk }) => risk.owaspRefs.includes(ctx.controlRef!))
+        .map(({ proof }) => proof.key);
+      if (keys.length === 0) return 0;
+      const rows = await db
+        .select()
+        .from(agentRiskProofResults)
+        .where(
+          and(
+            inArray(agentRiskProofResults.proofKey, keys),
+            eq(agentRiskProofResults.outcome, "pass"),
+            gte(agentRiskProofResults.finishedAt, periodStart),
+            lt(agentRiskProofResults.finishedAt, periodEnd),
+          ),
+        )
+        .limit(AGENT_RISK_PROOF_COLLECTOR_MAX_ROWS);
+      const checks = await checkAgentRiskProofEvidence(db, rows);
+      return rows.filter((r) => countsAsEvidence(r.outcome, checks.get(r.id)!)).length;
     }
 
     default: {

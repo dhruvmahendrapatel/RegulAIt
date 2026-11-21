@@ -55,7 +55,7 @@ import { COMPAT_ANTHROPIC_ROUTE, COMPAT_MODELS_ROUTE, COMPAT_OPENAI_ROUTE, MCP_P
 import { WORKLOAD_ROUTES } from "./oauth/resource.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { setTokenRequestTimeoutForTest, tokenEndpointTestHooks } from "./oauth/token-endpoint.js";
-import { admitChildGrant, createRootGrant } from "./delegation.js";
+import { admitChildGrant, createRootGrant, revokeDelegationGrant } from "./delegation.js";
 import { makeCert, type TestCert } from "./testing/x509-fixtures.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -1350,5 +1350,100 @@ describe("#337 gap item 5: a bootstrap-token proof refusal is audited", () => {
     // positive control: the same request from the person succeeds and writes no refusal
     expect((await proofRequest(agents[0]!)).statusCode).toBe(201);
     expect(await refusals()).toBe(before + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0315 slice 1b: the agent credential exchange on the same endpoint (this file's harness: agents, proofs, DPoP)
+// ---------------------------------------------------------------------------
+describe("ADR-0315 slice 1b — agent credential exchange", () => {
+  const CRED = "urn:regulait:params:oauth:token-type:agent-credential";
+  const AUD = `https://mcp.vendor.test/ac-${RUN}`;
+  let audienceId: string;
+
+  beforeAll(async () => {
+    audienceId = rows<{ id: string }>(
+      await db.execute(sql`insert into agent_credential_audiences (audience, name, algorithm, binding, max_ttl_seconds)
+        values (${AUD}, ${`ac ${RUN}`}, 'EdDSA', 'dpop', 300) returning id`),
+    )[0]!.id;
+    await db.execute(sql`insert into agent_credential_audience_scopes (audience_id, resource_type, server_id, tool_name, kind, scope)
+      values (${audienceId}, 'mcp_tool', ${serverId}, ${T.read}, 'read', 'tickets.read')`);
+  });
+
+  const credForm = async (a: Agent, subject: string, o: { resource?: string; extra?: Record<string, string> } = {}): Promise<Form> => ({
+    grant_type: EXCHANGE,
+    subject_token: subject,
+    subject_token_type: AT,
+    requested_token_type: CRED,
+    resource: o.resource ?? AUD,
+    client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    client_assertion: await assertion(a),
+    ...(o.extra ?? {}),
+  });
+
+  it("issues a DPoP-bound credential that verifies offline against the published JWKS; one proof mints once", async () => {
+    const a = await newAgent("ac-ok");
+    const held = await rootToken(a);
+    const proof = await dpop(held.bind);
+    const r = await token(await credForm(a, held.token), proof);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().issued_token_type).toBe(CRED);
+    expect(r.json().token_type).toBe("DPoP");
+    const cred = r.json().access_token as string;
+
+    const jwks = (await app.inject({ method: "GET", url: "/agent-credentials/.well-known/jwks.json" })).json();
+    const { jwtVerify, createLocalJWKSet } = await import("jose");
+    const { payload, protectedHeader } = await jwtVerify(cred, createLocalJWKSet(jwks), {
+      algorithms: ["EdDSA"],
+      typ: "at+jwt",
+      issuer: `${ISSUER}/agent-credentials`,
+      audience: AUD,
+    });
+    expect(protectedHeader.alg).toBe("EdDSA");
+    expect(payload.scope).toBe("tickets.read");
+    expect(payload.regulait_grant).toBe(held.grantId);
+    expect((payload.cnf as { jkt: string }).jkt).toBe(await jkt(held.bind));
+    expect(payload.client_id).toBe(a.clientId);
+    const [row] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "agent-credential-exchange-issued"), eq(auditLog.objectId, held.grantId)));
+    expect((row!.detail as { credentialJti: string }).credentialJti).toBe(payload.jti);
+
+    // the same DPoP proof again: refused, nothing minted (the proof's jti was claimed)
+    const again = await token(await credForm(a, held.token), proof);
+    expect(again.statusCode).toBe(400);
+  });
+
+  it("refuses, audited, before minting: unknown audience, no proof, another key's proof, another agent's token, a widened form, a revoked grant, an empty projection", async () => {
+    const a = await newAgent("ac-no");
+    const b = await newAgent("ac-other");
+    const held = await rootToken(a);
+    const code = (r: { json: () => { error_code?: string } }) => r.json().error_code;
+
+    const unknown = await token(await credForm(a, held.token, { resource: "https://unregistered.vendor.test/" }), await dpop(held.bind));
+    expect([unknown.statusCode, code(unknown)]).toEqual([400, "agent_credential_audience_unknown"]);
+    expect((await token(await credForm(a, held.token), null)).statusCode).toBe(400);
+    const otherKey = await token(await credForm(a, held.token), await dpop(wkey()));
+    expect([otherKey.statusCode, code(otherKey)]).toEqual([400, "agent_credential_subject_key_mismatch"]);
+    // b authenticates, holding a's token and even a's key: the token's leaf is a, so b cannot exchange it
+    const stolen = await token(await credForm(b, held.token), await dpop(held.bind));
+    expect([stolen.statusCode, code(stolen)]).toEqual([400, "agent_credential_subject_client_mismatch"]);
+    // no scope may be asked for: the form is strict
+    const widened = await token(await credForm(a, held.token, { extra: { authorization_details: JSON.stringify(scope([T.write], "write")) } }), await dpop(held.bind));
+    expect(widened.statusCode).toBe(400);
+    const refused = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "agent-credential-exchange-refused"), eq(auditLog.objectType, "agent_credential")));
+    expect(refused.length).toBeGreaterThanOrEqual(3);
+
+    // an empty projection: an audience that maps only a tool the grant does not hold
+    const narrow = `https://narrow.vendor.test/ac-${RUN}`;
+    const nid = rows<{ id: string }>(
+      await db.execute(sql`insert into agent_credential_audiences (audience, name, algorithm, binding, max_ttl_seconds) values (${narrow}, ${`narrow ${RUN}`}, 'EdDSA', 'dpop', 300) returning id`),
+    )[0]!.id;
+    await db.execute(sql`insert into agent_credential_audience_scopes (audience_id, resource_type, server_id, tool_name, kind, scope) values (${nid}, 'mcp_tool', ${serverId}, ${T.write}, 'write', 'tickets.write')`);
+    const empty = await token(await credForm(a, held.token, { resource: narrow }), await dpop(held.bind));
+    expect([empty.statusCode, code(empty)]).toEqual([400, "agent_credential_scope_empty"]);
+
+    // a revoked grant: the subject token is no longer live
+    await revokeDelegationGrant(db, { grantId: held.grantId, reason: "admin" });
+    const dead = await token(await credForm(a, held.token), await dpop(held.bind));
+    expect([dead.statusCode, code(dead)]).toEqual([400, "agent_credential_subject_invalid"]);
   });
 });
