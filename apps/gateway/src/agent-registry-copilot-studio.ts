@@ -12,6 +12,12 @@
  * that exclude `configuration`, `content`, `data` and `dependencies`; a connected app is its connection reference's
  * connector id and name, never the connection itself. People only as pseudonyms (the owner's display name).
  *
+ * Plaintext credentials (decision 4, slice 5): the `data` (YAML) of the agents' topic (type 9) and generative
+ * instruction (type 15) components is read in a separate listing (`COPILOT_STUDIO_SCANNED`), passed in memory through
+ * the vendored secret matcher and dropped; a hit is reported as `agent_config` evidence by its path
+ * (`bots/<bot id>/components/<component id>/data`) and rule id only. It is never kept: `COPILOT_STUDIO_SELECTS`, the
+ * columns that are kept, still exclude `data`.
+ *
  * Every call goes through `allowListedFetch` (COPILOT_STUDIO_ENDPOINTS: GET on five Dataverse paths of the named
  * environments, nothing else) on top of the guarded fetch. Paging passes the `$skiptoken` back on the same path; a
  * `@odata.nextLink` is never fetched as given.
@@ -24,7 +30,7 @@
 import type { AgentRegistry, DiscoveryReadOutcome } from "@regulait/shared";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { REGISTRY_COMPONENTS_PER_RECORD_MAX } from "./agent-registry-records.js";
-import { attrs, finishRegistry, fullyRead, includeSet } from "./agent-registry-scanners.js";
+import { ConfigSecretCollector, attrs, finishRegistry, fullyRead, includeSet } from "./agent-registry-scanners.js";
 import { GUID, ITEM_CAP, ReadFailure, WIDER_MAX_ITEMS, WiderSourceConfigError, atPath, entraToken, getJson, readListing, str } from "./discovery-wider-scanners.js";
 import { scannerFetch } from "./discovery-cloud-scanners.js";
 import type { RegistryAgentComponent, RegistryAgentRecord, ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -56,6 +62,17 @@ export const COPILOT_STUDIO_SELECTS = Object.freeze({
   botcomponents: ["botcomponentid", "name", "componenttype", "statecode", "_parentbotid_value"],
   connectionreferences: ["connectionreferenceid", "connectionreferencelogicalname", "connectionreferencedisplayname", "connectorid", "statecode"],
 } as const);
+
+/**
+ * Slice 5: the listing whose `data` is scanned in memory for plaintext credentials and dropped (never kept): topics
+ * (componenttype 9) and generative instructions (15), the components whose YAML holds an agent's text and HTTP calls.
+ */
+export const COPILOT_STUDIO_SCANNED = Object.freeze({
+  botcomponents: ["botcomponentid", "componenttype", "_parentbotid_value", "data"],
+  componentTypes: [9, 15],
+} as const);
+/** a page of scanned components is held smaller: each carries its YAML */
+const SCANNED_PAGE_SIZE = 20;
 
 /** `botcomponent.componenttype` values that are components of the agent (Dataverse `botcomponent_componenttype`) */
 const COMPONENT_KIND_OF_TYPE: Readonly<Record<number, RegistryAgentComponent["kind"]>> = Object.freeze({
@@ -119,7 +136,7 @@ interface Bot {
   partial: boolean;
 }
 
-async function readOrg(ctx: ScanContext, org: string, include: Set<string> | null, outcomes: DiscoveryReadOutcome[], records: RegistryAgentRecord[]): Promise<{ complete: boolean; write: boolean; verified: boolean }> {
+async function readOrg(ctx: ScanContext, org: string, include: Set<string> | null, outcomes: DiscoveryReadOutcome[], records: RegistryAgentRecord[], secrets: ConfigSecretCollector): Promise<{ complete: boolean; write: boolean; verified: boolean }> {
   const host = new URL(org).host;
   let accessToken: string;
   try {
@@ -285,6 +302,23 @@ async function readOrg(ctx: ScanContext, org: string, include: Set<string> | nul
   }, get);
   const componentsComplete = fullyRead(outcomes, COMPONENTS) && !compCut && refsComplete;
 
+  // 6. slice 5: the topic and generative-instruction YAML, scanned in memory for plaintext credentials and dropped
+  const SCAN = `agent configurations in ${host}`;
+  const scanFirst = `${org}${API}/botcomponents?$select=${COPILOT_STUDIO_SCANNED.botcomponents.join(",")}&$filter=_parentbotid_value ne null and (${COPILOT_STUDIO_SCANNED.componentTypes.map((t) => `componenttype eq ${t}`).join(" or ")})`;
+  const scanHeaders = { ...headers, prefer: `odata.maxpagesize=${SCANNED_PAGE_SIZE}` };
+  await readListing(ctx, SCAN, scanFirst, outcomes, (body) => {
+    const value = atPath(body, "value");
+    if (!Array.isArray(value)) return null;
+    for (const c of value) {
+      const bot = bots.get(str(atPath(c, "_parentbotid_value"), 64)?.toLowerCase() ?? "");
+      const id = str(atPath(c, "botcomponentid"), 64)?.toLowerCase();
+      if (!bot || !id || !GUID.test(id)) continue;
+      secrets.scan(bot.rec.externalId, [{ path: `bots/${bot.botId}/components/${id}/data`, text: c && typeof c === "object" && Object.hasOwn(c, "data") ? (c as Record<string, unknown>).data : undefined }]);
+    }
+    const next = skipTokenNext(scanFirst, body);
+    return next === PARTIAL ? null : next;
+  }, (url) => getJson(fetchImpl, url, scanHeaders, ctx.signal));
+
   let overCap = 0;
   for (const bot of bots.values()) {
     // decision 3: components are staged only when this agent's were read in full; otherwise the stored set stays.
@@ -304,6 +338,7 @@ async function runCopilotStudio(ctx: ScanContext): Promise<ScanResult> {
   const include = includeSet(ctx);
   const outcomes: DiscoveryReadOutcome[] = [];
   const records: RegistryAgentRecord[] = [];
+  const secrets = new ConfigSecretCollector();
   let complete = true;
   let verified = true;
   for (const org of orgs) {
@@ -313,7 +348,7 @@ async function runCopilotStudio(ctx: ScanContext): Promise<ScanResult> {
       verified = false;
       continue;
     }
-    const r = await readOrg(ctx, org, include, outcomes, records);
+    const r = await readOrg(ctx, org, include, outcomes, records, secrets);
     if (r.write) {
       // decision 5 / ADR-0195 decision 7: a write privilege refuses the credential; nothing from this run is kept
       return { observations: [], credentialWriteScope: "write", readOutcomes: outcomes.filter((o) => o.status !== "read").slice(0, 100) };
@@ -323,7 +358,9 @@ async function runCopilotStudio(ctx: ScanContext): Promise<ScanResult> {
   }
   const registries: AgentRegistry[] = complete ? ["copilot_studio"] : [];
   // read_only only when EVERY environment's privileges were listed and all were reads
-  return finishRegistry(records, outcomes, registries, verified ? "read_only" : "unverified");
+  const capped = secrets.outcome("plaintext credentials in agent configurations");
+  if (capped) outcomes.push(capped);
+  return finishRegistry(records, outcomes, registries, verified ? "read_only" : "unverified", secrets.observations);
 }
 
 export const COPILOT_STUDIO_SCANNER: Scanner = Object.freeze({
