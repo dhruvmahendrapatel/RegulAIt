@@ -15,7 +15,10 @@
  */
 import type { AgentRegistry, DiscoverySourceKind } from "@regulait/shared";
 import { AGENT_REGISTRY_SCANNERS } from "./agent-registry-scanners.js";
+import { AGENTFORCE_ENDPOINTS, AGENTFORCE_SCANNER } from "./agent-registry-agentforce.js";
 import { COPILOT_STUDIO_ENDPOINTS, COPILOT_STUDIO_SCANNER } from "./agent-registry-copilot-studio.js";
+import { N8N_ENDPOINTS, N8N_SCANNER } from "./agent-registry-n8n.js";
+import { OPENAI_ENDPOINTS, OPENAI_SCANNER } from "./agent-registry-openai.js";
 import type { EndpointRule } from "./agent-platform-endpoints.js";
 import type { Scanner } from "./discovery-scanners.js";
 import { COPILOT_STUDIO_CONTROL } from "./agent-platform-copilot-studio-control.js";
@@ -82,6 +85,13 @@ export const AGENT_PLATFORM_ADAPTERS: readonly AgentPlatformAdapter[] = Object.f
     ]),
     control: Object.freeze({ registry: "copilot_studio", member: COPILOT_STUDIO_CONTROL }),
   }),
+  // ADR-0336 slice 2. No action yet: deactivating the active BotVersion is E19's, with its own write credential.
+  Object.freeze({ vendor: "salesforce", kind: "agent_registry_agentforce", scanner: AGENTFORCE_SCANNER, readEndpoints: AGENTFORCE_ENDPOINTS, governedActions: Object.freeze([]) }),
+  // ADR-0336 slice 3. No action yet: GPT removal (Compliance API, destructive, irreversible) and n8n workflow
+  // deactivation (`workflow:activate`) are E19's, each with its own write credential. n8n's allow-list is declared
+  // for an instance at the root; the scanner builds the same rules under the target's path prefix.
+  Object.freeze({ vendor: "openai", kind: "agent_registry_openai", scanner: OPENAI_SCANNER, readEndpoints: OPENAI_ENDPOINTS, governedActions: Object.freeze([]) }),
+  Object.freeze({ vendor: "n8n", kind: "agent_registry_n8n", scanner: N8N_SCANNER, readEndpoints: N8N_ENDPOINTS, governedActions: Object.freeze([]) }),
 ]);
 
 /** ADR-0338: registry → its adapter's control member; what the vendor agent control routes may execute */

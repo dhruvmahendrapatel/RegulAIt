@@ -85,6 +85,8 @@ import {
   DISCOVERY_GATED_FAMILIES,
   familySwitchProblem,
   discoveryWriteScopeFinal,
+  discoveryCredentialScope,
+  type DiscoveryCredentialScope,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -216,6 +218,11 @@ export interface DiscoveryCredentialView {
   publicConfig: Record<string, string>;
   hasSecret: boolean;
   writeScope: DiscoveryCredentialRow["writeScope"];
+  /**
+   * ADR-0336 decision 5: `unverified` for a kind whose key scope no API can check (OpenAI, n8n). Storing and enabling
+   * such a credential is a relaxation, recorded with this same value in the step-up binding and the audit row.
+   */
+  credentialScope: DiscoveryCredentialScope;
   createdAt: string;
   ageDays: number;
   /** a static secret older than the warning age */
@@ -226,7 +233,7 @@ export interface DiscoveryCredentialView {
 const ageDaysSql = sql<number>`floor(extract(epoch from (now() - ${discoveryCredentials.createdAt})) / 86400)::int`;
 type CredentialWithAge = DiscoveryCredentialRow & { ageDays: number };
 
-function credentialView(c: CredentialWithAge, warningAgeDays: number): DiscoveryCredentialView {
+function credentialView(c: CredentialWithAge, warningAgeDays: number, kind: string): DiscoveryCredentialView {
   const ageDays = Math.max(0, Number(c.ageDays));
   return {
     id: c.id,
@@ -234,6 +241,7 @@ function credentialView(c: CredentialWithAge, warningAgeDays: number): Discovery
     publicConfig: { ...c.publicConfig },
     hasSecret: c.secretCiphertext !== null,
     writeScope: c.writeScope,
+    credentialScope: discoveryCredentialScope(kind),
     createdAt: c.createdAt.toISOString(),
     ageDays,
     ageWarning: c.credentialMode === "static" && ageDays >= warningAgeDays,
@@ -282,7 +290,9 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Cred
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
     scannerBuilt: registry.has(s.kind),
-    credential: cred ? credentialView(cred, warningAgeDays) : null,
+    /** ADR-0336 decision 5: whether this kind's credential scope can be checked at all (see DiscoveryCredentialView) */
+    credentialScope: discoveryCredentialScope(s.kind),
+    credential: cred ? credentialView(cred, warningAgeDays, s.kind) : null,
     lastRun: lastRun ? runView(lastRun) : null,
   };
 }
@@ -297,7 +307,15 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Cred
  * with (review of #403), so a credential swapped between the grant and its spend makes the grant fail.
  */
 export function enableStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, credentialId: string | null): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credentialId } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credentialId, ...unverifiedScope(kind) } } } };
+}
+/**
+ * ADR-0336 decision 5: a kind whose key scope cannot be checked names `credentialScope: "unverified"` in every
+ * step-up that stores or enables its credential, so the admin confirms that relaxation itself, not only the source.
+ * Kinds whose scope is checked add nothing, so their bindings are unchanged.
+ */
+function unverifiedScope(kind: string): { credentialScope?: "unverified" } {
+  return discoveryCredentialScope(kind) === "unverified" ? { credentialScope: "unverified" } : {};
 }
 
 /** per-kind target requirements the gateway can check (SD2 matches credentials against them) */
@@ -307,14 +325,14 @@ function targetProblem(kind: string, target: Record<string, string>): string | n
 }
 /** storing a credential on an ENABLED source whose account cannot be matched to the target: the enable step-up, with the config */
 export function credentialOnEnabledStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, mode: string, publicConfig: Record<string, string>): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credential: { mode, publicConfig } } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credential: { mode, publicConfig }, ...unverifiedScope(kind) } } } };
 }
 /** revealing the name behind one pseudonym: its own step-up kind (not a settings relaxation), bound to the pseudonym */
 export function pseudonymRevealStepUpArgs(pseudonym: string): StepUpCheckArgs {
   return { kind: "pseudonym_reveal", facts: { op: "pseudonym_reveal", pseudonym } };
 }
 export function staticCredentialStepUpArgs(sourceId: string, kind: string, replacesCredentialId: string | null): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.staticCredential]: { sourceId, kind, replacesCredentialId } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.staticCredential]: { sourceId, kind, replacesCredentialId, ...unverifiedScope(kind) } } } };
 }
 
 // ---------------------------------------------------------------------------
@@ -596,8 +614,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         .where(eq(discoverySources.id, s.id))
         .returning();
       await audit(t, req, "discovery_source", s.id, "discovery-source-enabled", "allow",
-        `discovery source '${s.name}' (${s.kind}) ENABLED: RegulAIt will scan it read-only on its schedule`,
-        { kind: s.kind, target: s.target, scope: s.scope, scheduleIntervalSeconds: s.scheduleIntervalSeconds });
+        `discovery source '${s.name}' (${s.kind}) ENABLED: RegulAIt will scan it read-only on its schedule${discoveryCredentialScope(s.kind) === "unverified" ? "; its credential's scope cannot be checked (credentialScope: unverified, a relaxation confirmed with the step-up)" : ""}`,
+        { kind: s.kind, target: s.target, scope: s.scope, scheduleIntervalSeconds: s.scheduleIntervalSeconds, credentialScope: discoveryCredentialScope(s.kind) });
       return row!;
     });
     if (isRefusal(out)) return send(reply, out);
@@ -669,10 +687,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       const early = modeProblem(parsedBody.mode);
       if (early) return send(reply, early);
     }
+    let sourceKind = "";
     const out = await db.transaction(async (tx): Promise<Refusal | DiscoveryCredentialRow> => {
       const t = tx as unknown as Db;
       const s = await lockSource(t, p.data.sourceId);
       if (!s) return refusal(404, "not_found", "no such discovery source");
+      sourceKind = s.kind;
       // ADR-0195 A5 (secure by default): an omitted mode is federated wherever the provider supports it
       const body = { ...parsedBody, mode: parsedBody.mode ?? defaultCredentialMode(s.kind) };
       if (parsedBody.mode === undefined) {
@@ -730,13 +750,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         })
         .returning();
       await audit(t, req, "discovery_credential", row!.id, live ? "discovery-credential-replaced" : "discovery-credential-stored", "allow",
-        `${body.mode} credential ${live ? "replaced" : "stored"} for discovery source '${s.name}'${body.mode === "static" ? " (a stored static secret: a relaxation, confirmed with a step-up)" : ""}`,
-        { sourceId: s.id, kind: s.kind, mode: body.mode, publicConfigKeys: Object.keys(publicConfig).sort(), replacedCredentialId: live?.id ?? null });
+        `${body.mode} credential ${live ? "replaced" : "stored"} for discovery source '${s.name}'${body.mode === "static" ? " (a stored static secret: a relaxation, confirmed with a step-up)" : ""}${discoveryCredentialScope(s.kind) === "unverified" ? "; its scope cannot be checked (credentialScope: unverified)" : ""}`,
+        { sourceId: s.id, kind: s.kind, mode: body.mode, publicConfigKeys: Object.keys(publicConfig).sort(), replacedCredentialId: live?.id ?? null, credentialScope: discoveryCredentialScope(s.kind) });
       return row!;
     });
     if (isRefusal(out)) return send(reply, out);
     const settings = await loadDiscoverySettings(db);
-    return credentialView({ ...out, ageDays: 0 }, settings.credentialWarningAgeDays);
+    return credentialView({ ...out, ageDays: 0 }, settings.credentialWarningAgeDays, sourceKind);
   });
 
   app.delete("/v1/discovery/sources/:sourceId/credential", async (req, reply) => {

@@ -191,6 +191,7 @@ import {
   type SemanticCacheKey,
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
+import { recordRuleStepSaving, switchedRuleAnswer, type RuleStepRef } from "./rule-step-serve.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { customProviderDisabledRefusal, resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
@@ -499,7 +500,7 @@ export interface GovernedDispatchArgs {
   /** ADR-0327 slice 4b: set with `cachedResponse` when the candidate answer is an approved rule-like step's rule
    * output, not a cached model answer. It only relabels the span and audit rows; every gate runs exactly as for a
    * cache hit. */
-  ruleStepServed?: { suggestionId: string; switchId: string } | undefined;
+  ruleStepServed?: RuleStepRef | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -1004,7 +1005,7 @@ async function dispatchOnce(
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
     ...(args.ruleStepServed
-      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      ? { ruleStep: { ...args.ruleStepServed } }
       : args.cachedResponse
         ? { semanticCache: "hit" }
         : {}),
@@ -1770,7 +1771,7 @@ async function dispatchAttempt(
     const cached = args.cachedResponse;
     // where the candidate came from, as the audit rows below record it: never a cache claim for a rule's answer
     const candidateSource: Record<string, unknown> = args.ruleStepServed
-      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      ? { ruleStep: { ...args.ruleStepServed } }
       : { semanticCache: { hit: true } };
     let outputHits: PiiHit[] = [];
     if (piiMode) {
@@ -4286,6 +4287,92 @@ export function registerAgentConnectorRoutes(
         !!body.input &&
         !convo &&
         routingModeForCache !== "passthrough";
+      // ADR-0327 slice 4c: a switched rule-like step is answered by its approved rule, on this path as on the compat
+      // path (4b). Only a plain single-turn dispatch qualifies: the rule was measured on spans whose input is
+      // `body.input` alone, so anything else that shapes the model's answer (a conversation, a system prompt,
+      // attachments, a baseline, reference content) goes to the AI. A passthrough user keeps every AI call. The rule's
+      // answer is only a candidate: the one dispatch core runs every input gate and the output PII and guardrail checks
+      // on it, and nothing here makes a permission decision or calls a model.
+      const ruleAnswer =
+        body.dispatch === true &&
+        !!body.input &&
+        !convo &&
+        !body.system &&
+        !body.baseline &&
+        !body.referenceContent &&
+        (body.attachments ?? []).length === 0 &&
+        modeFor(true) !== "passthrough"
+          ? await switchedRuleAnswer(db, { agentId: agent.id, stepName: agent.name, inputText: body.input })
+          : null;
+      if (ruleAnswer && body.input) {
+        const ruleStep = ruleAnswer.ref;
+        const governed = await executeGovernedDispatch(db, opts.dataKey, {
+          userId,
+          served: agent,
+          requestedAgentId: agent.id,
+          input: body.input,
+          projectId,
+          virtualKey: invokeVirtualKey,
+          mode: body.mode,
+          cachedResponse: { outputText: ruleAnswer.output, model: null, inputTokens: 0, outputTokens: 0, createdAt: new Date() },
+          ruleStepServed: ruleStep,
+          modelFeature: CHAT_FEATURE,
+          detail: { surface: "invoke_rule_step", mode: body.mode },
+        });
+        if (!governed.ok) {
+          return reply
+            .status(governed.status)
+            .send({
+              decision,
+              error: governed.error,
+              ...(governed.detail ? { detail: governed.detail } : {}),
+              ...(governed.approvalId ? { approvalId: governed.approvalId } : {}),
+              ...(governed.pii ? { pii: governed.pii } : {}),
+              ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
+              ...suppressionFlag,
+            });
+        }
+        // No usage_events: nothing was spent. The ledger records the saving.
+        await recordRuleStepSaving(db, {
+          userId,
+          requestedAgentId: agent.id,
+          servedAgentId: agent.id,
+          projectId: projectId ?? null,
+          ruleAnswer,
+          surface: "invoke",
+        });
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          detail: { mode: body.mode, servedAgentId: agent.id, ruleStep, receiptClass: "decision" },
+          effect: decision.effect,
+          ruleId: decision.ruleId,
+          ruleChain: decision.ruleChain,
+          reason: decision.reason,
+        });
+        const ruleDispatch = {
+          ...governed.result,
+          usage: { inputTokens: 0, outputTokens: 0 },
+          costUsd: 0,
+          ruleStep,
+        };
+        if (useStream) {
+          reply.hijack();
+          reply.raw.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+          });
+          const send = (event: string, data: unknown) =>
+            reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          send("delta", { text: governed.result.outputText });
+          send("result", { decision, dispatch: ruleDispatch });
+          reply.raw.end();
+          return reply;
+        }
+        return reply.send({ decision, dispatch: ruleDispatch, ...suppressionFlag });
+      }
       // ADR-0119: the key derivation, the scoped read and the collision guard
       // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
       // SAME governance boundary rather than a second copy of it. The behaviour

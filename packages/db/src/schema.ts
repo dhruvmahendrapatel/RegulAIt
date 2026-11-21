@@ -2036,6 +2036,8 @@ export const auditLog = pgTable(
         // (declared, removed). Plain text column — no DDL.
         "saas_entitlement_app",
         "agent_vendor_identifier",
+        // ADR-0365: a context graph source (bound, rebound, unbound, synced). Plain text column — no DDL.
+        "context_graph_source",
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
@@ -8262,7 +8264,7 @@ export const discoverySources = pgTable(
   (t) => [
     check(
       "discovery_sources_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio', 'agent_registry_agentforce', 'agent_registry_openai', 'agent_registry_n8n')`,
     ),
     check("discovery_sources_name_check", sql`char_length(${t.name}) BETWEEN 1 AND 120`),
     check("discovery_sources_target_check", sql`jsonb_typeof(${t.target}) = 'object'`),
@@ -8359,7 +8361,7 @@ export const discoveryRuns = pgTable(
     check("discovery_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed')`),
     check(
       "discovery_runs_kind_check",
-      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio')`,
+      sql`${t.kind} IN ('repo_github', 'repo_gitlab', 'repo_bitbucket', 'repo_azure_devops', 'cloud_aws', 'cloud_gcp', 'cloud_azure', 'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent', 'saas_inventory_api', 'idp_entra', 'ml_mlflow', 'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack', 'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore', 'agent_registry_copilot_studio', 'agent_registry_agentforce', 'agent_registry_openai', 'agent_registry_n8n')`,
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
@@ -17347,7 +17349,7 @@ export const agentRegistryRecords = pgTable(
     uniqueIndex("agent_registry_records_vendor_uq").on(t.sourceId, t.registry, t.externalId),
     uniqueIndex("agent_registry_records_agent_uq").on(t.agentId),
     index("agent_registry_records_open_idx").on(t.lastSeenAt).where(sql`${t.agentId} IS NULL`),
-    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore', 'copilot_studio')`),
+    check("agent_registry_records_registry_check", sql`${t.registry} IN ('entra_agent_id', 'agent_365', 'gemini_enterprise', 'bedrock_agentcore', 'copilot_studio', 'agentforce', 'openai_gpts', 'n8n')`),
     check("agent_registry_records_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
     check("agent_registry_records_display_name_check", sql`char_length(${t.displayName}) BETWEEN 1 AND 256`),
     check("agent_registry_records_description_check", sql`${t.description} IS NULL OR char_length(${t.description}) <= 1000`),
@@ -17959,10 +17961,12 @@ export const ruleStepSwitches = pgTable(
   "rule_step_switches",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    suggestionId: uuid("suggestion_id")
-      .notNull()
-      .references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
-    /** sha256 hex of `canonicalJson(rule)` at request time */
+    /** the detector suggestion switched (slice 4a); exactly one of this and `decisionTableVersionId` is set */
+    suggestionId: uuid("suggestion_id").references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
+    /** the published decision-table version switched (slice 4d, migration `rule_step_switch_decision_table`); the table
+     * is reached through the version, and one open request per table is held under the `decision_tables` row lock */
+    decisionTableVersionId: uuid("decision_table_version_id").references(() => decisionTableVersions.id, { onDelete: "cascade" }),
+    /** sha256 hex of `canonicalJson(rule)` at request time; for a table, the version's `body_sha256` */
     ruleSha256: text("rule_sha256").notNull(),
     status: text("status", { enum: RULE_STEP_SWITCH_STATUSES }).notNull().default("pending_review"),
     requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
@@ -17982,6 +17986,8 @@ export const ruleStepSwitches = pgTable(
       .where(sql`${t.status} IN ('pending_review', 'switched')`),
     index("rule_step_switches_suggestion_requested_idx").on(t.suggestionId, t.requestedAt),
     index("rule_step_switches_approval_idx").on(t.approvalId),
+    index("rule_step_switches_version_requested_idx").on(t.decisionTableVersionId, t.requestedAt),
+    check("rule_step_switches_subject_check", sql`(${t.suggestionId} IS NULL) <> (${t.decisionTableVersionId} IS NULL)`),
     check("rule_step_switches_rule_sha256_check", sql`${t.ruleSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "rule_step_switches_status_check",
@@ -19775,6 +19781,105 @@ export const customClassifierHashKey = pgTable(
   (t) => [check("custom_classifier_hash_key_singleton_check", sql`${t.id}`)],
 );
 // ===== end ADR-0363 slice 2 =====
+
+// ===== ADR-0365 (lane E46, slice 1): the live synced context graph (pillar 4, PENDING P2) =====
+// Migration `pending/shared_context_graph.sql` (numbered at merge). Forced row-level security on all four tables; a
+// node is readable by an admin or by a principal who is a member of the project of EVERY one of its scope rows
+// (`regulait_context_graph_node_readable`). A node stores no copy of its source's facts: label, URL, type and missing
+// state are joined from pm_connections / pm_imported_work_items at read (3NF; nothing PM-authoritative is stored).
+
+/** A PM connection an admin bound into the graph, and the project whose members may read what it brings in. */
+export const contextGraphSources = pgTable(
+  "context_graph_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pmConnectionId: uuid("pm_connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    boundByUserId: uuid("bound_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
+    /** keyset cursor over the connection's imported items (first_seen_at, id); both NULL before the first sync */
+    cursorFirstSeenAt: timestamp("cursor_first_seen_at", { withTimezone: true }),
+    // the cursor's tie-breaker id, FK-free on purpose: it is a position, and the item it names may be gone
+    cursorItemId: uuid("cursor_item_id"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("context_graph_sources_connection_uq").on(t.pmConnectionId),
+    index("context_graph_sources_project_idx").on(t.projectId),
+    check("context_graph_sources_cursor_check", sql`(${t.cursorFirstSeenAt} IS NULL) = (${t.cursorItemId} IS NULL)`),
+  ],
+);
+
+export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item"] as const;
+export const CONTEXT_GRAPH_EDGE_KINDS = ["contains"] as const;
+
+/** A graph node: a bound connection's PM project (one per source) or one imported work item. */
+export const contextGraphNodes = pgTable(
+  "context_graph_nodes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => contextGraphSources.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: CONTEXT_GRAPH_NODE_KINDS }).notNull(),
+    pmImportedWorkItemId: uuid("pm_imported_work_item_id").references(() => pmImportedWorkItems.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("context_graph_nodes_work_item_uq").on(t.pmImportedWorkItemId).where(sql`${t.pmImportedWorkItemId} IS NOT NULL`),
+    uniqueIndex("context_graph_nodes_project_uq").on(t.sourceId).where(sql`${t.kind} = 'pm_project'`),
+    index("context_graph_nodes_source_kind_idx").on(t.sourceId, t.kind, t.id),
+    check(
+      "context_graph_nodes_kind_check",
+      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.pmImportedWorkItemId} IS NULL WHEN 'pm_work_item' THEN ${t.pmImportedWorkItemId} IS NOT NULL ELSE false END`,
+    ),
+  ],
+);
+export type ContextGraphNodeRow = typeof contextGraphNodes.$inferSelect;
+
+/** A directed edge; readable only when both ends are. */
+export const contextGraphEdges = pgTable(
+  "context_graph_edges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fromNodeId: uuid("from_node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    toNodeId: uuid("to_node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: CONTEXT_GRAPH_EDGE_KINDS }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("context_graph_edges_triple_uq").on(t.fromNodeId, t.toNodeId, t.kind),
+    index("context_graph_edges_to_idx").on(t.toNodeId),
+    check("context_graph_edges_kind_check", sql`${t.kind} IN ('contains')`),
+    check("context_graph_edges_no_loop_check", sql`${t.fromNodeId} <> ${t.toNodeId}`),
+  ],
+);
+
+/** A node's access-control scope: a reader needs membership of EVERY row's project; no row = admins only. */
+export const contextGraphNodeScopes = pgTable(
+  "context_graph_node_scopes",
+  {
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "context_graph_node_scopes_pk", columns: [t.nodeId, t.projectId] }),
+    index("context_graph_node_scopes_project_idx").on(t.projectId, t.nodeId),
+  ],
+);
+// ===== end ADR-0365 =====
 
 // ===== ADR-0232 §3–§5, lane E49 slice 1: pipeline runs (migration pending/workflow_template_pipeline_runs.sql) =====
 // A pipeline run is one governed run of one published workflow-template version (ADR-0341), started through the

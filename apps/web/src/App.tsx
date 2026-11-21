@@ -33,6 +33,7 @@ const BuilderPromptsPage = screen(() => import("./screens/builder"), "BuilderPro
 const BuilderPromptDetailPage = screen(() => import("./screens/builder"), "BuilderPromptDetailPage");
 const BuilderPlaygroundPage = screen(() => import("./screens/builder"), "BuilderPlaygroundPage");
 const WebhooksPage = screen(() => import("./screens/admin-integrations"), "WebhooksPage");
+const SiemDeliveryPage = screen(() => import("./screens/admin-integrations"), "SiemDeliveryPage");
 const ModelsPage = lazy(() => import("./views/models/ModelsPage"));
 const RunsPage = screen(() => import("./screens/runs"), "RunsPage");
 const RunDetailPage = screen(() => import("./screens/runs"), "RunDetailPage");
@@ -348,6 +349,7 @@ function ApplicationRoutes() {
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
+                <Route path="siem" element={<SiemDeliveryPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />
                 <Route path="git-connections" element={<GitConnectionsPage />} />
                 <Route path="pm-connections" element={<PmConnectionsPage />} />
