@@ -56,9 +56,16 @@ What exists and is reused (repo search, 2026-11-17):
    reader of labels embedded in content, a reader of message headers) and `LabelDefinition`. Purview is the first
    provider. It reads `docMetadata/LabelInfo.xml` (authoritative when present), else `docProps/custom.xml`, the PDF
    info/XMP keys and the `MSIP_Labels` email header. Only enabled, not-removed labels count. An OLE compound file
-   (an encrypted Office file) is `protected`. A corrupt zip or an oversized label part is `unreadable`. Bounds: only
-   the two XML parts are inflated, each at most 1 MiB by declared size. The PDF scan reads the first and last 256 KiB
-   and uses a literal search, not a regex over the content.
+   (an encrypted Office file) is `protected`. Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are OLE compound
+   files too, so they are also `protected` and decided by `protected_action` (block by default), labelled or not:
+   safe, but an admin who sees them refused should know why. A corrupt zip or an oversized label part is
+   `unreadable`. Bounds: only the two XML parts are inflated, each at most 1 MiB by declared size. The PDF scan reads
+   the whole buffer (already in memory and bounded by the request body limit) with a literal search, not a regex over
+   the content; head and tail windows alone failed open on a label written mid-file by an incremental save (review of
+   #973). A PDF with compressed object streams (`/ObjStm`, PDF 1.5+) in which no label key is visible is `unreadable`
+   (block by default), because a label inside a compressed stream cannot be seen by a literal scan.
+   Relaxations (step-up, audited as relaxations) include removing a rule while `unmapped_action` is looser than it,
+   and dropping or swapping a rule's compliance profile (review of #973).
 2. **Definitions are read-only, through the `idp_entra` scan.** When the app's own token carries
    `InformationProtectionPolicy.Read.All`, the scan reads
    `GET /beta/security/informationProtection/sensitivityLabels` (the only Graph listing of labels; beta). It commits the complete
@@ -97,9 +104,24 @@ What exists and is reused (repo search, 2026-11-17):
 7. They run **inside the existing pipeline**: classifier findings are guardrail findings, evaluated by
    `evaluateGuardrails`, composed and audited by the engine's own modes and audit rows. Redaction uses the ADR-0140
    span-union redactor. There is no second pipeline and no second audit format.
-8. Each classifier is **versioned** (`config_versions`, a new artifact type). A version takes effect only after an
+8. Each classifier is **versioned**. *Amended as built:* versions live in their own table,
+   `custom_classifier_versions`, not `config_versions`: an EDM version owns a digest set (a child table keyed by the
+   version), which a `config_versions` document cannot hold under 3NF. The lifecycle is the declared ADR-0348 machine
+   `CLASSIFIER_VERSION_MACHINE` (draft, pending_approval, published, rejected, superseded, retired); every status write
+   is guarded by `whereFrom` and `.returning()`, so a lost race is a 409. A version takes effect only after an
    approval in the one approvals queue (the ADR-0208 pattern: no self-approval; activation inside the decide
    transaction; every step audited).
+8a. **Loosening is a step-up** (ADR-0180, the ADR-0186 decision 29 precedent). Submitting a version looser than the
+   published one (a weaker mode, a dropped phase, a changed pattern, a removed term or protected value, a weaker EDM
+   normalisation, fewer EDM tokens, another kind) needs the author's `settings_relax` step-up, bound to both version
+   ids. Retiring a published classifier needs one too.
+8b. **Matching and cost bounds.** Text and values are tokenised by one function, and a token starts and ends with a
+   letter or digit, so a value at the end of a sentence still matches. A dictionary word or EDM value the scan could
+   never match (`O'Brien`, more tokens than `maxTokens`) is refused at save, by position only. Text past 1M characters,
+   or an EDM scan past 20,000 tokens, is `unavailable` (a hit, fail closed). At most 50 classifiers, 5 of them EDM, are
+   live (published or in review) at once.
+8c. **Every guardrail site** runs the classifiers, including the training-corpus scan (whatever a classifier's phases:
+   a corpus row is prompt and completion alike) and the cost-import text scan.
 
 ### Slice 3 — AI app risk attributes (PR 3)
 
@@ -139,3 +161,12 @@ What exists and is reused (repo search, 2026-11-17):
   commit in `discovery-worker.ts` (`inCommit`), `stricterPiiMode` in `projects.ts`, `extraComplianceTags` in
   `guardrails.ts`, migration `sensitivity_labels`. Tests: `sensitivity-labels.test.ts` (shared),
   `zz-adr0363-sensitivity-labels.test.ts`, and a case in `discovery-wider-scanners.test.ts`.
+- Slice 2: `packages/shared/src/custom-classifiers.ts` (+ test), `CLASSIFIER_VERSION_MACHINE` in
+  `packages/shared/src/state-machines.ts`, `apps/gateway/src/custom-classifiers.ts` (loader, six admin routes, the
+  decide hooks), the `classifiers` argument at every `evaluateGuardrails` site (`guardrails.ts`, `regulait-llm.ts`,
+  `cost-import.ts`), migration `custom_classifiers`. Tests: `custom-classifiers.test.ts` (shared),
+  `zz-adr0363-custom-classifiers.test.ts`, and the CHECK equality in `adr0348-state-machines.test.ts`.
+- Slice 3: `packages/shared/src/ai-app-risk.ts` (attributes, the factor score) and `ai-app-risk-data.ts` (the curated
+  dataset v1, deep-frozen and pinned by count and hash), with `ai-app-risk.test.ts`; `apps/gateway/src/ai-app-risk.ts`
+  (two read-only routes: the dataset, and the risk-ranked shadow-AI inventory with suggested, never applied, site
+  rules). Test: `zz-adr0363-ai-app-risk.test.ts`. UI gaps: `scripts/known-ui-gaps/adr-0363-e44-ai-app-risk.json`.

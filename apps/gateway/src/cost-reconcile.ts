@@ -241,7 +241,8 @@ export async function runCostReconciliation(
  * assertion becomes the live one again, and the reinstatement is audited.
  */
 export async function reinstateLinesSupersededBy(
-  db: Db,
+  // a transaction or the pool: the revoke route runs this inside the transaction that withdraws the batch
+  db: Pick<Db, "update" | "insert">,
   opts: { batchId: string; lineIds: string[]; actorUserId: string | null; reason: string },
 ): Promise<number> {
   if (opts.lineIds.length === 0) return 0;
