@@ -56,6 +56,33 @@ output "gateway_role_arn" {
   value = module.gateway_pod_identity.iam_role_arn
 }
 
+output "backup_bucket" {
+  description = "The operator's backup bucket, or null when operator_backups is false."
+  value       = var.operator_backups ? module.backup_target[0].bucket : null
+}
+
+output "backup_role_arn" {
+  description = "The backup Job's Pod Identity role. Not needed in the spec: the association names the ServiceAccount."
+  value       = var.operator_backups ? module.backup_pod_identity.iam_role_arn : null
+}
+
+output "backup_spec" {
+  description = "spec.backup.s3 for the RegulAItInstallation (ADR-0305), less uploaderImage, which comes from the signed bundle. Null when operator_backups is false."
+  value = var.operator_backups ? yamlencode({
+    s3 = {
+      bucket              = module.backup_target[0].bucket
+      region              = local.region
+      prefix              = "${module.backup_target[0].prefix}/"
+      kmsKeyARN           = module.kms.key_arn
+      expectedBucketOwner = local.account
+      podIdentity         = true
+      # The STS interface endpoint and S3's published ranges (the S3 gateway
+      # endpoint), opened on 443 for the backup pods only.
+      egressCIDRs = concat(local.endpoint_subnets, data.aws_ec2_managed_prefix_list.s3.entries[*].cidr)
+    }
+  }) : null
+}
+
 output "ecr_repository_urls" {
   value = { for k, m in module.ecr : k => m.repository_url }
 }
