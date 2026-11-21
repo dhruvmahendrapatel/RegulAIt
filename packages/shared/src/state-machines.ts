@@ -802,6 +802,24 @@ export const PIPELINE_RUN_MACHINE = defineMachine({
 });
 
 /** Every declared machine, by id: the one list an agent or a document reads. */
+/** `repetitive_ask_clusters.status` (ADR-0328). A scan inserts `suggested`; a rescan refreshes the evidence but never the
+ * status. Dismissal is final for that fingerprint. Slices 3 and 4 add the eval gate, shadow and switch states. */
+export const REPETITIVE_ASK_CLUSTER_MACHINE = defineMachine({
+  id: "repetitive_ask_cluster",
+  stored: "repetitive_ask_clusters.status",
+  states: ["suggested", "dismissed"],
+  initial: ["suggested"],
+  terminal: ["dismissed"],
+  transitions: {
+    dismiss: {
+      from: ["suggested"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the cluster; a cheaper model is never suggested for it again.",
+    },
+  },
+});
+
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
@@ -826,4 +844,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
 } as Record<string, StateMachine<string, string>>);

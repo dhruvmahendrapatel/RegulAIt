@@ -17985,6 +17985,92 @@ export const ruleStepSwitches = pgTable(
 export type RuleStepSwitchRow = typeof ruleStepSwitches.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// ADR-0328 slice 2 (lane E12, migration `repetitive_asks`) — repetitive asks: clusters of near-duplicate prompts sent to
+// one agent, found by `findRepetitiveAsks` (@regulait/optimizer-kernel) on captured previews in the gateway process.
+// No prompt text is stored: fingerprints, counts, measured cost and a bounded sample of member span ids. Read-only:
+// nothing here changes routing. Written only by `apps/gateway/src/repetitive-asks.ts`, each write with its audit row.
+// ---------------------------------------------------------------------------
+
+/** One row, absent until an admin first saves it. Absent = OFF (ADR-0180). Bounds = the kernel's REPETITIVE_ASK_FLOORS. */
+export const repetitiveAskSettings = pgTable(
+  "repetitive_ask_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    maxHamming: integer("max_hamming").notNull().default(3),
+    minSimilarity: doublePrecision("min_similarity").notNull().default(0.9),
+    minClusterSize: integer("min_cluster_size").notNull().default(20),
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("repetitive_ask_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("repetitive_ask_settings_max_hamming_check", sql`${t.maxHamming} BETWEEN 0 AND 5`),
+    check("repetitive_ask_settings_min_similarity_check", sql`${t.minSimilarity} >= 0.8 AND ${t.minSimilarity} <= 1`),
+    check("repetitive_ask_settings_min_cluster_size_check", sql`${t.minClusterSize} BETWEEN 10 AND 100000`),
+  ],
+);
+export type RepetitiveAskSettingsRow = typeof repetitiveAskSettings.$inferSelect;
+
+export const REPETITIVE_ASK_CLUSTER_STATUSES = ["suggested", "dismissed"] as const;
+export type RepetitiveAskClusterStatus = (typeof REPETITIVE_ASK_CLUSTER_STATUSES)[number];
+
+/**
+ * One row per (agent, cluster fingerprint): a measured read model of `trace_spans` (its source of truth; ADR-0200
+ * exception), refreshed by each scan, with the cheaper agent `routeModel` would accept and the projected monthly saving.
+ */
+export const repetitiveAskClusters = pgTable(
+  "repetitive_ask_clusters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the representative ask's 64-bit SimHash, 16 lowercase hex characters (never text) */
+    fingerprint: text("fingerprint").notNull(),
+    asks: integer("asks").notNull(),
+    /** mean TF-IDF cosine of the members to the representative */
+    cohesion: doublePrecision("cohesion").notNull(),
+    /** measured cost of the members' AI calls over the scan window; null when none was priced */
+    windowCostUsd: doublePrecision("window_cost_usd"),
+    /** the cheaper agent suggested for this cluster; null when no cheaper candidate passes `routeModel` */
+    candidateAgentId: uuid("candidate_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd"),
+    status: text("status", { enum: REPETITIVE_ASK_CLUSTER_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("repetitive_ask_clusters_agent_fingerprint_uq").on(t.agentId, t.fingerprint),
+    index("repetitive_ask_clusters_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    index("repetitive_ask_clusters_candidate_idx").on(t.candidateAgentId),
+    check("repetitive_ask_clusters_fingerprint_check", sql`${t.fingerprint} ~ '^[0-9a-f]{16}$'`),
+    check("repetitive_ask_clusters_asks_check", sql`${t.asks} >= 2`),
+    check("repetitive_ask_clusters_cohesion_check", sql`${t.cohesion} BETWEEN 0 AND 1`),
+    check("repetitive_ask_clusters_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("repetitive_ask_clusters_dismissed_check", sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`),
+    check("repetitive_ask_clusters_candidate_check", sql`${t.candidateAgentId} IS NULL OR ${t.candidateAgentId} <> ${t.agentId}`),
+  ],
+);
+export type RepetitiveAskClusterRow = typeof repetitiveAskClusters.$inferSelect;
+
+/** A bounded sample of a cluster's member spans (a join table): what slice 3's eval dataset is built from. */
+export const repetitiveAskClusterSpans = pgTable(
+  "repetitive_ask_cluster_spans",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => repetitiveAskClusters.id, { onDelete: "cascade" }),
+    spanId: uuid("span_id")
+      .notNull()
+      .references(() => traceSpans.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ name: "repetitive_ask_cluster_spans_pk", columns: [t.clusterId, t.spanId] }), index("repetitive_ask_cluster_spans_span_idx").on(t.spanId)],
+);
+
+// ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
 // ---------------------------------------------------------------------------
 
