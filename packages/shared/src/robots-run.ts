@@ -117,21 +117,33 @@ export const robotRunResultSchema = z
   });
 export type RobotRunResult = z.infer<typeof robotRunResultSchema>;
 
+/** the kinds a STORED evidence row may have (`robot_run_evidence.kind`) */
 export const ROBOT_EVIDENCE_KINDS = ["screenshot", "download", "egress_log"] as const;
 export type RobotEvidenceKind = (typeof ROBOT_EVIDENCE_KINDS)[number];
+/**
+ * the kinds a RUNNER may upload. Never `egress_log`: the run's egress log is the executor's evidence about the
+ * sandbox, written only from the executor's end (`robotEgressLogHook`), so the sandbox can neither forge nor crowd it out
+ */
+export const ROBOT_RUNNER_EVIDENCE_KINDS = ["screenshot", "download"] as const;
+/**
+ * the one item number reserved for the executor's egress log: outside the runner's 0..evidenceItems-1, so a runner
+ * that fills every item it may use cannot take the log's slot (the database CHECK pins kind and item together)
+ */
+export const ROBOT_EGRESS_LOG_ITEM = ROBOT_RUN_LIMITS.evidenceItems;
 
 /** raw bytes per evidence chunk: one chunk's base64 fits the gateway channel's 512 KiB request body */
 export const ROBOT_EVIDENCE_CHUNK_BYTES = 256 * 1024;
 
 /**
  * One chunk of one evidence item (the gateway channel bounds a request body, so an item goes up in order, in chunks).
- * `item` is the runner's 0-based item number; the last chunk carries the whole item's size and sha256, which the
+ * `item` is the runner's 0-based item number (below `ROBOT_EGRESS_LOG_ITEM`), and `kind` is a screenshot or a download
+ * (never the egress log, `ROBOT_RUNNER_EVIDENCE_KINDS`); the last chunk carries the whole item's size and sha256, which the
  * gateway recomputes before it stores anything. Screenshots are JPEG (`page.screenshot({ type: "jpeg" })`).
  */
 export const robotEvidenceUploadSchema = z
   .object({
     item: z.number().int().min(0).max(ROBOT_RUN_LIMITS.evidenceItems - 1),
-    kind: z.enum(ROBOT_EVIDENCE_KINDS),
+    kind: z.enum(ROBOT_RUNNER_EVIDENCE_KINDS),
     step: z.number().int().min(0).max(ROBOT_LIMITS.steps).nullable(),
     contentType: z.enum(["image/jpeg", "application/octet-stream", "text/plain"]),
     chunk: z.number().int().min(0).max(Math.ceil(ROBOT_RUN_LIMITS.downloadBytes / ROBOT_EVIDENCE_CHUNK_BYTES)),

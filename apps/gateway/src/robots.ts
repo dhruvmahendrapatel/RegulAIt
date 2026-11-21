@@ -62,6 +62,7 @@ import {
   robotToolName,
   robotVersionDraftSchema,
   setRobotSecretSchema,
+  ROBOT_SECRET_MIN_CHARS,
   submitRobotVersionSchema,
   validateStepsScript,
   type RobotVersionDraft,
@@ -931,7 +932,17 @@ export function registerRobotRoutes(app: FastifyInstance, db: Db, opts: { dataKe
     if (robot.status !== "active") return reply.status(409).send({ error: "robot_not_active" });
     const parsed = setRobotSecretSchema.safeParse(req.body ?? {});
     // the zod issue list could echo the body back, and the body is the secret: a fixed sentence instead
-    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { value } (1 to 8192 characters)" });
+    if (!parsed.success) {
+      // a value too short for the evidence canary to match is its own named refusal (still never echoed)
+      const v = (req.body as { value?: unknown } | undefined)?.value;
+      if (typeof v === "string" && v.length < ROBOT_SECRET_MIN_CHARS) {
+        return reply.status(400).send({
+          error: "robot_secret_too_short",
+          detail: `a robot secret is at least ${ROBOT_SECRET_MIN_CHARS} characters: a shorter value cannot be detected if a page echoes it back into evidence or an output`,
+        });
+      }
+      return reply.status(400).send({ error: "invalid_request", detail: `expected { value } (${ROBOT_SECRET_MIN_CHARS} to 8192 characters)` });
+    }
     if (!opts.dataKey) return reply.status(503).send({ error: "data_key_unavailable", detail: "the data key is not configured, so a secret cannot be stored encrypted" });
     const stepUp = { kind: "settings_relax" as const, facts: { op: "robot_secret_set", robotId: robot.id, name, scope } };
     const su = await requireStepUp(db, req, reply, stepUp);

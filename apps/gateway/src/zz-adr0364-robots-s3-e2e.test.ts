@@ -15,6 +15,10 @@
  *    posts `cancelled`/`halted`; the run ends `cancelled` with failure_code `halted`.
  *  - NO ROBOT-CAPABLE EXECUTOR: an executor that attests only hardened_container (runc) is never used; the run is
  *    refused `robot_run_placement_refused` and its row ends `refused`.
+ *  - REVIEW A: a runner cannot upload an `egress_log`, and filling all 64 of its items does not stop the executor's
+ *    log from being stored in its reserved slot (item 64); the log's sha256, size and truncation are audited.
+ *  - REVIEW B: an agent's tools/call through /mcp that the CLIENT abandons (its own request timeout, or an explicit
+ *    abort: both send `notifications/cancelled` on a later request) cancels the run `caller_aborted`, once.
  *
  * Global state (M-068): the run owns its scratch database (dropped in afterAll); the runner image seam and the
  * execution mode are reset.
@@ -27,9 +31,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   aiUseCases,
+  and,
   auditLog,
   createDb,
   eq,
+  executionOffers,
   executionPlacements,
   orgSettings,
   projects,
@@ -54,11 +60,19 @@ import {
   FakeSandboxBackend,
   type FakeEgressRecord,
 } from "@regulait/sandbox-executor/testing";
-import { openRobotSecret, robotRunPlanSchema } from "@regulait/shared";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { mcpServers, mcpTools, toolGrants } from "@regulait/db";
+import { openRobotSecret, ROBOT_EGRESS_LOG_ITEM, ROBOT_RUN_LIMITS, robotRunPlanSchema } from "@regulait/shared";
+import { PROJECT_HEADER } from "./project-header.js";
+import { trackedCallerRequestsForTest } from "./mcp-protocol.js";
+import { ROBOTS_SERVER_URL, setRobotRunDeps } from "./robots-mcp.js";
+import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 import { buildApp } from "./app.js";
 import { artifactStorageKey, FileArtifactStore } from "./model-artifacts.js";
 import { deploymentEnvironment } from "./oauth/common.js";
-import { setRobotRunnerImageForTest, startRobotRun } from "./robot-runs.js";
+import { ROBOT_RUN_STALE_MS, runRobotRunStaleSweep, setRobotRunnerImageForTest, startRobotRun } from "./robot-runs.js";
+import { decidePlacement } from "./execution-placement.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
@@ -227,6 +241,11 @@ interface RunnerTrace {
   resultStatus: number | null;
   screenshots: string | null;
   evidenceStatus: number | null;
+  /** the "fill" scenario: the forged egress_log upload's answer, each item's answer, and the 65th item's */
+  forgedEgress?: number;
+  filled?: number[];
+  overflow?: number;
+  reused?: number;
   /** called once, after the first heartbeat's answer (the abort scenario aborts the call here) */
   onFirstHeartbeat?: () => void;
 }
@@ -244,7 +263,7 @@ const newTrace = (): RunnerTrace => ({
   evidenceStatus: null,
 });
 
-function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt" | "loop" | "download") {
+function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt" | "loop" | "download" | "fill") {
   return async (ctx: {
     secret: string | undefined;
     workload: { command: string; args: string[] };
@@ -332,6 +351,43 @@ function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt" | "loop" |
         await new Promise((r) => setTimeout(r, 25));
       }
       const res = await call("POST", "result", { status: "cancelled", failureCode: "halted", stepsCompleted: 1, outputs: {} });
+      trace.resultStatus = res.status;
+      write({ t: "end", code: 0 });
+      return;
+    }
+    if (scenario === "fill") {
+      // review A: a runner that tries to write the egress log itself, then takes every item it may use, then one more
+      const fake = Buffer.from("[forged egress log: nothing was refused]");
+      trace.forgedEgress = (
+        await call("POST", "evidence", {
+          item: 0,
+          kind: "egress_log",
+          step: null,
+          contentType: "text/plain",
+          chunk: 0,
+          dataBase64: fake.toString("base64"),
+          last: true,
+          size: fake.length,
+          sha256: createHash("sha256").update(fake).digest("hex"),
+        })
+      ).status;
+      const shot = (item: number) => ({
+        item,
+        kind: "screenshot",
+        step: 1,
+        contentType: "image/jpeg",
+        chunk: 0,
+        dataBase64: JPEG.toString("base64"),
+        last: true,
+        size: JPEG.length,
+        sha256: JPEG_SHA,
+      });
+      trace.filled = [];
+      for (let i = 0; i < ROBOT_RUN_LIMITS.evidenceItems; i++) trace.filled.push((await call("POST", "evidence", shot(i))).status);
+      // the reserved slot's number is outside the runner's range, and a stored number is never taken twice
+      trace.overflow = (await call("POST", "evidence", shot(ROBOT_RUN_LIMITS.evidenceItems))).status;
+      trace.reused = (await call("POST", "evidence", shot(0))).status;
+      const res = await call("POST", "result", { status: "succeeded", stepsCompleted: plan.steps.length, outputs: { balance: "64" } });
       trace.resultStatus = res.status;
       write({ t: "end", code: 0 });
       return;
@@ -672,10 +728,20 @@ describe.skipIf(!DATABASE_URL)(
       ]);
       const egressLog = ev.filter((e) => e.kind === "egress_log");
       expect(egressLog, ex.logs.join("\n")).toHaveLength(1);
+      // review A: the executor's log is in its reserved slot, never a number the runner chose
       expect(egressLog[0]).toMatchObject({
-        item: 1,
+        item: ROBOT_EGRESS_LOG_ITEM,
         contentType: "text/plain",
         step: null,
+      });
+      // ... and its digest is in the audit trail, on the run (R3 non-blocking 1)
+      const [logAudit] = await db
+        .select({ detail: auditLog.detail, objectId: auditLog.objectId })
+        .from(auditLog)
+        .where(eq(auditLog.ruleId, "robot-run-egress-log"));
+      expect(logAudit).toMatchObject({
+        objectId: runId,
+        detail: expect.objectContaining({ sha256: egressLog[0]!.sha256, sizeBytes: egressLog[0]!.sizeBytes, truncated: false }),
       });
       // the screenshot's bytes are kept (the store is configured)
       expect(shot[0]!.bytesWithheld).toBeNull();
@@ -866,6 +932,204 @@ describe.skipIf(!DATABASE_URL)(
         await loop;
       }
     }, 120_000);
+
+    const loadRobot = async () =>
+      (
+        await db
+          .select({ robot: robots, version: robotVersions })
+          .from(robotVersions)
+          .innerJoin(robots, eq(robots.id, robotVersions.robotId))
+          .where(eq(robots.id, robotId))
+      )[0]!;
+
+    it("review A: a runner cannot upload an egress_log, and filling items 0-63 does not stop the executor's log (audited, truncated)", async () => {
+      const t = newTrace();
+      const truncatedLog = (e: FakeEgressRecord) =>
+        `allow portal.example.com:443 run=${e.runId}\n[regulait: egress log truncated, 4096 bytes dropped]\nallow portal.example.com:443\n`;
+      const ex = await rig(
+        "gvisor-fill",
+        new FakeSandboxBackend({
+          backend: "gvisor",
+          classes: ["hardened_container", "user_space_kernel"],
+          robotTask: robotRunner(t, "fill"),
+          egressLog: truncatedLog,
+        }),
+      );
+      const { robot, version } = await loadRobot();
+      await ex.loop({ maxWindows: 1 });
+      const abort = new AbortController();
+      const loop = ex.loop({ signal: abort.signal });
+      try {
+        const out = await startRobotRun(
+          db,
+          { robot, version, kind: "test", requestedBy: ownerId, projectId, inputs: { username: "alice" }, contentDigest: "8".repeat(64) },
+          { dataKey: DATA_KEY, store: null, onlyExecutorIds: [ex.executorId] },
+        );
+        expect(out, ex.logs.join("\n")).toMatchObject({ kind: "finished", status: "succeeded" });
+        // the forged log is refused at the schema (a runner's kind is a screenshot or a download), every own item is
+        // taken, the reserved number is refused at the schema too, and a stored number is not taken again
+        expect(t.forgedEgress).toBe(400);
+        expect(t.filled).toEqual(Array.from({ length: ROBOT_RUN_LIMITS.evidenceItems }, () => 200));
+        expect(t.overflow).toBe(400);
+        expect(t.reused).toBe(409);
+        const id = (out as { runId: string }).runId;
+        // the executor's end lands after the run's own end: wait for the log
+        let ev: (typeof robotRunEvidence.$inferSelect)[] = [];
+        for (let i = 0; i < 100; i++) {
+          ev = await db.select().from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, id));
+          if (ev.some((e) => e.kind === "egress_log")) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(ev.filter((e) => e.kind === "screenshot")).toHaveLength(ROBOT_RUN_LIMITS.evidenceItems);
+        const logs = ev.filter((e) => e.kind === "egress_log");
+        expect(logs, ex.logs.join("\n")).toHaveLength(1);
+        const [sb] = placementSandboxes(ex.backend);
+        const expectedLog = truncatedLog(sb!.egress!);
+        const expectedSha = createHash("sha256").update(expectedLog, "utf8").digest("hex");
+        // the executor's end stores the log through the app's own artifact store (configured here), not the run's deps
+        expect(logs[0]).toMatchObject({ item: ROBOT_EGRESS_LOG_ITEM, sha256: expectedSha, bytesWithheld: null });
+        // the stored log is the one the executor sent (its digest is also on the execution-ended audit row)
+        const audits = await db.select({ ruleId: auditLog.ruleId, objectId: auditLog.objectId, detail: auditLog.detail }).from(auditLog);
+        const ended = audits.find((a) => a.ruleId === "execution-ended" && (a.detail as { egressLogSha256?: string }).egressLogSha256 === expectedSha);
+        expect(ended).toBeTruthy();
+        const logged = audits.filter((a) => a.ruleId === "robot-run-egress-log" && a.objectId === id);
+        expect(logged).toEqual([
+          expect.objectContaining({
+            detail: expect.objectContaining({ sha256: expectedSha, sizeBytes: Buffer.byteLength(expectedLog), truncated: true, droppedBytes: 4096 }),
+          }),
+        ]);
+        // the database itself refuses an egress_log anywhere but the reserved slot, and anything else in it
+        const constraintOf = async (p: Promise<unknown>) => {
+          try {
+            await p;
+            return null;
+          } catch (err) {
+            const e = err as { constraint?: string; cause?: { constraint?: string } };
+            return e.cause?.constraint ?? e.constraint ?? "unknown";
+          }
+        };
+        expect(
+          await constraintOf(db.insert(robotRunEvidence).values({ robotRunId: id, item: 5, kind: "egress_log", step: null, contentType: "text/plain", sha256: expectedSha, sizeBytes: 1 })),
+        ).toBe("robot_run_evidence_egress_slot_check");
+        expect(
+          await constraintOf(
+            db.insert(robotRunEvidence).values({ robotRunId: id, item: ROBOT_EGRESS_LOG_ITEM, kind: "screenshot", step: 1, contentType: "image/jpeg", sha256: JPEG_SHA, sizeBytes: 1 }),
+          ),
+        ).toBe("robot_run_evidence_egress_slot_check");
+      } finally {
+        abort.abort();
+        await loop;
+      }
+    }, 180_000);
+
+    it("review B: a client that times out or aborts its tools/call through /mcp cancels the run (caller_aborted), once each", async () => {
+      // the version is approved (an approver other than its author) and the owner is granted its tool
+      const restoreSigning = await relaxApprovalSigningForTest(db);
+      restores.push(restoreSigning);
+      const sub = await inject("POST", `/v1/robots/${robotId}/versions/1/submit`, ownerAuth, { approverUserId: adminId });
+      expect(sub.statusCode, sub.body).toBe(202);
+      const [submitted] = await db.select().from(robotVersions).where(eq(robotVersions.robotId, robotId));
+      const decided = await inject("POST", `/v1/approvals/${submitted!.approvalId}/decide`, adminAuth, { decision: "approved" });
+      expect(decided.statusCode, decided.body).toBe(200);
+      const [approved] = await db.select().from(robotVersions).where(eq(robotVersions.robotId, robotId));
+      expect(approved!.status).toBe("approved");
+      const [server] = await db.select().from(mcpServers).where(eq(mcpServers.url, ROBOTS_SERVER_URL));
+      const [tool] = await db.select().from(mcpTools).where(eq(mcpTools.id, approved!.mcpToolId!));
+      await db.insert(toolGrants).values({ userId: ownerId, serverId: server!.id, toolName: tool!.name });
+      // an executor that attests but never takes the offer: the run waits in placement until the call is abandoned
+      const ex = await rig(
+        "gvisor-idle",
+        new FakeSandboxBackend({ backend: "gvisor", classes: ["hardened_container", "user_space_kernel"], robotTask: robotRunner(newTrace(), "succeed") }),
+      );
+      await ex.loop({ maxWindows: 1 });
+      setRobotRunDeps({ dataKey: DATA_KEY, store: null, onlyExecutorIds: [ex.executorId], placementTimeoutMs: 90_000 });
+      const base = await app.listen({ port: 0, host: "127.0.0.1" });
+      const client = new Client({ name: "rbt3e-client", version: "0.0.1" });
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(`${base}/mcp/${server!.id}`), {
+          requestInit: { headers: { ...ownerAuth, [PROJECT_HEADER]: projectId } },
+        }),
+      );
+      const runsOf = () => db.select().from(robotRuns).where(and(eq(robotRuns.robotVersionId, approved!.id), eq(robotRuns.kind, "agent")));
+      const settled = async (n: number) => {
+        for (let i = 0; i < 200; i++) {
+          const r = await runsOf();
+          if (r.length === n && r.every((x) => x.status !== "queued" && x.status !== "running")) return r;
+          await new Promise((res) => setTimeout(res, 100));
+        }
+        return runsOf();
+      };
+      try {
+        // 1. the client's own request timeout (the SDK's is 60 s by default, below a robot run's bound)
+        await expect(client.callTool({ name: tool!.name, arguments: { username: "alice" } }, undefined, { timeout: 2_000 })).rejects.toThrow(/timed out/i);
+        const first = await settled(1);
+        expect(first, ex.logs.join("\n")).toEqual([expect.objectContaining({ status: "cancelled", failureCode: "caller_aborted" })]);
+        // 2. an explicit abort
+        const ctrl = new AbortController();
+        const pending = client.callTool({ name: tool!.name, arguments: { username: "bob" } }, undefined, { signal: ctrl.signal, timeout: 120_000 });
+        setTimeout(() => ctrl.abort("user pressed stop"), 2_000);
+        await expect(pending).rejects.toThrow();
+        const both = await settled(2);
+        expect(both.map((r) => [r.status, r.failureCode])).toEqual([
+          ["cancelled", "caller_aborted"],
+          ["cancelled", "caller_aborted"],
+        ]);
+        // each offer was withdrawn, and the gateway recorded each cancelled call (not as an upstream failure)
+        const cancelled = await db.select({ id: auditLog.id }).from(auditLog).where(and(eq(auditLog.ruleId, "mcp-call-cancelled-by-caller"), eq(auditLog.toolName, tool!.name)));
+        expect(cancelled).toHaveLength(2);
+        // a cancelled call is never retried into another run, and the cancel registry holds nothing once calls end
+        await new Promise((r) => setTimeout(r, 1_000));
+        expect(await runsOf()).toHaveLength(2);
+        expect(trackedCallerRequestsForTest()).toBe(0);
+      } finally {
+        await client.close().catch(() => undefined);
+        setRobotRunDeps({ dataKey: DATA_KEY, store: new FileArtifactStore(storeDir) });
+      }
+    }, 180_000);
+
+    it("review R3-2: the stale-run sweep withdraws a lost run's still-open offer and writes its usage row", async () => {
+      const ex = await rig(
+        "gvisor-stale",
+        new FakeSandboxBackend({ backend: "gvisor", classes: ["hardened_container", "user_space_kernel"], robotTask: robotRunner(newTrace(), "succeed") }),
+      );
+      await ex.loop({ maxWindows: 1 });
+      const { version } = await loadRobot();
+      // a run its gateway lost while the offer was out (a restart mid-placement), older than any run can live
+      const [run] = await db
+        .insert(robotRuns)
+        .values({
+          robotVersionId: version.id,
+          requestedBy: ownerId,
+          projectId,
+          kind: "test",
+          contentDigest: "7".repeat(64),
+          createdAt: new Date(Date.now() - ROBOT_RUN_STALE_MS - 60_000),
+        })
+        .returning({ id: robotRuns.id });
+      const decision = await decidePlacement(db, {
+        onlyExecutorIds: [ex.executorId],
+        workloadKind: "robot_browser",
+        projectId,
+        agent: null,
+        mcpServerId: null,
+        parentGrantId: null,
+        interactivePerson: false,
+        imageDigest: IMAGE,
+        actorUserId: ownerId,
+        egress: { runId: run!.id, targets: [{ host: "portal.example.com", port: 443 }] },
+      });
+      expect(decision.kind).toBe("offered");
+      const offerId = (decision as { offerId: string }).offerId;
+      const out = await runRobotRunStaleSweep(db);
+      expect(out.ids).toContain(run!.id);
+      expect(out.offersWithdrawn).toBeGreaterThanOrEqual(1);
+      const [offer] = await db.select().from(executionOffers).where(eq(executionOffers.id, offerId));
+      expect(offer!.status).toBe("withdrawn");
+      const usage = await db.select().from(usageEvents).where(eq(usageEvents.objectType, "robot_run"));
+      expect(usage.filter((u) => (u.detail as { robotRunId?: string }).robotRunId === run!.id)).toEqual([
+        expect.objectContaining({ projectId, userId: ownerId, costUsd: null }),
+      ]);
+    }, 60_000);
 
     it("no executor that can run robot_browser (runc only): refused robot_run_placement_refused, the row ends refused", async () => {
       const ex = await rig(

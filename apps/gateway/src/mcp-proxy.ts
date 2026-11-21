@@ -126,6 +126,7 @@ import { loadEntitlements } from "./entitlements.js";
 import {
   executeGovernedProtocolCall,
   installProtocolSurface,
+  trackCallerRequest,
   isReservedToolName,
   protocolCapabilities,
   protocolOutcomeResult,
@@ -746,6 +747,13 @@ export async function executeGovernedToolCall(
      * exception). Absent = a caller gated elsewhere (a run's worker loop: its run was gated when it was planned).
      */
     planGate?: { engineInstanceId: string | null } | undefined;
+    /**
+     * ADR-0364 S3 (review B) — the caller's abort: its cancellation, its own request timeout (the SDK client's default
+     * is 60 s, below a robot run's bound) or its connection closing. Passed to the upstream `tools/call` with the
+     * deadline, so the upstream is told to stop (`notifications/cancelled`); a robot tool's run is cancelled by it
+     * (`startRobotRun`). Absent = only the deadline bounds the call (a worker loop).
+     */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -1648,6 +1656,9 @@ async function executeGovernedToolCallInner(
         ({ deadlineMs }) =>
           upstream!.callTool({ name: toolName, arguments: preparedPii?.effectiveArguments ?? args.arguments }, undefined, {
             timeout: deadlineMs,
+            // the caller's abort beside the deadline: whichever comes first ends the call, and the SDK tells the
+            // upstream (`notifications/cancelled`)
+            ...(args.signal ? { signal: args.signal } : {}),
           }),
         {
           // G2: by far the most generous of the three deadlines, because this is
@@ -1670,7 +1681,22 @@ async function executeGovernedToolCallInner(
       // A `try`/`catch` rather than `.catch()`: an async `.catch` handler that
       // rethrows still widens the inferred type to include `undefined`, which
       // no longer satisfies the SDK's `tools/call` handler signature.
-      await operationFailed(err);
+      // A caller that gave up is not the upstream failing: nothing is charged to its breaker, and the cancel is
+      // audited (the upstream was told to stop; what it had done by then is its own).
+      if (args.signal?.aborted) {
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          effect: "deny",
+          ruleId: "mcp-call-cancelled-by-caller",
+          ruleChain: [],
+          reason: "the caller cancelled the tools/call (or its connection closed) before the upstream answered; the upstream was told to stop",
+          detail: { projectId, phase: "tools/call", receiptClass: "decision" },
+        });
+      } else {
+        await operationFailed(err);
+      }
       if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
       throw err;
     }
@@ -2749,11 +2775,21 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     );
     // ADR-0185 G3: every non-tool request is decided by the protocol primitive
     // (refused, disabled, or governed exactly like a tool call)
+    // ADR-0364 S3 (review B): the caller's cancellation scope. A client cancels (or times out) with a
+    // `notifications/cancelled` on a LATER HTTP request; it reaches the call only within the same user, server and
+    // credential, so no caller can cancel another's call
+    const cancelScope = [
+      userId,
+      serverId,
+      req.authCtx.via,
+      req.authCtx.apiKeyId ?? req.authCtx.virtualKeyId ?? req.authCtx.delegationGrantId ?? req.authCtx.workloadCredentialId ?? "",
+    ].join("\u0000");
     const protocolSurface = installProtocolSurface(proxy, {
       db,
       userId,
       serverId,
       projectId,
+      cancelScope,
       call: async (method, params, extra) => {
         const protocolTrace = await beginTrace(db, {
           kind: "tool",
@@ -2774,6 +2810,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
           trace: protocolTrace,
           relay: extra.relay,
           progressToken: extra.progressToken,
+          signal: extra.signal,
           // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
           ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
@@ -2882,64 +2919,72 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       return { tools: entitled.filter((t) => exposed.has(t.name)) };
     });
 
-    proxy.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const toolName = request.params.name;
-      // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
-      // by the SERVER as the session so an operator can read a client's whole
-      // conversation with one MCP server as one thing. `beginTrace` returns
-      // null when tracing is off, and every line below then no-ops.
-      const toolTrace = await beginTrace(db, {
-        kind: "tool",
-        name: `mcp ${toolName}`,
-        userId,
-        projectId,
-        sessionId: `mcp:${serverId}`,
-        rootRefId: serverId,
-      });
-      // The proxy route is now a thin governance-to-MCP-error mapper over the
-      // shared primitive; the identical logic serves the worker loop too.
-      const outcome = await executeGovernedToolCall(db, opts.dataKey, {
-        planGate: { engineInstanceId: planGateEngineInstance },
-        userId,
-        serverId,
-        toolName,
-        arguments: request.params.arguments,
-        projectId,
-        // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
-        // session row, never from a header the caller could set.
-        principal: abacPrincipalFromRequest(req),
-        trace: toolTrace,
-        // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
-        // with no grant resolves to no grant and is refused in the core (never decided as the person)
-        ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
-      }).catch(async (err: unknown) => {
-        // AER-024: the reply is already hijacked, so the primitive's admission
-        // hold / egress refusal cannot be the pre-hijack 403 the manifest path
-        // answers. It is the SAME named policy refusal the manifest handler
-        // raises post-hijack — never a generic internal error, and never the
-        // breaker's "retry later".
-        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
-          await finishTrace(db, toolTrace, "denied");
-          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
-        }
-        // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
-        // before anything is answered, so a client never sees a value it could replay
-        isStdioSessionLostError(err);
-        throw err;
-      });
-      await finishTrace(
-        db,
-        toolTrace,
-        outcome.kind === "allowed" ? "ok" : outcome.kind === "unknown_tool" ? "error" : "denied",
-      );
+    proxy.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      // ADR-0364 S3 (review B): the call ends when the caller cancels it (by id, from any later request of the same
+      // caller), times out on its side, or closes its connection; the abort reaches the upstream (a robot run cancels)
+      const tracked = trackCallerRequest(cancelScope, extra.requestId, extra.signal);
+      try {
+        const toolName = request.params.name;
+        // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
+        // by the SERVER as the session so an operator can read a client's whole
+        // conversation with one MCP server as one thing. `beginTrace` returns
+        // null when tracing is off, and every line below then no-ops.
+        const toolTrace = await beginTrace(db, {
+          kind: "tool",
+          name: `mcp ${toolName}`,
+          userId,
+          projectId,
+          sessionId: `mcp:${serverId}`,
+          rootRefId: serverId,
+        });
+        // The proxy route is now a thin governance-to-MCP-error mapper over the
+        // shared primitive; the identical logic serves the worker loop too.
+        const outcome = await executeGovernedToolCall(db, opts.dataKey, {
+          planGate: { engineInstanceId: planGateEngineInstance },
+          userId,
+          serverId,
+          toolName,
+          arguments: request.params.arguments,
+          projectId,
+          // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
+          // session row, never from a header the caller could set.
+          principal: abacPrincipalFromRequest(req),
+          trace: toolTrace,
+          // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
+          // with no grant resolves to no grant and is refused in the core (never decided as the person)
+          ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+          signal: tracked.signal,
+        }).catch(async (err: unknown) => {
+          // AER-024: the reply is already hijacked, so the primitive's admission
+          // hold / egress refusal cannot be the pre-hijack 403 the manifest path
+          // answers. It is the SAME named policy refusal the manifest handler
+          // raises post-hijack — never a generic internal error, and never the
+          // breaker's "retry later".
+          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
+            await finishTrace(db, toolTrace, "denied");
+            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+          }
+          // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
+          // before anything is answered, so a client never sees a value it could replay
+          isStdioSessionLostError(err);
+          throw err;
+        });
+        await finishTrace(
+          db,
+          toolTrace,
+          outcome.kind === "allowed" ? "ok" : outcome.kind === "unknown_tool" ? "error" : "denied",
+        );
 
-      switch (outcome.kind) {
-        case "unknown_tool":
-          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
-        case "allowed":
-          return outcome.content as Record<string, unknown>;
-        default:
-          throw mcpErrorForGovernanceOutcome(outcome);
+        switch (outcome.kind) {
+          case "unknown_tool":
+            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
+          case "allowed":
+            return outcome.content as Record<string, unknown>;
+          default:
+            throw mcpErrorForGovernanceOutcome(outcome);
+        }
+      } finally {
+        tracked.done();
       }
     });
 

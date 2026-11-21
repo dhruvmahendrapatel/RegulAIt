@@ -19545,6 +19545,9 @@ export const robotRunEvidence = pgTable(
     unique("robot_run_evidence_item_uq").on(t.robotRunId, t.item),
     index("robot_run_evidence_sha_idx").on(t.sha256),
     check("robot_run_evidence_kind_check", sql`${t.kind} IN ('screenshot', 'download', 'egress_log')`),
+    // items 0..63 are the runner's; item 64 (ROBOT_EGRESS_LOG_ITEM) is the executor's egress log, and only it
+    check("robot_run_evidence_item_check", sql`${t.item} >= 0 AND ${t.item} <= 64`),
+    check("robot_run_evidence_egress_slot_check", sql`(${t.item} = 64) = (${t.kind} = 'egress_log')`),
   ],
 );
 export type RobotRunEvidenceRow = typeof robotRunEvidence.$inferSelect;

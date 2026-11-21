@@ -4,7 +4,8 @@
 -- Sorts after robots.sql (byte order: '.' < '_'), which creates robot_runs.
 --
 --  - robot_runs.execution_placement_id: the decision 7 placement the run executed under (set once, by the gateway).
---  - robot_run_evidence: one row per stored evidence item (a redacted screenshot, a download, the run's egress log).
+--  - robot_run_evidence: one row per stored evidence item (a redacted screenshot, a download, the run's egress log;
+--    the log alone takes the reserved item 64).
 --    The bytes live in the content-addressed store under `sha256/<hex>`; the row is append-only (no UPDATE, no
 --    DELETE, no TRUNCATE): evidence leaves only by retention expiry, a later slice's recorded sweep.
 --  - org_settings.freeform_browser_session_budget_usd / freeform_browser_max_run_minutes: the owner's limits for a
@@ -30,12 +31,25 @@ CREATE TABLE IF NOT EXISTS "robot_run_evidence" (
   CONSTRAINT "robot_run_evidence_kind_check" CHECK ("kind" IN ('screenshot', 'download', 'egress_log')),
   CONSTRAINT "robot_run_evidence_type_check" CHECK ("content_type" IN ('image/jpeg', 'application/octet-stream', 'text/plain')),
   CONSTRAINT "robot_run_evidence_sha_check" CHECK ("sha256" ~ '^[0-9a-f]{64}$'),
-  CONSTRAINT "robot_run_evidence_item_check" CHECK ("item" >= 0 AND "item" < 64),
+  CONSTRAINT "robot_run_evidence_item_check" CHECK ("item" >= 0 AND "item" <= 64),
   CONSTRAINT "robot_run_evidence_size_check" CHECK ("size_bytes" >= 0 AND "size_bytes" <= 10485760),
   CONSTRAINT "robot_run_evidence_step_check" CHECK ("step" IS NULL OR ("step" >= 0 AND "step" <= 500))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "robot_run_evidence_sha_idx" ON "robot_run_evidence" ("sha256");
+--> statement-breakpoint
+-- items 0..63 are the runner's (a screenshot or a download); item 64 is reserved for the executor's egress log, and
+-- only the egress log may take it (ROBOT_EGRESS_LOG_ITEM). The (run, item) unique key then allows one log per run,
+-- which a runner can neither forge nor crowd out by filling its own items. Re-stated here so a database that applied
+-- an earlier draft of this pending file gets the same pair of checks.
+ALTER TABLE "robot_run_evidence" DROP CONSTRAINT IF EXISTS "robot_run_evidence_item_check";
+--> statement-breakpoint
+ALTER TABLE "robot_run_evidence" ADD CONSTRAINT "robot_run_evidence_item_check" CHECK ("item" >= 0 AND "item" <= 64);
+--> statement-breakpoint
+ALTER TABLE "robot_run_evidence" DROP CONSTRAINT IF EXISTS "robot_run_evidence_egress_slot_check";
+--> statement-breakpoint
+ALTER TABLE "robot_run_evidence" ADD CONSTRAINT "robot_run_evidence_egress_slot_check"
+  CHECK (("item" = 64) = ("kind" = 'egress_log'));
 --> statement-breakpoint
 -- why an item's bytes were never kept (NULL = they are in the store under the sha256): `pii_block` (the project's PII
 -- mode is `block`, so a download is recorded by its sha256 and size only, §7) or `no_store` (no store configured)

@@ -113,9 +113,13 @@ export interface ExecutorChannelOptions {
    * ADR-0364 S3: where a robot run's Smokescreen log (its egress evidence, §7) goes when the executor ends the
    * placement, inside the end's transaction, after the audit row that anchors its sha256. Handed in by the app (the
    * robot routes own `robot_run_evidence`). Absent: the log's sha256 and size are still on the `execution-ended` audit
-   * row, the bytes are not kept.
+   * row, the bytes are not kept. Called on EVERY robot placement's end: `log` and `sha256` are null when the end
+   * carried no log, so the hook can audit the log as missing.
    */
-  robotEgressLog?: (tx: Db, end: { offerId: string; placementId: string | null; log: string; sha256: string }) => Promise<void>;
+  robotEgressLog?: (
+    tx: Db,
+    end: { offerId: string; placementId: string | null; log: string | null; sha256: string | null; outcome: string },
+  ) => Promise<void>;
 }
 
 /** I5: what the executor channel needs from the engine tasks this process holds (engine-tasks.ts implements it) */
@@ -1280,8 +1284,15 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
           },
           reason: `the sandbox placed on executor ${row.name} ended: ${body.data.outcome} (ADR-0190 decision 13)`,
         });
-        if (egressSha256 !== null && opts.robotEgressLog) {
-          await opts.robotEgressLog(tx as unknown as Db, { offerId: o.id, placementId: o.placementId, log: egressLog!, sha256: egressSha256 });
+        // every robot placement's end reaches the hook, with or without a log (a missing log is audited there too)
+        if (o.workloadKind === "robot_browser" && opts.robotEgressLog) {
+          await opts.robotEgressLog(tx as unknown as Db, {
+            offerId: o.id,
+            placementId: o.placementId,
+            log: egressLog ?? null,
+            sha256: egressSha256,
+            outcome: body.data.outcome,
+          });
         }
         return true;
       });

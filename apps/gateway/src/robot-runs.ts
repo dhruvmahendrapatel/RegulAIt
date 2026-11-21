@@ -32,8 +32,10 @@
  *   EVIDENCE (§7). Each item is reassembled from its chunks, its size and sha256 re-checked, and refused if any byte
  *   sequence of a secret value or the run key appears in it (the canary rule, `canaryPatterns`), then stored
  *   content-addressed in the artifact store and recorded in `robot_run_evidence` (append-only). The bytes held in
- *   memory while an item is still arriving are capped per run and across runs; a chunk over either cap fails the run
- *   `evidence_too_large`. No store configured = no bytes are kept (`bytes_withheld = no_store`), and the run still
+ *   memory while an item is still arriving are capped per run and across runs: a chunk over the run's own cap fails
+ *   the run `evidence_too_large`; a new item that finds the gateway-wide cap reserved by other runs is answered 503
+ *   `evidence_busy` with a `retryAfterMs`, and the runner sends the same chunk again (another run's evidence never
+ *   fails this one). No store configured = no bytes are kept (`bytes_withheld = no_store`), and the run still
  *   records its outcome (screenshots are evidence, not the result).
  *
  *   OUTPUTS go through the same canary rule (a page that echoes a secret back fails the run `secret_in_output`, and no
@@ -75,7 +77,9 @@ import {
 } from "@regulait/db";
 import {
   ENGINE_IMAGES_LOCK,
+  ROBOT_EGRESS_LOG_ITEM,
   ROBOT_RUN_LIMITS,
+  ROBOT_SECRET_MIN_CHARS,
   ROBOT_RUN_MACHINE,
   compileRobotPlanSteps,
   engineTaskOutFrameSchema,
@@ -194,10 +198,11 @@ export function robotRunnerImage(): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * A secret value (or the run key) shorter than this is not matched: four characters shred ordinary bytes into false
- * hits. Such a value is still sealed and never logged; it just cannot be told apart from page content.
+ * A secret value (or the run key) shorter than this is not matched: fewer characters shred ordinary bytes into false
+ * hits. It is the store's own floor (`ROBOT_SECRET_MIN_CHARS`: a shorter secret is refused when it is set), so every
+ * stored value is matched; the run key is 43 characters.
  */
-export const CANARY_MIN_CHARS = 4;
+export const CANARY_MIN_CHARS = ROBOT_SECRET_MIN_CHARS;
 
 /** the base64 text of `bytes` wherever they sit in a longer stream (each of the three byte alignments), std and url */
 function base64Forms(bytes: Buffer): string[] {
@@ -242,7 +247,17 @@ export function canaryPatterns(values: readonly string[]): Buffer[] {
 // the in-memory bound on evidence still arriving
 // ---------------------------------------------------------------------------
 
-/** bytes of unfinished evidence items one run, and the whole gateway, may hold in memory at once */
+/**
+ * how long a runner waits before it sends a chunk again when the gateway-wide in-flight cap is full (the answer is
+ * 503 `evidence_busy` with this as `retryAfterMs`); only the run's own cap fails a run
+ */
+export const ROBOT_EVIDENCE_RETRY_AFTER_MS = 250;
+/**
+ * bytes of unfinished evidence items one run, and the whole gateway, may hold in memory at once. The run's cap counts
+ * the bytes it holds; the gateway's counts RESERVATIONS: an item reserves its kind's most (a screenshot's, or the
+ * plan's download bound) when its first chunk arrives, so an item that started always has room to finish, and runs
+ * waiting on the gateway's cap can never hold each other's items half-done forever.
+ */
 export const ROBOT_EVIDENCE_IN_FLIGHT_CAPS = { perRunBytes: 16 * 1024 * 1024, globalBytes: 64 * 1024 * 1024 } as const;
 let inFlightCaps: { perRunBytes: number; globalBytes: number } = { ...ROBOT_EVIDENCE_IN_FLIGHT_CAPS };
 let globalInFlightBytes = 0;
@@ -250,7 +265,7 @@ let globalInFlightBytes = 0;
 export function setRobotEvidenceCapsForTest(caps?: { perRunBytes: number; globalBytes: number }): void {
   inFlightCaps = caps ? { ...caps } : { ...ROBOT_EVIDENCE_IN_FLIGHT_CAPS };
 }
-/** tests only: the gateway-wide in-flight figure */
+/** tests only: the gateway-wide in-flight figure (bytes reserved by unfinished items) */
 export function robotEvidenceInFlightBytes(): number {
   return globalInFlightBytes;
 }
@@ -605,14 +620,16 @@ export async function finishRun(
   });
   if (moved === 0) return lost(runId, "finish");
 
-  // the ordered evidence list the run stored (the egress log may follow, from the executor's end)
+  // the ordered evidence list the run stored (the egress log, item ROBOT_EGRESS_LOG_ITEM, may follow from the
+  // executor's end; its digest is then on its own `robot-run-egress-log` audit row)
   const evidence = await runWithRlsSystem("system_task", "robot-run.finish-evidence", () =>
     db
       .select({ item: robotRunEvidence.item, kind: robotRunEvidence.kind, sha256: robotRunEvidence.sha256 })
       .from(robotRunEvidence)
       .where(eq(robotRunEvidence.robotRunId, runId))
       .orderBy(asc(robotRunEvidence.item))
-      .limit(ROBOT_RUN_LIMITS.evidenceItems),
+      // the runner's items and the egress log's reserved slot
+      .limit(ROBOT_RUN_LIMITS.evidenceItems + 1),
   );
   if (outputLeak) {
     await auditRun(
@@ -655,24 +672,31 @@ export async function finishRun(
 
 /**
  * End every `queued` or `running` run older than any run can live (`ROBOT_RUN_STALE_MS`) as `timed_out`
- * (`stale_run`), audited, at most 500 a pass. Such a run lost its gateway (a restart mid-run): nothing can still
+ * (`stale_run`), audited, at most 500 a pass. Each swept run gets the usage row a finished run gets (unpriced) unless
+ * it has one, and any offer of it still open is withdrawn (`cancelOffer`, `session_abandoned`). Such a run lost its gateway (a restart mid-run): nothing can still
  * finish it. The age is judged on the database clock unless the caller supplies one (M-075).
  */
-export async function runRobotRunStaleSweep(db: Db, opts: { now?: Date } = {}): Promise<{ timedOut: number; ids: string[] }> {
+export async function runRobotRunStaleSweep(db: Db, opts: { now?: Date } = {}): Promise<{ timedOut: number; ids: string[]; offersWithdrawn: number }> {
   const cutoff = opts.now ? sql`${new Date(opts.now.getTime() - ROBOT_RUN_STALE_MS).toISOString()}::timestamptz` : sql`now() - make_interval(secs => ${ROBOT_RUN_STALE_MS / 1000})`;
-  return runWithRlsSystem("system_task", "robot-run.stale-sweep", async () => {
+  const swept = await runWithRlsSystem("system_task", "robot-run.stale-sweep", async () => {
     const due = await db
       .select({ id: robotRuns.id })
       .from(robotRuns)
       .where(and(whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "time_out"), lt(robotRuns.createdAt, cutoff)))
       .orderBy(asc(robotRuns.createdAt))
       .limit(500);
-    if (due.length === 0) return { timedOut: 0, ids: [] };
+    if (due.length === 0) return [];
     const ended = await db
       .update(robotRuns)
       .set({ status: "timed_out", failureCode: "stale_run", finishedAt: new Date() })
       .where(and(inArray(robotRuns.id, due.map((d) => d.id)), whereFrom(robotRuns.status, ROBOT_RUN_MACHINE, "time_out")))
-      .returning({ id: robotRuns.id, requestedBy: robotRuns.requestedBy, robotVersionId: robotRuns.robotVersionId, kind: robotRuns.kind });
+      .returning({
+        id: robotRuns.id,
+        requestedBy: robotRuns.requestedBy,
+        robotVersionId: robotRuns.robotVersionId,
+        kind: robotRuns.kind,
+        projectId: robotRuns.projectId,
+      });
     for (const e of ended) {
       await auditRun(
         db,
@@ -684,8 +708,51 @@ export async function runRobotRunStaleSweep(db: Db, opts: { now?: Date } = {}): 
         "deny",
       );
     }
-    return { timedOut: ended.length, ids: ended.map((e) => e.id) };
+    return ended;
   });
+  if (swept.length === 0) return { timedOut: 0, ids: [], offersWithdrawn: 0 };
+  const ids = swept.map((e) => e.id);
+
+  // PILLAR 5: a swept run lands on the usage ledger exactly like a finished one (cost NULL = unpriced), unless its
+  // gateway wrote the row before it was lost (finishRun's write landed, the status write did not)
+  const named = await db
+    .select({ id: robotRuns.id, slug: robots.slug, robotId: robots.id, version: robotVersions.version })
+    .from(robotRuns)
+    .innerJoin(robotVersions, eq(robotVersions.id, robotRuns.robotVersionId))
+    .innerJoin(robots, eq(robots.id, robotVersions.robotId))
+    .where(inArray(robotRuns.id, ids));
+  const nameOf = new Map(named.map((n) => [n.id, n]));
+  const billed = await db
+    .select({ runId: sql<string>`${usageEvents.detail}->>'robotRunId'` })
+    .from(usageEvents)
+    .where(and(eq(usageEvents.objectType, "robot_run"), inArray(sql<string>`${usageEvents.detail}->>'robotRunId'`, ids)));
+  const hasRow = new Set(billed.map((b) => b.runId));
+  for (const e of swept) {
+    const n = nameOf.get(e.id);
+    if (!n || hasRow.has(e.id)) continue;
+    await db.insert(usageEvents).values({
+      userId: e.requestedBy,
+      objectType: "robot_run",
+      operation: robotToolName(n.slug, n.version),
+      costUsd: null,
+      projectId: e.projectId,
+      detail: { robotRunId: e.id, robotId: n.robotId, versionId: e.robotVersionId, kind: e.kind, status: "timed_out", swept: true },
+    });
+  }
+
+  // the run's offer, if one is still open (offered, accepted, or placed with no cancel recorded): withdrawn through
+  // the one offer-cancel path, so a sandbox that is still starting gets no input and its evidence says `cancelled`
+  const open = await db
+    .select({ id: executionOffers.id, robotRunId: executionOffers.robotRunId })
+    .from(executionOffers)
+    .where(and(inArray(executionOffers.robotRunId, ids), inArray(executionOffers.status, ["offered", "accepted", "placed"])));
+  let offersWithdrawn = 0;
+  const byRun = new Map(swept.map((e) => [e.id, e]));
+  for (const o of open) {
+    const userId = byRun.get(o.robotRunId!)?.requestedBy ?? null;
+    if (await cancelOffer(db, o.id, "session_abandoned", { userId }).catch(() => false)) offersWithdrawn += 1;
+  }
+  return { timedOut: swept.length, ids, offersWithdrawn };
 }
 
 export const ROBOT_RUN_STALE_SWEEP_JOB_NAME = "robot-run-stale-sweep";
@@ -696,7 +763,8 @@ export function robotRunJobDefinitions(): SchedulerJobDefinition[] {
       name: ROBOT_RUN_STALE_SWEEP_JOB_NAME,
       description:
         "End every queued or running robot run older than any run can live (placement wait, wall clock, margin and " +
-        "exit grace, plus a minute) as timed_out (stale_run), audited. Such a run lost its gateway mid-run.",
+        "exit grace, plus a minute) as timed_out (stale_run), audited, with its usage row and its open offer withdrawn. " +
+        "Such a run lost its gateway mid-run.",
       adr: "ADR-0364",
       defaultIntervalSeconds: 300,
       run: async (ctx) => {
@@ -714,11 +782,14 @@ export function robotRunJobDefinitions(): SchedulerJobDefinition[] {
 const ROUTE_RE = /^\/v1\/robot-runner\/runs\/([0-9a-f-]{36})\/(plan|heartbeat|evidence|result)$/;
 
 interface EvidenceItem {
-  kind: "screenshot" | "download" | "egress_log";
+  /** a runner uploads screenshots and downloads only; the egress log is the executor's (`robotEgressLogHook`) */
+  kind: "screenshot" | "download";
   step: number | null;
   contentType: string;
   chunks: Buffer[];
   bytes: number;
+  /** the bytes this item holds against the gateway-wide cap (its kind's most, reserved at its first chunk) */
+  reserved: number;
   next: number;
 }
 
@@ -742,7 +813,8 @@ export class RobotRunController implements RunEndFacts {
   private sessionDone = false;
   private endWaiters: Array<() => void> = [];
   private readonly items = new Map<number, EvidenceItem>();
-  private storedItems = 0;
+  /** the item numbers already stored (a number is used once: the row's (run, item) key) */
+  private readonly storedItemNos = new Set<number>();
   private readonly startedAt = Date.now();
   /** bytes of this run's unfinished items held in memory (counted into the gateway-wide figure too) */
   private inFlightBytes = 0;
@@ -827,20 +899,20 @@ export class RobotRunController implements RunEndFacts {
 
   /** free every unfinished item's bytes (the run ended; nothing more is reassembled) */
   releaseAll(): void {
-    for (const item of this.items.values()) this.release(item.bytes);
+    for (const item of this.items.values()) this.release(item);
     this.items.clear();
   }
 
-  private release(n: number): void {
-    this.inFlightBytes -= n;
-    globalInFlightBytes = Math.max(0, globalInFlightBytes - n);
+  private release(item: EvidenceItem): void {
+    this.inFlightBytes -= item.bytes;
+    globalInFlightBytes = Math.max(0, globalInFlightBytes - item.reserved);
   }
 
   private dropItem(itemNo: number): void {
     const item = this.items.get(itemNo);
     if (!item) return;
     this.items.delete(itemNo);
-    this.release(item.bytes);
+    this.release(item);
   }
 
   private finish(r: RobotRunResult | null): void {
@@ -917,18 +989,28 @@ export class RobotRunController implements RunEndFacts {
     const data = Buffer.from(e.dataBase64, "base64");
     let item = this.items.get(e.item);
     if (!item) {
-      if (e.chunk !== 0 || this.storedItems + this.items.size >= ROBOT_RUN_LIMITS.evidenceItems) return [409, { error: "evidence_refused" }];
-      item = { kind: e.kind, step: e.step, contentType: e.contentType, chunks: [], bytes: 0, next: 0 };
+      if (e.chunk !== 0 || this.storedItemNos.has(e.item) || this.storedItemNos.size + this.items.size >= ROBOT_RUN_LIMITS.evidenceItems) {
+        return [409, { error: "evidence_refused" }];
+      }
+      // B4 / N-B: a new item reserves its kind's most against the gateway-wide cap. When other runs hold that cap,
+      // this chunk is not taken and the runner is told to send the SAME chunk again shortly (503 `evidence_busy`,
+      // `retryAfterMs`): one run's evidence never fails another's. Only this run's own cap (below) fails a run.
+      const reserve = e.kind === "download" ? this.plan.limits.downloadBytes : ROBOT_RUN_LIMITS.screenshotBytes;
+      if (globalInFlightBytes + reserve > inFlightCaps.globalBytes) {
+        return [503, { error: "evidence_busy", retryAfterMs: ROBOT_EVIDENCE_RETRY_AFTER_MS }];
+      }
+      globalInFlightBytes += reserve;
+      item = { kind: e.kind, step: e.step, contentType: e.contentType, chunks: [], bytes: 0, reserved: reserve, next: 0 };
       this.items.set(e.item, item);
     }
     if (e.chunk !== item.next || e.kind !== item.kind) return [409, { error: "evidence_out_of_order" }];
-    const cap = e.kind === "download" ? this.plan.limits.downloadBytes : ROBOT_RUN_LIMITS.screenshotBytes;
+    const cap = item.reserved;
     if (item.bytes + data.length > cap) {
       this.dropItem(e.item);
       return [413, { error: "evidence_too_large" }];
     }
-    // B4: the bytes still arriving are bounded per run and across the gateway; over either, the run fails
-    if (this.inFlightBytes + data.length > inFlightCaps.perRunBytes || globalInFlightBytes + data.length > inFlightCaps.globalBytes) {
+    // B4: the bytes this run holds while its items arrive are bounded; over that, the run fails
+    if (this.inFlightBytes + data.length > inFlightCaps.perRunBytes) {
       this.dropItem(e.item);
       this.forced = "evidence_too_large";
       return [413, { error: "evidence_too_large" }];
@@ -936,7 +1018,6 @@ export class RobotRunController implements RunEndFacts {
     item.chunks.push(data);
     item.bytes += data.length;
     this.inFlightBytes += data.length;
-    globalInFlightBytes += data.length;
     item.next += 1;
     if (!e.last) return [200, { ok: true }];
     const bytes = Buffer.concat(item.chunks);
@@ -957,7 +1038,7 @@ export class RobotRunController implements RunEndFacts {
       return [422, { error: "evidence_contains_secret" }];
     }
     const withheld = await this.store(e.item, item, bytes, sha256);
-    this.storedItems += 1;
+    this.storedItemNos.add(e.item);
     return [200, { ok: true, sha256, ...(withheld ? { bytesWithheld: withheld } : {}) }];
   }
 
@@ -985,40 +1066,86 @@ export class RobotRunController implements RunEndFacts {
   }
 }
 
+/** the marker the executor puts where it cut an over-long Smokescreen log (sandbox-executor `egressLogMarker`) */
+const EGRESS_LOG_TRUNCATION_RE = /\n\[regulait: egress log truncated, (\d+) bytes dropped\]\n/;
+
 /**
  * The executor's end of a robot placement carries the run's Smokescreen log (capped by the executor); it is stored as
  * that run's `egress_log` evidence, in the end call's own transaction (`ExecutorChannelOptions.robotEgressLog`). It
  * holds host names and verdicts only: the run's secrets never reach the proxy (TLS is end to end through CONNECT).
+ *
+ * The log takes the ONE reserved item `ROBOT_EGRESS_LOG_ITEM` (64), outside the runner's 0..63, and only the log may
+ * take it (the database CHECK): a runner can neither upload an `egress_log` nor crowd the log out by filling its own
+ * items. Every end is audited on the run: `robot-run-egress-log` (the log's sha256, its size and whether the executor
+ * truncated it), or `robot-run-egress-log-missing` when the end carried no log or the slot was already taken. The
+ * run's end audit may already be written by then, so this is its own row on the run.
  */
 export function robotEgressLogHook(store: ArtifactStore | null) {
-  return async (tx: Db, end: { offerId: string; placementId: string | null; log: string; sha256: string }): Promise<void> => {
+  return async (
+    tx: Db,
+    end: { offerId: string; placementId: string | null; log: string | null; sha256: string | null; outcome: string },
+  ): Promise<void> => {
+    // the executor's end runs as the executor's principal, which the robot tables' policies do not open: the reads
+    // and the evidence write below are the gateway's own (system_task) steps inside that transaction
     const [offer] = await tx.select({ robotRunId: executionOffers.robotRunId }).from(executionOffers).where(eq(executionOffers.id, end.offerId));
     if (!offer?.robotRunId) return;
-    const bytes = Buffer.from(end.log, "utf8");
-    // the executor's end runs as the executor's principal, which robot_run_evidence's policies do not open: the read
-    // and the write below are the gateway's own (system_task) steps inside that transaction. The log takes the item
-    // after the highest stored one (items need not be contiguous: a refused item leaves a gap).
     const runId = offer.robotRunId;
-    const [{ top }] = (await withinSystemReason(tx, "system_task", "robot-run.egress-log-read", () =>
-      tx.select({ top: sql<number | null>`max(${robotRunEvidence.item})` }).from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, runId)),
-    )) as [{ top: number | null }];
-    const n = top === null ? 0 : Number(top) + 1;
-    if (n >= ROBOT_RUN_LIMITS.evidenceItems) return;
+    const [run] = (await withinSystemReason(tx, "system_task", "robot-run.egress-log-read", () =>
+      tx.select({ requestedBy: robotRuns.requestedBy }).from(robotRuns).where(eq(robotRuns.id, runId)),
+    )) as Array<{ requestedBy: string }>;
+    if (!run) return;
+    const audit = (ruleId: string, reason: string, detail: Record<string, unknown>, effect: "allow" | "deny") =>
+      tx.insert(auditLog).values({ userId: run.requestedBy, objectType: "robot_run", objectId: runId, detail, effect, ruleId, ruleChain: [], reason });
+    const base = { offerId: end.offerId, placementId: end.placementId, outcome: end.outcome, item: ROBOT_EGRESS_LOG_ITEM };
+    if (end.log === null || end.sha256 === null) {
+      await audit(
+        "robot-run-egress-log-missing",
+        "The executor ended the robot run's sandbox without its egress log; the run has no egress evidence.",
+        { ...base, dropped: "not_sent" },
+        "deny",
+      );
+      return;
+    }
+    const bytes = Buffer.from(end.log, "utf8");
+    const cut = EGRESS_LOG_TRUNCATION_RE.exec(end.log);
+    const facts = { sha256: end.sha256, sizeBytes: bytes.length, truncated: cut !== null, ...(cut ? { droppedBytes: Number(cut[1]) } : {}) };
     if (store) {
       const key = artifactStorageKey(end.sha256);
       if (!(await store.has(key))) await putBytes(store, key, end.sha256, bytes, "robot-egress-");
     }
-    await withinSystemReason(tx, "system_task", "robot-run.egress-log", () =>
-      tx.insert(robotRunEvidence).values({
-        robotRunId: runId,
-        item: n,
-        kind: "egress_log",
-        step: null,
-        contentType: "text/plain",
-        sha256: end.sha256,
-        sizeBytes: bytes.length,
-        bytesWithheld: store ? null : "no_store",
-      }),
+    const bytesWithheld = store ? null : ("no_store" as const);
+    const sha256 = end.sha256;
+    const stored = (await withinSystemReason(tx, "system_task", "robot-run.egress-log", () =>
+      tx
+        .insert(robotRunEvidence)
+        .values({
+          robotRunId: runId,
+          item: ROBOT_EGRESS_LOG_ITEM,
+          kind: "egress_log",
+          step: null,
+          contentType: "text/plain",
+          sha256,
+          sizeBytes: bytes.length,
+          bytesWithheld,
+        })
+        // one log per run: an end is accepted once, so a taken slot means a second log, recorded below as dropped
+        .onConflictDoNothing({ target: [robotRunEvidence.robotRunId, robotRunEvidence.item] })
+        .returning({ id: robotRunEvidence.id }),
+    )) as Array<{ id: string }>;
+    if (stored.length === 0) {
+      await audit(
+        "robot-run-egress-log-missing",
+        "A second egress log for the robot run was not stored: the run's egress log slot is already taken.",
+        { ...base, ...facts, dropped: "slot_taken" },
+        "deny",
+      );
+      return;
+    }
+    await audit(
+      "robot-run-egress-log",
+      `The robot run's egress log was stored (${bytes.length} bytes${cut ? ", truncated by the executor" : ""}).`,
+      { ...base, ...facts, bytesWithheld },
+      "allow",
     );
   };
 }

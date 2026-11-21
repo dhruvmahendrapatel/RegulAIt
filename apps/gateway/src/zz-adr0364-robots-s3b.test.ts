@@ -6,7 +6,12 @@
  *    Values under four characters are not matched (documented at `CANARY_MIN_CHARS`).
  *  - B2 THE PII MODE: resolved through the compliance cascade (`projectPiiMode`): the org floor when the project has
  *    no matching tag, the tag's profile when it has one. `block` = screenshots off and downloads kept by digest only.
- *  - B4 THE IN-FLIGHT EVIDENCE CAPS, per run and across runs: a chunk over either fails the run `evidence_too_large`.
+ *  - B4 THE IN-FLIGHT EVIDENCE CAPS: a chunk over the run's own cap fails the run `evidence_too_large`; a new item
+ *    that finds the gateway-wide cap reserved by other runs gets a retryable 503 `evidence_busy` (review N-B), and an
+ *    item already started always has room to finish.
+ *  - Review A: a runner's upload can never be an `egress_log`, nor use the log's reserved item number.
+ *  - Review N-A: a robot secret under four characters (the canary's floor) is refused when it is set.
+ *  - Review R3-2: a swept run gets the usage row a finished run gets (once).
  *  - Code 1: a robot tools/call gets a deadline that covers a whole run, and one attempt.
  *  - Code 3: an over-budget project is refused in the budget gate's own shape (409 `project_budget_exceeded`).
  *  - Code 4: the end audit carries the ordered evidence list.
@@ -24,7 +29,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, auditLog, complianceProfiles, eq, inArray, orgSettings, projects, robotRunEvidence, robotRuns, robotVersions, robots, sql, usageEvents } from "@regulait/db";
-import { newRobotRunKey, ROBOT_RUN_LIMITS, type RobotRunPlan } from "@regulait/shared";
+import {
+  newRobotRunKey,
+  ROBOT_EGRESS_LOG_ITEM,
+  ROBOT_RUN_LIMITS,
+  ROBOT_SECRET_MIN_CHARS,
+  robotEvidenceUploadSchema,
+  setRobotSecretSchema,
+  type RobotRunPlan,
+} from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 import { artifactStorageKey, FileArtifactStore } from "./model-artifacts.js";
@@ -33,8 +46,10 @@ import { attemptsForToolKind } from "./upstream-retry.js";
 import { ROBOT_RUN_MAX_LIFETIME_MS, ROBOTS_SERVER_URL } from "./robots-mcp.js";
 import { toolCallBudgetMs } from "./mcp-proxy.js";
 import {
+  CANARY_MIN_CHARS,
   canaryPatterns,
   finishRun,
+  ROBOT_EVIDENCE_RETRY_AFTER_MS,
   RobotRunController,
   robotEvidenceInFlightBytes,
   ROBOT_RUNNER_WORKLOAD,
@@ -280,9 +295,77 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs: the gateway 
     expect(byId.get(staleRunning)).toMatchObject({ status: "timed_out", failureCode: "stale_run" });
     expect(byId.get(fresh)!.status).toBe("running");
     for (const id of [staleQueued, staleRunning]) expect((await auditsOf(id)).map((a) => a.ruleId)).toEqual(["robot-run-timed-out"]);
+    // R3-2: each swept run is on the usage ledger like a finished one: attributed, unpriced (NULL), once
+    const usage = await kit.db.select().from(usageEvents).where(eq(usageEvents.objectType, "robot_run"));
+    for (const id of [staleQueued, staleRunning]) {
+      const mine = usage.filter((u) => (u.detail as { robotRunId?: string }).robotRunId === id);
+      expect(mine).toEqual([expect.objectContaining({ userId: owner.id, projectId: owner.projectId, costUsd: null })]);
+      expect(mine[0]!.detail).toMatchObject({ status: "timed_out", swept: true });
+    }
+    expect(usage.some((u) => (u.detail as { robotRunId?: string }).robotRunId === fresh)).toBe(false);
     // a second pass finds nothing more
     expect((await runRobotRunStaleSweep(kit.db)).ids).not.toContain(staleQueued);
     await kit.db.update(robotRuns).set({ status: "cancelled" }).where(eq(robotRuns.id, fresh));
+  });
+
+  it("R3-2: a swept run whose gateway already wrote its usage row gets no second one", async () => {
+    const { version, robot } = await loaded();
+    const old = new Date(Date.now() - ROBOT_RUN_STALE_MS - 60 * 60_000);
+    const [run] = await kit.db
+      .insert(robotRuns)
+      .values({ robotVersionId: version.id, requestedBy: owner.id, projectId: owner.projectId, kind: "test", status: "running", contentDigest: "d".repeat(64), createdAt: old })
+      .returning({ id: robotRuns.id });
+    await kit.db.insert(usageEvents).values({
+      userId: owner.id,
+      objectType: "robot_run",
+      operation: `robot_${robot.slug}_v1`,
+      costUsd: null,
+      projectId: owner.projectId,
+      detail: { robotRunId: run!.id, status: "succeeded" },
+    });
+    expect((await runRobotRunStaleSweep(kit.db)).ids).toContain(run!.id);
+    const usage = await kit.db.select().from(usageEvents).where(eq(usageEvents.objectType, "robot_run"));
+    expect(usage.filter((u) => (u.detail as { robotRunId?: string }).robotRunId === run!.id)).toHaveLength(1);
+  });
+
+  it("review A: a runner's evidence upload is never an egress_log, nor the log's reserved item", async () => {
+    const shot = { item: 0, kind: "screenshot", step: 1, contentType: "image/jpeg", chunk: 0, dataBase64: "", last: false };
+    expect(robotEvidenceUploadSchema.safeParse(shot).success).toBe(true);
+    expect(robotEvidenceUploadSchema.safeParse({ ...shot, kind: "egress_log", contentType: "text/plain" }).success).toBe(false);
+    expect(ROBOT_EGRESS_LOG_ITEM).toBe(ROBOT_RUN_LIMITS.evidenceItems);
+    expect(robotEvidenceUploadSchema.safeParse({ ...shot, item: ROBOT_EGRESS_LOG_ITEM }).success).toBe(false);
+    // through the session's channel: refused as a body, nothing stored
+    const runId = await runningRow();
+    const controller = new RobotRunController(kit.db, DEPS, runId, planFor(runId), [CANARY], owner.id);
+    const log = Buffer.from("allow portal.example.com:443\n");
+    const forged = await channel(controller)("POST", "evidence", {
+      item: 0,
+      kind: "egress_log",
+      step: null,
+      contentType: "text/plain",
+      chunk: 0,
+      dataBase64: log.toString("base64"),
+      last: true,
+      size: log.length,
+      sha256: createHash("sha256").update(log).digest("hex"),
+    });
+    expect(forged).toMatchObject({ status: 400, json: { error: "invalid_body" } });
+    expect(await kit.db.select().from(robotRunEvidence).where(eq(robotRunEvidence.robotRunId, runId))).toHaveLength(0);
+    controller.releaseAll();
+    await kit.db.update(robotRuns).set({ status: "cancelled" }).where(eq(robotRuns.id, runId));
+  });
+
+  it("review N-A: a robot secret shorter than the canary's floor is refused when it is set, with a named error", async () => {
+    expect(CANARY_MIN_CHARS).toBe(ROBOT_SECRET_MIN_CHARS);
+    expect(setRobotSecretSchema.safeParse({ value: "abc" }).success).toBe(false);
+    expect(setRobotSecretSchema.safeParse({ value: "abcd" }).success).toBe(true);
+    const g = await grantStepUpForTest(kit.db, owner.id, { kind: "settings_relax", facts: { op: "robot_secret_set", robotId, name: "PORTAL_PASSWORD", scope: "live" } });
+    const sr = stepUpRequest(g);
+    const short = await kit.app.inject({ method: "PUT", url: `/v1/robots/${robotId}/secrets/PORTAL_PASSWORD/live`, headers: sr.headers, cookies: sr.cookies, payload: { value: "pw1" } });
+    expect(short.statusCode, short.body).toBe(400);
+    expect(short.json().error).toBe("robot_secret_too_short");
+    // the refusal never echoes the value
+    expect(short.body).not.toContain("pw1");
   });
 
   it("B4: unfinished evidence is capped per run; over the cap the run fails evidence_too_large", async () => {
@@ -292,7 +375,8 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs: the gateway 
       const controller = new RobotRunController(kit.db, DEPS, runId, planFor(runId), [CANARY], owner.id);
       const call = channel(controller);
       expect((await call("POST", "evidence", oneChunk(0, Buffer.alloc(600, 1), "download", false))).status).toBe(200);
-      expect(robotEvidenceInFlightBytes()).toBe(600);
+      // the gateway-wide figure counts the item's reservation: the plan's download bound
+      expect(robotEvidenceInFlightBytes()).toBe(planFor(runId).limits.downloadBytes);
       const over = await call("POST", "evidence", oneChunk(1, Buffer.alloc(600, 2), "download", false));
       expect(over.status).toBe(413);
       expect(over.json.error).toBe("evidence_too_large");
@@ -309,20 +393,37 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs: the gateway 
     }
   });
 
-  it("B4: unfinished evidence is capped across runs too", async () => {
-    setRobotEvidenceCapsForTest({ perRunBytes: 1000, globalBytes: 1000 });
+  it("B4 / review N-B: the gateway-wide cap answers a retryable 503 (never fails the run); an item already started finishes", async () => {
+    // each download reserves the plan's bound (4096): one fits under 5000, a second does not
+    setRobotEvidenceCapsForTest({ perRunBytes: 100_000, globalBytes: 5000 });
     try {
       const [r1, r2] = [await runningRow(), await runningRow()];
       const c1 = new RobotRunController(kit.db, DEPS, r1, planFor(r1), [CANARY], owner.id);
       const c2 = new RobotRunController(kit.db, DEPS, r2, planFor(r2), [CANARY], owner.id);
-      expect((await channel(c1)("POST", "evidence", oneChunk(0, Buffer.alloc(700, 1), "download", false))).status).toBe(200);
-      const over = await channel(c2)("POST", "evidence", oneChunk(0, Buffer.alloc(700, 2), "download", false));
-      expect(over).toMatchObject({ status: 413, json: { error: "evidence_too_large" } });
-      expect(c2.forcedFailure).toBe("evidence_too_large");
+      const [ch1, ch2] = [channel(c1), channel(c2)];
+      const whole = Buffer.concat([Buffer.alloc(700, 1), Buffer.alloc(700, 4)]);
+      expect((await ch1("POST", "evidence", oneChunk(0, whole.subarray(0, 700), "download", false))).status).toBe(200);
+      // another run's new item finds the cap reserved: a retryable answer, and that run is NOT failed
+      const busy = await ch2("POST", "evidence", oneChunk(0, Buffer.alloc(700, 2), "download", false));
+      expect(busy).toMatchObject({ status: 503, json: { error: "evidence_busy", retryAfterMs: ROBOT_EVIDENCE_RETRY_AFTER_MS } });
+      expect(c2.forcedFailure).toBeNull();
+      expect((await ch2("POST", "heartbeat", { step: 1 })).json).toEqual({ cancel: false });
+      // the first run's item, already started, keeps going and finishes (its reservation covers it)
+      const last = await ch1("POST", "evidence", {
+        ...oneChunk(0, whole.subarray(700), "download", true),
+        chunk: 1,
+        size: whole.length,
+        sha256: createHash("sha256").update(whole).digest("hex"),
+      });
+      expect(last.status, JSON.stringify(last.json)).toBe(200);
       expect(c1.forcedFailure).toBeNull();
+      // its reservation is released, so the SAME chunk now goes through for the other run
+      expect((await ch2("POST", "evidence", oneChunk(0, Buffer.alloc(700, 2), "download", false))).status).toBe(200);
+      expect(c2.forcedFailure).toBeNull();
       c1.releaseAll();
       c2.releaseAll();
       expect(robotEvidenceInFlightBytes()).toBe(0);
+      for (const r of [r1, r2]) await kit.db.update(robotRuns).set({ status: "cancelled" }).where(eq(robotRuns.id, r));
     } finally {
       setRobotEvidenceCapsForTest(undefined);
     }
