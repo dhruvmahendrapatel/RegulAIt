@@ -7,7 +7,7 @@
 - **Builds on:** ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0187 and ADR-0242 (sidecar engines and
   the subject-scan shim), ADR-0195 and ADR-0235 (repository scans), ADR-0079 (pillar-2 PR checks), ADR-0097 and
   ADR-0175 A6 (the admission scanner this reuses), ADR-0200 (engineering guidelines),
-  `internal/product/GAP_ANALYSIS_MANIFOLD_2026-11.md` (on PR #935 until it merges) row 11 and gap 4
+  [GAP_ANALYSIS_MANIFOLD_2026-11.md](../product/GAP_ANALYSIS_MANIFOLD_2026-11.md) row 11 and gap 4
 
 ## Context
 
