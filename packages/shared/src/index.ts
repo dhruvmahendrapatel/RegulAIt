@@ -5128,6 +5128,9 @@ export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-actions.js";
 
+// ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
+export * from "./adoption-analytics.js";
+
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 

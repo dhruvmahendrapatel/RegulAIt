@@ -2092,6 +2092,10 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0358 (lane E39): the adoption-analytics privacy policy writes and each per-person ranking read; the CMDB
+        // sync connector (its policy, credential and enable writes, and each sync run). Plain text column — no DDL needed.
+        "adoption_analytics",
+        "cmdb_connector",
       ],
     })
       .notNull()
@@ -20153,3 +20157,29 @@ export const vendorAgentActions = pgTable(
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
+
+// ===== ADR-0358 (lane E39): AI adoption analytics =====
+/**
+ * The adoption-analytics privacy policy: one row (id `singleton`), read before every adoption read. Strict by default
+ * (ADR-0180): per-person ranking OFF, and any count of people below `min_cohort_size` (default 5) is suppressed.
+ * Turning ranking on or lowering the cohort is a relaxation (admin-only, `settings_relax` step-up, a required reason,
+ * audited in the same transaction). A missing row reads as the strict defaults; the first write inserts it.
+ * Row-level security: an admin principal, `system_task` and `migration` only.
+ */
+export const ADOPTION_POLICY_ID = "singleton";
+export const adoptionAnalyticsPolicy = pgTable(
+  "adoption_analytics_policy",
+  {
+    id: text("id").primaryKey().default(ADOPTION_POLICY_ID),
+    perPersonRanking: boolean("per_person_ranking").notNull().default(false),
+    minCohortSize: integer("min_cohort_size").notNull().default(5),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("adoption_analytics_policy_singleton_check", sql`${t.id} = 'singleton'`),
+    check("adoption_analytics_policy_cohort_check", sql`${t.minCohortSize} BETWEEN 1 AND 50`),
+  ],
+);
+export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
+// ===== end ADR-0358 (lane E39) adoption analytics =====
