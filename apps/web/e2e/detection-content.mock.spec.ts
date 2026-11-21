@@ -14,6 +14,8 @@ async function setup(page: Page, path: string, response: unknown, status=200) {
     return json(route,{});
   });
   await page.goto(`/ui/admin/${path}`);
+  // I-2: on Guardrails the vendored content lives on its own tab
+  if(path==="guardrails") await page.getByRole("tab",{name:/^Detection content/}).click();
   await expect(page.getByText("Vendored detection content",{exact:true})).toBeVisible();
 }
 const pack=(id:string,rules:number,enabled:boolean)=>({id,rules,enabled,source:"Pinned fixture",repo:"https://example.test/source",commit:"a".repeat(40),sha256:"b".repeat(64),licence:"Apache-2.0",notImported:[{id:"excluded_condition",reason:"Compound upstream condition is outside the admitted grammar"}],auditRedactionAlways:id==="pipelock-secrets"});

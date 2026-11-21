@@ -283,6 +283,66 @@ For the Anthropic shape use `provider: anthropic` and `apiBase: BASE`.
 The API key is entered in Zed's agent panel. Zed cannot attach custom headers to model calls —
 `requireProjectAttribution` (on by default) has to be relaxed for it, an audited admin change.
 
+### GitHub Copilot (tool calls only, through MCP)
+
+GitHub Copilot can have its **tool calls** governed here, and nothing more. Copilot is an MCP client, and
+`POST /mcp/:serverId` is a standard streamable-HTTP MCP endpoint, so pointing Copilot's MCP configuration at the
+gateway sends every tool call it makes through this server through the same path as any other client:
+entitlement checks, read/write data scope, approvals (ADR-0104/0105), the project budget (ADR-0103), PII and
+guardrail checks on arguments and results, and the audit trail.
+
+In VS Code, a workspace `.vscode/mcp.json` (or the user-level MCP configuration) looks like this. The `inputs`
+prompt keeps the key out of the file:
+
+```json
+{
+  "inputs": [
+    { "type": "promptString", "id": "regulait-key", "description": "RegulAIt API key", "password": true }
+  ],
+  "servers": {
+    "regulait": {
+      "type": "http",
+      "url": "BASE/mcp/<MCP_SERVER_ID>",
+      "headers": {
+        "Authorization": "Bearer ${input:regulait-key}",
+        "x-regulait-project-id": "<PROJECT_ID>"
+      }
+    }
+  }
+}
+```
+
+Other Copilot clients (JetBrains, Visual Studio, the Copilot CLI) take the same URL and headers in their own MCP
+settings. Check that client's documentation for where those settings live.
+
+What this does and does not do, stated plainly:
+
+- **It governs actions, not completions.** Copilot's model calls still go to GitHub's backend. The gateway never
+  sees the prompt, the completion or the code suggestions. It sees only the tool calls Copilot sends to this
+  server.
+- **`key_custody` does not apply to Copilot.** That rung works by withholding raw provider keys. Copilot's
+  credential is a GitHub entitlement, not a vendor API key your org issues, and Copilot does not call an
+  OpenAI-compatible endpoint that could be pointed somewhere else. Only the `network` rung (blocking the Copilot
+  API hosts at your boundary) closes the completion path, and that is infrastructure at your boundary, never
+  product code. The Shadow-AI catalogue's `github-copilot` signatures show where Copilot is in use. Detecting it
+  is not governing it.
+- **On the ladder, tool governance here is `voluntary`, or `managed` if you push the config.** A developer can
+  remove the server from their own configuration, which leaves Copilot with only its built-in tools. GitHub
+  documents two enterprise controls that narrow what a developer can add instead:
+  - the **MCP servers in Copilot** policy;
+  - an `allowedMcpServers` / `deniedMcpServers` allowlist in the enterprise's `managed-settings.json`. GitHub
+    describes it as applying across clients and not overridable by users, on the Copilot clients that enforce it.
+
+  With an allowlist that names only this deployment's `BASE/mcp/*` URL, any other MCP server a developer adds is
+  blocked by Copilot. That control is GitHub's, enforced in GitHub's clients, not by RegulAIt. Per GitHub's
+  documentation it always allows Copilot's built-in default servers (such as the built-in GitHub MCP server), and it
+  does not cover servers defined in repository custom agent profiles. Tools are only fully routed through this
+  gateway when the MCP servers themselves can be reached only through it, for example a private upstream that
+  only the gateway's network can reach.
+
+Sources, checked 2026-11-14: GitHub Docs "Configuring an MCP server allowlist for your enterprise" and "MCP server
+usage in your company"; VS Code "Manage AI settings in enterprise environments".
+
 ### Generic Anthropic-compatible
 
 ```sh
@@ -320,7 +380,7 @@ MCP-capable client can have its tool calls governed here.
 | Continue | `apiBase` override | yes | MCP only |
 | Zed | `language_models` `api_url` override | yes (context servers) | MCP only |
 | VS Code (built-in MCP) | not applicable | yes | yes |
-| **GitHub Copilot** | **not supported** — largely locked down; its enterprise proxy path or nothing | not via this proxy | n/a |
+| **GitHub Copilot** | **not supported**: completions go to GitHub's backend and cannot be repointed here | yes, through its MCP configuration ([setup](#github-copilot-tool-calls-only-through-mcp)); governs actions, not completions | MCP only |
 | **Eclipse** | **no first-party agent of note**; the ecosystem is third-party plugins, each with its own (often absent) configurability | varies by plugin | n/a |
 
 ---

@@ -90,7 +90,6 @@ import {
   builderUpdateThreadSchema,
   builderUsageQuerySchema,
   nextScheduleRun,
-  parseSkillMarkdown,
   type BuilderBundle,
   type BuilderCadenceValue,
 } from "@regulait/shared";
@@ -109,6 +108,7 @@ import {
   modelAllowed,
   skillVisible,
   toolboxOptionsFor,
+  unavailableRobotToolIds,
   type Viewer,
 } from "./builder-access.js";
 import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
@@ -140,6 +140,7 @@ import {
   skillDigest,
   skillRefusalBody,
 } from "./skill-admission.js";
+import { validateSkillMarkdown } from "./skill-frontmatter.js";
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
@@ -943,6 +944,19 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
           detail: `you hold no grant for the MCP tool '${m.serverName}/${m.name}', so you cannot give it to an agent`,
         });
       }
+    }
+    // ADR-0364: a retired (or halted) robot version cannot be added to a toolbox
+    const retiredRobotTools = await unavailableRobotToolIds(db, toolIds);
+    for (const m of mcpRows) {
+      if (!retiredRobotTools.has(m.id)) continue;
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-robot-version-retired",
+        `refused adding robot tool '${m.name}' to '${agent.name}': the robot version is not approved or is retired`,
+        { kind: "mcp_tool", refId: m.id }, "deny");
+      return reply.status(409).send({
+        error: "robot-version-retired",
+        tool: { kind: "mcp_tool", refId: m.id, name: `${m.serverName}/${m.name}` },
+        detail: `the robot version '${m.name}' is not approved or has been retired, so it cannot be given to an agent`,
+      });
     }
     const seen = new Set<string>();
     const rows = body.tools.filter((t) => {
@@ -1927,14 +1941,10 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const viewer = viewerOf(req, reply);
     if (!viewer) return;
     const { markdown } = builderImportSkillSchema.parse(req.body ?? {});
-    const parsed = parseSkillMarkdown(markdown);
-    if (!parsed) {
-      return reply.status(422).send({
-        error: "skill_frontmatter_missing",
-        detail: "a SKILL.md starts with a --- block that names the skill (name: …) and describes it (description: …)",
-      });
-    }
-    if (parsed.body.length > 20_000) return reply.status(422).send({ error: "skill_body_too_long" });
+    // ADR-0242 §7.3 (lane L4): a strict, size-capped SKILL.md frontmatter and layout check before anything is saved
+    const checked = validateSkillMarkdown(markdown);
+    if (!checked.ok) return reply.status(422).send({ error: checked.error, detail: checked.detail });
+    const parsed = checked.skill;
     const out = await createSkill(viewer, { ...parsed, visibility: "private" }, "builder-skill-imported", "import");
     if (!out.ok) return reply.status(out.status).send(out.body);
     return reply.status(201).send({ skill: out.skill });

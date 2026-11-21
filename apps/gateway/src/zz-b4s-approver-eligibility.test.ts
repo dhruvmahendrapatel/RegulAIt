@@ -18,6 +18,7 @@
  * counts tool invocations. Runs on its OWN scratch database (prefix `b4s1_`),
  * dropped in afterAll, so the append-only decision rows leave nothing behind (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
@@ -97,7 +98,7 @@ async function mkSession(userId: string): Promise<Session> {
   const [row] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),
@@ -257,7 +258,7 @@ beforeAll(async () => {
   await relaxStrictAdmissionForTest(db);
   await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required', approval_delegation_enabled = true,
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   await app.listen({ port: 0, host: "127.0.0.1" });

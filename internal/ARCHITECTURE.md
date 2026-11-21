@@ -65,7 +65,7 @@ builds on its own.
 | `db` | Drizzle schema (`schema.ts`), migrations and migrator, the chained audit writer (`audit-chain.ts`), decision facts, the deferred-unique preflight, the prose scrub, the content-credential guard (ADR-0233). |
 | `shared` | Zod schemas and pure logic shared by gateway and SPA (approval digests, placement, forecasting, guardrails, demo seeds). |
 | `model-provider` | Real model dispatch behind the agent registry. |
-| `connector-provider` | Connector execution and the actual-spend ledger. |
+| `connector-provider` | Connector execution and the actual-spend ledger; the curated connector-catalogue pieces (clean-room, ADR-0255). |
 | `git-provider` | Provider-agnostic git (four providers). |
 | `pm-provider` | Pillar-8 PM adapters and inbound sync. |
 | `infra-provider` | Pillar-3 drift, CVE and certificate detection and remediation across three clouds. |
@@ -73,6 +73,7 @@ builds on its own.
 | `training-provider` | The pure training half of the in-house model work. |
 | `engine-runner` | Sidecar runner core for the evaluation engines; hands every run to the executor, never runs one itself. |
 | `engine-promptfoo`, `engine-modelscan`, `engine-garak` | Per-engine shims (adapter, config, mapper, worker). |
+| `engine-admission-scan` | The runner and task shim of both ADR-0242 admission-scan images (mcpscanner, skillscanner): subject runs on the task bridge, the driver's report posted as the raw report. |
 | `sandbox-executor` | The isolation executor: `runc` (L1 hardened container) and `gvisor` (L2 user-space kernel) backends, chosen by `REGULAIT_EXECUTOR_BACKEND`. |
 | `api-client` | The supported TypeScript client for the public API (generated from [openapi.json](../docs/api/openapi.json)). |
 
@@ -84,6 +85,7 @@ builds on its own.
 | [integrations/](../integrations) | Kong plugin and Envoy `ext_authz` config that call `POST /v1/evaluate` as an external decision point. |
 | [endpoint-discovery/](../endpoint-discovery) | The osquery pack for endpoint AI discovery. |
 | [agents/endpoint](../agents/endpoint) | The read-only Go endpoint agent; sends signed, pseudonymous snapshots. |
+| [agents/browser](../agents/browser) | The managed MV3 browser extension (ADR-0334): blocks governed AI sites until a signed per-user policy allows them, checks prompts against the shared credential rules, reports breaches with per-device proofs. |
 | [security/](../security) | Third-party inventory and the audit, image and SAST allow-lists. |
 | [scripts/](../scripts) | CI gates and tooling: ADR index test, licence gate, `preflight-*` checks, engine image lock and verify, BOM tooling, bundle signing, `install.sh`, `scripts/master/` merge loop. |
 | [spikes/](../spikes) | Throwaway probes behind individual ADRs; not shipped. |
@@ -92,7 +94,10 @@ builds on its own.
 Key ADRs: [0009](decisions/0009-typescript-fastify-stack.md), [0003](decisions/0003-terraform-over-cloudformation.md),
 [0053](decisions/0053-public-api-sdks.md), [0127](decisions/0127-authorization-callout.md),
 [0176](decisions/0176-open-source-first.md), [0187](decisions/0187-batch5-sidecar-engines.md),
-[0195](decisions/0195-shadow-ai-active-discovery.md).
+[0195](decisions/0195-shadow-ai-active-discovery.md). The SaaS entitlement graph (which OAuth scopes agents hold in
+M365, Google Workspace, Salesforce and Slack) is read by `entitlement_*` discovery sources on the same framework, and
+each vendor app is linked to a RegulAIt agent on an exact identifier match or by an admin (declared machine
+`saas_app_agent_link`): [0337](decisions/0337-saas-entitlement-graph.md).
 
 ## Request path through the gateway
 
@@ -108,28 +113,33 @@ In hook order in `apps/gateway/src/app.ts`:
      MFA enrolment gate;
    - workload token: `DPoP` or certificate-bound access token, verified in `oauth/resource.ts`, accepted only on the
      workload routes (`/mcp/:serverId` and the model compat endpoints);
-   - bearer credential (`authenticate()`): bootstrap token, virtual key (never admin), engine credential, or hashed API
-     key (refused if its owner lacks MFA the org requires).
+   - bearer credential (`authenticate()`): bootstrap token (retired once an active admin exists, ADR-0167 S-02), virtual
+     key (never admin), engine credential, or hashed API key (refused if its owner lacks MFA the org requires).
 5. **Credential-tier rate limit**, the **virtual-key route allow-list**, **admin-only gating**, and the **audit actor
    context** for delegated callers.
 
 ### A governed call
 
 The four governed call types (MCP tool, model/agent, connector, remote agent over A2A) share one audit chain and the
-budget gate, but **not** one decision core today (corrected 2026-11-07 from the whole-build review, finding P-01; the
-plan to unify them is [ADR-0251](decisions/0251-one-governed-decision-core.md)):
+budget gate. Since [ADR-0251](decisions/0251-one-governed-decision-core.md) (#715 and its P-01 follow-ups) the model,
+connector and A2A paths also share one restriction layer, `governedEvaluateResource` (`apps/gateway/src/governed-core.ts`
+over the kernel's `composeResourceDecision`); the MCP tool path keeps `governedEvaluate`, which already met the contract:
 
 | Control | MCP tool | Model/agent | Connector | A2A |
 |---|---|---|---|---|
-| Decision function | `governedEvaluate` → kernel `evaluate` | kernel `evaluateAgent` | kernel `evaluateConnector` | route checks in `a2a.ts`, no kernel call |
+| Entitlement (kernel) | `evaluate` | `evaluateAgent` | `evaluateConnector` | `evaluateA2a` |
+| Restriction layer | `governedEvaluate` | `governedModelGate` → `governedEvaluateResource` | `governedEvaluateResource` | `governedEvaluateResource` |
 | Per-user grant, default-deny | yes | yes | yes | yes (`a2a_agent_grants`) |
-| Kill switch and safe modes (`executionGate`) | yes | yes | yes | **no** |
-| AI literacy gate | yes | yes | yes | **no** |
-| Approval rules (`approval_rules`) | yes | **no**: the execution dial's `require_approval` mode becomes a deny | **no**: writes are held only under the execution dial | **no** |
-| Governance rate limits | `rate_limits`, always on | `model_rate_limits`, **off** until an admin enables them | **none** (only the edge HTTP limiter, which in-process calls skip) | **none** |
-| Cedar ABAC | yes | **no** (the actor slot exists, never supplied) | **no** (same) | **no** |
+| Kill switch and safe modes (`executionGate`) | yes | yes | yes | yes |
+| AI literacy gate | yes | yes | yes | yes |
+| Approval rules | `approval_rules`, queued | `resource_approval_rules`, queued as `model_call` (202; 403 on the compat surfaces) and replayed once | `resource_approval_rules` and the execution dial, queued (202) | `resource_approval_rules`, **refused** (no queue yet) |
+| Governance rate limits | `rate_limits` | `model_rate_limits`, on by default | `resource_rate_limits` | `resource_rate_limits` |
+| Cedar ABAC | yes | **not yet** (v5 actions pending) | **not yet** | **not yet** |
 | Data-scope rules | `data_scope_rules` | n/a | grant `allowedObjects` | n/a |
-| Attribution mandate, on by default | `requireMcpAttribution` | `requireProjectAttribution` (compat), `dispatchAttributionRequired` (native) | **no**: an unattributed call runs | **no**: an unattributed call runs |
+| Attribution mandate, on by default | `requireMcpAttribution` | `requireProjectAttribution` (compat), `dispatchAttributionRequired` (native) | `connector_attribution_required` | `a2a_attribution_required` |
+
+Rate-limit windows are counted when the call is decided, so they are soft under concurrency (bounded by the calls in
+flight for one subject and resource); hard windows are an ADR-0251 follow-up.
 
 The sequence below is the **MCP tool** path. The others reach the same budget gate and audit chain from their own
 route-level decision.
@@ -180,7 +190,8 @@ sequenceDiagram
   by default). Egress is decided on the MCP posture. The A2A SDK
   client sends through the guarded fetch, with the credential going only to the registered origin. The usage row and
   the audit row are written in one transaction.
-- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (both go through
+- **Model/agent call** — `POST /v1/agents/:agentId/invoke` and the IDE compat endpoints (`/v1/messages`,
+  `/v1/chat/completions`, and the stateless `/v1/responses` of ADR-0287; all go through
   `compat-core.ts` into the same primitives): virtual-key allow-list, project attribution, workflow-instance gate,
   grants and revocations, model policy, `evaluateAgent` with the kill switch (allow or deny only: no approval rules
   and no ABAC), the model rate limit (`checkModelRateLimit`, off until an admin enables it); **then** the optimiser (routing,
@@ -218,7 +229,8 @@ runtime [0125](decisions/0125-shared-enforcement-counters.md),
 
 | Store | Use |
 |---|---|
-| **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). |
+| **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). The live context graph (ADR-0365) is plain node, edge and node-scope tables here, read through a recursive CTE under row-level security (no graph database). |
+| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
 | **Object Lock bucket** (compose `objectstore`, SeaweedFS) | Audit-chain anchors only; the gateway runs if it is down. |
 | **Nightly `pg_dump` to S3** | Backups (`infra/scripts/pg-backup.sh`). The data key is deliberately not in the backup. |
 | **Engine volumes** | Per-engine state, jobs and results. |

@@ -19,6 +19,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { prefixedBearer } from "./prefixed-bearer.js";
 import { z } from "zod";
 import {
   and,
@@ -38,6 +39,8 @@ import {
 } from "@regulait/db";
 import {
   DEFENSECLAW_INGEST_PATH,
+  DEFENSECLAW_OTLP_LOGS_PATH,
+  otlpLogsRequestToJsonl,
   DEFENSECLAW_SCHEMA_FAMILY,
   findingEvidenceReason,
   findingFor,
@@ -58,6 +61,7 @@ import {
 import { databaseNow } from "./db-clock.js";
 import { derivePseudonym, recordPseudonyms } from "./discovery-worker.js";
 import { upsertFindings } from "./shadow-ai.js";
+import { decodeOtlpLogsRequest, encodeOtlpLogsResponse, OTLP_CONTENT_TYPES, otlpEncodingOf } from "./third-party-otlp.js";
 import { requireStepUp } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
 
@@ -97,14 +101,7 @@ async function audit(db: Db, actor: string, objectId: string | null, ruleId: str
 }
 
 /** the bearer value when it is `rgti_` + 64 lower-case hex, else null (no regex on caller input) */
-function ingestBearer(req: FastifyRequest): string | null {
-  const h = req.headers.authorization;
-  if (typeof h !== "string" || !h.startsWith("Bearer ")) return null;
-  const v = h.slice("Bearer ".length);
-  if (v.length !== THIRD_PARTY_INGEST_TOKEN_PREFIX.length + 64 || !v.startsWith(THIRD_PARTY_INGEST_TOKEN_PREFIX)) return null;
-  const hex = v.slice(THIRD_PARTY_INGEST_TOKEN_PREFIX.length);
-  return [...hex].every((c) => (c >= "0" && c <= "9") || (c >= "a" && c <= "f")) ? v : null;
-}
+const ingestBearer = (req: FastifyRequest) => prefixedBearer(req, THIRD_PARTY_INGEST_TOKEN_PREFIX, 64, "hex");
 
 const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) => reply.status(status).send(detail ? { error, detail } : { error });
 
@@ -309,7 +306,7 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
   // ---- the exporter's route: auth-exempt, authenticated in-route by the source's `rgti_` token -------------------
 
   app.register(async (scope) => {
-    for (const type of THIRD_PARTY_INGEST_CONTENT_TYPES) {
+    for (const type of [...THIRD_PARTY_INGEST_CONTENT_TYPES, OTLP_CONTENT_TYPES.protobuf]) {
       scope.addContentTypeParser(type, { parseAs: "buffer", bodyLimit: THIRD_PARTY_INGEST_MAX_BODY_BYTES }, (_req, body, done) => done(null, body));
     }
     scope.setErrorHandler((err: { code?: string; statusCode?: number }, _req, reply) => {
@@ -319,9 +316,25 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
       throw err;
     });
 
-    scope.post(DEFENSECLAW_INGEST_PATH, async (req, reply) => {
+    // ADR-0302 decision 2: the JSONL route and the OTLP/HTTP logs route share this whole pipeline; only the wire
+    // decoding and the success response differ
+    const ingest = async (req: FastifyRequest, reply: FastifyReply, wire: "jsonl" | "otlp") => {
       const deny = (objectId: string | null, code: string, detail: Record<string, unknown> = {}) =>
-        audit(db, NIL_UUID, objectId, THIRD_PARTY_INGEST_RULE_IDS.batchRefused, "deny", `a third-party evidence batch was refused: ${code} (ADR-0261)`, { code, attribution: "third_party", ...detail });
+        audit(db, NIL_UUID, objectId, THIRD_PARTY_INGEST_RULE_IDS.batchRefused, "deny", `a third-party evidence batch was refused: ${code} (ADR-0261)`, { code, attribution: "third_party", wire, ...detail });
+      // a compressed body is refused by name, not decoded as garbage (review of #835): exporters default to gzip,
+      // and a plain 400 would drop their batch silently. OTLP exporters set `compression: none` (ADR-0302).
+      const contentEncoding = String(req.headers["content-encoding"] ?? "identity").trim().toLowerCase();
+      if (contentEncoding !== "identity") {
+        return refuse(reply, 415, "unsupported_content_encoding", "send the body uncompressed (exporter setting compression: none)");
+      }
+      // each route takes only its own encodings
+      const otlpEncoding = otlpEncodingOf(req.headers["content-type"]);
+      if (wire === "otlp" && !otlpEncoding) {
+        return refuse(reply, 415, "unsupported_media_type", `send ${OTLP_CONTENT_TYPES.protobuf} or ${OTLP_CONTENT_TYPES.json}`);
+      }
+      if (wire === "jsonl" && otlpEncoding === "protobuf") {
+        return refuse(reply, 415, "unsupported_media_type", `send ${THIRD_PARTY_INGEST_CONTENT_TYPES.join(", ")}; OTLP goes to ${DEFENSECLAW_OTLP_LOGS_PATH}`);
+      }
 
       const bearer = ingestBearer(req);
       if (!bearer) {
@@ -362,11 +375,14 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
 
       let parsed;
       try {
-        parsed = parseDefenseClawJsonl(body, sha256Hex);
+        parsed =
+          wire === "jsonl"
+            ? parseDefenseClawJsonl(body, sha256Hex)
+            : parseDefenseClawJsonl(otlpLogsRequestToJsonl(decodeOtlpLogsRequest(body, otlpEncoding!)), sha256Hex);
       } catch (e) {
         if (e instanceof ThirdPartyBatchRefused) {
           await deny(source.id, e.code, { batchSha256 });
-          return refuse(reply, e.code === "too_many_records" ? 413 : 400, e.code);
+          return refuse(reply, e.code === "too_many_records" || e.code === "batch_too_large" ? 413 : 400, e.code);
         }
         throw e;
       }
@@ -526,12 +542,18 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
             findingsCreated: findings.created,
             findingsUpdated: findings.updated,
             importId,
+            wire,
           },
           auditId,
         );
         return { accepted: accepted.length, duplicates, findings };
       });
 
+      if (wire === "otlp") {
+        // the OTLP contract: an ExportLogsServiceResponse, with partial success naming how many records were rejected
+        const res = encodeOtlpLogsResponse(otlpEncoding!, rejects.length, rejects.length ? `rejected records (1-based): ${rejects.slice(0, 20).map((r) => `${r.line}:${r.code}`).join(", ")}` : "");
+        return reply.status(200).header("content-type", res.contentType).send(res.body);
+      }
       return reply.status(200).send({
         accepted: outcome.accepted,
         duplicates: outcome.duplicates,
@@ -540,6 +562,9 @@ export function registerThirdPartyIngestRoutes(app: FastifyInstance, db: Db, opt
         findingsUpdated: outcome.findings.updated,
         attribution: "third_party",
       });
-    });
+    };
+
+    scope.post(DEFENSECLAW_INGEST_PATH, (req, reply) => ingest(req, reply, "jsonl"));
+    scope.post(DEFENSECLAW_OTLP_LOGS_PATH, (req, reply) => ingest(req, reply, "otlp"));
   });
 }

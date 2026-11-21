@@ -36,7 +36,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../../api/client";
-import { ago, fmtAt, fmtUsd, plural } from "../../../api/format";
+import { ago, fmtAt, fmtUsd, plural, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table, Tabs, tabIds } from "../../../ui/kit";
@@ -130,7 +130,7 @@ function useEngineAction() {
     }
   };
   const fail = (engineId: string, err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorText(err);
     setError({ engineId, message });
     toast(message, "error");
   };
@@ -252,7 +252,7 @@ export default function EnginesPage() {
       <div role="tabpanel" id={panel.panel} aria-labelledby={panel.tab} className={v.stack}>
         {tab === "engines" && (
           <>
-            <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
+            <QueryGate query={engines}>
               {engines.data?.runnerIssuer && !engines.data.runnerIssuer.configured && (
                 // ADR-0188 S7: without the issuer no runner can authenticate; say why rather than show runners offline
                 <Card title="Issuer not configured">
@@ -444,7 +444,7 @@ export default function EnginesPage() {
               close();
               return null;
             }
-            return res.err instanceof Error ? res.err.message : String(res.err);
+            return errorText(res.err);
           }}
         />
       )}
@@ -1112,7 +1112,7 @@ function ContentSetsCard(props: { query: ReturnType<typeof useDetectionContent>;
             body="The vendored detection content's admin view is not built on this gateway, so no content set can be listed here. Nothing is implied about any set's version or licence."
           />
         ) : q.error ? (
-          <ErrorState title="Couldn't load the content sets" message={q.error instanceof Error ? q.error.message : String(q.error)} onRetry={() => void q.refetch()} />
+          <ErrorState title="Couldn't load the content sets" message={errorText(q.error)} onRetry={() => void q.refetch()} />
         ) : (
           <Table<DetectionContentPack>
             rows={q.data?.packs ?? []}

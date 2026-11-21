@@ -823,11 +823,21 @@ describe("GenericWebhookProvider (signed normalized envelopes, injectable fetch,
     const ref = await hook.createWorkItem("proj-1", "task", { title: "Build API", description: "initial" });
     expect(calls[0]!.url).toBe("https://recv.example/regulait");
     expect(calls[0]!.headers["content-type"]).toBe("application/json");
-    // the signature is a deterministic HMAC-SHA256 of the EXACT body under the
-    // connection token — recomputed here from the captured body
+    // S-03 follow-up (a): the signature is HMAC-SHA256 of "<timestamp>.<EXACT body>"
+    // under the connection token, the inbound generic contract — recomputed here
+    // from the captured header and body
+    const ts = calls[0]!.headers["x-regulait-timestamp"]!;
+    expect(ts).toMatch(/^\d{10}$/);
+    expect(Math.abs(Number(ts) - Date.now() / 1000)).toBeLessThan(60);
     expect(calls[0]!.headers["x-regulait-signature"]).toBe(
+      "sha256=" + createHmac("sha256", "shared-secret").update(`${ts}.${calls[0]!.raw}`).digest("hex"),
+    );
+    // the body-only signature of the first cut is gone (no grandfathering)
+    expect(calls[0]!.headers["x-regulait-signature"]).not.toBe(
       "sha256=" + createHmac("sha256", "shared-secret").update(calls[0]!.raw).digest("hex"),
     );
+    // the signed header and the envelope's ISO timestamp name the same instant
+    expect(Math.floor(Date.parse(calls[0]!.body.timestamp as string) / 1000)).toBe(Number(ts));
     expect(calls[0]!.body).toMatchObject({
       event: "work_item.create",
       project: "proj-1",
@@ -924,5 +934,41 @@ describe("GenericWebhookProvider (signed normalized envelopes, injectable fetch,
       resolvePmProvider({ provider: "generic_webhook", token: "s", baseUrl: "https://recv.example" }).kind,
     ).toBe("generic_webhook");
     expect(() => resolvePmProvider({ provider: "generic_webhook", token: "s" })).toThrowError(/baseUrl/);
+  });
+});
+
+describe("listWorkItems (ADR-0289, the importer's read)", () => {
+  it("the mock pages in id order with a cursor and ends with nextCursor null", async () => {
+    const m = new MockPmProvider();
+    for (let i = 0; i < 5; i++) await m.createWorkItem("lp", "Task", { title: `t${i}` });
+    const first = await m.listWorkItems("lp", { limit: 2 });
+    expect(first.items.map((i) => i.id)).toEqual(["1", "2"]);
+    expect(first.items[0]).toEqual({ id: "1", type: "Task", url: "mock-pm://lp/items/1" });
+    const second = await m.listWorkItems("lp", { cursor: first.nextCursor!, limit: 2 });
+    expect(second.items.map((i) => i.id)).toEqual(["3", "4"]);
+    const last = await m.listWorkItems("lp", { cursor: second.nextCursor!, limit: 2 });
+    expect(last.items.map((i) => i.id)).toEqual(["5"]);
+    expect(last.nextCursor).toBeNull();
+    await expect(m.listWorkItems("lp", { cursor: "nope", limit: 2 })).rejects.toBeInstanceOf(PmProviderError);
+  });
+
+  it("generic_webhook posts a signed work_item.list and validates the page", async () => {
+    const sent: Array<{ headers: Record<string, string>; body: string }> = [];
+    const reply = (body: unknown) => async (_url: string, init?: { headers?: Record<string, string>; body?: string }) => {
+      sent.push({ headers: init?.headers ?? {}, body: String(init?.body) });
+      return { status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const ok = new GenericWebhookProvider({
+      token: "s",
+      baseUrl: "https://recv.example/r",
+      fetchImpl: reply({ items: [{ id: 7, url: "https://pm.example/7", type: "Bug" }], nextCursor: "c2" }),
+    });
+    const page = await ok.listWorkItems("p", { cursor: "c1", limit: 50 });
+    expect(page).toEqual({ items: [{ id: "7", url: "https://pm.example/7", type: "Bug" }], nextCursor: "c2" });
+    const env = JSON.parse(sent[0]!.body);
+    expect(env).toMatchObject({ event: "work_item.list", project: "p", payload: { cursor: "c1", limit: 50 } });
+    expect(sent[0]!.headers["x-regulait-signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+    const bad = new GenericWebhookProvider({ token: "s", baseUrl: "https://recv.example/r", fetchImpl: reply({ nope: true }) });
+    await expect(bad.listWorkItems("p", { limit: 50 })).rejects.toBeInstanceOf(PmProviderError);
   });
 });

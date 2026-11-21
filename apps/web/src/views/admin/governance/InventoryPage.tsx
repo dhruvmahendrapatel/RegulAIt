@@ -18,12 +18,13 @@
  * APPROVED use-case intent: aligned / overreach / undershoot — claims about
  * grant rows and the register, never about observed traffic).
  */
-import { useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import inv from "./inventoryOverview.module.css";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Table, type TableProps, type Tone } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
 import v from "../../views.module.css";
@@ -167,9 +168,38 @@ function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out
   );
 }
 
+/**
+ * The summary tiles count exactly the rows the table is showing. The table reports what it renders, so a failed
+ * read clears the counts (they show "—", never the previous page's numbers) and an emptied list counts zero.
+ * DataList rebuilds its rows array on every render in "All" mode, so the report is keyed on the counts themselves
+ * (a string), never on the array reference: an unchanged summary never sets state again (#780 review).
+ */
+type InventorySummary = ReturnType<typeof summaryOf>;
+const ShownSummaryContext = createContext<(summary: InventorySummary | null) => void>(() => undefined);
+function ReportingTable(props: TableProps<InventoryAgent>) {
+  const report = useContext(ShownSummaryContext);
+  const rows = props.error || props.loading ? null : (props.rows ?? null);
+  const summary = rows ? summaryOf(rows) : null;
+  const key = summary ? JSON.stringify(summary) : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the counts, see above
+  useEffect(() => report(summary), [report, key]);
+  return <Table {...props} />;
+}
+
+function summaryOf(rows: InventoryAgent[]) {
+  return {
+    agents: rows.length,
+    active: rows.filter((a) => a.lifecycle.status === "active").length,
+    unowned: rows.filter((a) => a.ownership === "unowned" || a.ownership === "orphaned").length,
+    overreach: rows.filter((a) => a.alignment?.overreach).length,
+    openRisks: rows.reduce((n, a) => n + a.links.openRisks, 0),
+  };
+}
+
 export default function InventoryPage() {
   // ADR-0226: the registered agents page on the server; the window comes with each page
   const [days, setDays] = useState(90);
+  const [summary, setSummary] = useState<InventorySummary | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const detail = useQuery({
     queryKey: ["admin", "inventory", openId],
@@ -193,8 +223,30 @@ export default function InventoryPage() {
         }
       />
       <div className={v.stack}>
+        <section aria-label="Summary of the agents on this page" data-testid="inventory-summary">
+          <dl className={inv.overview}>
+          {([
+            ["agents", "Agents on this page"],
+            ["active", "Active on this page"],
+            ["unowned", "Unowned or orphaned on this page"],
+            ["overreach", "Grant overreach on this page"],
+            ["openRisks", "Open linked risks on this page"],
+          ] as const).map(([key, label]) => (
+            <div key={key} className={inv.tile}>
+              <dt>{label}</dt>
+              <dd>{summary ? summary[key] : "—"}</dd>
+            </div>
+          ))}
+          </dl>
+        </section>
+        <p className={v.faint} data-testid="inventory-summary-scope">
+          These figures count only the agents shown in the table below, not the whole inventory. Lifecycle, grants and
+          observed usage stay distinct.
+        </p>
           <Card title="Registered agents" flush>
+            <ShownSummaryContext.Provider value={setSummary}>
               <DataList<InventoryAgent>
+                table={ReportingTable}
                 listId="inventory-agents"
                 noun="agents"
                 endpoint="/v1/inventory/agents"
@@ -334,10 +386,11 @@ export default function InventoryPage() {
                   },
                 ]}
               />
+            </ShownSummaryContext.Provider>
           </Card>
 
         {openId && (
-          <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+          <QueryGate query={detail}>
             {d && (
               <Card
                 title={`Dependencies: ${d.agent.name}`}

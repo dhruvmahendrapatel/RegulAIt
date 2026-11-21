@@ -78,7 +78,7 @@ export default function EvalsCatalogTab() {
           .includes(q.toLowerCase())),
   );
   return (
-    <QueryGate loading={catalog.isLoading} error={catalog.error} onRetry={() => void catalog.refetch()}>
+    <QueryGate query={catalog}>
       {catalog.data && (
         <Card title="Evaluator catalog — what each one measures, and which controls it evidences">
           <div className={v.stack}>
@@ -97,7 +97,7 @@ export default function EvalsCatalogTab() {
                 </Select>
               </Field>
               <Field label="Search name or control" grow>
-                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="for example MEASURE-2.7 or owasp:llm:01" />
+                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="for example MEASURE-2.7 or owasp:llm:2026:01" />
               </Field>
             </div>
             <Table<CatalogEvaluator>

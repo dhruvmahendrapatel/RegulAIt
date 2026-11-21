@@ -62,7 +62,7 @@ export function DecisionReceiptsPanel(props: { bare?: boolean } = {}) {
   const measured = status.data && ["signing", "no_key", "off", "stalled"].includes(status.data.state) && Number.isSafeInteger(status.data.lastSeq) && Number.isSafeInteger(status.data.lagRows) && status.data.lastSeq >= 0 && status.data.lagRows >= 0;
   return <Card title={props.bare ? undefined : "Signed decision receipts"}>
     <p>Receipts sign governed-call and approval decisions without their reason or detail text. Admin configuration stays on the audit hash chain. Oversized tool names and rule IDs are represented by SHA-256 hashes.</p>
-    <QueryGate loading={status.isLoading} error={status.error} onRetry={() => void status.refetch()}>
+    <QueryGate query={status}>
       {measured ? <>
         <p>{status.data!.state === "signing" ? "Receipt signing is configured." : status.data!.state === "stalled" ? "Receipt signing is stalled or its latest sweep failed. Check the scheduler and unsigned decision backlog." : status.data!.state === "no_key" ? "Unsigned: no receipt signing key is configured." : "Receipt signing is off."}</p>
         <p>Last receipt sequence: {status.data!.lastSeq}. Decision rows awaiting signing: {status.data!.lagRows}.</p>

@@ -43,13 +43,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * somebody reviews.
  */
 export const DELIBERATELY_API_ONLY = new Map([
+  // ADR-0311 (lane E1, G10): MCP Streamable HTTP plumbing, not a governed object. It always answers 405 Allow: POST,
+  // because the stateless proxy issues no session for a client to end, and it deletes nothing.
+  ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
-  // ADR-0236 (P11), owner decision 2026-11-07 (#697): API-first until the bundle screen requested on #453 lands; these
-  // two entries are deleted when it does (KNOWN_UI_GAPS in preflight-ui-route-census.mjs holds the same routes).
-  ["/v1/mcp-bundles/:x", "archiving an MCP bundle: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
-  ["/v1/mcp-bundles/:x/grants/:x", "revoking an MCP bundle grant: API-only until the bundle screen on #453 (owner decision 2026-11-07, #697)"],
   // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
@@ -57,6 +56,26 @@ export const DELIBERATELY_API_ONLY = new Map([
   // Lane L2 (ADR-0231 B3): the Connect SAP Agent Gateway panel is slice B5 on #453
   ["/v1/a2a/gateway-connections/:x", "removing an agent gateway connection (step-up): API-only until the B5 panel on #453 (lane L2 brief)"],
   ["/v1/a2a/agents/:x/pending-card", "rejecting a changed remote-agent card: API-only until the B5 panel on #453 (lane L2 brief)"],
+  // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
+  // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
+  ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  ["/v1/endpoint-device-groups/:x/members/:x", "removing a device from a device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  ["/v1/endpoint-device-groups/:x/rules/:x", "removing a device group's narrowing rule (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  // ADR-0337 §6 (lane E18, owner decision 2026-11-17): API-only until the entitlement graph screen on #453; delete these
+  // entries when the screen lands
+  ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/discovery/entitlements/apps/:x/agent-link", "unlinking a vendor app from its agent (audited, declared machine): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
+  // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
+  // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
+  ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
+  // ADR-0322 (lane E7): the vendor usage pull brief is API-only; the connector screen is posted on #453 (route census
+  // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
+  ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
+  // ADR-0364 S2 (lane E45): the Robots screens are the design builder's (#453); delete this entry when the robot detail screen lands
+  // ADR-0365 (lane E46): the context graph is API-only in slice 1; delete this entry when the bindings screen on #453 lands
+  ["/v1/context-graph/sources/:x", "unbinding a PM connection from the context graph (audited; removes its nodes): API-only until the context graph bindings screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
+  ["/v1/robots/:x/secrets/:x/:x", "clearing a robot secret no submitted version is bound to (audited): API-only until the robot detail screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
 ]);
 
 /**
@@ -66,9 +85,13 @@ export const DELIBERATELY_API_ONLY = new Map([
  * would remove the proof.
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
+  ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
+  ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
+  ["/v1/pipeline-runs", "ADR-0232 (lane E49): a pipeline run is the evidence record of one governed run of one template version; the database refuses its deletion, and its workflow instance is aborted through the engine"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],
+  ["/v1/model-artifacts/:x/lineage", "a model file's derivation is provenance evidence, recorded once and never edited or removed; it goes with the file when the file is deleted, and its audit row keeps the record (lane L7, P14)"],
   ["/v1/engine-runner/runs/:x/task/frames", "frames are the runner's output stream for one run, append-only"],
   ["/v1/governance/alerts/:x/remediation", "a remediation plan is part of the alert's record; the alert closes, the plan stays"],
   ["/v1/security/data-key/attestations", "key attestations are append-only evidence of who held the data key when"],
@@ -96,9 +119,6 @@ export const NO_REMOVE_BY_DESIGN = new Map([
  * appears, the entry is reported stale and has to be deleted here.
  */
 export const KNOWN_REMOVE_GAPS = new Map([
-  ["/v1/connectors", "G3 connector disable and delete (#605)"],
-  ["/v1/servers", "G4 MCP server disable and delete (#605)"],
-  ["/v1/mcp-registries", "G9 MCP registry remove (#606)"],
   ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
 ]);
 

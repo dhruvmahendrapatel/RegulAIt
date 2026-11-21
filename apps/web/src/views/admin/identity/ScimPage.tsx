@@ -162,7 +162,7 @@ export default function ScimPage() {
           />
         </Card>
 
-        <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+        <QueryGate query={q}>
           {q.data && <StatusCard status={q.data} />}
         </QueryGate>
 

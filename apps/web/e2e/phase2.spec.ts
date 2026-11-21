@@ -196,8 +196,10 @@ test("users: create a user, issue a one-time password and an API key (one-time r
   await shot(page, "phase2-03-users-otp-reveal");
   await page.getByRole("button", { name: "Dismiss" }).click();
 
-  // issue an API key — a fresh one-time reveal
+  // issue an API key — a fresh one-time reveal. ADR-0167 amendment (S-02): a key for someone
+  // else is an identity_manage step-up, so Ada confirms with her authenticator again
   await page.getByRole("button", { name: "Issue API key" }).click();
+  await settleWithStepUp(page, page.getByTestId("revealed-secret"));
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await shot(page, "phase2-04-users-key-reveal");
   await page.getByRole("button", { name: "Dismiss" }).click();
@@ -264,6 +266,8 @@ test("sso & sessions: OIDC list + sessions policy save", async () => {
   test.setTimeout(150_000); // a step-up's TOTP code may wait for the next 30 s window (B4S-06)
   await nav("SSO & sessions", "SSO & sessions");
   await expect(page.getByText("Single sign-on — OIDC providers")).toBeVisible();
+  // P3: the sign-in/session policy now lives on its own settings tab on /admin/sso
+  await page.getByRole("tab", { name: /^Sessions & step-up/ }).click();
   await page.getByRole("button", { name: "Save sign-in policy" }).click();
   const policySaved = page.getByText("Sign-in policy saved", { exact: false }).first();
   await settleWithStepUp(page, policySaved);
@@ -454,7 +458,8 @@ test("agents: register an agent and save its base system prompt", async () => {
   // the agent now appears in the catalog AND the stewardship table (ADR-0168 item 6)
   await expect(page.getByRole("cell", { name: "e2e-agent", exact: true }).first()).toBeVisible();
 
-  // admin base system prompt (governance artifact)
+  // admin base system prompt (governance artifact); P3 keeps it under the "Pricing & prompts" settings tab
+  await page.getByRole("tab", { name: /^Pricing & prompts/ }).click();
   const promptCard = page.locator("section", { has: page.getByRole("button", { name: "Save prompt" }) });
   await promptCard.getByLabel("Agent").selectOption({ label: "e2e-agent · mock · tier 0" });
   await promptCard.getByLabel("System prompt (empty = clear)").fill("You are the e2e governance agent.");
@@ -560,7 +565,7 @@ test("mcp servers: set a per-tool price override and see it persist (O10)", asyn
 
 test("git connections: seeded connection listed with provider hints", async () => {
   await nav("Git connections", "Git connections");
-  await expect(page.getByRole("cell", { name: "demo-git" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "demo-git", exact: true })).toBeVisible();
   await shot(page, "phase2-20-git-connections");
   track.assertClean("git connections");
 });
@@ -569,7 +574,8 @@ test("pm connections: create a mock connection → one-time webhook secret revea
   await nav("PM connections", "PM connections");
   await page.getByLabel("Name").fill(`e2e-pm-${Date.now() % 100000}`);
   await page.getByLabel("Project", { exact: false }).first().fill("E2E-DEMO");
-  await page.getByLabel("Token").fill("e2e-token");
+  // exact: the row's "Replace token: <name>" button also carries the word (ADR-0207)
+  await page.getByLabel("Token", { exact: true }).fill("e2e-token");
   await page.getByRole("button", { name: "Add connection" }).click();
   await expect(page.getByTestId("revealed-secret")).toBeVisible();
   await shot(page, "phase2-21-pm-connections");
@@ -664,8 +670,12 @@ test("infrastructure: posture, set approver, propose a governed remediation", as
 test("organization: the six-section org settings form saves partially", async () => {
   await nav("Organization", "Organization");
   await expect(page.getByText("1 · Optimisation", { exact: false })).toBeVisible();
+  // the sections sit in tabs (I-2): each save is on its own tab
+  const tabs = page.getByRole("tablist", { name: "Organisation settings" });
+  await tabs.getByRole("tab", { name: /^Approvals & gates/ }).click();
   await page.getByRole("button", { name: "Save approval policy" }).click();
   await expect(page.getByText("Approval policy saved", { exact: false }).first()).toBeVisible();
+  await tabs.getByRole("tab", { name: /^Cost & limits/ }).click();
   await page.getByRole("button", { name: "Save optimization settings" }).click();
   await expect(page.getByText("Optimization settings saved", { exact: false }).first()).toBeVisible();
   await shot(page, "phase2-27-organization");

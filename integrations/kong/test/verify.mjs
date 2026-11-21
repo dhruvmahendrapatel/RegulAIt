@@ -145,6 +145,7 @@ const created = {
   scratchDir: null,
   secretDir: null,
   receiptKeyDir: null,
+  installSecretsDir: null,
 };
 
 /**
@@ -508,14 +509,27 @@ async function main() {
     writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
     identityKey.REGULAIT_IDENTITY_SIGNING_KEY = file;
   }
+  // ADR-0234 batch 7b: the first boot creates the regulait_runtime_<database> login through the owner connection and serves
+  // every request on it, so this suite runs with row-level security binding the gateway (never the privileged opt-in)
+  const installSecrets = {};
+  if (!process.env.REGULAIT_INSTALL_SECRETS_DIR && !process.env.REGULAIT_RUNTIME_DATABASE_URL) {
+    const dir = mkdtempSync(path.join(tmpdir(), `kong-e2e-install-${RUN_ID}-`));
+    created.installSecretsDir = dir;
+    installSecrets.REGULAIT_INSTALL_SECRETS_DIR = dir;
+  }
   const env = {
     ...process.env,
     ...receiptKey,
     ...identityKey,
+    ...installSecrets,
     REGULAIT_PUBLIC_URL: ISSUER,
     REGULAIT_DEPLOY_MODE: DEPLOY_MODE,
     DATABASE_URL: `${PG}/${DB}`,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
+    // ADR-0167 amendment (S-02): the demo seed creates an active admin, which
+    // retires the bootstrap token by default; this harness drives the gateway
+    // with that token throughout, so it keeps it working (a test-only relaxation).
+    REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(GATEWAY_PORT),
   };
@@ -533,7 +547,8 @@ async function main() {
   const users = (await api("GET", `${base}/v1/users`, undefined, boot)).json.users;
   const servers = (await api("GET", `${base}/v1/servers`, undefined, boot)).json.servers ?? [];
   if (!servers.length) throw new Error("the seed registered no MCP server — nothing to govern");
-  const server = servers[0];
+  // ADR-0364: the first-party Robots server (seeded by migration, in-process) is not the demo upstream
+  const server = servers.find((s) => s.transport !== "first_party") ?? servers[0];
   const tools = (await api("GET", `${base}/v1/servers/${server.id}/tools`, undefined, boot)).json.tools ?? [];
   if (!tools.length) throw new Error("the seeded server has no tools — nothing to govern");
   const tool = tools[0];
@@ -656,7 +671,7 @@ async function main() {
   // Tool B is a READ tool on the OTHER seeded server that the PDP already
   // refuses the entitled user; found by asking the PDP rather than by assuming
   // the seed's order, because the seed's roles make several tools hers.
-  const serverB = servers.find((s) => s.id !== server.id);
+  const serverB = servers.find((s) => s.id !== server.id && s.transport !== "first_party");
   if (!serverB) throw new Error("the seed registered one server — the two-route case needs two");
   const toolsB = ((await api("GET", `${base}/v1/servers/${serverB.id}/tools`, undefined, boot)).json.tools ?? [])
     .filter((t) => t.kind === "read");
@@ -1591,8 +1606,19 @@ async function teardown(why) {
   // 3. the processes
   gateway?.kill("SIGKILL");
   upstream?.kill("SIGKILL");
+  // ADR-0234 batch 7b: the runtime login this run's first boot created (one per database, cluster-wide), read from
+  // its connection-string file before the directory goes, and dropped with the database below
+  let runtimeRole = null;
+  if (created.installSecretsDir) {
+    try {
+      const u = new URL(readFileSync(path.join(created.installSecretsDir, "runtime-database-url"), "utf8").trim());
+      if (/^[a-z0-9_]{1,63}$/.test(u.username)) runtimeRole = u.username;
+    } catch {
+      /* never written */
+    }
+  }
   // 4. the scratch and key directories
-  for (const d of [created.scratchDir, created.secretDir, created.receiptKeyDir]) {
+  for (const d of [created.scratchDir, created.secretDir, created.receiptKeyDir, created.installSecretsDir]) {
     if (!d) continue;
     try {
       rmSync(d, { recursive: true, force: true });
@@ -1618,6 +1644,13 @@ async function teardown(why) {
         sh("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c", `DROP DATABASE ${DB} WITH (FORCE)`], { stdio: "pipe" });
       } catch (e) {
         console.error(`could not drop database ${DB}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
+      }
+      if (runtimeRole) {
+        try {
+          sh("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c", `DROP ROLE IF EXISTS ${runtimeRole}`], { stdio: "pipe" });
+        } catch (e) {
+          console.error(`could not drop role ${runtimeRole}: ${String(e.stderr ?? e.message).trim().slice(0, 200)}`);
+        }
       }
     } else {
       console.error(`REFUSING to drop database ${DB}: its mark is '${mark}', not '${DB_MARK}'`);

@@ -91,6 +91,7 @@ export const RATE_LIMIT_LOOSENING: Classified<typeof rateLimits.$inferSelect> = 
   deployMode: DEPLOY_MODE,
   maxCalls: { kind: "compare", looser: (b, a) => Number(a) > Number(b), why: "more calls per window" },
   windowSeconds: { kind: "compare", looser: (b, a) => Number(a) < Number(b), why: "the same calls in a shorter window" },
+  writeOnly: { kind: "compare", looser: (b, a) => b !== true && a === true, why: "true = only write calls are limited (ADR-0230)" },
 };
 
 export const DATA_SCOPE_RULE_LOOSENING: Classified<typeof dataScopeRules.$inferSelect> = {
@@ -172,6 +173,18 @@ export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.
     kind: "compare",
     looser: rankLowered({ hardened_container: 1, user_space_kernel: 2, microvm: 3 }),
     why: "a lower (or no) isolation class floor",
+  },
+  // ADR-0045 amendment 2026-11-14: true -> false/null stops the framework forcing the ADR-0045 dispatch gate on its projects
+  mrmRequired: {
+    kind: "compare",
+    looser: (b, a) => b === true && a !== true,
+    why: "the framework no longer requires model risk management sign-off",
+  },
+  // ADR-0346 decision 9: true -> false/null stops the framework forcing the fairness promotion gate on its cards
+  fairnessGateRequired: {
+    kind: "compare",
+    looser: (b, a) => b === true && a !== true,
+    why: "the framework no longer requires a passing fairness evaluation before a model card is signed off",
   },
 };
 

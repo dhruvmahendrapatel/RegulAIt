@@ -12,7 +12,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { Badge, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
-import { QueryGate } from "../adminKit";
+import { NotAvailableToYou, QueryGate, isRefusal } from "../adminKit";
 import v from "../../views.module.css";
 import rec from "./record.module.css";
 import { shortDate } from "./useCaseLifecycle";
@@ -67,7 +67,10 @@ export function DecisionRecordTab(props: { useCaseId: string }) {
         the review policy, the required AI tests, the intake template, the screening rules and the suggestion rules.
         Digests identify a configuration exactly; the same digest means the same content.
       </p>
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      {isRefusal(q.error) ? (
+        <NotAvailableToYou what="The decision records" />
+      ) : (
+      <QueryGate query={q}>
         {q.data ? (
           <>
             <Table
@@ -109,6 +112,7 @@ export function DecisionRecordTab(props: { useCaseId: string }) {
           </>
         ) : null}
       </QueryGate>
+      )}
     </Card>
   );
 }

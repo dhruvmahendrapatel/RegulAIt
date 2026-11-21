@@ -181,7 +181,7 @@ afterAll(async () => {
   await db.execute(sql`UPDATE org_settings SET
     decision_regression_gate = 'enforce', decision_regression_max_age_minutes = 60,
     incident_gate_mode = 'enforce', incident_evidence_hold = true,
-    incident_clock_regimes = '["eu-ai-act", "hipaa"]'::jsonb, feedback_signed_links_enabled = false,
+    incident_clock_regimes = '["eu-ai-act", "hipaa", "gdpr", "nis2", "dora", "cra"]'::jsonb, feedback_signed_links_enabled = false,
     feedback_ack_sla_hours = 72, feedback_resolve_sla_days = 30, feedback_retention_days = 365,
     literacy_gate_mode = 'enforce', literacy_default_validity_days = 365,
     alert_sla_hours = '{"high": 24, "medium": 72, "low": 168}'::jsonb, alert_ticket_mode = 'manual'`);
@@ -281,7 +281,8 @@ describe("ADR-0182 secure by default: the D4 org settings", () => {
       { literacyDefaultValidityDays: 731 },
       { decisionRegressionMaxAgeMinutes: 1441 },
       { incidentClockRegimes: ["eu-ai-act", "eu-ai-act"] },
-      { incidentClockRegimes: ["gdpr"] },
+      // ADR-0296 made gdpr a regime; ccpa has no incident clocks
+      { incidentClockRegimes: ["ccpa"] },
       { incidentGateMode: "lenient" },
     ]) {
       const r = await inject("PUT", "/v1/org/settings", users.admin.auth, body);
@@ -290,7 +291,7 @@ describe("ADR-0182 secure by default: the D4 org settings", () => {
     await expectRefused(db.execute(sql`UPDATE org_settings SET feedback_retention_days = 10`), /org_settings_feedback_retention_check/);
     await expectRefused(
       db.execute(sql`UPDATE org_settings SET alert_sla_hours = '{"high": 0, "medium": 72, "low": 168}'::jsonb`), /org_settings_alert_sla_hours_check/);
-    await expectRefused(db.execute(sql`UPDATE org_settings SET incident_clock_regimes = '["gdpr"]'::jsonb`), /org_settings_incident_clock_regimes_check/);
+    await expectRefused(db.execute(sql`UPDATE org_settings SET incident_clock_regimes = '["ccpa"]'::jsonb`), /org_settings_incident_clock_regimes_check/);
   });
 
   it("a member cannot read or write the settings", async () => {

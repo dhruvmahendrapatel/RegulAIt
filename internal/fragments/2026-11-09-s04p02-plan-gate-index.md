@@ -1,2 +1,0 @@
-<!-- fold: pending -->
-**Plan-gate project index (ADR-0250 follow-up, PR #720 review finding 4).** `guardProjectPlanOnly` reads `workflow_instances` by `project_id` and non-terminal status on every mutating invoke, run and compat call and every MCP write tool, and only `workflow_instances_status_idx` exists. Add a pending migration with a partial index `workflow_instances (project_id) WHERE status NOT IN ('completed', 'aborted', 'denied', 'rolled_back')` (ADR-0200 data), and declare it in `schema.ts`.

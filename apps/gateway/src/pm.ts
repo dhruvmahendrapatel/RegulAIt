@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
   approvals,
@@ -15,6 +15,7 @@ import {
   pmLinks,
   pmSyncEvents,
   pmWebhookDeliveries,
+  runAsPrincipalStepIfScoped,
   sql,
   users,
   workflowInstances,
@@ -41,9 +42,14 @@ import {
   createDecisionSchema,
   createPmConnectionSchema,
   pmSyncSchema,
+  replaceConnectionTokenSchema,
+  rotatePmWebhookSecretSchema,
+  updatePmConnectionSchema,
 } from "@regulait/shared";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { requireStepUp } from "./step-up.js";
+import { connectionMoveStepUp, connectionTokenStepUp, TOKEN_REQUIRED_FOR_MOVE } from "./integration-lifecycle.js";
 import {
   ConnectionEgressBlockedError,
   guardConnectionCall,
@@ -84,8 +90,19 @@ const CONNECTION_COLUMNS = {
   project: pmConnections.project,
   mapping: pmConnections.mapping,
   apiVersion: pmConnections.apiVersion,
+  driftResolution: pmConnections.driftResolution,
+  /** ADR-0207 (G6): while a rotation's grace window is open (database clock), when the previous webhook secret stops
+   * being accepted; null otherwise */
+  previousSecretValidUntil: sql<Date | null>`CASE WHEN ${pmConnections.previousWebhookSecretValidUntil} > now() THEN ${pmConnections.previousWebhookSecretValidUntil} END`.mapWith(
+    pmConnections.previousWebhookSecretValidUntil,
+  ),
   createdAt: pmConnections.createdAt,
 };
+
+/** ADR-0207 (G6): how long the previous webhook secret is still accepted after a rotation */
+export const PM_WEBHOOK_SECRET_OVERLAP_HOURS = 24;
+/** a fresh per-connection webhook secret (ADR-0010): shown once, stored as a hash and an envelope */
+const mintWebhookSecret = () => `rglwh_${randomBytes(24).toString("hex")}`;
 
 /**
  * ADR-0034 amendment #2 — EVERY PM PROVIDER RESOLUTION GOES THROUGH THE EGRESS
@@ -116,7 +133,7 @@ const CONNECTION_COLUMNS = {
  * `CompiledDefaultEgressBlockedError`, which both pm-sync endpoints turn into
  * the same honest 403 the guarded path produces.
  */
-async function providerFor(
+export async function providerFor(
   db: Db,
   conn: {
     id: string;
@@ -182,6 +199,12 @@ async function providerFor(
   return {
     kind: provider.kind,
     getWorkItem: (...args) => provider.getWorkItem(...args),
+    // ADR-0289: a read, like getWorkItem (the generic contract's work_item.list is a POST that changes nothing)
+    // an adapter without a listing answers 501, which the importer refuses by name (never an empty import)
+    listWorkItems: (project: string, page: { cursor?: string | undefined; limit: number }) =>
+      provider.listWorkItems
+        ? provider.listWorkItems(project, page)
+        : Promise.reject(new PmProviderError(`the ${provider.kind} adapter cannot list a project's work items`, 501)),
     createWorkItem: (...args) => runExternalWrite(db, "pm.create_work_item", () => provider.createWorkItem(...args)),
     updateFields: (...args) => runExternalWrite(db, "pm.update_fields", () => provider.updateFields(...args)),
     transitionState: (...args) => runExternalWrite(db, "pm.transition_state", () => provider.transitionState(...args)),
@@ -194,7 +217,7 @@ async function providerFor(
  * unmapped status is skipped, never invented; a provider failure is surfaced
  * to the caller and never fails the run event itself. Returns null when there
  * is nothing to mirror. */
-export async function mirrorNodeStatus(
+async function mirrorNodeStatusInScope(
   db: Db,
   dataKey: string | undefined,
   runId: string,
@@ -261,7 +284,7 @@ export async function mirrorNodeStatus(
  * transition when the mapping names one for this stage, a comment otherwise
  * (never a silent drop). Strictly a mirror of the ONE approvals queue: the
  * decision is already made and recorded; a mirror failure never unwinds it. */
-export async function mirrorApprovalDecision(
+async function mirrorApprovalDecisionInScope(
   db: Db,
   dataKey: string | undefined,
   approvalRow: {
@@ -369,6 +392,11 @@ export async function mirrorApprovalDecision(
   }
 }
 
+/** wrap a non-admin route's handler in the pm_sync principal step (ADR-0234 PM batch) */
+function pmSyncRoute<R>(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<R>) {
+  return (req: FastifyRequest, reply: FastifyReply): Promise<R> => asPmSync(path, () => handler(req, reply));
+}
+
 export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string }) {
   // Read-only widening for the PM strip's GETs, mirroring loadRunFor /
   // loadInstanceFor: the named approver of a PENDING approval on a run or
@@ -447,7 +475,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     // an AES-256-GCM ciphertext is stored alongside because provider-native
     // verification (linear/asana HMAC signatures, generic's signed envelope)
     // must re-derive MACs from the secret itself — a hash cannot key an HMAC.
-    const webhookSecret = `rglwh_${randomBytes(24).toString("hex")}`;
+    const webhookSecret = mintWebhookSecret();
     const dataKey = opts.dataKey;
     // #453 follow-up: the creation is on the record in the same transaction as the row, as the delete is
     const row = await db.transaction(async (tx) => {
@@ -526,9 +554,212 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     return { removed: true, ...removed };
   });
 
+  // ADR-0207 (G6): edit a connection, replace its token and rotate its webhook secret. The name is part of the webhook
+  // address and the provider decides the adapter, so neither can change. A new base URL is adjudicated by the egress
+  // guard again, as on create; a rotation only tightens, so it needs no step-up. Review of #605: a base URL change
+  // would send the stored token to another host, so it needs the new host's token in the same request (the stored one
+  // is replaced, never sent there) and a `settings_relax` step-up bound to the connection and both URLs; replacing the
+  // token needs one bound to the connection. Each change is audited in the same transaction as its write, and no
+  // response ever carries the token.
+  const pmName = z.object({ name: z.string().min(1).max(256) });
+  app.patch("/v1/pm/connections/:name", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const parsedBody = updatePmConnectionSchema.safeParse(req.body);
+    // the body may hold a token, and a zod issue list could echo it: the messages only, never the values
+    if (!parsedBody.success) return reply.status(400).send({ error: "invalid_request", detail: parsedBody.error.issues.map((i) => i.message).join("; ") });
+    const body = parsedBody.data;
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const [before] = await db.select().from(pmConnections).where(eq(pmConnections.name, name));
+    if (!before) return reply.status(404).send({ error: "unknown_connection" });
+    const moves = body.baseUrl !== undefined && body.baseUrl !== before.baseUrl;
+    if (moves && body.token === undefined) return reply.status(422).send(TOKEN_REQUIRED_FOR_MOVE);
+    if (!moves && body.token !== undefined) {
+      return reply.status(400).send({ error: "invalid_request", detail: "the base URL is unchanged: replace the token with POST /v1/pm/connections/:name/token" });
+    }
+    if (body.apiVersion != null && before.provider !== "jira") {
+      return reply.status(400).send({ error: "invalid_request", detail: "apiVersion only applies to jira connections" });
+    }
+    const next = {
+      project: body.project ?? before.project,
+      baseUrl: body.baseUrl === undefined ? before.baseUrl : body.baseUrl,
+      apiVersion: body.apiVersion === undefined ? before.apiVersion : body.apiVersion,
+      driftResolution: body.driftResolution ?? before.driftResolution,
+    };
+    // the edited connection must still resolve, exactly as a new one must
+    try {
+      resolvePmProvider({ provider: before.provider, token: moves && body.token !== undefined ? body.token : decryptSecret(opts.dataKey, before.tokenCiphertext), baseUrl: next.baseUrl, apiVersion: next.apiVersion });
+    } catch (err) {
+      if (err instanceof PmProviderError) return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
+      throw err;
+    }
+    if (next.baseUrl && next.baseUrl !== before.baseUrl) {
+      const refusal = await refuseConnectionEgressWrite(db, {
+        surface: "pm_connection",
+        baseUrl: next.baseUrl,
+        userId: req.authCtx.userId ?? null,
+        phase: "pm_connection_write",
+        label: `pm connection '${name}' baseUrl`,
+        detail: { name, provider: before.provider },
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
+    const fields = ["project", "baseUrl", "apiVersion", "driftResolution"] as const;
+    const changed = fields.filter((f) => next[f] !== before[f]);
+    if (changed.length === 0) {
+      const [row] = await db.select(CONNECTION_COLUMNS).from(pmConnections).where(eq(pmConnections.id, before.id));
+      return row;
+    }
+    let stepUp: string | null = null;
+    if (moves) {
+      const su = await requireStepUp(db, req, reply, connectionMoveStepUp("pm_connection", before.id, before.baseUrl, next.baseUrl));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const dataKey = opts.dataKey;
+    const row = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(pmConnections)
+        .set({ ...next, ...(moves && body.token !== undefined ? { tokenCiphertext: encryptSecret(dataKey, body.token) } : {}) })
+        // compare-and-set on every field the audit row reports as "from"
+        .where(
+          and(
+            eq(pmConnections.id, before.id),
+            eq(pmConnections.project, before.project),
+            sql`${pmConnections.baseUrl} IS NOT DISTINCT FROM ${before.baseUrl}`,
+            sql`${pmConnections.apiVersion} IS NOT DISTINCT FROM ${before.apiVersion}`,
+            eq(pmConnections.driftResolution, before.driftResolution),
+          ),
+        )
+        .returning(CONNECTION_COLUMNS);
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: before.id,
+        detail: {
+          phase: "updated",
+          name,
+          provider: before.provider,
+          from: Object.fromEntries(changed.map((f) => [f, before[f]])),
+          to: Object.fromEntries(changed.map((f) => [f, next[f]])),
+          ...(moves ? { tokenReplaced: true, stepUp } : {}),
+        },
+        effect: "allow",
+        ruleId: "pm-connection-updated",
+        ruleChain: [],
+        reason:
+          `PM connection '${name}' updated: ${changed.join(", ")}` +
+          (moves ? "; the token was replaced with the new host's (the previous one was never sent there)" : ""),
+      });
+      return r;
+    });
+    if (!row) return reply.status(409).send({ error: "changed_concurrently", detail: "the connection changed while this edit was decided; reload and try again" });
+    return row;
+  });
+
+  app.post("/v1/pm/connections/:name/token", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const parsed = replaceConnectionTokenSchema.safeParse(req.body);
+    // the zod issue list could echo the body back, and the body holds the token: a fixed sentence instead
+    if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: "expected { token } (1 to 512 characters)" });
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const dataKey = opts.dataKey;
+    const [target] = await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.name, name));
+    if (!target) return reply.status(404).send({ error: "unknown_connection" });
+    // review of #605: a credential change, so a step-up bound to this connection (ADR-0204's credential routes)
+    const su = await requireStepUp(db, req, reply, connectionTokenStepUp("pm_connection", target.id));
+    if (!su.ok) return reply;
+    const out = await db.transaction(async (tx) => {
+      const [r] = await tx
+        .update(pmConnections)
+        .set({ tokenCiphertext: encryptSecret(dataKey, parsed.data.token) })
+        .where(eq(pmConnections.id, target.id))
+        .returning({ id: pmConnections.id, provider: pmConnections.provider, secretSetAt: pmConnections.secretSetAt });
+      if (!r) return null;
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: r.id,
+        detail: { phase: "token-rotated", name, provider: r.provider, stepUp: su.method },
+        effect: "allow",
+        ruleId: "pm-connection-token-rotated",
+        ruleChain: [],
+        reason: `PM connection '${name}': token replaced; the previous token was destroyed here (revoke it in the PM tool)`,
+      });
+      return r;
+    });
+    if (!out) return reply.status(404).send({ error: "unknown_connection" });
+    return { replaced: true, secretSetAt: out.secretSetAt };
+  });
+
+  app.post("/v1/pm/connections/:name/webhook-secret/rotate", async (req, reply) => {
+    const { name } = pmName.parse(req.params);
+    const body = rotatePmWebhookSecretSchema.parse(req.body ?? {});
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const dataKey = opts.dataKey;
+    const webhookSecret = mintWebhookSecret();
+    const immediate = body.immediate === true;
+    const out = await db.transaction(async (tx) => {
+      const [conn] = await tx
+        .select({
+          id: pmConnections.id,
+          provider: pmConnections.provider,
+          hash: pmConnections.webhookSecretHash,
+          ciphertext: pmConnections.webhookSecretCiphertext,
+          // decided on the database clock, like the webhook's own check
+          windowOpen: sql<boolean>`coalesce(${pmConnections.previousWebhookSecretValidUntil} > now(), false)`,
+          validUntil: pmConnections.previousWebhookSecretValidUntil,
+        })
+        .from(pmConnections)
+        .where(eq(pmConnections.name, name))
+        .for("update");
+      if (!conn) return { status: 404, body: { error: "unknown_connection" } as Record<string, unknown> };
+      if (conn.windowOpen && !immediate) {
+        return {
+          status: 409,
+          body: {
+            error: "rotation_in_progress",
+            detail: "a rotation's grace window is still open: wait until the previous secret expires, or rotate immediately",
+            previousValidUntil: conn.validUntil,
+          } as Record<string, unknown>,
+        };
+      }
+      // the current secret becomes the previous one for the overlap; an immediate rotation (or a connection with no
+      // secret yet) keeps none, so every older secret stops working now
+      const keepPrevious = !immediate && conn.hash !== null;
+      const [r] = await tx
+        .update(pmConnections)
+        .set({
+          webhookSecretHash: sha256(webhookSecret),
+          webhookSecretCiphertext: encryptSecret(dataKey, webhookSecret),
+          previousWebhookSecretHash: keepPrevious ? conn.hash : null,
+          previousWebhookSecretCiphertext: keepPrevious ? conn.ciphertext : null,
+          previousWebhookSecretValidUntil: keepPrevious ? sql`now() + make_interval(hours => ${PM_WEBHOOK_SECRET_OVERLAP_HOURS})` : null,
+        })
+        .where(eq(pmConnections.id, conn.id))
+        .returning({ previousValidUntil: pmConnections.previousWebhookSecretValidUntil });
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? SYSTEM_IDENTITY,
+        objectType: "pm_connection",
+        objectId: conn.id,
+        detail: { phase: "webhook-secret-rotated", name, provider: conn.provider, immediate, previousValidUntil: r?.previousValidUntil ?? null },
+        effect: "allow",
+        ruleId: "pm-webhook-secret-rotated",
+        ruleChain: [],
+        reason:
+          `PM connection '${name}': webhook secret rotated; ` +
+          (r?.previousValidUntil
+            ? `the previous secret is accepted until ${r.previousValidUntil.toISOString()}`
+            : "every older secret stopped working at once"),
+      });
+      return { status: 200, body: { webhookSecret, previousValidUntil: r?.previousValidUntil ?? null } as Record<string, unknown> };
+    });
+    return reply.status(out.status).send(out.body);
+  });
+
   // §2/§3: link every task-graph node to a real work item in the customer's
   // tool. Idempotent — already-linked nodes are skipped, not duplicated.
-  app.post("/v1/runs/:runId/pm-sync", async (req, reply) => {
+  app.post("/v1/runs/:runId/pm-sync", pmSyncRoute("pm.route.run-sync", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
     const body = pmSyncSchema.parse(req.body);
     const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
@@ -702,11 +933,11 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       orphaned,
       skipped: [...linked].filter((n): n is string => n !== null),
     });
-  });
+  }));
 
   // §5: link a workflow instance to ONE work item so its sign-offs are
   // visible in the customer's tool without opening RegulAIt.
-  app.post("/v1/workflows/instances/:instanceId/pm-sync", async (req, reply) => {
+  app.post("/v1/workflows/instances/:instanceId/pm-sync", pmSyncRoute("pm.route.instance-sync", async (req, reply) => {
     const { instanceId } = z.object({ instanceId: z.string().uuid() }).parse(req.params);
     const body = pmSyncSchema.parse(req.body);
     const [instance] = await db
@@ -843,7 +1074,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     return reply
       .status(201)
       .send({ created: true, externalId: ref.id, externalUrl: ref.url });
-  });
+  }));
 
   // ADR-0010 inbound processing for ONE normalized event — unchanged
   // semantics: every event lands in the append-only pm_sync_events log;
@@ -1062,18 +1293,43 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       if (!conn.webhookSecretCiphertext || !opts.dataKey) {
         return reply.status(401).send({ error: "unauthenticated" });
       }
-      const secret = decryptSecret(opts.dataKey, conn.webhookSecretCiphertext);
+      const dataKey = opts.dataKey;
+      // ADR-0207 (G6): during a rotation's grace window (database clock) the previous secret is accepted too, tried
+      // only after the current one fails verification; once the window closes it is never read. It follows the same
+      // S-03 rule: only a stored ciphertext is ever used, never a presented-header compare against its hash
+      const [previous] = await db
+        .select({ ciphertext: pmConnections.previousWebhookSecretCiphertext })
+        .from(pmConnections)
+        .where(and(eq(pmConnections.id, conn.id), sql`${pmConnections.previousWebhookSecretValidUntil} > now()`));
+      const secrets = [
+        decryptSecret(dataKey, conn.webhookSecretCiphertext),
+        previous?.ciphertext ? decryptSecret(dataKey, previous.ciphertext) : null,
+      ].filter((v): v is string => v !== null);
 
-      let result;
-      try {
-        result = parseInboundWebhook(conn.provider, {
-          headers,
-          query,
-          rawBody,
-          secret,
-          connectionProject: conn.project,
-        });
-      } catch (err) {
+      let result: ReturnType<typeof parseInboundWebhook> | undefined;
+      // the secret that verified this delivery; the S-03 replay key below is derived with it
+      let secret = secrets[0]!;
+      let failure: unknown = null;
+      for (const candidate of secrets) {
+        try {
+          result = parseInboundWebhook(conn.provider, {
+            headers,
+            query,
+            rawBody,
+            secret: candidate,
+            connectionProject: conn.project,
+          });
+          secret = candidate;
+          failure = null;
+          break;
+        } catch (err) {
+          failure = err;
+          // a verification failure tries the next accepted secret; anything else (malformed, a bug) stops here
+          if (!(err instanceof PmProviderError) || err.status === 400) break;
+        }
+      }
+      if (failure !== null || result === undefined) {
+        const err = failure;
         if (err instanceof PmProviderError) {
           // 400 = verified but malformed; anything else = verification
           // failure. Neither response carries secret material.
@@ -1150,7 +1406,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
   // §4: first-class decision records. Recorded locally ALWAYS; mirrored to
   // the PM tool as a linked work item of the mapped Decision-like type, or a
   // tagged comment on the parent item when no type is mapped — never dropped.
-  app.post("/v1/decisions", async (req, reply) => {
+  app.post("/v1/decisions", pmSyncRoute("pm.route.decision-create", async (req, reply) => {
     const body = createDecisionSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_decide" });
@@ -1279,9 +1535,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
     }
     return reply.status(201).send({ ...row, ...(pmMirror ? { pmMirror } : {}) });
-  });
+  }));
 
-  app.get("/v1/decisions", async (req, reply) => {
+  app.get("/v1/decisions", pmSyncRoute("pm.route.decision-list", async (req, reply) => {
     const q = z
       .object({ objectType: z.enum(["run", "workflow_instance"]), objectId: z.string().uuid() })
       .parse(req.query);
@@ -1353,7 +1609,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         };
       }),
     };
-  });
+  }));
 
   // §3 read-through: RegulAIt stores only the linkage. live=true resolves the
   // PM-authoritative fields (priority/description/…) from the tool right now —
@@ -1362,7 +1618,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
   // item) or instanceId (the workflow instance's single item). Each link
   // carries its connection's NAME so a caller can drive the matching
   // pm-sync endpoint without the admin-only connections list.
-  app.get("/v1/pm/links", async (req, reply) => {
+  app.get("/v1/pm/links", pmSyncRoute("pm.route.links", async (req, reply) => {
     const q = z
       .object({
         runId: z.string().uuid().optional(),
@@ -1453,7 +1709,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }),
     );
     return { links: live };
-  });
+  }));
 }
 
 // ===========================================================================
@@ -1480,7 +1736,7 @@ export type AlertTicketOutcome =
   | { outcome: "refused"; status: number; error: string; detail: string };
 
 /** the episode's work item, if one was filed (oldest wins) */
-export async function governanceAlertTicket(db: Db, alertId: string) {
+async function governanceAlertTicketInScope(db: Db, alertId: string) {
   const [link] = await db
     .select({
       connectionId: pmLinks.connectionId,
@@ -1499,8 +1755,8 @@ export async function governanceAlertTicket(db: Db, alertId: string) {
 }
 
 /** the work items of many episodes in one query (oldest per episode wins) */
-export async function governanceAlertTickets(db: Db, alertIds: readonly string[]) {
-  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicket>>>>();
+async function governanceAlertTicketsInScope(db: Db, alertIds: readonly string[]) {
+  const out = new Map<string, NonNullable<Awaited<ReturnType<typeof governanceAlertTicketInScope>>>>();
   if (alertIds.length === 0) return out;
   const rows = await db
     .select({
@@ -1520,7 +1776,7 @@ export async function governanceAlertTickets(db: Db, alertIds: readonly string[]
   return out;
 }
 
-export async function fileGovernanceAlertTicket(
+async function fileGovernanceAlertTicketInScope(
   db: Db,
   dataKey: string,
   input: {
@@ -1533,7 +1789,7 @@ export async function fileGovernanceAlertTicket(
 ): Promise<AlertTicketOutcome> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`pm_link:governance_alert:${input.alertId}`}))`);
-    const existing = await governanceAlertTicket(tx as unknown as Db, input.alertId);
+    const existing = await governanceAlertTicketInScope(tx as unknown as Db, input.alertId);
     if (existing) {
       return {
         outcome: "existing" as const,
@@ -1612,3 +1868,24 @@ export async function prunePmWebhookDeliveries(
   );
   return (res as unknown as { rowCount?: number }).rowCount ?? 0;
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// ADR-0234 PM batch (#828 review): every PM table is under row-level security. An admin request reaches them as an
+// admin; the PM webhook (approval_maintenance), scheduler jobs and boot timers (system_task) through their own
+// scope. The mirror and link work a request does for a principal who need not be an admin enters `pm_sync` as a
+// principal step, so the principal still writes its own audit rows. In any other scope it runs unchanged.
+// ---------------------------------------------------------------------------------------------------------------
+export function asPmSync<T>(path: string, fn: () => T): T {
+  return runAsPrincipalStepIfScoped("pm_sync", path, fn);
+}
+
+export const mirrorNodeStatus = (...args: Parameters<typeof mirrorNodeStatusInScope>) =>
+  asPmSync("pm.mirror-node-status", () => mirrorNodeStatusInScope(...args));
+export const mirrorApprovalDecision = (...args: Parameters<typeof mirrorApprovalDecisionInScope>) =>
+  asPmSync("pm.mirror-approval-decision", () => mirrorApprovalDecisionInScope(...args));
+export const governanceAlertTicket = (...args: Parameters<typeof governanceAlertTicketInScope>) =>
+  asPmSync("pm.alert-ticket", () => governanceAlertTicketInScope(...args));
+export const governanceAlertTickets = (...args: Parameters<typeof governanceAlertTicketsInScope>) =>
+  asPmSync("pm.alert-tickets", () => governanceAlertTicketsInScope(...args));
+export const fileGovernanceAlertTicket = (...args: Parameters<typeof fileGovernanceAlertTicketInScope>) =>
+  asPmSync("pm.alert-ticket-file", () => fileGovernanceAlertTicketInScope(...args));

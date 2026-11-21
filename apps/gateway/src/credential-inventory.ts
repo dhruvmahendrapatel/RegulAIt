@@ -43,6 +43,8 @@ import {
   inArray,
   isNotNull,
   modelCredentials,
+  modelDriftIngestCredentials,
+  modelDriftMonitors,
   oidcProviders,
   orgSettings,
   pmConnections,
@@ -55,6 +57,7 @@ import {
   userModelCredentials,
   users,
   virtualKeys,
+  runAsPrincipalStepIfScoped,
   type Db,
 } from "@regulait/db";
 import {
@@ -330,6 +333,37 @@ export async function computeCredentialInventory(
     });
   }
 
+  // --- ADR-0223 amendment 1: drift ingestion credentials (write-only, one monitor each) ---
+  for (const c of await db
+    .select({
+      id: modelDriftIngestCredentials.id,
+      name: modelDriftIngestCredentials.name,
+      monitorName: modelDriftMonitors.name,
+      createdAt: modelDriftIngestCredentials.createdAt,
+      lastUsedAt: modelDriftIngestCredentials.lastUsedAt,
+      expiresAt: modelDriftIngestCredentials.expiresAt,
+      revokedAt: modelDriftIngestCredentials.revokedAt,
+    })
+    .from(modelDriftIngestCredentials)
+    .innerJoin(modelDriftMonitors, eq(modelDriftMonitors.id, modelDriftIngestCredentials.monitorId))) {
+    drafts.push({
+      id: `drift_ingest_credential:${c.id}`,
+      type: "drift_ingest_credential",
+      name: c.name,
+      ownerUserId: null,
+      ownerKind: null,
+      scope: `push production summaries to drift monitor '${c.monitorName}' only`,
+      createdAt: c.createdAt.toISOString(),
+      lastUsedAt: iso(c.lastUsedAt),
+      expiresAt: c.expiresAt.toISOString(),
+      revokedAt: iso(c.revokedAt),
+      // rotation is a new row, so the secret was set when the row was created
+      secretSetAt: c.createdAt.toISOString(),
+      overScoped: false,
+      status: c.revokedAt ? "revoked" : "active",
+    });
+  }
+
   // --- model-provider keys ---------------------------------------------------
   const agentRows = await db
     .select({ id: agents.id, name: agents.name, provider: agents.provider, customProviderId: agents.customProviderId })
@@ -544,7 +578,11 @@ export async function computeCredentialInventory(
     });
   }
 
-  for (const p of await db
+  // ADR-0234 PM batch (#828 review): pm_connections is under row-level security. The inventory also runs inside a
+  // non-admin request (a remediation decision re-runs the governance monitor as the deciding approver), so the read
+  // enters pm_sync as a principal step; in an admin or system scope it runs unchanged.
+  const pmRows = await runAsPrincipalStepIfScoped("pm_sync", "credentials.pm-connections", () =>
+    db
     .select({
       id: pmConnections.id,
       name: pmConnections.name,
@@ -555,7 +593,9 @@ export async function computeCredentialInventory(
       webhookSecretSetAt: pmConnections.webhookSecretSetAt,
       hasWebhookSecret: sql<boolean>`${pmConnections.webhookSecretHash} IS NOT NULL`,
     })
-    .from(pmConnections)) {
+    .from(pmConnections),
+  );
+  for (const p of pmRows) {
     drafts.push({
       id: `pm_token:${p.id}`,
       type: "pm_token",

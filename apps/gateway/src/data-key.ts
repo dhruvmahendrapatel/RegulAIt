@@ -247,6 +247,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "git_connections", column: "token_ciphertext", what: "git provider tokens" },
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
+  { table: "pm_connections", column: "previous_webhook_secret_ciphertext", what: "PM webhook secrets in a rotation window" },
+  // ADR-0364 (lane E45 S2): a robot's live and test secrets, filled only on their bound origin by the runner (S3)
+  { table: "robot_secrets", column: "value_ciphertext", what: "robot secrets (live and test)" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
   // ADR-0065: the credential a REMOTE training backend needs before it will do
@@ -266,6 +269,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0173 batch 2b: the Standard Webhooks signing secret of each outbound
   // webhook subscription — receivers verify our deliveries with it.
   { table: "webhook_subscriptions", column: "secret_ciphertext", what: "outbound webhook signing secrets" },
+  { table: "siem_destinations", column: "secret_ciphertext", what: "SIEM destination signing secrets (ADR-0303)" },
   // ADR-0182 (D4) A13 (migration 0162): what a person wrote in a problem
   // report or appeal, and how to reach them — personal data, enveloped under
   // the data key, purged by the retention sweep.
@@ -281,10 +285,16 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0187 (migration 0173): an engine's raw report (it can quote model
   // text), kept for the raw-report retention window, then deleted.
   { table: "engine_runs", column: "raw_report_ciphertext", what: "raw engine reports" },
+  // ADR-0242 L4.3 (the pending `admission_scan_subject_target` migration): the MCP manifest snapshot an admission
+  // scan run carries from queueing to its task input (hostile upstream text), cleared when the run ends
+  { table: "engine_runs", column: "target_subject_input_ciphertext", what: "admission-scan MCP manifest snapshots" },
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
+  { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
+  // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
+  { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
   // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
   { table: "content_digest_keys", column: "key_ciphertext", what: "the content digest key" },
@@ -299,9 +309,12 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "fairness_datasets", column: "rows_ciphertext", what: "fairness evaluation datasets" },
   // ADR-0221 (migration 0257): an evidence file a supplier uploaded through the portal (download is admin-only)
   { table: "supplier_submissions", column: "file_ciphertext", what: "supplier evidence files" },
+  // ADR-0240: the TOTP secrets of supplier and auditor second factors
+  { table: "external_mfa_factors", column: "secret_ciphertext", what: "external portal TOTP secrets" },
   // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
   { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
   { table: "a2a_gateway_connections", column: "client_secret_ciphertext", what: "agent gateway discovery client secrets (ADR-0231)" },
+  { table: "browser_prompt_captures", column: "text_ciphertext", what: "prompts captured in the browser while an admin has prompt capture on (ADR-0334)" },
 ];
 
 export interface CiphertextProbe {

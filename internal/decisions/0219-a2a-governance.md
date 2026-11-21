@@ -175,3 +175,24 @@ the entry-bundled `admin.module.css`.
   - Lifting a revocation widens access, so it is a `settings_relax` step-up.
   - The routes are known UI gaps on #453.
 - Grants to an agent identity (as opposed to a person or a role) remain out of scope.
+- **Review of PR #810 (code and security): the A2A writes reuse the gateway's grant and revocation machinery** instead
+  of their own:
+  - **Minting a grant.** Both the role-grant `POST` and the direct `POST /v1/a2a/agents/:agentId/grants` (which
+    predates this amendment) go through the gates of `POST /v1/roles/:roleId/grants/agents`:
+    - `refuseSodMint` (ADR-0091), with the new mint kinds `a2a` and `role_a2a`;
+    - the ADR-0250 `grant_mint` step-up (`grantMintStepUp`), so an admin API key can no longer widen access to a remote
+      agent;
+    - for a role grant, `insertRoleGrantLocked`, which locks the role's row, serialized with the workload-identity
+      steward check.
+  - **SoD is inert for A2A for now.** An SoD rule side cannot name a remote agent yet: its selector kinds are `agent`,
+    `connector`, `mcp_tool` and `mcp_server`. So an A2A mint confers no capability that a rule can match. When a selector
+    kind for remote agents is added, only `mintFootprint` changes. Recorded as a follow-up fragment.
+  - **Assigning a role.** `rolesHoldingGrants` now counts `a2a_agent_role_grants`. Assigning a role that holds only
+    remote-agent grants, or mapping a group to it, needs the step-up like any other granting role.
+  - **Revocations.**
+    - Creating one takes `lockPersonForRevocation` first (ADR-0188 S4+S5, review L5).
+    - Lifting one uses `revocationLiftStepUp("a2a", …)`.
+    - The table carries a `reason` (1 to 500 characters), as `agent_revocations` does. It is scrubbed operator prose
+      (ADR-0102): it is listed in the `prose-scrub` registry and its test.
+  - **Lists.** The role-grant and revocation lists answer through the ADR-0226 list contract (`answerListPage`), and
+    each has an `export.xlsx` (`answerListExport`). Both are known UI gaps on #453.

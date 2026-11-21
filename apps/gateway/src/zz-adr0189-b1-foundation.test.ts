@@ -926,7 +926,7 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
     await expectRefused(assertReceiptEmitterBootable(rdb), /refusing to start/i);
     await expect(assertReceiptEmitterBootable(rdb, true)).resolves.toBeUndefined();
     const lines: string[] = [];
-    const started = await startGateway({ db: rdb, migrationsFolder, port: 0, host: "127.0.0.1", log: (l) => lines.push(l), env: { NODE_ENV: "test" }, bootstrapToken: BOOT, dataKey: "a".repeat(64) }).then(
+    const started = await startGateway({ db: rdb, migrationsFolder, port: 0, host: "127.0.0.1", log: (l) => lines.push(l), env: { NODE_ENV: "test", REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1" }, bootstrapToken: BOOT, dataKey: "a".repeat(64) }).then(
       (g) => g,
       (e: unknown) => e,
     );

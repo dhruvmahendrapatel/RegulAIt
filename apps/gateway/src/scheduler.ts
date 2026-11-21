@@ -75,8 +75,8 @@
  * recorded and the next tick tries again — the right shape for a sweep, and the
  * wrong shape for anything that needs to run for hours. See the ADR.
  */
+import { PROCESS_INSTANCE_ID } from "./instance-id.js";
 import { errLine } from "./err-serializer.js";
-import { randomUUID } from "node:crypto";
 import {
   and,
   asc,
@@ -84,6 +84,7 @@ import {
   desc,
   eq,
   gt,
+  runWithRlsSystem,
   schedulerJobs,
   schedulerRuns,
   sql,
@@ -396,27 +397,15 @@ async function releaseJob(
   jobName: string,
   runId: string,
   outcome: "ok" | "failed",
-  opts: { startedAt: Date; itemsProcessed: number; detail: Record<string, unknown>; error: string | null },
+  opts: { instanceId: string; startedAt: Date; itemsProcessed: number; detail: Record<string, unknown>; error: string | null },
 ): Promise<void> {
   const finishedAt = new Date();
   const durationMs = Math.max(0, finishedAt.getTime() - opts.startedAt.getTime());
 
-  await db
-    .update(schedulerRuns)
-    .set({
-      finishedAt,
-      durationMs,
-      outcome,
-      itemsProcessed: opts.itemsProcessed,
-      detail: opts.detail,
-      error: opts.error,
-    })
-    .where(eq(schedulerRuns.id, runId));
-
   const [current] = await db.select().from(schedulerJobs).where(eq(schedulerJobs.name, jobName));
   const intervalSeconds = current?.intervalSeconds ?? 3600;
 
-  await db
+  const released = await db
     .update(schedulerJobs)
     .set({
       running: false,
@@ -437,7 +426,30 @@ async function releaseJob(
         outcome === "failed" ? sql`${schedulerJobs.consecutiveFailures} + 1` : sql`0`,
       updatedAt: finishedAt,
     })
-    .where(eq(schedulerJobs.name, jobName));
+    // ADR-0348: only the pass that holds the lease releases it. A pass that outlived its lease, which another
+    // pass then took (a new `last_run_at`), must not clear that pass's lease or move `next_due_at` and the counters.
+    .where(
+      and(
+        eq(schedulerJobs.name, jobName),
+        eq(schedulerJobs.running, true),
+        eq(schedulerJobs.leaseOwner, opts.instanceId),
+        eq(schedulerJobs.lastRunAt, opts.startedAt),
+      ),
+    )
+    .returning({ name: schedulerJobs.name });
+
+  // this pass's own ledger row always records how it ended; a lost lease is said on it
+  await db
+    .update(schedulerRuns)
+    .set({
+      finishedAt,
+      durationMs,
+      outcome,
+      itemsProcessed: opts.itemsProcessed,
+      detail: released.length > 0 ? opts.detail : { ...opts.detail, leaseLost: true },
+      error: opts.error,
+    })
+    .where(eq(schedulerRuns.id, runId));
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +560,18 @@ export async function runSchedulerJob(
   def: SchedulerJobDefinition,
   opts: RunJobOptions,
 ): Promise<JobRunOutcome> {
+  // ADR-0234 batch 7a: a job is not a request and has no principal. It runs under `system_task`, whoever triggered it
+  // (a tick or an admin's run-now): a job acts on every row by design (sweeps, escalations, routing), and a job that
+  // acts as a person resolves that person and enters their scope itself.
+  const label = /^[a-z0-9][a-z0-9_.:/-]{0,69}$/.test(def.name) ? `scheduler.${def.name}` : "scheduler.job";
+  return runWithRlsSystem("system_task", label, () => runSchedulerJobScoped(db, def, opts));
+}
+
+async function runSchedulerJobScoped(
+  db: Db,
+  def: SchedulerJobDefinition,
+  opts: RunJobOptions,
+): Promise<JobRunOutcome> {
   const now = opts.now ?? new Date();
   const claim = await claimJob(db, def.name, {
     instanceId: opts.instanceId,
@@ -608,6 +632,7 @@ export async function runSchedulerJob(
     const items = result.itemsProcessed ?? 0;
     const detail = result.detail ?? {};
     await releaseJob(db, def.name, run.id, "ok", {
+      instanceId: opts.instanceId,
       startedAt: run.startedAt,
       itemsProcessed: items,
       detail,
@@ -640,6 +665,7 @@ export async function runSchedulerJob(
     console.error(`[regulait] scheduled job '${def.name}' FAILED: ${errLine(err)}`);
     try {
       await releaseJob(db, def.name, run.id, "failed", {
+        instanceId: opts.instanceId,
         startedAt: run.startedAt,
         itemsProcessed: 0,
         detail: {},
@@ -717,7 +743,7 @@ export class Scheduler {
     registerMetricJobNames(opts.registry.keys());
     this.tickMs = opts.tickMs ?? DEFAULT_TICK_MS;
     this.leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
-    this.instanceId = opts.instanceId ?? randomUUID();
+    this.instanceId = opts.instanceId ?? PROCESS_INSTANCE_ID;
     this.clock = opts.now ?? (() => new Date());
     this.clockInjected = opts.now !== undefined;
   }

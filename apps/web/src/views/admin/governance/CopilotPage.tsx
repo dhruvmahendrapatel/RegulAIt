@@ -35,12 +35,15 @@
  *    that exists only where applying is possible, and the refusal reason
  *    verbatim where it is not.
  */
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
+
+// its own chunk: an admin setting most visits to the copilot never open
+const CopilotRedteamGateCard = lazy(() => import("./CopilotRedteamGateCard").then((m) => ({ default: m.CopilotRedteamGateCard })));
+import { Badge, Button, Card, EmptyState, Field, Input, SkeletonBlock, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction, useApiAction } from "../adminKit";
 import { DataList } from "../../../ui/DataList";
 import { CopilotProposalForm } from "./CopilotProposalForm";
@@ -382,7 +385,7 @@ export default function CopilotPage() {
       ) : null}
 
       <Card title="Everything it can do">
-        <QueryGate loading={tools.isLoading} error={tools.error} onRetry={() => void tools.refetch()}>
+        <QueryGate query={tools}>
           <Table<ToolSpec>
             rows={tools.data?.tools ?? []}
             rowKey={(t) => t.id}
@@ -410,6 +413,11 @@ export default function CopilotPage() {
           void queryClient.invalidateQueries({ queryKey: ["copilot", "proposals"] });
         }}
       />
+
+      {/* ADR-0056 §5 amendment: who may narrate a copilot answer */}
+      <Suspense fallback={<Card title="Narrator red-team gate"><SkeletonBlock lines={4} /></Card>}>
+        <CopilotRedteamGateCard />
+      </Suspense>
 
       <Card title="Proposals — recorded, approved by a human, then applied">
 

@@ -31,6 +31,9 @@
 - A Codex review of a Claude lane counts as independent, and so does a Claude review of a Codex lane.
 - An external sign-in surface needs a separate security review ("SECURITY APPROVE at <sha>").
 
+**How to review:** [REVIEW_CHECKLISTS.md](REVIEW_CHECKLISTS.md) (ADR-0260): numbered findings with a severity, the code,
+security (`SECURITY APPROVE at <sha>`) and design checklists, READY and delta-review rules.
+
 **Verdict format:** one PR issue comment starting `APPROVE at <full 40-char sha>` or `REQUEST CHANGES at <full sha>`.
 List blocking findings with file:line and a concrete fix. End with the Claude Code footer if you are Claude, or your own
 attribution line otherwise. Post without waiting for anyone's confirmation.
@@ -112,4 +115,30 @@ C (knowledge management).
 - (empty)
 
 ### To Codex
-- Read §0, then ask in "To Claude" for a lane or a review task.
+- **2026-11-17, from the master (owner-approved).** Read §0, CLAUDE.md (including the owner build rules of 2026-11-17)
+  and AGENTS.md, then take the four items below. Work on `codex/<lane>` branches, one draft PR per slice, `READY at
+  <full sha>` when CI is green. Never merge or mark ready; never edit STATE.md, the ADR index or any other part of this
+  board; delete each message from your inbox once handled (§5). Ask in "To Claude"
+  before deleting anything, except replacing duplicate code with an existing shared module, which is pre-approved.
+- **C0 — independent reviewer.** Review Claude-lane PRs that show `READY at <head>` and no verdict from you yet at that
+  head. Code review: post `APPROVE at <sha>` or `REQUEST CHANGES at <sha>` per §1 and REVIEW_CHECKLISTS.md. Put F×S
+  (how often × how bad, 1–10 each) on every finding; a finding below 5 is a `triage-low` issue, not a blocker; a
+  confirmed security-checklist gap always blocks. Do not post `SECURITY APPROVE`: security review stays with the
+  Claude security reviewers. Do not review a PR the master has routed to two Claude reviewers unless asked.
+- **C1 — CI speed-up (lane `codex/ci-gateway-build-once`, new ADR at the next free number when written, §3).** The 150-run audit (2026-11-17) showed every
+  `CI / gateway shard N` job rebuilding the gateway and its workspace dependencies (about 100–115 s each, five shards),
+  and jobs spending 54% of their time queued. Build once in one job and hand the output to the five shards (an
+  artifact or a cache keyed by the lockfile and source hash), without weakening any check: same tests, same coverage
+  gate, same pinned actions. Measure before and after on at least three runs and put the numbers in the PR body.
+  Workflow changes need a security review; say so in the PR.
+- **C2 — signed detection-content feed (lane `codex/detection-feed`, new ADR at the next free number when written, §3).** The remaining Obsidian gap
+  (internal/product/GAP_ANALYSIS_OBSIDIAN_2026-11.md, row 13): an opt-in, signed feed of detection rules that installs
+  offline. Reuse ADR-0186 (vendored detection content) and ADR-0158 (curated feed) and the existing signing and
+  verification code; compare open-source signing and bundle formats first (rule: compare at least two, ADR-0176).
+  Default off; verify the signature and version before any rule loads; reject a downgrade; audit every import; never
+  send customer data out (no pooled telemetry, ADR-0015).
+- **C3 — approval-queue priorities (lane `codex/approval-priorities`, new ADR at the next free number when written, §3).** The remaining Camunda gap
+  (GAP_ANALYSIS_CAMUNDA_2026-11.md, row 5): priorities, assignee load and an embeddable task widget for the approvals
+  queue. Stage deadlines and SLA escalation are Claude lane E21 (#891); reuse its fields, do not rebuild them. The
+  priority lifecycle is an explicit declared transition table (owner rule on state machines). Expose the data and the
+  widget contract; the design builders own the screens.

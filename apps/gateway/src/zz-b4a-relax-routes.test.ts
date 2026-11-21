@@ -8,6 +8,7 @@
  *
  * Global state is restored to the strict values in afterAll (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,7 +66,7 @@ async function grantFor(action: { kind: string; body: Record<string, unknown> })
 
 const STRICT_SQL = sql`UPDATE org_settings SET assurance_gate_mode = 'enforce', mrm_enforced = true, risk_treatments_enabled = false,
   mrm_staleness_recert_enabled = true, mrm_staleness_recert_threshold = 1, step_up_mode = 'required',
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
   WHERE id = ${ORG_SETTINGS_ID}`;
 
 beforeAll(async () => {
@@ -84,7 +85,7 @@ beforeAll(async () => {
   const [s] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: id,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

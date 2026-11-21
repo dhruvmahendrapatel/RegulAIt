@@ -40,7 +40,18 @@ import { errLine, errSerializer } from "./err-serializer.js";
 import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
-import { runMigrations, type Db } from "@regulait/db";
+import { runMigrations, runWithRlsSystem, type Db } from "@regulait/db";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
+import { markDraining, resolveDrainDelayMs } from "./readiness.js";
+import {
+  auditPrivilegedRuntimeLogin,
+  checkRuntimeLogin,
+  describeRuntimeLogin,
+  privilegedRuntimeLoginBanner,
+  resolveRuntimeDatabase,
+  type RuntimeLoginCheck,
+} from "./runtime-login.js";
+import { registerOwnerDb } from "./owner-db.js";
 import { buildApp, type BuildAppOptions } from "./app.js";
 import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { prunePmWebhookDeliveries } from "./pm.js";
@@ -50,16 +61,27 @@ import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
+import { startStageRetryWorker, stageRetryWorkerEnabled, warmStageQueueSender, type StageRetryWorker } from "./workflows-queue.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
 import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
-import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
+import {
+  BOOTSTRAP_AFTER_ADMIN_ENV,
+  DEV_SECRETS_OVERRIDE_ENV,
+  DevSecretsBootError,
+  assessDevSecrets,
+  bootstrapAfterAdminRelaxed,
+  activeAdminExists,
+  recordDevSecretsOptIn,
+  recordBootstrapAfterAdmin,
+} from "./dev-secrets.js";
 import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
-import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { describeMetricsPosture, disablePrometheusReader, enableOtlpPushReader, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
+import { createOtlpMetricsPusher, describeOtlpMetricsPosture, resolveOtlpMetricsConfig } from "./metrics-otlp.js";
 import { configureRateLimitEvaluator, describeRateLimitEvaluator } from "./rate-limit-evaluator.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { assertReceiptEmitterBootable } from "./decision-receipts.js";
@@ -68,7 +90,14 @@ import { assertReceiptEmitterBootable } from "./decision-receipts.js";
 const DEFAULT_ANCHOR_INTERVAL_MS = 15 * 60_000;
 
 export interface StartGatewayOptions extends BuildAppOptions {
+  /**
+   * The OWNER (migrator) connection. ADR-0234 batch 7b: it runs the migrations, provisions the runtime login and runs
+   * the audit prune; requests are served on the runtime login (`resolveRuntimeDatabase`), or on this handle when no
+   * runtime login is configured (refused at boot unless it is fit, or the loud dev opt-in is set).
+   */
   db: Db;
+  /** the owner's connection string, from which the install-generated runtime login's URL is derived */
+  connectionString?: string;
   migrationsFolder: string;
   port?: number;
   host?: string;
@@ -90,6 +119,11 @@ export interface StartedGateway {
   metricsAddress: string | null;
 }
 
+/** end a handle's pool (the drizzle handle exposes it as `$client`) */
+function endPool(db: Db): Promise<void> {
+  return (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+}
+
 /**
  * Bring a gateway up, or refuse to.
  *
@@ -98,7 +132,7 @@ export interface StartedGateway {
  * under. Nothing is listening when it throws.
  */
 export async function startGateway(opts: StartGatewayOptions): Promise<StartedGateway> {
-  const { db, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
+  const { db: ownerDb, connectionString, migrationsFolder, port = 3000, host = "0.0.0.0", log = console.log, env = process.env, ...appOpts } = opts;
 
   // ADR-0121 amendment: a REGULAIT_PUBLIC_URL that is set but invalid refuses
   // the boot FIRST — before an app, a migration or a socket exists — because
@@ -108,6 +142,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // bearer token (or with an unparseable address) refuses the boot here, for
   // the same reason — nothing exists yet to leave behind.
   const metricsConfig = resolveMetricsConfig(env);
+  // ADR-0301: an OTLP metrics setting that is present but unusable refuses here too.
+  const otlpMetricsConfig = resolveOtlpMetricsConfig(env);
+  // ADR-0301 review item 1: the push reader is registered before anything records, and only when it is wanted
+  if (otlpMetricsConfig) enableOtlpPushReader();
+  // ADR-0301 second review: the Prometheus reader likewise exists only when a scrape surface is on
+  if (!metricsConfig.listen && !metricsConfig.onMainListener) disablePrometheusReader();
   // ADR-0239: an unrecognised REGULAIT_RATE_LIMIT_EVALUATOR refuses the boot here, before anything exists.
   const rateLimitEvaluator = configureRateLimitEvaluator(env);
   // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is
@@ -129,10 +169,39 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // ADR-0060 / AER-012: the sink this process anchors WITH (below) is the sink
   // the app's readers grade — one instance, one observation cache.
   const anchorSink = appOpts.auditAnchorSink !== undefined ? appOpts.auditAnchorSink : resolveAnchorSink(env);
-  const app = buildApp(db, { ...appOpts, logger, auditAnchorSink: anchorSink });
+  // ADR-0167 amendment (S-02): the bootstrap token retires once an active admin exists, unless relaxed
+  const bootstrapAfterAdmin = appOpts.bootstrapAfterAdmin ?? bootstrapAfterAdminRelaxed(env);
 
-  // migrations are idempotent — booting always converges the schema
-  await runMigrations(db, migrationsFolder);
+  // migrations are idempotent — booting always converges the schema. ADR-0234 batch 7b: on the OWNER login.
+  await runMigrations(ownerDb, migrationsFolder);
+
+  // ADR-0234 batch 7b — THE RUNTIME LOGIN. Requests are served on a login that is a member of regulait_app and is
+  // not a superuser, BYPASSRLS, CREATEROLE or the owner of the RLS tables, nor a member of a role that is, so no
+  // request path can step out of the policies. Resolved after the migrations (the install-generated login is created through the owner, and needs
+  // regulait_app to exist), and refused here, before an app or a socket exists, when it is not fit.
+  const runtime = await resolveRuntimeDatabase(env, ownerDb, connectionString);
+  const db: Db = runtime.db;
+  let runtimeLogin: RuntimeLoginCheck;
+  try {
+    runtimeLogin = await checkRuntimeLogin(db, env);
+  } catch (err) {
+    if (db !== ownerDb) await endPool(db).catch(() => {});
+    throw err;
+  }
+  if (runtimeLogin.privileged) {
+    for (const line of privilegedRuntimeLoginBanner(runtimeLogin)) log(line);
+  }
+  registerOwnerDb(db, ownerDb);
+  const app = buildApp(db, { ...appOpts, bootstrapAfterAdmin, logger, auditAnchorSink: anchorSink });
+  if (db !== ownerDb) {
+    app.addHook("onClose", async () => {
+      await endPool(db).catch(() => {});
+    });
+  }
+  if (runtimeLogin.privileged) {
+    // the opt-in is evidence, not a footnote: one audit row per boot that used it
+    await runWithRlsSystem("system_task", "boot.runtime-login", () => auditPrivilegedRuntimeLogin(db, runtimeLogin));
+  }
 
   // ADR-0189 R43: a build that cannot emit v2 receipts with facts refuses to
   // start once a receipt v2 boundary is recorded (a v1 receipt there is
@@ -143,11 +212,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // (a drained rolling deploy): `REGULAIT_AUDIT_V2_CUTOVER=run` on the boot that performs it. The
   // database trigger `audit_log_v2_floor` (migration 0184) refuses a v1 row past the boundary from any
   // writer that was not drained.
+  // ADR-0234 batch 7a: the boot tasks below have no principal; they run under the named `system_task` reason (users
+  // read, approvals, audit read and append), as regulait_app under the policies, not as whatever the login is.
+  const asBootTask = <T>(label: string, fn: () => Promise<T>): Promise<T> => runWithRlsSystem("system_task", `boot.${label}`, fn);
   try {
-    await assertReceiptEmitterBootable(db);
-    await assertAuditChainWritable(db);
+    await asBootTask("receipt-emitter", () => assertReceiptEmitterBootable(db));
+    await asBootTask("audit-chain-writable", () => assertAuditChainWritable(db));
     if (env[AUDIT_V2_CUTOVER_ENV]?.trim() === "run") {
-      const cut = await runAuditV2Cutover(db, { setBy: null });
+      const cut = await asBootTask("audit-v2-cutover", () => runAuditV2Cutover(db, { setBy: null }));
       log(`[regulait] audit chain v2 cutover: ${cut.created ? `recorded from seq ${cut.fromSeq}` : `already at v2 from seq ${cut.fromSeq}`}`);
     }
   } catch (err) {
@@ -160,7 +232,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // grants of its own (OWNER DECISION 1; ADR-0180, nothing is grandfathered). Never fatal: a subject
   // missed here is given its identity at first use.
   try {
-    const ensured = await ensureInternalIdentities(db);
+    const ensured = await asBootTask("internal-identities", () => ensureInternalIdentities(db));
     if (ensured.created > 0) log(`[regulait] created ${ensured.created} internal workload identit${ensured.created === 1 ? "y" : "ies"} (no grants; an admin grants them)`);
   } catch (err) {
     log(`[regulait] internal workload identities not ensured at boot: ${errLine(err)}`);
@@ -176,7 +248,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // does not abort it; that row is left unverified and fails closed.)
   let digestRepin: ManifestDigestRepinResult;
   try {
-    digestRepin = await repinManifestDigests(db);
+    digestRepin = await asBootTask("manifest-digest-repin", () => repinManifestDigests(db));
   } catch (err) {
     await app.close().catch(() => {});
     throw new ManifestDigestRepinBootError(err);
@@ -186,7 +258,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // box without its key came up healthy and failed every decryption silently.
   let dataKey: DataKeyBootResult;
   try {
-    dataKey = await verifyDataKeyOnBoot(db, appOpts.dataKey, env);
+    dataKey = await asBootTask("data-key", () => verifyDataKeyOnBoot(db, appOpts.dataKey, env));
   } catch (err) {
     // Do not leave a constructed-but-never-started Fastify instance holding
     // plugin resources behind on the way out.
@@ -198,14 +270,40 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // and on a box that shows a sign of being deployed they REFUSE the boot —
   // before listen, like the data-key gate, so a refused deployment leaves no
   // socket behind. See dev-secrets.ts for exactly what refuses and what warns.
+  const activeAdminAtBoot = await asBootTask("active-admin-exists", () => activeAdminExists(db)).catch(() => false);
   const secrets = assessDevSecrets(env, {
     bootstrapToken: appOpts.bootstrapToken,
     dataKey: appOpts.dataKey,
-    realAdminExists: await realAdminExists(db).catch(() => false),
+    realAdminExists: activeAdminAtBoot,
+    listenHost: host,
+    bootstrapAfterAdmin,
   });
   if (secrets.refuse) {
     await app.close().catch(() => {});
     throw new DevSecretsBootError(secrets);
+  }
+  // S-02: the dev opt-in is RECORDED, not only printed. A failed write is
+  // printed below and never fatal (the box is already accepted as dev-grade).
+  let optInRecorded: "recorded" | "not_needed" | "failed" = "not_needed";
+  try {
+    optInRecorded = (await asBootTask("dev-secrets-opt-in", () => recordDevSecretsOptIn(db, secrets))) ? "recorded" : "not_needed";
+  } catch {
+    optInRecorded = "failed";
+  }
+  // S-02 review: the retirement relaxation is RECORDED too (ADR-0180), never fatal.
+  let relaxationRecorded: "recorded" | "not_needed" | "failed" = "not_needed";
+  try {
+    relaxationRecorded = (await asBootTask("bootstrap-after-admin", () =>
+      recordBootstrapAfterAdmin(db, {
+        bootstrapAfterAdmin,
+        bootstrapToken: appOpts.bootstrapToken,
+        activeAdmin: activeAdminAtBoot,
+      }),
+    ))
+      ? "recorded"
+      : "not_needed";
+  } catch {
+    relaxationRecorded = "failed";
   }
 
   // ADR-0167 (SEC-06): a pre-0128 row still holding the OTLP collector
@@ -215,7 +313,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   let otlpBackfill: "enveloped" | "nothing" = "nothing";
   if (appOpts.dataKey) {
     try {
-      otlpBackfill = await backfillOtlpHeaderCiphertext(db, appOpts.dataKey);
+      const key = appOpts.dataKey;
+      otlpBackfill = await asBootTask("otlp-backfill", () => backfillOtlpHeaderCiphertext(db, key));
     } catch (err) {
       log(`[regulait] OTLP header envelope backfill failed: ${errLine(err)}`);
     }
@@ -225,7 +324,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // verified) from the pinned vendored files. Idempotent, starts no run, and
   // never fatal: a drifted file is audited and its datasets refuse to run.
   try {
-    const seeded = await seedBuiltinEvalDatasets(db);
+    const seeded = await asBootTask("eval-datasets", () => seedBuiltinEvalDatasets(db));
     const by = (o: string) => seeded.datasets.filter((d) => d.outcome === o).length;
     log(
       `[regulait] built-in eval datasets: ${by("seeded")} seeded, ${by("unchanged")} unchanged, ` +
@@ -254,6 +353,11 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   app.addHook("onClose", async () => {
     if (scheduler) await scheduler.stop();
   });
+  // ADR-0283: the workflow retry worker, registered before listen for the same reason
+  let retryWorker: StageRetryWorker | null = null;
+  app.addHook("onClose", async () => {
+    if (retryWorker) await retryWorker.stop();
+  });
 
   // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
   // scheduler. Two reasons, both load-bearing:
@@ -272,10 +376,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   let anchorTimer: NodeJS.Timeout | null = null;
   let rateLimitPruneTimer: NodeJS.Timeout | null = null;
   let pmDeliveryPruneTimer: NodeJS.Timeout | null = null;
+  // ADR-0343: one replica of the cluster captures and flushes anchors (two flushes pushed the same anchor twice)
+  const anchorLeader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.auditAnchor);
   app.addHook("onClose", async () => {
     if (anchorTimer) clearInterval(anchorTimer);
     if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
     if (pmDeliveryPruneTimer) clearInterval(pmDeliveryPruneTimer);
+    await anchorLeader.release();
   });
 
   // ADR-0185 G5 — the separate metrics listener. Its close hook is registered
@@ -292,6 +399,14 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       throw err;
     }
   }
+
+  // ADR-0301 — OTLP metrics push, only when an endpoint is configured. The
+  // first push is one interval after boot; every push re-checks the egress
+  // allow-list. Its close hook goes in before listen, like the ones above.
+  const otlpMetricsPusher = otlpMetricsConfig
+    ? createOtlpMetricsPusher(db, otlpMetricsConfig, { start: !underTest, log })
+    : null;
+  if (otlpMetricsPusher) app.addHook("onClose", async () => otlpMetricsPusher.stop());
 
   const address = await app.listen({ port, host });
 
@@ -314,14 +429,17 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // that drops rather than refuses) used to leave a capture hanging and the
     // interval kept starting another one every 15 minutes on top of it.
     anchorTimer = setInterval(
-      withoutOverlap(async () => {
-        try {
-          await captureAnchor(db, anchorSink, null);
-          await flushPendingAnchors(db, anchorSink);
-        } catch (err) {
-          app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
-        }
-      }),
+      withoutOverlap(leaderOnly(anchorLeader, () =>
+        // ADR-0234 batch 7a: the anchor reads the chain head and appends its own audit row, with no principal
+        runWithRlsSystem("system_task", "timer.audit-anchor", async () => {
+          try {
+            await captureAnchor(db, anchorSink, null);
+            await flushPendingAnchors(db, anchorSink);
+          } catch (err) {
+            app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
+          }
+        }),
+      )),
       anchorEveryMs,
     );
     anchorTimer.unref();
@@ -354,7 +472,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // like the counters above: a missed prune only keeps rows longer, which refuses more replays, never fewer.
     pmDeliveryPruneTimer = setInterval(
       () => {
-        void prunePmWebhookDeliveries(db).catch((err: unknown) => {
+        // ADR-0234 PM batch: pm_webhook_deliveries is under row-level security; the prune runs as system_task.
+        void runWithRlsSystem("system_task", "boot.pm-delivery-prune", () => prunePmWebhookDeliveries(db)).catch((err: unknown) => {
           app.log.warn({ err }, "PM webhook delivery prune failed; replay refusal is unaffected");
         });
       },
@@ -393,6 +512,18 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // an in-flight job rather than abandoning it mid-sweep (see Scheduler.stop).
     // The hook itself is registered above, before listen — see the note there.
   }
+  // ADR-0283: automatic stage retries. On unless REGULAIT_WORKFLOW_RETRY_WORKER=off (forced off under vitest). A
+  // failure to start is a degradation, not an outage: a failed stage stays retryable through /advance.
+  if (stageRetryWorkerEnabled(env)) {
+    try {
+      retryWorker = await startStageRetryWorker(db);
+    } catch (err) {
+      console.error(`[regulait] workflow retry worker did not start: ${errLine(err)}`);
+    }
+  }
+  // The sender starts here, not inside the first failing stage's transaction. Best-effort: a send that still finds no
+  // sender commits the failure with `stage-retry-not-scheduled: queue_unavailable`.
+  await warmStageQueueSender().catch((err: unknown) => console.error(`[regulait] workflow retry sender did not start: ${errLine(err)}`));
 
   log(`regulait gateway listening on ${address}`);
   // ADR-0033: /ui is the whole product surface; /app and /admin are only
@@ -407,6 +538,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // belongs in the boot log next to the proxy posture rather than only in a
   // response an operator has to think to look at.
   log(`  hsts:      ${describeHsts(resolveHsts())}`);
+  // ADR-0234 batch 7b: say out loud which database login serves requests, and whether row-level security binds it
+  log(`  db login:  ${describeRuntimeLogin(runtimeLogin, runtime.source)}`);
   // ADR-0062: say out loud what this box will REFUSE to reach. An operator who
   // believes their install is air-gapped and has not set the variable must be
   // able to see that from the boot log rather than from a packet capture.
@@ -454,8 +587,20 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   for (const finding of secrets.findings) {
     log(`  secrets:   DEV-GRADE — ${finding}`);
   }
-  if (secrets.overridden && secrets.refusing.length > 0) {
-    log(`             (booting anyway: REGULAIT_ALLOW_DEV_SECRETS=1 overrides the refusal on ${secrets.networkFacingSignal})`);
+  if (secrets.overridden && secrets.refusing.length > 0 && secrets.exposure !== null) {
+    // S-02: LOUD, because this is the one line that says anyone with the repository can sign in as admin here
+    log("  ****************************************************************************");
+    log(`  * DEV SECRETS ACCEPTED: ${DEV_SECRETS_OVERRIDE_ENV}=1 overrides the refusal`);
+    log(`  * (${secrets.exposure}).`);
+    log("  * Published credentials are live on a reachable listener. Development only.");
+    log(`  * Audit: ${optInRecorded === "recorded" ? "recorded (rule dev-secrets-opt-in)" : "WRITE FAILED - this boot is not in the audit log"}`);
+    log("  ****************************************************************************");
+  }
+  if (bootstrapAfterAdmin && appOpts.bootstrapToken) {
+    log(`             (relaxed: ${BOOTSTRAP_AFTER_ADMIN_ENV}=1 keeps the bootstrap token working after an admin signs in)`);
+    log(
+      `             (audit: ${relaxationRecorded === "recorded" ? "recorded (rule bootstrap-after-admin-relaxed)" : "WRITE FAILED - this relaxation is not in the audit log"})`,
+    );
   }
   // ADR-0167 (CFG-08): the pool's bounds and whether the database hop is TLS.
   const dbPool = resolveDbPoolConfig(env);
@@ -473,6 +618,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // from a stale registry screen three months later.
   // ADR-0185 G5: whether /metrics is served, where, and that it needs a token
   log(`  metrics:   ${describeMetricsPosture(metricsConfig, metricsListener?.address ?? null)}`);
+  log(`  metrics:   ${describeOtlpMetricsPosture(otlpMetricsConfig)}`);
   // ADR-0239: which engine evaluates rate limits (Cedar by default; legacy only by explicit setting)
   log(`  rate limits: ${describeRateLimitEvaluator(rateLimitEvaluator)}`);
   log(`  scheduler: ${schedulerConfig.reason}${schedulerConfig.enabled ? `, ${registry.size} job(s)` : ""}`);
@@ -515,6 +661,9 @@ export interface ShutdownHandlerOptions {
    * docker-compose.yml's `stop_grace_period` for the gateway is set above
    * this so the orchestrator never SIGKILLs a drain that was going to finish. */
   graceMs?: number;
+  /** ADR-0343: how long `/ready` answers 503 before the listener closes (REGULAIT_DRAIN_DELAY_MS, default 0); capped
+   * one second under `graceMs` so the drain itself always has time */
+  drainDelayMs?: number;
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 15_000;
@@ -560,6 +709,7 @@ export function installShutdownHandlers(
   const proc: ProcessLike = opts.proc ?? process;
   const log = opts.log ?? ((line: string) => console.error(line));
   const graceMs = opts.graceMs ?? resolveShutdownGraceMs();
+  const drainDelayMs = Math.min(opts.drainDelayMs ?? resolveDrainDelayMs(), Math.max(0, graceMs - 1_000));
   let draining: Promise<void> | null = null;
 
   const shutdown = (reason: string, code: number): Promise<void> => {
@@ -571,13 +721,20 @@ export function installShutdownHandlers(
         proc.exit(code === 0 ? 1 : code);
       }, graceMs);
       deadline.unref();
+      // ADR-0343: say "not ready" first and keep serving for the drain delay, so the load balancer stops sending new
+      // requests here before the listener closes
+      markDraining(started.app);
+      if (drainDelayMs > 0) {
+        log(`[regulait] readiness now 503 (draining); serving in-flight traffic for ${drainDelayMs} ms before closing`);
+        await new Promise((r) => setTimeout(r, drainDelayMs));
+      }
       try {
         await started.app.close();
       } catch (err) {
         log(`[regulait] app.close failed during drain: ${errLine(err)}`);
       }
       try {
-        await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
+        await endPool(db);
       } catch (err) {
         log(`[regulait] pool.end failed during drain: ${errLine(err)}`);
       }
