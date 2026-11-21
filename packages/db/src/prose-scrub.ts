@@ -230,6 +230,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // ADR-0366: the admin's reason for releasing a rogue-agent containment, and the signal's explanation (it quotes an
   // agent name a person typed)
   [s.agentContainments, ["releaseReason", "explanation"]],
+  // ADR-0366 slice 2: a virtual key's containment halt reason
+  [s.virtualKeys, ["haltedReason"]],
   // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
   // admin's note on the decision
   [s.agentIdentityLinks, ["note", "decisionNote"]],

@@ -55,6 +55,7 @@ import {
   runWithRlsSystem,
   sql,
   users,
+  virtualKeys,
   type AgentContainmentRow,
   type Db,
 } from "@regulait/db";
@@ -92,6 +93,7 @@ export const CONTAINMENT_RULE_IDS = {
   released: "containment-released",
   failed: "containment-failed",
   builderAgentHalted: "execution-builder-agent-halted",
+  virtualKeyHalted: "execution-virtual-key-halted",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -129,10 +131,41 @@ export async function haltBuilderAgentInTx(
   return { changed: true, name: before.name };
 }
 
+/**
+ * ADR-0366 slice 2: halt one virtual key INSIDE the caller's transaction (reversible, unlike revocation). Locks the
+ * row, idempotent, audited `execution-virtual-key-halted`. Null for an unknown or revoked key (nothing to contain).
+ */
+export async function haltVirtualKeyInTx(
+  tx: Db,
+  keyId: string,
+  reason: string,
+  actor: HaltActor,
+): Promise<{ changed: boolean; name: string } | null> {
+  const [before] = await tx.select().from(virtualKeys).where(eq(virtualKeys.id, keyId)).for("update");
+  if (!before || before.revokedAt) return null;
+  if (before.haltedAt) return { changed: false, name: before.name };
+  await tx.update(virtualKeys).set({ haltedAt: new Date(), haltedReason: reason, haltedByUserId: actor.userId }).where(eq(virtualKeys.id, keyId));
+  await tx.insert(auditLog).values({
+    userId: actor.userId ?? NO_IDENTITY,
+    objectType: "virtual_key",
+    objectId: keyId,
+    detail: { via: actor.via, ...actor.detail, receiptClass: "configuration" },
+    effect: "deny",
+    ruleId: CONTAINMENT_RULE_IDS.virtualKeyHalted,
+    ruleChain: [],
+    reason: `virtual key '${before.name}' HALTED: ${reason}`,
+  });
+  return { changed: true, name: before.name };
+}
+
+/** the subject id of a containment row, whatever its kind */
+const subjectIdOf = (row: Pick<AgentContainmentRow, "agentId" | "builderAgentId" | "virtualKeyId">) =>
+  (row.agentId ?? row.builderAgentId ?? row.virtualKeyId)!;
+
 /** halt the containment's subject; null = the subject no longer exists */
 async function haltSubject(
   tx: Db,
-  row: Pick<AgentContainmentRow, "id" | "subjectKind" | "agentId" | "builderAgentId" | "explanation">,
+  row: Pick<AgentContainmentRow, "id" | "subjectKind" | "agentId" | "builderAgentId" | "virtualKeyId" | "explanation">,
   actor: HaltActor,
 ): Promise<{ changed: boolean } | null> {
   const reason = `${CONTAINMENT_HALT_PREFIX}${row.explanation}`.slice(0, 2000);
@@ -141,12 +174,25 @@ async function haltSubject(
     const r = await haltAgentInTx(tx, row.agentId!, reason, { ...actor, detail });
     return r ? { changed: r.changed } : null;
   }
+  if (row.subjectKind === "virtual_key") {
+    const r = await haltVirtualKeyInTx(tx, row.virtualKeyId!, reason, { ...actor, detail });
+    return r ? { changed: r.changed } : null;
+  }
   const r = await haltBuilderAgentInTx(tx, row.builderAgentId!, reason, { ...actor, detail });
   return r ? { changed: r.changed } : null;
 }
 
-/** the subject's steward (the person whose agent it is) and whether the subject exists */
+/** the subject's steward (the person whose agent or key it is) and whether the subject exists */
 async function subjectOf(db: Db, signal: Pick<ContainmentSignal, "subject">): Promise<{ exists: boolean; ownerUserId: string | null; label: string }> {
+  if (signal.subject.kind === "virtual_key") {
+    const [k] = await db
+      .select({ name: virtualKeys.name, userId: virtualKeys.userId, revokedAt: virtualKeys.revokedAt })
+      .from(virtualKeys)
+      .where(eq(virtualKeys.id, signal.subject.id));
+    return k && !k.revokedAt
+      ? { exists: true, ownerUserId: k.userId, label: `virtual key '${k.name}'` }
+      : { exists: false, ownerUserId: null, label: "" };
+  }
   if (signal.subject.kind === "agent") {
     const [a] = await db.select({ name: agents.name, ownerUserId: agents.ownerUserId }).from(agents).where(eq(agents.id, signal.subject.id));
     return a ? { exists: true, ownerUserId: a.ownerUserId, label: `agent '${a.name}'` } : { exists: false, ownerUserId: null, label: "" };
@@ -205,12 +251,12 @@ async function routeApprover(
 
 type ContainmentAction2 = "contain" | "release";
 /** what the approver signs: the containment, the action and the subject (the MFA step-up is bound to its digest) */
-const argumentsOf = (row: Pick<AgentContainmentRow, "id" | "subjectKind" | "agentId" | "builderAgentId">, action: ContainmentAction2) => ({
+const argumentsOf = (row: Pick<AgentContainmentRow, "id" | "subjectKind" | "agentId" | "builderAgentId" | "virtualKeyId">, action: ContainmentAction2) => ({
   op: "agent_containment",
   action,
   containmentId: row.id,
   subjectKind: row.subjectKind,
-  subjectId: row.agentId ?? row.builderAgentId,
+  subjectId: subjectIdOf(row),
 });
 const digestOf = (args: ReturnType<typeof argumentsOf>) => approvalArgumentsDigest({ projectId: null, arguments: args });
 /** the approver's MFA step-up: bound to the approval, the decision and the digest of what will run */
@@ -316,7 +362,12 @@ export async function fileContainment(
   const subject = await subjectOf(db, signal);
   if (!subject.exists) return "skipped";
   const action = decideContainmentAction(signal.severity, ctx.threshold);
-  const subjectCols = signal.subject.kind === "agent" ? { agentId: signal.subject.id } : { builderAgentId: signal.subject.id };
+  const subjectCols =
+    signal.subject.kind === "agent"
+      ? { agentId: signal.subject.id }
+      : signal.subject.kind === "virtual_key"
+        ? { virtualKeyId: signal.subject.id }
+        : { builderAgentId: signal.subject.id };
   const baseDetail = {
     signal: { source: signal.source.kind, ruleId: signal.source.ruleId, refId: signal.source.refId },
     subject: signal.subject,
@@ -424,7 +475,11 @@ async function approvalTarget(db: Db, approvalId: string): Promise<{ row: AgentC
   return { row, action: row.releaseApprovalId === approvalId ? "release" : "contain" };
 }
 
-async function stewardOf(db: Db, row: Pick<AgentContainmentRow, "subjectKind" | "agentId" | "builderAgentId">): Promise<string | null> {
+async function stewardOf(db: Db, row: Pick<AgentContainmentRow, "subjectKind" | "agentId" | "builderAgentId" | "virtualKeyId">): Promise<string | null> {
+  if (row.subjectKind === "virtual_key") {
+    const [k] = await db.select({ o: virtualKeys.userId }).from(virtualKeys).where(eq(virtualKeys.id, row.virtualKeyId!));
+    return k?.o ?? null;
+  }
   if (row.subjectKind === "agent") {
     const [a] = await db.select({ o: agents.ownerUserId }).from(agents).where(eq(agents.id, row.agentId!));
     return a?.o ?? null;
@@ -472,7 +527,7 @@ export async function precheckContainmentDecision(
     }
   } else {
     if (!CONTAINMENT_MACHINE.can(row.status, "approve")) return { status: 409, body: { error: "containment_not_pending", status: row.status } };
-    const subject = await subjectOf(db, { subject: { kind: row.subjectKind, id: (row.agentId ?? row.builderAgentId)! } });
+    const subject = await subjectOf(db, { subject: { kind: row.subjectKind, id: subjectIdOf(row) } });
     if (!subject.exists) {
       return { status: 409, body: { error: "containment_subject_gone", detail: "the agent this containment names is archived or no longer exists" } };
     }
@@ -577,7 +632,11 @@ export async function applyContainmentDecision(
  */
 async function liftContainmentHalt(tx: Db, row: AgentContainmentRow): Promise<{ haltLifted: boolean; heldByOther: string | null }> {
   const subjectWhere =
-    row.subjectKind === "agent" ? eq(agentContainments.agentId, row.agentId!) : eq(agentContainments.builderAgentId, row.builderAgentId!);
+    row.subjectKind === "agent"
+      ? eq(agentContainments.agentId, row.agentId!)
+      : row.subjectKind === "virtual_key"
+        ? eq(agentContainments.virtualKeyId, row.virtualKeyId!)
+        : eq(agentContainments.builderAgentId, row.builderAgentId!);
   const [other] = await tx
     .select({ id: agentContainments.id })
     .from(agentContainments)
@@ -588,6 +647,12 @@ async function liftContainmentHalt(tx: Db, row: AgentContainmentRow): Promise<{ 
     const [a] = await tx.select({ r: agents.haltedReason }).from(agents).where(eq(agents.id, row.agentId!)).for("update");
     if (!a?.r?.startsWith(CONTAINMENT_HALT_PREFIX)) return { haltLifted: false, heldByOther: null };
     await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(agents.id, row.agentId!));
+    return { haltLifted: true, heldByOther: null };
+  }
+  if (row.subjectKind === "virtual_key") {
+    const [k] = await tx.select({ r: virtualKeys.haltedReason }).from(virtualKeys).where(eq(virtualKeys.id, row.virtualKeyId!)).for("update");
+    if (!k?.r?.startsWith(CONTAINMENT_HALT_PREFIX)) return { haltLifted: false, heldByOther: null };
+    await tx.update(virtualKeys).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(virtualKeys.id, row.virtualKeyId!));
     return { haltLifted: true, heldByOther: null };
   }
   const [b] = await tx.select({ r: builderAgents.haltedReason }).from(builderAgents).where(eq(builderAgents.id, row.builderAgentId!)).for("update");
@@ -650,7 +715,7 @@ export const containmentReleaseRequestStepUp = (containmentId: string): StepUpCh
 
 const serialize = (r: AgentContainmentRow) => ({
   id: r.id,
-  subject: { kind: r.subjectKind, id: r.agentId ?? r.builderAgentId },
+  subject: { kind: r.subjectKind, id: subjectIdOf(r) },
   signal: { source: r.signalSource, ruleId: r.signalRuleId, refId: r.signalRefId },
   alertId: r.alertId,
   severity: r.severity,

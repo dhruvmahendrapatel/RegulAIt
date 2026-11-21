@@ -188,7 +188,7 @@ export function isVirtualKeyToken(token: string): boolean {
 
 export type VirtualKeyResolution =
   | { ok: true; row: VirtualKeyRow; ownerDisabled: boolean }
-  | { ok: false; reason: "unknown" | "revoked" | "expired" };
+  | { ok: false; reason: "unknown" | "revoked" | "expired" | "halted" };
 
 /**
  * Resolve a presented `rglv_` token. Returns the distinct reason for a key that
@@ -204,6 +204,8 @@ export async function resolveVirtualKey(db: Db, token: string): Promise<VirtualK
     .where(eq(virtualKeys.tokenHash, hashToken(token)));
   if (!row) return { ok: false, reason: "unknown" };
   if (row.key.revokedAt !== null) return { ok: false, reason: "revoked" };
+  // ADR-0366 slice 2: a rogue-agent containment halted this key; it is lifted only by an approved release
+  if (row.key.haltedAt !== null) return { ok: false, reason: "halted" };
   if (row.key.expiresAt !== null && row.key.expiresAt.getTime() <= Date.now()) {
     return { ok: false, reason: "expired" };
   }
