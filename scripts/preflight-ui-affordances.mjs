@@ -48,7 +48,6 @@ export const DELIBERATELY_API_ONLY = new Map([
   ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
-  ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
   // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
   ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
