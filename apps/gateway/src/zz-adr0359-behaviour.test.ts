@@ -19,6 +19,8 @@ import {
   runAuditV2Cutover,
   runMigrations,
   sql,
+  withPrincipal,
+  withSystemContext,
   type Db,
 } from "@regulait/db";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
@@ -28,7 +30,7 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { BEHAVIOUR_RULE_IDS, addDays, runBehaviourSweep } from "./behaviour/sweep.js";
-import { FINDING_STATUS_TRANSITIONS } from "./behaviour/lifecycle.js";
+import { BEHAVIOUR_FINDING_MACHINE } from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -138,7 +140,7 @@ describe("ADR-0359 sweep: baselines from the install's own audit chain, shadow f
     // one chained audit row per finding, carrying the finding id (the SIEM export path)
     const audit = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, BEHAVIOUR_RULE_IDS.observed), eq(auditLog.objectId, bySignal["model_calls:"]!.id)));
     expect(audit).toHaveLength(1);
-    expect(audit[0]).toMatchObject({ objectType: "behaviour_baseline", effect: "allow", userId: user });
+    expect(audit[0]).toMatchObject({ objectType: "behaviour_baseline", effect: "allow", userId: adminId, detail: expect.objectContaining({ subjectKind: "user", subjectId: user }) });
     expect(audit[0]!.seq).not.toBeNull();
   });
 
@@ -149,7 +151,12 @@ describe("ADR-0359 sweep: baselines from the install's own audit chain, shadow f
     const rerun = await runBehaviourSweep(db, adminId);
     expect(rerun).toMatchObject({ daysEvaluated: [yesterday], findings: 0 });
     expect(await findingsFor(user)).toHaveLength(3);
-    // the finding audit rows (userId = the subject) are behaviour_baseline rows: not in the subject's counts
+    // the finding audit rows are the sweep's own act (userId = the sweep's actor, never the monitored user; review of
+    // #966 R8 [3]), with the subject in `detail`, and are behaviour_baseline rows: never in anyone's counts
+    const observed = await db.select().from(auditLog).where(eq(auditLog.ruleId, BEHAVIOUR_RULE_IDS.observed));
+    const mine = observed.filter((a) => (a.detail as { subjectId?: string }).subjectId === user);
+    expect(mine).toHaveLength(3);
+    expect(mine.every((a) => a.userId === adminId)).toBe(true);
     const today = await db.execute(sql`SELECT coalesce(sum(count), 0)::int AS n FROM behaviour_daily_counts
                                        WHERE subject_id = ${user}::uuid AND day > ${yesterday}::date`);
     expect((today as unknown as { rows: { n: number }[] }).rows[0]!.n).toBe(0);
@@ -169,7 +176,7 @@ describe("ADR-0359 sweep: baselines from the install's own audit chain, shadow f
     expect(f).toMatchObject({ signal: "model_calls", observed: 300, baselineMedian: 30 });
 
     const one = await app.inject({ method: "GET", url: `/v1/behaviour/findings/${f.id}`, headers: KEY });
-    expect(one.json()).toMatchObject({ finding: { id: f.id }, allowedNext: [...FINDING_STATUS_TRANSITIONS.open] });
+    expect(one.json()).toMatchObject({ finding: { id: f.id }, lifecycle: { status: BEHAVIOUR_FINDING_MACHINE.describe("open") } });
 
     const url = `/v1/behaviour/findings/${f.id}/status`;
     expect((await app.inject({ method: "PUT", url, headers: KEY, payload: { status: "open" } })).statusCode).toBe(400);
@@ -177,6 +184,8 @@ describe("ADR-0359 sweep: baselines from the install's own audit chain, shadow f
     const again = await app.inject({ method: "PUT", url, headers: KEY, payload: { status: "acknowledged" } });
     expect(again.statusCode).toBe(409);
     expect((await app.inject({ method: "PUT", url, headers: KEY, payload: { status: "dismissed" } })).statusCode).toBe(200);
+    const after = await app.inject({ method: "GET", url: `/v1/behaviour/findings/${f.id}`, headers: KEY });
+    expect(after.json().lifecycle.status).toMatchObject({ state: "dismissed", terminal: true });
     expect((await app.inject({ method: "PUT", url, headers: KEY, payload: { status: "acknowledged" } })).statusCode).toBe(409);
     expect((await app.inject({ method: "PUT", url: `/v1/behaviour/findings/${randomUUID()}/status`, headers: KEY, payload: { status: "dismissed" } })).statusCode).toBe(404);
     const audited = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, BEHAVIOUR_RULE_IDS.findingStatus), eq(auditLog.objectId, f.id)));
@@ -242,5 +251,49 @@ describe("ADR-0359 settings: shadow by default, off is a step-up relaxation", ()
     const audited = await db.select().from(auditLog).where(eq(auditLog.ruleId, BEHAVIOUR_RULE_IDS.modeChanged)).orderBy(asc(auditLog.seq));
     expect(audited.slice(-2).map((a) => (a.detail as { to: string }).to)).toEqual(["off", "shadow"]);
     expect((await app.inject({ method: "PUT", url: "/v1/behaviour/settings", headers: KEY, payload: { mode: "enforce" } })).statusCode).toBe(400);
+  });
+});
+
+describe("ADR-0359 row-level security and the admin gate (ADR-0234; review of #966)", () => {
+  const TABLES = ["behaviour_anomaly_findings", "behaviour_baseline_settings", "behaviour_daily_counts", "behaviour_engine_state"];
+
+  it("all four tables have row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+       where relnamespace = 'public'::regnamespace and relname in (${sql.join(TABLES.map((t) => sql`${t}`), sql`, `)}) order by relname`);
+    expect((r as unknown as { rows: unknown[] }).rows).toEqual(TABLES.map((relname) => ({ relname, on: true, forced: true })));
+  });
+
+  it("NEGATIVE: a member principal and a request reason see no finding or count and cannot write one; an admin and system_task can", async () => {
+    const member = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0359-member-${RUN}@example.com`, displayName: "behaviour member", isAdmin: false } });
+    expect(member.statusCode, member.body).toBe(201);
+    const memberId: string = member.json().id;
+    const findings = (tx: unknown) => (tx as Db).select({ id: behaviourAnomalyFindings.id }).from(behaviourAnomalyFindings).limit(1);
+    const counts = (tx: unknown) => (tx as Db).execute(sql`SELECT 1 FROM behaviour_daily_counts LIMIT 1`).then((r) => (r as unknown as { rows: unknown[] }).rows);
+    expect(await withPrincipal(db, { userId: adminId }, findings)).toHaveLength(1);
+    expect(await withSystemContext(db, "system_task", "test.e40", findings)).toHaveLength(1);
+    expect(await withPrincipal(db, { userId: memberId }, findings)).toEqual([]);
+    expect(await withPrincipal(db, { userId: memberId }, counts)).toEqual([]);
+    expect(await withSystemContext(db, "credential_request", "test.e40", findings)).toEqual([]);
+    await expect(
+      withPrincipal(db, { userId: memberId }, (tx) =>
+        (tx as unknown as Db).execute(sql`INSERT INTO behaviour_baseline_settings (id, mode) VALUES (1, 'off') ON CONFLICT (id) DO UPDATE SET mode = 'off'`),
+      ),
+    ).rejects.toThrow();
+
+    // and the API is admin-only (the default gate): a member's key is refused on every behaviour route (S10 [1])
+    const key = await app.inject({ method: "POST", url: `/v1/users/${memberId}/keys`, headers: AUTH, payload: { name: "adr0359-member" } });
+    const MEMBER = { authorization: `Bearer ${key.json().token}` };
+    for (const [method, url] of [
+      ["GET", "/v1/behaviour/settings"],
+      ["PUT", "/v1/behaviour/settings"],
+      ["GET", "/v1/behaviour/findings"],
+      ["GET", `/v1/behaviour/findings/${randomUUID()}`],
+      ["PUT", `/v1/behaviour/findings/${randomUUID()}/status`],
+      ["GET", `/v1/behaviour/baselines/user/${memberId}`],
+    ] as const) {
+      const res = await app.inject({ method, url, headers: MEMBER, ...(method === "PUT" ? { payload: {} } : {}) });
+      expect(res.statusCode, `${method} ${url}`).toBe(403);
+    }
   });
 });

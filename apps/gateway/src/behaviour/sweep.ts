@@ -324,7 +324,8 @@ async function recordDay(db: Db, token: string, actorUserId: string, ev: Awaited
       if (!f) continue;
       recorded++;
       await tx.insert(auditLog).values({
-        userId: subject.kind === "user" ? subject.id : actorUserId,
+        // the sweep's actor, never the monitored user: the row is the sweep's act; the subject is in `detail` (#966 R8 [3])
+        userId: actorUserId,
         objectType: BEHAVIOUR_OBJECT_TYPE,
         objectId: f.id,
         detail: {

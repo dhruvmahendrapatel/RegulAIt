@@ -1,6 +1,6 @@
 # ADR-0359: Learned behaviour baselines and backtested rule suggestions over the audit chain
 
-- **Status**: Proposed (builder lane E40, 2026-11-17; owner decision 2026-11-17 from the competitor gap audit, Obsidian row 9 and DarkControl row 20)
+- **Status**: Accepted (owner decision 2026-11-17 from the competitor gap audit, Obsidian row 9 and DarkControl row 20; builder lane E40: slice 1 built, slice 2 pending)
 - **Date**: 2026-11-17
 - **Index**: Behaviour analytics: per-install baselines, explainable anomaly findings (shadow mode), backtested rule suggestions
 - **Builds on**: ADR-0333 (lane E15, deterministic detection rules), ADR-0049
@@ -50,6 +50,10 @@ a later batch; it is a refactor outside this lane.
   single-tenant (ADR-0015), "per customer" is "per install".
 - The rollup and the findings are derived data. They name `audit_log` as their source of truth (ADR-0200 read-model
   exception).
+- All four tables are ENABLED and FORCED under row-level security with the admin-only policy (an admin principal,
+  or the `system_task`/`migration` system reasons; ADR-0234), as ADR-0333's detection tables are. The rollup and the
+  findings are per-person monitoring data. A finding's audit row is the sweep's own act (the sweep's actor), with the
+  subject in `detail`, never a row attributed to the monitored user.
 
 ### 2. Subjects and signals
 
@@ -91,8 +95,9 @@ a later batch; it is a refactor outside this lane.
 - **Shadow mode is the default and the only mode built.** `behaviour_baseline_settings.mode` is `shadow` or `off`.
   Nothing a finding says changes a decision, and the sweep is never in the decision path. Turning the engine off is a
   relaxation: it needs a `settings_relax` step-up and is audited. Turning it back on is audited.
-- **Finding status** is a declared table: `open → acknowledged | dismissed`, `acknowledged → dismissed`. `dismissed`
-  is terminal.
+- **Finding status** is the declared `BEHAVIOUR_FINDING_MACHINE` (ADR-0348, `@regulait/shared` state-machines):
+  `open → acknowledged | dismissed`, `acknowledged → dismissed`. `dismissed` is terminal. The status route's UPDATE is
+  guarded by `whereFrom`, and a finding is returned with its `lifecycle` view.
 - At most 500 findings are recorded per evaluated day, highest score first. The cap is reported in the day's summary
   audit row, never silent.
 

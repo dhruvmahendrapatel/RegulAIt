@@ -280,6 +280,30 @@ export const DETECTION_INCIDENT_MACHINE = defineMachine({
   },
 });
 
+/** `behaviour_anomaly_findings.status` (ADR-0359, lane E40). A shadow finding: an admin acknowledges it or dismisses
+ * it, and a dismissed finding is final. Same values as `BEHAVIOUR_FINDING_STATUSES` in ./behaviour-baseline.ts. */
+export const BEHAVIOUR_FINDING_MACHINE = defineMachine({
+  id: "behaviour_finding",
+  stored: "behaviour_anomaly_findings.status",
+  states: ["open", "acknowledged", "dismissed"],
+  initial: ["open"],
+  terminal: ["dismissed"],
+  transitions: {
+    acknowledge: {
+      from: ["open"],
+      to: "acknowledged",
+      by: ["admin"],
+      summary: "An admin has seen the finding and is looking into it; nothing is enforced either way (shadow mode).",
+    },
+    dismiss: {
+      from: ["open", "acknowledged"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the finding; it is final, and a later departure records a new finding.",
+    },
+  },
+});
+
 /** `detection_incidents.response_state` (ADR-0333 §5). A configured response runs at most once: it either took
  * effect or failed with a fixed code, and neither is retried. An alert-only incident stays `none`.
  * Same values as `DETECTION_RESPONSE_STATES` in @regulait/db. */
@@ -811,6 +835,8 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  // ADR-0359 (lane E40): a behaviour baseline shadow finding
+  [BEHAVIOUR_FINDING_MACHINE.def.id]: BEHAVIOUR_FINDING_MACHINE,
   [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,

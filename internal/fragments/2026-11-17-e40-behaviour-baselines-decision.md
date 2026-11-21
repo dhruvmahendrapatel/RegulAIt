@@ -1,5 +1,5 @@
 <!-- fold: state-decisions -->
-**ADR-0359 (builder lane E40, 2026-11-17, Proposed; owner decision 2026-11-17, competitor gap audit Obsidian row 9 and DarkControl row 20): learned behaviour baselines.**
+**ADR-0359 (builder lane E40, 2026-11-17, Accepted; owner decision 2026-11-17, competitor gap audit Obsidian row 9 and DarkControl row 20): learned behaviour baselines.**
 - **What (slice 1):** a sweep (`behaviour-baseline-sweep`, every 60 s) rolls the install's own audit chain up into
   per-day counts per user and per agent (workload identity), and compares each complete UTC day with the 28 days
   before it: model-call and data-scoped-call volume by robust z-score (Iglewicz–Hoaglin, MAD; 3x-median fallback when

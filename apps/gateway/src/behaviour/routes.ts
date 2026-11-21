@@ -18,7 +18,6 @@ import {
   behaviourBaselineSettings,
   desc,
   eq,
-  inArray,
   lt,
   or,
   sql,
@@ -34,7 +33,8 @@ import {
   volumeBaselineStats,
 } from "@regulait/shared";
 import { requireStepUp } from "../step-up.js";
-import { FINDING_STATUS_TRANSITIONS, SETTABLE_FINDING_STATUSES, findingStatusSources } from "./lifecycle.js";
+import { whereFrom } from "../state-transition.js";
+import { BEHAVIOUR_FINDING_MACHINE, FINDING_STATUS_EVENT, SETTABLE_FINDING_STATUSES, findingLifecycle } from "./lifecycle.js";
 import { BEHAVIOUR_OBJECT_TYPE, BEHAVIOUR_RULE_IDS, addDays, behaviourMode } from "./sweep.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -85,15 +85,20 @@ export function registerBehaviourRoutes(app: FastifyInstance, db: Db): void {
   app.put("/v1/behaviour/settings", async (req, reply) => {
     const body = settingsBody.safeParse(req.body);
     if (!body.success) return refuse(reply, 400, "invalid_request", "body must be { mode: 'shadow' | 'off' }");
-    const from = await behaviourMode(db);
     const to = body.data.mode;
-    if (from === to) return { mode: to, changed: false };
+    if ((await behaviourMode(db)) === to) return { mode: to, changed: false };
+    // `off` is the relaxation whatever the current mode is, so the step-up is decided by the target alone
     const relaxed = to === "off";
     if (relaxed) {
-      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { behaviourBaseline: "mode", from, to } });
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { behaviourBaseline: "mode", from: "shadow", to } });
       if (!su.ok) return reply;
     }
-    await db.transaction(async (tx) => {
+    // `from` is read under the row lock, so two admins racing never audit a stale `from` (review of #966, S10 [2])
+    const changed = await db.transaction(async (tx) => {
+      await tx.execute(sql`INSERT INTO behaviour_baseline_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+      const [locked] = ((await tx.execute(sql`SELECT mode FROM behaviour_baseline_settings WHERE id = 1 FOR UPDATE`)) as unknown as Rows<{ mode: string }>).rows;
+      const from = locked?.mode ?? "shadow";
+      if (from === to) return false;
       await tx
         .insert(behaviourBaselineSettings)
         .values({ id: 1, mode: to, updatedBy: req.authCtx.userId ?? null })
@@ -109,8 +114,9 @@ export function registerBehaviourRoutes(app: FastifyInstance, db: Db): void {
           ? "Behaviour baselines turned off — RELAXED: no baseline is built and no finding is recorded (step-up verified)"
           : "Behaviour baselines turned on in shadow mode (findings only)",
       });
+      return true;
     });
-    return { mode: to, changed: true };
+    return { mode: to, changed };
   });
 
   app.get("/v1/behaviour/findings", async (req, reply) => {
@@ -146,7 +152,7 @@ export function registerBehaviourRoutes(app: FastifyInstance, db: Db): void {
     if (!p.success) return refuse(reply, 400, "invalid_request", "findingId must be a uuid");
     const [finding] = await db.select().from(behaviourAnomalyFindings).where(eq(behaviourAnomalyFindings.id, p.data.findingId));
     if (!finding) return refuse(reply, 404, "not_found");
-    return { finding, allowedNext: FINDING_STATUS_TRANSITIONS[finding.status] };
+    return { finding, lifecycle: findingLifecycle(finding.status) };
   });
 
   app.put("/v1/behaviour/findings/:findingId/status", async (req, reply) => {
@@ -157,7 +163,7 @@ export function registerBehaviourRoutes(app: FastifyInstance, db: Db): void {
       const [row] = await tx
         .update(behaviourAnomalyFindings)
         .set({ status: b.data.status, statusChangedBy: req.authCtx.userId ?? null, statusChangedAt: sql`now()` })
-        .where(and(eq(behaviourAnomalyFindings.id, p.data.findingId), inArray(behaviourAnomalyFindings.status, findingStatusSources(b.data.status))))
+        .where(and(eq(behaviourAnomalyFindings.id, p.data.findingId), whereFrom(behaviourAnomalyFindings.status, BEHAVIOUR_FINDING_MACHINE, FINDING_STATUS_EVENT[b.data.status])))
         .returning({ id: behaviourAnomalyFindings.id, status: behaviourAnomalyFindings.status });
       if (!row) return null;
       await tx.insert(auditLog).values({

@@ -6,7 +6,9 @@
 -- - `behaviour_daily_counts`: the per-day rollup (a read model whose source of truth is `audit_log`; FK-free subject
 --   ids, like the audit trail).
 -- - `behaviour_anomaly_findings`: point-in-time snapshots of each finding with its baseline.
--- - The deployment is single-tenant (ADR-0015), so like the other register tables there is no tenant column for RLS.
+-- - Row-level security (ADR-0234; review of #966): all four tables are ENABLED and FORCED with the admin-only
+--   policy the detection tables use (an admin principal, or the `system_task`/`migration` system reasons). The rollup
+--   and the findings are per-person monitoring data, so the database itself enforces "admin or the sweep only".
 -- No new functions or refusal triggers.
 
 CREATE TABLE IF NOT EXISTS "behaviour_baseline_settings" (
@@ -86,3 +88,43 @@ CREATE UNIQUE INDEX IF NOT EXISTS "behaviour_anomaly_findings_subject_signal_uq"
 CREATE INDEX IF NOT EXISTS "behaviour_anomaly_findings_status_created_idx" ON "behaviour_anomaly_findings" USING btree ("status", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "behaviour_anomaly_findings_subject_idx" ON "behaviour_anomaly_findings" USING btree ("subject_kind", "subject_id", "day");
+--> statement-breakpoint
+ALTER TABLE "behaviour_baseline_settings" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "behaviour_baseline_settings" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "behaviour_baseline_settings_admin" ON "behaviour_baseline_settings";
+--> statement-breakpoint
+CREATE POLICY "behaviour_baseline_settings_admin" ON "behaviour_baseline_settings" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "behaviour_engine_state" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "behaviour_engine_state" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "behaviour_engine_state_admin" ON "behaviour_engine_state";
+--> statement-breakpoint
+CREATE POLICY "behaviour_engine_state_admin" ON "behaviour_engine_state" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "behaviour_daily_counts" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "behaviour_daily_counts" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "behaviour_daily_counts_admin" ON "behaviour_daily_counts";
+--> statement-breakpoint
+CREATE POLICY "behaviour_daily_counts_admin" ON "behaviour_daily_counts" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "behaviour_anomaly_findings" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "behaviour_anomaly_findings" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "behaviour_anomaly_findings_admin" ON "behaviour_anomaly_findings";
+--> statement-breakpoint
+CREATE POLICY "behaviour_anomaly_findings_admin" ON "behaviour_anomaly_findings" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
