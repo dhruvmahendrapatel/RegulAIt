@@ -1,0 +1,63 @@
+{
+  "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+  "unchangedUiAt": "6804b562b2f697361a2c8cc7fba5b56a91c84f8d",
+  "mode": "Synthetic mocked API contracts in Chromium; no cloud calls or real destructive mutations",
+  "testsPassed": 7,
+  "seconds": 8.9,
+  "observations": {
+    "promotion-outage": {
+      "workflowFailures": 1,
+      "emptyVisible": true,
+      "alerts": []
+    },
+    "context-draft": {
+      "keyAfterReopen": "",
+      "contentAfterReopen": "",
+      "confirmationDialogs": 1
+    },
+    "stepup-options-outage": {
+      "failures": 1,
+      "gettingReadyVisible": true,
+      "retryButtons": 0,
+      "buttons": [
+        "Cancel"
+      ]
+    },
+    "rate-state-outage": {
+      "failures": 2,
+      "unenforcedVisible": true,
+      "offByDefault": true,
+      "toggleEnabled": true,
+      "inlineAlerts": [
+        "Couldn't load this listThis record isn't available \u2014 it may not exist, or it may belong to someone elseRetry"
+      ]
+    },
+    "report-controls": {
+      "schedulerPresentInput": true,
+      "noSchedulerText": [
+        "Nothing in this deployment fires these: an operator or an external cron must run them."
+      ],
+      "deleteRequestsAfterOneClick": 1,
+      "dialogsAfterClick": 0,
+      "deleteWasMockedAndRefused": true
+    },
+    "risk-reason": {
+      "afterOpeningDifferentRisk": "Reason for synthetic A only",
+      "expectedBlankOrRecordSpecific": true,
+      "mutationSent": false
+    },
+    "workflow-report": {
+      "workflowPayload": {
+        "basis": "approvals",
+        "approvalsRequested": 17,
+        "approvalsDecided": 12,
+        "approvalsPending": 5,
+        "approvalsApproved": 9,
+        "approvalsDenied": 3,
+        "medianDecisionMinutes": 8.5
+      },
+      "noSummaryMessageVisible": true,
+      "dialogText": "Report run\nGenerated\n21 Nov 2026, 01:00\nTrigger\nmanual\nPeriod\ncurrent_month: 1 Nov 2026, 00:00 \u2013 1 Dec 2026, 00:00\nEntitlement\norg, org-wide\nRows\n1\n\nThis run's stored report carries no summary figures.\n\nExport CSV\nSigned JSON bundle\nClose"
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "setup-summary": {
+    "source": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+    "appConstruction": "buildApp test seam; real HTTP listener; production startGateway/boot checks not exercised",
+    "database": "fresh disposable PostgreSQL17 database; pending migrations applied explicitly; no live/demo data",
+    "identityPolicyOverrides": false,
+    "roleAccounts": 2,
+    "passwordOnboardingRequestsPassed": true,
+    "totpEnrollActivateForBothPassed": true,
+    "twoStepPasswordLoginForBothPassed": true,
+    "bootstrapAfterActiveAdminStatus": 401,
+    "identityFacts": [
+      {
+        "role": "member",
+        "totpEnabled": true,
+        "mfaSetupRequired": false,
+        "isAdmin": false
+      },
+      {
+        "role": "admin",
+        "totpEnabled": true,
+        "mfaSetupRequired": false,
+        "isAdmin": true
+      }
+    ],
+    "assertedRequests": 19,
+    "allRequestStatusesExpected": true
+  },
+  "browser-results": {
+    "source": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+    "mode": "Real gateway HTTP + isolated PostgreSQL, real password/TOTP-authenticated cookie sessions. Browser sessions seeded with API-created session cookie; login UI not exercised.",
+    "observations": [
+      {
+        "role": "admin",
+        "flow": "Projects list \u2192 New project \u2192 Create",
+        "postStatus": 201,
+        "createdProjectVisible": true
+      },
+      {
+        "role": "admin",
+        "flow": "add project member through real API fixture",
+        "status": 201
+      },
+      {
+        "role": "viewer",
+        "flow": "authorized project list and forbidden project create",
+        "memberProjectVisible": true,
+        "createButtonPresent": false,
+        "directPostStatus": 403,
+        "error": "admin_only"
+      },
+      {
+        "role": "viewer",
+        "flow": "direct administrative credential inventory API",
+        "status": 403,
+        "error": "admin_only"
+      },
+      {
+        "role": "viewer",
+        "flow": "direct administrative credential UI URL",
+        "actualPath": "/ui/admin/credentials",
+        "mainText": "You don't have access to this view\nThis is an administrative surface and your account does not hold the administrator role. It is not listed in your navigation for the same reason. The server refuses these endpoints independently of this screen, so nothing here was hidden from you and then left reachable."
+      }
+    ]
+  },
+  "context-results": {
+    "source": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+    "role": "project viewer",
+    "flow": "read populated shared-context revision and refuse contribution",
+    "visibleProjectCount": 1,
+    "adminContextCreateStatus": 201,
+    "viewerContextReadStatus": 200,
+    "viewerContextWriteStatus": 403,
+    "viewerError": "forbidden",
+    "addContextButtonPresent": false,
+    "editButtonPresent": false,
+    "sharedContentExpanded": true
+  },
+  "authenticationTransport": "Fastify inject with real hooks/database; browser cookies seeded afterward; login form not tested"
+}

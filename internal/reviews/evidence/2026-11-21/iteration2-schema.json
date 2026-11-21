@@ -1,0 +1,151 @@
+{
+  "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+  "functionsUnchangedAt": "6804b562b2f697361a2c8cc7fba5b56a91c84f8d",
+  "registryDisclosure": {
+    "id": "json_schema",
+    "deterministic": true,
+    "modelBacked": false,
+    "summary": "The output must parse as JSON and conform to a schema. Supports a documented subset: type, required, properties, items, enum, minimum/maximum, minLength/maxLength.",
+    "limits": "A SHAPE check, not a correctness check — a structurally perfect answer with wrong values scores 1.0. Unsupported schema keywords are ignored, never guessed at."
+  },
+  "observations": [
+    {
+      "id": "pattern",
+      "schema": {
+        "type": "string",
+        "pattern": "^approved$"
+      },
+      "output": "\"denied\"",
+      "configError": null,
+      "eval": {
+        "score": 1,
+        "passed": true,
+        "detail": {
+          "violations": [],
+          "threshold": 1
+        }
+      },
+      "playground": {
+        "valid": false,
+        "errors": [
+          "(root) must match pattern \"^approved$\""
+        ]
+      }
+    },
+    {
+      "id": "additionalProperties",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "allowed": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": "{\"unexpected\":1}",
+      "configError": null,
+      "eval": {
+        "score": 1,
+        "passed": true,
+        "detail": {
+          "violations": [],
+          "threshold": 1
+        }
+      },
+      "playground": {
+        "valid": false,
+        "errors": [
+          "(root) must NOT have additional properties"
+        ]
+      }
+    },
+    {
+      "id": "minItems",
+      "schema": {
+        "type": "array",
+        "minItems": 2
+      },
+      "output": "[]",
+      "configError": null,
+      "eval": {
+        "score": 1,
+        "passed": true,
+        "detail": {
+          "violations": [],
+          "threshold": 1
+        }
+      },
+      "playground": {
+        "valid": false,
+        "errors": [
+          "(root) must NOT have fewer than 2 items"
+        ]
+      }
+    },
+    {
+      "id": "oneOf",
+      "schema": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "output": "true",
+      "configError": null,
+      "eval": {
+        "score": 1,
+        "passed": true,
+        "detail": {
+          "violations": [],
+          "threshold": 1
+        }
+      },
+      "playground": {
+        "valid": false,
+        "errors": [
+          "(root) must be string",
+          "(root) must be number",
+          "(root) must match exactly one schema in oneOf"
+        ]
+      }
+    },
+    {
+      "id": "supported-required-control",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "output": "{}",
+      "configError": null,
+      "eval": {
+        "score": 0,
+        "passed": false,
+        "detail": {
+          "violations": [
+            "$: missing required property 'name'"
+          ],
+          "threshold": 1
+        }
+      },
+      "playground": {
+        "valid": false,
+        "errors": [
+          "(root) must have required property 'name'"
+        ]
+      }
+    }
+  ],
+  "scope": "Pure compiled function calls; no model, provider, database or real customer data. Different declared schema contracts; divergence is not proof that eval violates its disclosed subset."
+}

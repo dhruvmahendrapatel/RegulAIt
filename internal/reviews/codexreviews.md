@@ -4,12 +4,12 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
-- **Current assessed source:** `9797d6f42798689d896103b9e9ce04278e01a4ad` (main, 2026-11-21).
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; branch refreshed by merge with main `6804b562b2f697361a2c8cc7fba5b56a91c84f8d`. Iteration-2 UI and schema-validator functions are unchanged between these snapshots. New memory-governance behavior from main was not audited by this iteration.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21; sources and limits are below.
-- **Deep audit:** first source and browser iteration is published below; full per-page/per-role/per-function completion remains explicitly tracked. The current route census contains 150 screens. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **Deep audit:** two iterations, 36 feedback cards, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The current route census contains 150 screens. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -43,7 +43,7 @@ Use the draft review PR for notifications and discussion, then fold the reasoned
 
 ## Primary-source research for the continuing regulAIt review
 
-Research date: **2026-11-21 UTC**. This is guidance for evaluating the product, not evidence that the product passes these checks. Public documentation was fetched with an HTTP client; no vendor account, vendor UI or live integration was tested. No dependency or product change is proposed here.
+Research date: **2026-11-21 UTC**. This is guidance for evaluating the product, not evidence that the product passes these checks. Public documentation was fetched with an HTTP client; no vendor account, vendor UI or live integration was tested. No dependency was installed and no product change was implemented during this review.
 
 ### 1. Source-backed review principles
 
@@ -521,9 +521,190 @@ Target: `/workspace/codexreviews`, main `9797d6f42798689d896103b9e9ce04278e01a4a
 
 **Not completed here:** visual verification, screen-reader session, all viewport/theme combinations, server-backed role flows, every row-action consumer, every form's dirty-state semantics, all RefusalGuidance paths, full chart canvas accessibility, mobile assistive hardware, all page-specific functions. Findings above are traceable first-pass evidence, not a claim of exhaustive audit completion.
 
+## Deep audit — iteration 2, 2026-11-21
+
+### Recommendations and evidence added this round
+
+Prioritize truthful unknown/error states, recovery without losing work, and record-scoped drafts. Ten new feedback cards below cover account/security tuning and risk/reporting. Seven focused Chromium probes reproduced eight observations: two existing cards (UIW-04/05) and six new cards (ACC-001/003; REV-001/002/004/005). These are mock-browser reproductions, separate from the real-gateway positive controls. F is estimated frequency within the affected workflow, not production incidence; all ten scores exceed the issue-only threshold. No product code was changed.
+
+The full browser rerun passed **7/7 in 8.9 seconds**. Earlier fixture/locator and stopped-preview errors were setup errors, corrected before this final run, not product findings. Safe evidence: [iteration-2 browser observations](evidence/2026-11-21/iteration2-browser.json). The scratch test uses the project's existing Playwright and synthetic contracts; destructive report DELETE was intercepted and refused, and no risk transition or policy toggle was sent.
+
+| Card | Runtime observation | Scope / limitation |
+| --- | --- | --- |
+| UIW-04 | Workflow-list 503 produced “Nothing promotable yet”; no alert was shown. | Populated project/context fixture; does not prove every dependency failure is hidden. |
+| UIW-05 | Escape and reopen lost both key and content of an unsaved context draft. | No save in flight in this probe; pending-save dismissal remains source-only. |
+| CXR-ACC-001 | Failed step-up-options request left “Getting ready…” and only Cancel; no Retry. | Initial options failure, not a failed proof or already-committed mutation. |
+| CXR-ACC-003 | Failed policy read showed “Not enforced” and “Off by default” with the toggle enabled. | An inline error was also present; the defect is the contradictory policy state and guessed mutation baseline. |
+| CXR-REV-001 | `schedulerPresent:true` still showed “Nothing in this deployment fires these.” | Configured state, not measured scheduler health. |
+| CXR-REV-002 | One Delete click immediately sent DELETE with no dialog for a definition with three runs. | Request mocked/refused; no records deleted. Cascades independently established from source. |
+| CXR-REV-004 | Risk A's typed reason remained after expanding risk B. | No transition submitted; no authorization bypass claimed. |
+| CXR-REV-005 | Valid stored workflow-only payload with 17 requested, 12 decided and 5 pending approvals displayed “no summary figures.” | Historical detail reproduced; immediate-result omission remains source-confirmed. |
+
+### Positive controls: preserve useful security rather than switch it off
+
+[Safe role evidence](evidence/2026-11-21/iteration2-roles.json) records an isolated PostgreSQL 17 database and the existing `buildApp` integration seam. Nineteen setup/auth assertions passed: two synthetic accounts changed their initial passwords, enrolled/activated TOTP and completed password-plus-TOTP sign-in; bootstrap authentication after an active administrator returned 401. Authentication requests used Fastify `inject` with real hooks/database, **not browser login forms or a production boot**. Server-issued HttpOnly cookies then seeded separate Chromium contexts for real HTTP gateway operations. No MFA, step-up, grant, role, attribution or audit policy was relaxed. Local database TLS was disabled solely for the isolated fixture.
+
+The admin created a project through the normal UI (201, visible afterward). A project viewer saw the assigned project and populated shared context but no create/edit affordance. Direct project creation and credential inventory returned 403 `admin_only`; direct context writing returned 403 `forbidden`. The admin-page URL explained the missing role clearly. These are positive observations, not additional defects or blanket security approval. They support improving specific broken recovery paths while retaining effective authorization and required MFA. Provider integrations, live IdPs, production startup, browser login accessibility and all other roles remain untested here.
+
+### O-04 counterevidence and research: declared schema contracts matter
+
+[Five pure-function probes](evidence/2026-11-21/iteration2-schema.json) invoked the existing compiled eval scorer and playground validator, with no database/model/customer data. The same pattern, additionalProperties, minItems and oneOf cases scored 1/passed in eval and failed playground validation. Both rejected the supported required-property control. The relevant functions are unchanged at the refreshed main snapshot.
+
+**Counterevidence:** `evalScorerRegistry().json_schema` explicitly says it supports a documented subset and that unsupported keywords are ignored; the eval page exposes the limits. The November-7 finding's behavioral mismatch is real, but its implication of a silently broken full-schema validator is too broad. This review therefore narrows O-04. Do not erase the old finding or silently reinterpret old scores.
+
+Primary-source comparison retrieved November 21 before recommending a compiler change (GitHub repository metadata and the existing package/lockfile were checked; neither candidate was newly benchmarked or admitted):
+
+| Approach | Fit and benefit | Cost / decision |
+| --- | --- | --- |
+| [Ajv](https://github.com/ajv-validator/ajv), MIT; existing gateway pin 8.20.0 plus ajv-formats 3.0.1 | Already integrated in playground; compiled validation, explicit dialect configuration and existing RE2 regex hardening. No new runtime download needed. Repository active, latest inspected push September 6, 2026. | Prefer evaluating reuse of the existing hardened configuration, with shared dependency boundaries checked. Preserve schema/input/regex complexity bounds; a full validator changes historical eval semantics and needs explicit versioning. |
+| [Hyperjump JSON Schema](https://github.com/hyperjump-io/json-schema), MIT | Standards-oriented alternative with dialect/vocabulary support; repository active, latest inspected push November 19, 2026. | A second compiler/dependency is not justified merely by the mismatch. Assess offline reference resolution, bounds, regex behavior, exact pin, tests and THIRD_PARTY coverage before adoption. No dependency was added in this review. |
+
+**Recommendation and reason:** identify the eval dialect prominently and warn or refuse unsupported keywords at configuration time so a valid-looking pasted schema does not imply enforcement of its ignored constraints. If moving to fuller validation, version that scorer/configuration, keep old results attributable to their original semantics and compare both engines over representative fixtures before migration. Reuse a validated compiler with safe regex and offline references instead of independently growing a general validator. F6 × S4 = 24 for users carrying schemas between these two surfaces; production frequency unmeasured. Acceptance: explicit dialect, unsupported-keyword feedback, historical scoring preserved, supported controls consistent, malicious complexity bounded. Claude should challenge whether warning-only versus refusing unsupported new configurations best preserves compatibility. This is a qualified follow-up, not a new claim of a security bypass.
+
+### Account, authentication and tuning — source evidence
+
+#### CXR-ACC-001 — A failed step-up-options request leaves a permanent “Getting ready…” state without Retry
+
+- **Evidence:** `apps/web/src/stepup/StepUpDialog.tsx:75–85` clears options before fetching them and sets only `error` on a non-422 failure. The effect at `:89–93` starts again only for a different prompt ID. The render at `:178–195` displays the error and, while options remain null, still renders `Getting ready…`. The only action available in that branch is Cancel; no options retry exists. Existing passkey/verify failure paths do restart their ceremonies, so the missing path is specifically the initial options read.
+- **Impact and reason:** an admin attempts a legitimate protected operation during a brief backend/network failure. The dialog appears both failed and indefinitely busy, with no way to recover in place. Cancel and repeat can require navigating back and reconstructing the protected change. This is avoidable security friction rather than a reason to disable step-up.
+- **Score:** **F6 × S4 = 24**. Source-confirmed control flow and mock-browser reproduced in iteration 2.
+- **Reproduce:** use an existing working protected-page fixture. Let the initial action return `step_up_required`, then make `POST /v1/auth/step-up/options` return 503. Inspect the error, status text and available buttons after it settles. Verify that no new options request occurs unless the original action is restarted.
+- **Recommendation and tradeoff:** represent options loading, unavailable-method and retryable failure separately. Offer Retry for retryable failures, preserving the non-secret draft and exact pending action; honor rate-limit backoff. A retry obtains a new ceremony, never reuses a spent proof. Do not auto-repeat a protected mutation that may have committed.
+- **Acceptance:** a failed options request does not keep an inaccurate loading status; Retry can recover without losing the caller's draft; Cancel cancels; a successful proof resends the exact action once. Preserve action-bound proof, authorization, CSRF, expiry and audit. Apply BP-03, BP-08 and BP-11.
+- **Claude question:** should this be an explicit state in the existing shared step-up dialog, and which safe API error classes may be retried in place?
+
+#### CXR-ACC-002 — Federated sign-in discards a protected deep link that local sign-in preserves
+
+- **Evidence:** `apps/web/src/App.tsx:190` records the protected pathname and query in login location state. `LoginPage.tsx:115` reads that return target and local sign-in finishes through it at `:152–157`. The broker link at `:373` and enterprise link at `:400` instead hard-code `returnTo=/app`. The backend currently admits only `/app` or `/admin` for OIDC (`apps/gateway/src/auth.ts:2229–2243`) and SAML (`saml.ts:622–640`), so this cannot be fixed by passing the arbitrary pathname from the browser without changing the server contract safely.
+- **Impact and reason:** a reviewer opens a link to a particular task, approval or evidence record, signs in through the organization's required identity provider, then lands at a generic application area. The original task context is lost. This adds navigation and makes SSO feel less usable than the password path.
+- **Score:** **F8 × S3 = 24** among federated deep-link sign-ins. Source-confirmed loss of target; no live identity provider was tested.
+- **Reproduce:** open a protected detail URL with a meaningful query while signed out. Inspect the resulting local return state and federated link. Follow a complete OIDC/SAML sign-in on a sandbox provider and compare final destination with local sign-in.
+- **Recommendation and tradeoff:** retain a validated internal destination in server-owned, expiring OIDC state/SAML correlation, or a comparably bound opaque continuation. Normalize against an explicit same-origin application path policy and recheck access on arrival. Preserve query context where safe. Do not introduce an open redirect, accept external/protocol-relative destinations or weaken nonce/RelayState binding merely to fix navigation.
+- **Acceptance:** local, OIDC and SAML flows return to the same permitted task; expired/invalid continuations use an honest safe fallback; malicious/external destinations are refused. Test a return through forced password/MFA enrollment too. Apply BP-01, BP-04 and BP-10.
+
+#### CXR-ACC-003 — Unread model-rate-limit policy is shown as “Not enforced,” with a live mutation button after failure
+
+- **Evidence:** `apps/web/src/views/admin/governance/ModelRateLimits.tsx:66` sets `enabled` to false when no data exists. The badge and help at `:77–81` then say `Not enforced` and `Off by default`. The toggle at `:85` disables only while loading or mutating; after a failed read it can still propose `enabled: !enabled` from that fabricated baseline (`:91`). The table separately shows its read error. Current storage defaults `modelRateLimitsEnabled` to true (`packages/db/src/schema.ts:5051`), so the off-by-default explanation is also stale for a normally initialized deployment.
+- **Impact and reason:** an admin cannot tell an unavailable policy read from actual relaxed enforcement. They may try to “turn on” something already on, misunderstand whether limits are protecting calls, or interpret an outage as insecure posture. A warning elsewhere in the card does not make a contradictory policy badge true.
+- **Score:** **F7 × S4 = 28** within failed/delayed policy reads. Source-confirmed; runtime verification supplied separately above.
+- **Reproduce:** make `GET /v1/rules/model-rate-limits` return 503, wait for loading to finish, inspect the badge/help/toggle and attempt to change it. Repeat a delayed initial read and a successful response with enforcement true/false.
+- **Recommendation and tradeoff:** display unknown/unavailable until a valid read arrives; keep policy mutations disabled without a current baseline; retry the read. Reuse the existing `OrgSettingsCard`/`useSettleAfterWrite` approach rather than invent another state cache. Explain actual shipped policy and distinguish an explicit audited relaxation. Do not turn enforcement off or weaken limits to reduce friction.
+- **Acceptance:** unknown is never rendered as off; controls cannot invert a guessed baseline; a recovered read accurately unlocks the correct action; a failed post-save refresh locks further writes truthfully. Preserve server-side step-up and enforcement. Apply BP-01, BP-09 and BP-12.
+
+#### CXR-ACC-004 — “Disable MFA” does not explain that a mandatory-policy account will immediately be forced to enroll again
+
+- **Evidence:** Account `MfaCard` offers Disable MFA at `AccountPage.tsx:456–487`, calls `/auth/totp/disable`, toasts `MFA disabled` and refreshes account state. The backend really does disable after proving password plus current code (`auth.ts:1862–1885`); this is not a claim that the endpoint refuses. `/auth/me` recomputes `mfaSetupRequired` for an unenrolled account under the all-users/admins policy (`auth.ts:1631–1643`). `App.tsx:193` then replaces the product with ForcedMfaEnroll. The account view does not explain this consequence before asking for both factors.
+- **Impact and reason:** a user attempting to reduce friction or replace an authenticator gets a success message followed by another compulsory enrollment journey. The product appears contradictory: it offers “off” but the role policy will not let the user continue that way. Re-enrollment may be appropriate; its meaning should be visible before beginning.
+- **Score:** **F5 × S3 = 15** for users under mandatory MFA attempting factor maintenance. Source-confirmed transition; a real role/session journey still needs execution.
+- **Reproduce:** use an enrolled admin while policy requires admins, disable TOTP with valid factors and observe the refresh. Repeat for an optional-policy member to distinguish legitimate disable from mandatory replacement.
+- **Recommendation and tradeoff:** expose the caller's effective MFA requirement as a safe derived self-service fact; clearly distinguish an allowed optional disable from replacing a required authenticator. Explain the re-enrollment outcome and preserve a route to complete it. Reuse existing proof/enrollment paths and keep the mandatory gate; do not solve this by relaxing the organization policy. Do not expose full administrative settings to members solely to display this fact.
+- **Acceptance:** each role sees the true outcome before starting; factor replacement is recoverable; mandatory accounts cannot continue unenrolled; optional-policy users can perform the permitted disable. Apply BP-01, BP-08 and BP-09.
+
+#### CXR-ACC-005 — Sign-in-method discovery failures silently degrade to password/API-key choices with no retry explanation
+
+- **Evidence:** `LoginPage.normalizeOptions` returns local enabled plus API-key exchange when data is absent (`LoginPage.tsx:66–74`). The page fetches options once with retry false and passes `optionsQ.data` to that normalizer (`:139–145`); neither query failure nor loading is represented in the method chooser. The UI can show “Sign in with email” and key exchange after a 503 while the configured SSO methods are absent. A login refusal can later reveal SSO-only policy, but cannot recover the missing IdP list itself.
+- **Impact and reason:** during a brief sign-in-options outage, an SSO user is directed toward credentials that their deployment may prohibit. This is not an authentication bypass—the server remains authoritative—but it is confusing and can strand the user. The historical compatibility fallback is intentional and remains useful when an older gateway genuinely lacks discovery.
+- **Score:** **F5 × S3 = 15** within sign-in-method discovery failures. Source-confirmed fallback; not a claim that all deployments need an IdP or that fallback password login is inherently unsafe.
+- **Reproduce:** signed out, return 503 or hold `/auth/sign-in-options`; observe the method chooser and absence of discovery Retry. Compare with a valid SSO-only response and an explicitly unsupported endpoint response.
+- **Recommendation and tradeoff:** distinguish temporary discovery failure, loading and proven legacy capability. Offer a clear method-discovery retry and retain the narrow supported legacy path with honest degraded wording. Do not show unverified settings as authoritative or expose a broad public configuration inventory. Preserve uniform credential errors and break-glass restrictions.
+- **Acceptance:** users can recover the IdP list without reloading or attempting the wrong credential path; local-only/legacy deployments still have a usable supported route; server policy remains decisive. Apply BP-01, BP-03 and BP-05.
+
+### Account patterns to preserve
+
+- Login, forced-password change and the main MFA step use password-manager `autocomplete` and paste-compatible input. Login deliberately accepts username or email, uses uniform incorrect-credential errors, and supplies a clear “Back to sign-in” at the TOTP step.
+- Forced password change follows the server's `passwordChangeRequiresCurrent` fact instead of asking a key-origin recovery user for a password they were never given. The account identity is visible before setup.
+- PasskeysCard and SessionsCard already distinguish pending/error reads from zero counts and retain inline errors plus Retry. Do not reintroduce guessed “none” values when copying these patterns.
+- SsoPage SignInStatus correctly treats failed policy/provider reads as unavailable with Retry, rather than asserting zero providers or relaxed policy.
+- OrgSettingsCard already supports per-setting old→new review, consequence explanations, conditional action-bound step-up, partial updates, single-flight writes and locked stale baselines after uncertain refresh. This is the pattern to reuse for policy tuning.
+- Step-up tuning already exposes a per-action checkbox set and a bounded one-use proof lifetime. Raising that lifetime does **not** mean “remember me” or reduce the number of required ceremonies: grants remain single-use and bound to one action. Prefer clear context, accessible passkeys and recoverable proof flows before broader exemptions.
+- AI policy acknowledgement allows “Not now” to reach other work while preserving server refusal of governed calls and a visible outstanding-policy banner; this is a useful example of reducing UI interruption without bypassing the actual control.
+
+### Account source coverage and limits
+
+Source/functions inspected: LoginPage normalizeOptions, submitPassword, submitTotp, submitKey, finish, federated method links and LinkAccount; ForcedPasswordChange submit/render; ForcedMfaEnroll enroll/activate/render; StepUpDialog begin/options/verify/passkey/SSO polling/render; AccountPage anchors, PasswordCard, MfaCard and SessionsCard; PasskeysCard add/revoke/sorting/status; AccountSubpages routing; SsoPage tabs and SignInStatus; ModelRateLimits body builder/read state/toggle/create/delete; OrgSettingsCard save/retry/stale baseline and SettingRow/SettingControl; relevant orgSettingSpecs step-up entries; AcknowledgeGate policy-list/query and interruption contract; backend auth/mfa/current-user/OIDC return-target and SAML start constraints.
+
+Cross-checked server facts are cited above. This source contribution did not perform runtime checks; the separate parent-run reproductions are listed above. No real identity provider, passkey device, OTP authenticator, screen reader, session-expiry race, API-key exchange or live permission transition was executed. Member/admin/optional-MFA/mandatory-MFA cases remain separate runtime acceptance work. Root should record actual reproductions independently and narrow/refute any card contradicted by them.
+
+### Risk, evidence and reporting — source evidence
+
+#### CXR-REV-001 — Report schedules are described as manual even when the gateway reports an enabled scheduler
+
+- **Status/type:** source-confirmed inconsistent status and operational instructions. **F8 × S4 = 32**, Medium.
+- **Evidence:** `apps/web/src/views/admin/cost/ReportsPage.tsx:51–55` models `schedulerPresent`, but its Schedules help and note at `:311–319` always say an operator/external cron is necessary and “Nothing in this deployment fires these.” The successful add message at `:342` repeats that nothing drives it automatically, and never-generated schedules are labelled “never — nothing drives this” at `:390`. In contrast, `apps/gateway/src/reporting.ts:1071` reports `resolveSchedulerConfig().enabled`; `apps/gateway/src/scheduler-jobs.ts:189–200` registers and runs `runDueReportSchedules`. `scheduler.test.ts:1054` contains a wired-generation test (not executed here). The backend's older `/v1/reports/schedules` note at `reporting.ts:756` is also stale.
+- **Why it matters:** an administrator cannot tell whether to wait, repair the scheduler or configure an external driver. Correctly configured automation is presented as absent. The wrong advice creates unnecessary operational work and can lead to redundant external scheduling; this is not a claim that duplicate runs were reproduced.
+- **Reproduction:** populate `/admin/reports` with one definition and enabled schedule, return `schedulerPresent:true` in `/v1/reports/overview`, and inspect the schedule note, new-schedule success message and “never” label. Compare with `false` and with actual last-run information. The interface does not branch on the supplied capability.
+- **Recommendation:** use the server-reported driver state consistently. Say “scheduler enabled” when configured, while showing last success/overdue/unknown health separately—enabled is not proof of health. Keep manual Run due now available where authorized. When the scheduler is off, explain the operator/cron alternative. Reuse the existing scheduler; do not add another timer or weaken leases.
+- **Acceptance:** enabled/off/unavailable/never-run/overdue fixtures produce different truthful explanations; successful schedule creation describes the actual driver. A running scheduler's last generation is visible. Unavailable health never appears healthy merely because the feature is enabled.
+- **Claude countercheck:** determine whether the endpoint should expose configured state plus live sweep health, and whether stale API note strings have additional consumers.
+
+#### CXR-REV-002 — Deleting a report definition immediately deletes its generated history without an upfront consequence review
+
+- **Status/type:** source-confirmed destructive-action usability gap. **F3 × S6 = 18**, Medium; consequence is high even though deletion is less frequent.
+- **Evidence:** `ReportsPage.tsx:284–294` sends DELETE directly on the row button, without confirmation or a disclosure of dependent records. The page already knows `d.runCount` and `d.schedules`. `apps/gateway/src/reporting.ts:699–713` deletes the definition and explicitly says in its audit reason that generated runs cascade. `packages/db/src/schema.ts:7226–7228` cascades schedules; `:7249–7251` cascades generated runs. The underlying usage/audit/approval ledgers remain intact; this does not mean the deleted report IDs, stored payloads and signed outputs can be recovered as the identical historical artifact.
+- **Why it matters:** “Delete” in a definitions table can reasonably be read as stopping/replacing a template. One mistaken click also removes report history and schedules. An operator discovers the full consequence only after the delete, from server/audit knowledge. Recomputing a report later is not the same as retaining the original run and its generation identity.
+- **Reproduction:** use a synthetic definition with existing runs and an enabled schedule. Observe that one Delete click sends the request immediately and no consequence dialog is offered. A browser proof should mock DELETE; this assessor did not delete any database record.
+- **Recommendation:** use the existing confirmation primitive for definitions with stored runs or active schedules, naming the definition, affected counts and retention consequence before final submission. A harmless unused draft need not gain the same ceremony. Separately discuss whether archiving a definition while retaining generated evidence is the appropriate product policy; do not implement a parallel lifecycle or retention bypass from this review.
+- **Acceptance:** consequential deletion cannot happen on the first accidental click; Cancel sends no request; the confirmation's data reflects current authorized server state; simple reads and ordinary generation gain no extra prompts. Existing permission/audit checks remain.
+- **Claude countercheck:** confirm the intended evidence-retention policy before treating template deletion and report-history deletion as inseparable requirements.
+
+#### CXR-REV-003 — The risk register silently stops at the newest 200 risks and offers no way to reach older records
+
+- **Status/type:** source-confirmed bounded-list completeness/discoverability defect. **F7 × S5 = 35**, Medium, conditional on estates exceeding 200 visible risks.
+- **Evidence:** `apps/gateway/src/risks.ts:913–954` accepts status/category/useCaseId filters, orders newest first and applies `.limit(200)` at `:938`, but returns no total, hasMore or continuation. `RisksPage.tsx:134–137` always requests plain `/v1/risks`. `:454–470` renders that array as the entire Register with no pagination, truncated-result warning, status/category filtering or search. A known `?riskId=` can open an out-of-list detail at `:499–507`, but users must already know the missing ID.
+- **Why it matters:** an older unresolved risk can disappear behind 200 newer closed records. The screen looks complete and offers no normal recovery path to the omitted risk. This impairs governance work and can disagree with full-ledger trust totals. The fix is not removing the server bound.
+- **Reproduction:** a valid synthetic dataset containing 200 recent closed risks and one older open risk. List normally as the authorized owner/admin: the old open risk is absent. There is no next page or visible filter to retrieve it, although a direct detail ID still works.
+- **Recommendation:** reuse the existing ADR-0226 bounded list contract with totals/hasMore, paging and server-side status/category filters; keep the authorization predicate and stable ordering. Make truncation or partial results visible until paging exists. Preserve the direct-link detail fallback.
+- **Acceptance:** 201+ visible risks remain reachable through normal browsing/filtering; filtering for open risks reveals the old risk; totals use the same permission/filter scope; unauthorized records never contribute to counts or pages. Keep query/body bounds.
+- **Claude countercheck:** if 200 is a deliberate product ceiling, document/enforce that at creation with a clear user contract; a silent display cap is not that policy.
+
+#### CXR-REV-004 — A transition reason typed for one risk is silently reused when another risk is expanded
+
+- **Status/type:** source-confirmed record-context/draft scoping defect. **F5 × S4 = 20**, Medium.
+- **Evidence:** `RisksPage.tsx:165` has one page-wide `transitionReason`. The expandable row toggle at `:467–470` changes only `openId`. Inputs at `:246–250` read that same draft, and transition requests at `:258–260` send it for the newly selected risk. Only successful transitions clear it (`:262`); changing records does not. `risks.ts:1090–1138` checks the correct risk and requires a reason, so this is not an object authorization bypass.
+- **Why it matters:** a user starts documenting why risk A is mitigated, opens risk B for comparison and sees the same explanation ready to submit for B. Accidentally recording the wrong rationale degrades an audit trail. The request still targets B correctly; this finding is about the user-entered explanation being scoped incorrectly.
+- **Reproduction:** return two open risks. Click `Details: A`, fill “Transition reason — required and audited”, then click `Details: B`. The reason remains and B's transition buttons are enabled. No real transition is needed to observe the problem.
+- **Recommendation:** keep an in-memory authorized draft per risk, or clear/reset with an explicit record-switch policy that preserves the user's work rather than silently discarding it. Bind a pending mutation to its risk identity. Do not add confirmation to every ordinary expand/collapse or relax the server's reason requirement.
+- **Acceptance:** A's draft never becomes B's reason by default; returning to A preserves its intended draft where appropriate; a successful mutation clears only that risk's submitted draft; another row cannot inherit a pending action's explanation.
+- **Claude countercheck:** if repeated reasons are an intended bulk workflow, expose that explicitly as an intentional scoped action rather than accidental state reuse.
+
+#### CXR-REV-005 — Approval-throughput figures are generated and stored, but neither report view renders them
+
+- **Status/type:** source-confirmed missing data presentation. **F6 × S4 = 24**, Medium.
+- **Evidence:** `packages/shared/src/reporting.ts:794–796` includes workflow in the default executive/team sections; `apps/gateway/src/reporting.ts:281–315` computes requested/decided/pending approval counts and median decision minutes. `ReportsPage.tsx:82` types that workflow data, but its fresh result renderer at `:414–494` handles spend, governance and controls only. `ReportsHistory.tsx:32–71` similarly extracts only spend/governance/controls. It can say “This run's stored report carries no summary figures” when a valid payload has only a workflow section. CSV serialization does include workflow (`shared/reporting.ts:694–700`).
+- **Why it matters:** a user generating or reopening an executive report cannot inspect its approval throughput through the page, although the reporting surface promises approval throughput and the server already calculated the figures. Exporting raw data is an alternative, not equivalent to readable report coverage.
+- **Reproduction:** a valid generated/stored payload whose workflow section has distinctive nonzero requested, decided and pending counts plus a median, with other sections absent. Open both the immediate report and run-history detail. The workflow figures are omitted; the stored view can incorrectly claim there are no summary figures.
+- **Recommendation:** share one defensive stored-payload renderer between fresh and historical views and display the existing workflow section with explicit units and time window. Render unavailable medians as unmeasured, never invented zero. Use the frozen payload; do not recompute current values for a historical report.
+- **Acceptance:** workflow-only and normal executive fixtures show the exact recorded counts/median; null median remains unmeasured; exports and on-screen fields agree; current permissions/scoping and audit properties remain server-enforced.
+- **Claude countercheck:** verify whether the omission was intentionally deferred; if so the page must disclose the narrower on-screen view and the accepted follow-up should be explicit.
+
+### Risk/evidence patterns to preserve
+
+- Trust dashboard explicitly distinguishes unmeasured from zero, separates accepted/transferred/avoided risks, and explains evidence coverage is not a compliance or trust score. Its heatmap and radar supply textual accessible names containing their values; do not report a color-only chart defect from a screenshot alone.
+- Trust monitor distinguishes loading, unavailable, not-evaluated and active states; an acknowledged alert remains active rather than turning green.
+- BOM verification explains the deployment trust root, independent offline verification, recorded-key limitations, format and size bounds. Upload changes clear prior verification results; downloads are saved after transport checks. Those are appropriate safeguards, not gratuitous friction.
+- Framework import proposals preview incoming/current text, preserve edited controls by default and make activation a separate action. The user can deliberately select source text; “review waiting” does not claim the pack is active.
+- Pack attestations reset only after `useAction.run` returns true (`PackRecords.tsx:154–163`), preserve drafts on failures and label the result attested rather than satisfied. This is a good pattern for the iteration-1 threshold/draft defects.
+- Report scope is shown explicitly; stored runs use their recorded entitlement scope. No evidence here supports weakening report scope checks.
+
+### Risk/evidence source coverage and limits
+
+Read sections/functions (not a blanket whole-file claim):
+
+- `TrustDashboardPage.tsx`: trustQuery, formatCoverage, reading guide, alerts state, TrustReportView totals/meta/drilldown, CoverageCard modes, Radar geometry/aria and Heatmap accessible text, TrustSnapshotCard.
+- `RisksPage.tsx`: row/detail types, statusTone/kindTone/measuredCells, risk/list/detail/library queries, seedFromLibrary, refreshAll, renderDetail, ordinary transitions, registration form, list and deep-link fallback.
+- `ReportsPage.tsx`: definition/schedule/generated-report contract, overview/history empty-state logic, definition creation/generation/deletion, scheduler card and actions, immediate result renderer, record-dialog navigation/focus handoff.
+- `ReportsHistory.tsx`: defensive obj/num parsing, ReportPayloadView, ReportRunDetail/export links, ReportDefinitionDetail and ReportRunsCard filter/header setup.
+- `BomEvidencePanel.tsx`: Digest/exportUnavailableText, VerifyResult trust/readability, OfflineVerifyNote, BomVerifyPanel file/result/error lifecycle, SnapshotDetail verify/download actions and capability checks (selected portions; not all subject/list hooks).
+- `FrameworkImportsPage.tsx`: sourceState, changedParts, TextSide/TextPair, ProposalDrawer preview/selection/action/error sections (selected portions, not full source list/approval routes).
+- `CompliancePacksPage.tsx`: pack queries, create/seed/activate/evaluate/diff handlers and control buttons (selected sections).
+- `PackRecords.tsx`: PackDetailCard labels and tables; AttestationForm submit/reset path and form controls.
+- Backend cross-checks: reporting overview/delete/generation/scheduler note, schema definition foreign keys, scheduler wired report job/test, risk list/transition routes, shared reporting section defaults/CSV serialization. Existing source/tests were read, not executed.
+
+Not completed by this assessor: browser reproduction, screen-reader use, real integration/provider execution, risk acceptance/treatment subforms in depth, every compliance-profile/privacy/infra ledger page, every dashboard/report format, report-download transport verification, and all role/scale/race paths. Root can promote confidence only after matching runtime evidence; these source observations must not be mislabeled as completed live tests.
+
 ## Claude/Codex discussion ledger
 
-Each row below is initially **reported**, not accepted, assigned or fixed. Claude should add its source-based response and counterevidence in the review PR or this file, then Codex folds the reasoned outcome into the card. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
+Each row below is initially **reported**, not accepted, assigned or fixed. At this iteration, no Claude response has been received on the review PR; Codex has not inferred agreement from silence. Claude should add its source-based response and counterevidence in the review PR or this file, then Codex folds the reasoned outcome into the card. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
 
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
@@ -539,8 +720,8 @@ Each row below is initially **reported**, not accepted, assigned or fixed. Claud
 | UIW-01 | mock-browser + source | Awaiting response | Reported; no fix claimed |
 | UIW-02 | mock-browser + source | Awaiting response | Reported; no fix claimed |
 | UIW-03 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIW-04 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIW-05 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
+| UIW-04 | mock-browser + source (iteration 2; qualified scope above) | Awaiting response | Reported; no fix claimed |
+| UIW-05 | mock-browser + source (iteration 2; qualified scope above) | Awaiting response | Reported; no fix claimed |
 | UIW-06 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
 | UIW-07 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
 | UIW-08 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
@@ -553,6 +734,17 @@ Each row below is initially **reported**, not accepted, assigned or fixed. Claud
 | UIS-07 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
 | UIS-08 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
 | UIS-09 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
+
+| CXR-ACC-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-ACC-002 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
+| CXR-ACC-003 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-ACC-004 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
+| CXR-ACC-005 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
+| CXR-REV-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-REV-002 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-REV-003 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
+| CXR-REV-004 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-REV-005 | mock-browser + source | Awaiting response | Reported; no fix claimed |
 
 ### Coverage — every page and function is a tracked goal, not a blanket completion claim
 
@@ -646,7 +838,7 @@ Target: main `9797d6f42798689d896103b9e9ce04278e01a4ad`. Original: `internal/rev
 | O-01 | Valid and partially still open; original counts and pin wording need update | Exact-name scan of current dependency manifests versus THIRD_PARTY text finds18 gateway names absent (AWS/Azure/Google cloud SDKs, @fastify/rate-limit, node-saml) and web @tanstack/react-query/react-dom absent. This is a textual spot check, not an SPDX/parser-complete audit. Some originally missing rows (e.g. zod/Ajv) were added. No dedicated manifest-to-THIRD_PARTY completeness preflight was found. The db doc's phrase exact devDependency versus manifest caret is misleading, but frozen pnpm-lock exact resolution is a valid pin; a caret alone is not evidence builds float. |
 | O-02 | Replacement debt remains; one factual premise now false | `ADR-0176:226–228` still lists all three open; retry engine remains handwritten, `shared/tracing.ts:836` builds trace OTLP JSON manually, scheduler.ts still owns leases and says it is not a distributed queue. But current gateway manifest **does contain** @opentelemetry/otlp-transformer0.223.0 and pg-boss12.38.2. They serve metrics-otlp.ts and workflows-queue.ts, respectively; their presence does not mean trace encoding/scheduler migration is done. No cockatiel manifest entry found. Reassess fit and retain retry/governance/lease semantics rather than assuming mere installation completes replacement. |
 | O-03 | Valid duplication; partly improved; replacement must preserve formats | Shared onboarding.ts:610 and reporting.ts:737 still implement separate parsers. Shared billing.ts:494–501 still writes CSV manually (the report's gateway billing path is stale/wrong for that writer). config-versions.ts:987 still has stableStringify. Several cited gateway copies are no longer present. Reuse csv-parse/stringify where compatible; do not blindly replace persisted evidence/hash serialization with JCS—prove byte compatibility or version/migrate the format. |
-| O-04 | Valid, still open, concrete behavioral mismatch | `shared/evals.ts:589–642` checks only a subset: type/enum/min/max/length/required/properties/items. It ignores pattern, additionalProperties, minItems and composition/$ref. `playground.ts:93–121` compiles with full Ajv and RE2 regex engine. A string violating a schema's pattern can pass evals and fail playground. A common validated dialect/compiler is the right direction, with safe regex and schema complexity bounds retained. |
+| O-04 | **Narrowed in iteration 2: real divergence, disclosed subset contract** | Pure-function probes confirm eval passes/playground rejects four unsupported-keyword cases. However, the scorer registry explicitly documents the subset and ignored keywords, and the UI displays its limits. This is not proof of a hidden full-schema guarantee or a violation of the declared eval contract. See iteration 2 for the comparison, versioning risk and qualified recommendation. |
 | O-05 | Sound documentation conflict; not proof of illegal shipment | ADR0176 still has no GCC-runtime/libquadmath carve-out; ADR0187:1285–1287 and2531 explicitly record the owner's accepted runtime exceptions. Clarify policy precedence/exception scope rather than treating Boost BSL1.0 as Business Source License or declaring the whole distribution noncompliant. This assessment is not legal advice or a fresh licence admission. |
 
 Most useful still-current engineering actions: unify JSON Schema validation (O04); close third-party inventory coverage (O01); scope the three known replacement debts (O02); reduce contract duplication (C01). Remove already-fixed migration/census work from the current backlog. Correct C05's fixture false positive before using report totals.

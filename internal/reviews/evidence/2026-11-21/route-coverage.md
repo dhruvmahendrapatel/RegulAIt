@@ -4,7 +4,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 
 | Route | Session fixture | Axe light/dark | Layout768–1920 | Error/loading | Deeper page feedback |
 | --- | --- | --- | --- | --- | --- |
-| `/login` | public | checked | checked | public: not tested | full task/roles pending |
+| `/login` | public | checked | checked | public: not tested | ACC-002/005 source; API authentication separately tested, login UI pending |
 | `/f/:token` | public | checked | checked | public: not tested | full task/roles pending |
 | `/trust` | public | checked | checked | public: not tested | full task/roles pending |
 | `/audit` | public | checked | checked | public: not tested | full task/roles pending |
@@ -30,15 +30,15 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/workflows/:instanceId` | signed-in | checked | checked | checked | UIW-07/08; check matching detail component |
 | `/inbox` | signed-in | checked | checked | checked | UIW-06; source pass |
 | `/inbox/annotations/:itemId` | signed-in | checked | checked | checked | full task/roles pending |
-| `/projects` | signed-in | checked | checked | checked | full task/roles pending |
+| `/projects` | signed-in | checked | checked | checked | Real gateway: admin create201; viewer member-scoped list/create403 |
 | `/projects/:projectId` | signed-in | checked | checked | checked | full task/roles pending |
-| `/projects/:projectId/context` | signed-in | checked | checked | checked | UIW-04/05; source pass |
+| `/projects/:projectId/context` | signed-in | checked | checked | checked | UIW-04/05 mock probes; real viewer read200/write403, content expanded |
 | `/projects/:projectId/context/graph` | signed-in | checked | checked | checked | full task/roles pending |
 | `/context` | signed-in | checked | checked | checked | full task/roles pending |
 | `/spend` | signed-in | checked | checked | checked | full task/roles pending |
-| `/account` | signed-in | checked | checked | checked | full task/roles pending |
-| `/account/sessions` | signed-in | checked | checked | checked | full task/roles pending |
-| `/account/passkeys` | signed-in | checked | checked | checked | full task/roles pending |
+| `/account` | signed-in | checked | checked | checked | ACC-004 source; factor-replacement runtime pending |
+| `/account/sessions` | signed-in | checked | checked | checked | Source status/revoke flow; device/session races pending |
+| `/account/passkeys` | signed-in | checked | checked | checked | Source enrollment/revoke flow; real authenticator pending |
 | `/incidents` | signed-in | checked | checked | checked | full task/roles pending |
 | `/incidents/:incidentId` | signed-in | checked | checked | checked | full task/roles pending |
 | `/feedback` | signed-in | checked | checked | checked | full task/roles pending |
@@ -53,12 +53,12 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/provisioning` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/group-mappings` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/virtual-keys` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/credentials` | signed-in | checked | checked | checked | CXR-ADM-007/008; source pass |
+| `/admin/credentials` | signed-in | checked | checked | checked | CXR-ADM-007/008 source; real viewer API403 and explained UI denial |
 | `/admin/agent-credentials` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/workload-identities` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/workload-identities/identities` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/workload-identities/:identityId/proposals` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/rules` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/rules` | signed-in | checked | checked | checked | ACC-003 mock-browser + source; no policy mutation sent |
 | `/admin/simulation` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/abac-policies` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/guardrails` | signed-in | checked | checked | checked | CXR-ADM-003–006; sample mock probe |
@@ -80,14 +80,14 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/governance/literacy` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/vendors` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/vendors/questionnaires` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/risks` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/risks` | signed-in | checked | checked | checked | REV-003 source scale cap; REV-004 mock-browser draft scoping |
 | `/admin/inventory` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/certification` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/recommendations` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/sod` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/posture` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/redteam` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/reports` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/reports` | signed-in | checked | checked | checked | REV-001/002/005 mock-browser + source; destructive request refused |
 | `/admin/prompt-versions` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/approvals` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/review-workbench` | signed-in | checked | checked | checked | full task/roles pending |
@@ -151,6 +151,6 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/data-key` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/scheduler` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/enforcement-posture` | signed-in | checked | checked | checked | CXR-ADM-009; source pass |
-| `/admin/execution` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/execution` | signed-in | checked | checked | checked | ACC-001 step-up options503 mock-browser; no successful resume |
 | `/admin/setup` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/first-run` | signed-in | checked | checked | checked | full task/roles pending |
