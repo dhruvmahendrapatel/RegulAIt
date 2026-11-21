@@ -1,0 +1,2 @@
+<!-- fold: pending -->
+- **E49 pipeline runtime follow-ups (ADR-0232 As built, E49 slice 1):** triggers (schedule, webhook, PM event; §12 slice 6); packages, deployments and run-as owners (slice 2); calls, control-flow and data steps (slices 3, 4, 7); `pipeline_run_id`/`pipeline_step_id` on `usage_events`; the step-row lease queue and retries (slice 5); the pipeline runs and run detail screens (#453).

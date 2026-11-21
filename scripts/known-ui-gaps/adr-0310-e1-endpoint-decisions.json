@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0310",
+  "lane": "E1",
+  "tracking": "ADR-0310 addendum (lane E1): API-only; the session and tamper views are requested on #453 (Governed Designer). raised under the lane E1 brief rule 3",
+  "gaps": {
+    "GET /v1/endpoint-decisions/sessions": "lists coding-agent sessions seen by the endpoint hook, flagging permission-bypass sessions (--dangerously-skip-permissions, --yolo) and saying which agents report no mode",
+    "GET /v1/endpoint-decisions/tamper": "per device user, the latest state of each managed settings and hook file and whether it changed or lost its hook"
+  }
+}

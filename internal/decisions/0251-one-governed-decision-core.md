@@ -454,8 +454,9 @@ Closes review #715 finding 4 ("no admin routes yet"). `apps/gateway/src/resource
   writes, and model limits stay in `model_rate_limits`, one fact in one place).
 - **Path.** Under `/v1/rules/resource/…` rather than `/v1/rules/resource-…`, so the SPA's generic one-segment
   `/v1/rules/${kind}` calls are not read by the route census as reaching these routes.
-- **UI.** No screen in this lane: the six writes, two lists and two list exports are `KNOWN_UI_GAPS` (main's ceiling
-  plus these ten) and the two removals are `DELIBERATELY_API_ONLY`, all tracked on #453 for the design builder.
+- **UI.** No screen in this lane: the six writes, two lists and two list exports are known UI gaps
+  (`scripts/known-ui-gaps/adr-0251-l1-resource-rules.json`) and the two removals are `DELIBERATELY_API_ONLY`, all
+  tracked on #453 for the design builder.
 - **Tests.** `zz-adr0251-resource-rule-routes.test.ts` (admin only; create, list, export, tighten, loosen and delete
   with the step-up refusal naming the exact change; every refusal reason; the core loads what the routes wrote and
   stops loading a deleted limit); `resource-rules.test.ts` (the rate-limit loosening predicate and the request shapes).
