@@ -9,7 +9,12 @@
 // nothing (a stale entry is a hole someone will later fall through) and on a
 // malformed allow-list or an unreadable report (fail closed, never open).
 //
-//   --kind pnpm-audit   `pnpm audit --json` output; HIGH and CRITICAL count.
+//   --kind pnpm-audit   `pnpm audit --json` output; HIGH and CRITICAL count
+//                       when a patched version exists. One with no patched
+//                       release (`patched_versions` exactly "<0.0.0") cannot
+//                       be acted on: it is reported as NO FIX YET, not gated,
+//                       and counts the first scan after a fix ships (ADR-0184
+//                       addendum 2026-11-17, the same rule as trivy below).
 //   --kind trivy        `trivy image|fs --format json`; HIGH and CRITICAL that
 //                       have a fixed version count (unfixable ones cannot be
 //                       acted on and are reported, not gated).
@@ -65,6 +70,9 @@ class GateInputError extends Error {}
  * `expectClasses` (trivy): Result classes that must be present, so a scan that
  * silently saw nothing (an undetected OS, an unreadable filesystem) fails
  * closed instead of passing as clean. */
+/** pnpm/npm audit's `patched_versions` when no release fixes the advisory. */
+export const NO_PATCHED_RELEASE = "<0.0.0";
+
 export function findingsFrom(kind, report, { expectClasses = [] } = {}) {
   if (report === null || typeof report !== "object") throw new GateInputError("report is not a JSON object");
   if (kind === "pnpm-audit") {
@@ -78,6 +86,9 @@ export function findingsFrom(kind, report, { expectClasses = [] } = {}) {
         id: a.github_advisory_id || String(a.id),
         scope: a.module_name,
         detail: `${a.severity} ${a.module_name} ${a.vulnerable_versions ?? ""} — ${a.title ?? ""} ${a.url ?? ""}`.trim(),
+        // Only the exact "no release is patched" marker counts as unfixed; a
+        // missing or unknown value stays gated (fail closed).
+        ...(a.patched_versions === NO_PATCHED_RELEASE ? { unfixed: true } : {}),
       }));
   }
   if (kind === "trivy") {
@@ -201,6 +212,12 @@ export function evaluate({ kind, report, allowlist, today = isoDay(), expectClas
     }
   });
 
+  const unfixed = findings.filter((f) => f.unfixed);
+  findings = findings.filter((f) => !f.unfixed);
+  for (const f of unfixed) {
+    lines.push(`NO FIX YET (reported, not gated; counts once a patched release exists): ${f.id} — ${f.detail}`);
+  }
+
   for (const f of findings) {
     const idx = entries.findIndex(
       (e) => e.id === f.id && e[scopeKey] === f.scope && (kind !== "sarif" || e.fingerprint === f.fingerprint),
@@ -219,7 +236,7 @@ export function evaluate({ kind, report, allowlist, today = isoDay(), expectClas
     if (!used.has(i)) failures.push(`STALE allow-list entry ${e.id} (${scopeKey} ${e[scopeKey]}) matches no current finding: remove it`);
   });
 
-  lines.push(`${kind}: ${findings.length} finding(s) at the gate threshold, ${entries.length} allow-list entr${entries.length === 1 ? "y" : "ies"}, ${failures.length} failure(s)`);
+  lines.push(`${kind}: ${findings.length} finding(s) at the gate threshold${unfixed.length ? ` (+${unfixed.length} with no fix yet)` : ""}, ${entries.length} allow-list entr${entries.length === 1 ? "y" : "ies"}, ${failures.length} failure(s)`);
   if (failures.length) return { exitCode: 1, lines: [...failures, ...lines, `GATE FAILED (${kind})`] };
   return { exitCode: 0, lines: [...lines, `GATE PASSED (${kind})`] };
 }

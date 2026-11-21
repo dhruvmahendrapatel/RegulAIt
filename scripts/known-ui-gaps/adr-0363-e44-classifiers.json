@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0363",
+  "lane": "E44",
+  "tracking": "ADR-0363 slice 2 (lane E44): the brief is API-only (rule 3); the classifier editor and its review are for the design builder on #453. RAISED for review: the master decides on the PR",
+  "gaps": {
+    "GET /v1/classifiers": "lists the customer classifiers and every version with its lifecycle status (exact-data-match values shown as a count only)",
+    "POST /v1/classifiers": "creates a classifier and drafts its first version (regex, keyword, dictionary or exact-data-match; EDM values hashed on the request, never stored)",
+    "POST /v1/classifiers/:id/versions": "drafts the next version of a classifier",
+    "POST /v1/classifiers/:id/versions/:version/submit": "submits a drafted version to a named reviewer in the approvals queue; it publishes only when approved",
+    "POST /v1/classifiers/:id/retire": "retires a published classifier (removes a control: settings_relax step-up, audited)",
+    "POST /v1/classifiers/test": "dry-runs an unsaved classifier definition against sample text and returns a match count (nothing stored)"
+  }
+}

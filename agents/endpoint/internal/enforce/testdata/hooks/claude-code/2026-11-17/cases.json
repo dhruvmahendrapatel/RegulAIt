@@ -1,0 +1,21 @@
+[
+  {"input": "mcp-managed.json", "policy": "enforce", "want": "none"},
+  {"input": "mcp-managed.json", "policy": "none", "want": "deny"},
+  {"input": "mcp-project-source.json", "policy": "enforce", "want": "deny"},
+  {"input": "mcp-project-source.json", "policy": "audit", "want": "none"},
+  {"input": "mcp-no-provenance.json", "policy": "enforce", "want": "deny"},
+  {"input": "builtin-bash.json", "policy": "none", "want": "deny"},
+  {"input": "bash-allowed.json", "policy": "enforce", "want": "none"},
+  {"input": "bash-ask.json", "policy": "enforce", "want": "ask"},
+  {"input": "bash-ask.json", "policy": "audit", "want": "none"},
+  {"input": "bash-deny-wrapped.json", "policy": "enforce", "want": "deny"},
+  {"input": "bash-unresolved.json", "policy": "enforce", "want": "ask"},
+  {"input": "bash-package-deny.json", "policy": "enforce", "want": "deny"},
+  {"input": "powershell.json", "policy": "enforce", "want": "ask"},
+  {"input": "read-inside.json", "policy": "enforce", "want": "none"},
+  {"input": "read-inside.json", "policy": "none", "want": "deny"},
+  {"input": "read-outside.json", "policy": "enforce", "want": "ask"},
+  {"input": "write-outside.json", "policy": "enforce", "want": "deny"},
+  {"input": "edit-env.json", "policy": "enforce", "want": "deny"},
+  {"input": "bash-path-program.json", "policy": "enforce", "want": "ask"}
+]

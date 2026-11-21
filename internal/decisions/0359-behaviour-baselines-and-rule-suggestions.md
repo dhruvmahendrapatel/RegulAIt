@@ -3,7 +3,7 @@
 - **Status**: Proposed (builder lane E40, 2026-11-17; owner decision 2026-11-17 from the competitor gap audit, Obsidian row 9 and DarkControl row 20)
 - **Date**: 2026-11-17
 - **Index**: Behaviour analytics: per-install baselines, explainable anomaly findings (shadow mode), backtested rule suggestions
-- **Builds on**: lane E15's deterministic detection rules (PR #865, ADR number reserved by that lane), ADR-0049
+- **Builds on**: ADR-0333 (lane E15, deterministic detection rules), ADR-0049
   (robust z-score spend anomalies), ADR-0060 (audit chain), ADR-0015 (deployment modes and data boundary), ADR-0242
   (engine sandbox), ADR-0180 (secure by default), ADR-0176 (open source first), ADR-0200 (engineering guidelines)
 - **Migration**: `pending/behaviour_baselines.sql` (slice 1) and `pending/behaviour_rule_suggestions.sql` (slice 2),
@@ -11,7 +11,7 @@
 
 ## Context
 
-Lane E15 (PR #865) detects risky behaviour with deterministic rules that an admin writes. A rule catches only what
+ADR-0333 (lane E15) detects risky behaviour with deterministic rules that an admin writes. A rule catches only what
 someone thought of. The owner asked (2026-11-17) for a learned layer on top: learn what is normal for each agent and
 user from the customer's own audit trail, show what departs from it, and turn repeated departures into candidate rules
 in E15's format that a human approves.
@@ -67,7 +67,7 @@ a later batch; it is a refactor outside this lane.
 
 ### 3. The baseline
 
-- **Rollup.** A leased cursor over `audit_log.seq` (the E15 detection-sweep pattern) adds each committed row once to
+- **Rollup.** A leased cursor over `audit_log.seq` (the ADR-0333 pattern) adds each committed row once to
   `behaviour_daily_counts` (day, subject, signal, key, count). On first run it replays the retained history from the
   first row, a bounded number of batches per pass. A day is evaluated only once the rollup has reached the chain head,
   so a part-built baseline never produces findings. Its own audit rows (`object_type = 'behaviour_baseline'`) are
@@ -110,7 +110,7 @@ a later batch; it is a refactor outside this lane.
 
 ### 6. Exceptions recorded (ADR-0176 §4)
 
-- The rollup cursor and window code is RegulAIt code (about 100 lines), for the same reason E15's detection ADR
+- The rollup cursor and window code is RegulAIt code (about 100 lines), for the same reason ADR-0333
   gives: the state must be shared across replicas, survive a restart and stay exact against the audit chain. No
   streaming library keeps its state in our Postgres.
 

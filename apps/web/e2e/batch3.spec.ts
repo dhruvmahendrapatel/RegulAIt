@@ -128,7 +128,8 @@ test("MCP methods require audited enablement and a separate real per-user protoc
   expect((await request("/v1/org/settings")).settings.mcpProtocolMethods).not.toContain("resources/list");
   await confirm.getByRole("button", { name: "Save audited change" }).click();
   await expect.poll(async () => (await request("/v1/org/settings")).settings.mcpProtocolMethods).toContain("resources/list");
-  const servers = (await request("/v1/servers")).servers;
+  // ADR-0364: the first-party Robots server (in-process, seeded by migration) serves no protocol methods
+  const servers = (await request("/v1/servers")).servers.filter((s: { transport?: string }) => s.transport !== "first_party");
   expect(servers.length).toBeGreaterThan(0);
   await page.getByLabel("Protocol user").selectOption(ownerId);
   await page.getByLabel("Protocol server").selectOption(servers[0].id);
