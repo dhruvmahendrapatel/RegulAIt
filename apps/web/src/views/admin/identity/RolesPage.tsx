@@ -247,7 +247,7 @@ export default function RolesPage() {
             void act
               .run(
                 () =>
-                  fetchDeleteWithBody(`/v1/roles/${r.id}`, { force: true, reason }),
+                  api.del(`/v1/roles/${r.id}`, { force: true, reason }),
                 "Role force-deleted — holders unassigned, reason audited",
               )
               .then((ok) => {
@@ -259,25 +259,6 @@ export default function RolesPage() {
   );
 }
 
-/** DELETE with a JSON body (the force-delete contract) */
-async function fetchDeleteWithBody(path: string, body: unknown): Promise<void> {
-  const res = await fetch(path, {
-    method: "DELETE",
-    credentials: "include",
-    headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      payload = { raw: text };
-    }
-    throw new ApiError(res.status, payload);
-  }
-}
 
 // ---- grants + holders for the active role ---------------------------------
 
