@@ -1139,7 +1139,8 @@
                 "rule_step_switch",
                 "robot_version",
                 "endpoint_addon_removal",
-                "vendor_agent_control"
+                "vendor_agent_control",
+                "agent_containment"
               ]
             }
           },

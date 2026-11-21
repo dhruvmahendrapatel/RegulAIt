@@ -673,6 +673,12 @@ import {
   vendorAgentControlApprovalLabels,
   type VendorAgentControlDeps,
 } from "./vendor-agent-control.js";
+import {
+  applyContainmentDecision,
+  containmentApprovalLabels,
+  precheckContainmentDecision,
+  registerContainmentRoutes,
+} from "./rogue-containment.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
@@ -4693,6 +4699,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
     );
+    // ADR-0366: what a rogue-agent containment proposal asks the approver to approve
+    const containmentLabel = await containmentApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "agent_containment").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4775,6 +4786,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5283,6 +5295,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0366 — a rogue-agent containment: only an active administrator decides, never the agent's steward
+    if (row.objectType === "agent_containment") {
+      const refusal = await precheckContainmentDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5688,6 +5705,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approver's step-up is spent here, with the move.
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0366: approved = the agent is halted through ADR-0124's halt; denied = declined, it keeps running
+      if (updated.objectType === "agent_containment") {
+        await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6411,6 +6432,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
   // production until slice 1b; both come only through the code-only test seam below
   registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
+  registerContainmentRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);

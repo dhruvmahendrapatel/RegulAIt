@@ -11,6 +11,7 @@ import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exception
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
+import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -826,4 +827,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  // ADR-0366: a rogue-agent containment (proposed, contained, declined, released)
+  [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);
