@@ -659,6 +659,8 @@ export interface RevealedSecret {
   title: string;
   secret: string;
   note?: string;
+  /** how the server keeps it, when not as a hash (an encrypted signing secret, say); replaces the default sentence */
+  stored?: string;
 }
 
 export function RevealCard(props: { reveal: RevealedSecret; onDismiss: () => void }) {
@@ -695,7 +697,7 @@ export function RevealCard(props: { reveal: RevealedSecret; onDismiss: () => voi
           </Button>
         </div>
         <div className={v.faint}>
-          This will not be shown again — the server keeps only a hash of it. {props.reveal.note ?? ""}
+          {props.reveal.stored ?? "This will not be shown again — the server keeps only a hash of it."} {props.reveal.note ?? ""}
         </div>
       </div>
     </Card>

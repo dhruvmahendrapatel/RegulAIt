@@ -29,6 +29,8 @@ export const FEDERATION_KEY_OVERLAP_SECONDS = 600;
 export const federationSourceSubject = (sourceId: string): string => `regulait:discovery-source:${sourceId}`;
 /** the token subject of RegulAIt's own AWS principal (the role it assumes customer roles from, with an external id) */
 export const FEDERATION_AWS_PRINCIPAL_SUBJECT = "regulait:aws-principal";
+/** the `sub` of a token RegulAIt presents for a vendor usage connector (ADR-0322 slice 4a); the customer's role pins it */
+export const vendorUsageConnectorSubject = (connectorId: string): string => `regulait:vendor-usage-connector:${connectorId}`;
 /** the deployment variable naming RegulAIt's own AWS principal (an IAM role ARN trusting the federation issuer) */
 export const AWS_PRINCIPAL_ROLE_ENV = "REGULAIT_AWS_PRINCIPAL_ROLE_ARN";
 
@@ -116,6 +118,14 @@ export function federationUnsupportedReason(kind: string): string | null {
   // bearer flow signs with the connected app's key; Slack takes a stored token. None accepts RegulAIt's OIDC token.
   if (kind === "entitlement_google_workspace" || kind === "entitlement_salesforce" || kind === "entitlement_slack") {
     return "this platform accepts no external OIDC token for a delegated admin read, so a federated credential cannot work; store the read-only key or token in static mode (a relaxation, confirmed with a step-up)";
+  }
+  // ADR-0336: Agentforce reads through Salesforce's JWT bearer flow, signed with the connected app's own key
+  if (kind === "agent_registry_agentforce") {
+    return "Salesforce accepts no external OIDC token, so a federated credential cannot work; store the connected app's private key in static mode (a relaxation, confirmed with a step-up)";
+  }
+  // ADR-0336: an OpenAI Compliance API key and an n8n API key are API keys only; neither vendor federates
+  if (kind === "agent_registry_openai" || kind === "agent_registry_n8n") {
+    return "this platform accepts no external OIDC token, so a federated credential cannot work; store its API key in static mode (a relaxation, confirmed with a step-up, recorded with an unverified scope)";
   }
   return null;
 }

@@ -14,6 +14,7 @@ questions.
 
 | ID | Date | Question | Answer | Applied in |
 |---|---|---|---|---|
+| D-2026-11-20-01 | 2026-11-20 | Add more builders in parallel | Lift rule 15 for E1, E13, E15, E17, E19, E20 and UI-C. Start new lanes E46 (live context graph, PENDING P2), E47 (privacy-ops limits on connector and MCP calls, ADR-0224), E48 (approval-rule matching on Cedar, P8 / ADR-0239) and E49 (pipeline step catalogue and runs, ADR-0232). Add reviewer pairs R5 + S5 and R6 + S6, for 6 pairs in all. Keep lanes running past the 10-session cap | Lanes told 02:38; new sessions 02:36-02:44 |
 | D-2026-11-19-03 | 2026-11-19 | Free-form browsing limits (ADR-0364 §4); session housekeeping | 30-minute maximum run time and a $2 default budget per session (an admin can change it per project, audited). Archive the finished sessions, keep lanes running, and ask the owner questions as popups | E45 told 23:15 |
 | D-2026-11-19-02 | 2026-11-19 | Speed up the build | Computed UI-gaps counter (#1067); lift rule 15 for E2, E7, E16 and UI-B; add reviewers R4 and S4; E45 starts S3 (browser runner) | Lanes told 21:45 |
 | D-2026-11-19-01 | 2026-11-19 | Start lane E45 (Robots, governed browser automation for agents) now, while rule 15 holds? | Yes, as an exception for E45 only: S2 (backend) starts now and goes through the usual code and security review. Every other lane stays paused | E45 told 06:16 |

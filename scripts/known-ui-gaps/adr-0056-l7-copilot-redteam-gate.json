@@ -1,9 +1,0 @@
-{
-  "adr": "ADR-0056",
-  "lane": "L7",
-  "tracking": "ADR-0056 §5 amendment (lane L7): the brief is API-only; the settings card and per-narrator status are for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first",
-  "gaps": {
-    "GET /v1/copilot/redteam-gate": "reads the copilot narrator red-team gate settings and, for one agent, whether it may narrate and which run decided it",
-    "PUT /v1/copilot/redteam-gate": "turns the copilot narrator red-team gate on or off, or changes how long a passing run counts (relaxing is a settings_relax step-up, audited)"
-  }
-}

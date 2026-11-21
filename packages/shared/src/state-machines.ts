@@ -10,6 +10,7 @@ import { INCIDENT_STATUSES } from "./accountability.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
+import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -304,6 +305,34 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
   },
 });
 
+/** `endpoint_device_quarantines.status` (ADR-0333 §6, lane E15). A `quarantine_device` detection response opens a
+ * quarantine `active`: the device's AI tools are refused until it ends. It ends exactly once, either released by an
+ * admin with a step-up (a human decision; widening, so only under the `normal` execution dial) or expired by the
+ * system at `expires_at` (also widening, so also only under `normal`). Both ends are final; a later incident opens a
+ * new quarantine. Same values as `ENDPOINT_DEVICE_QUARANTINE_STATUSES` in @regulait/db. */
+export const ENDPOINT_DEVICE_QUARANTINE_MACHINE = defineMachine({
+  id: "endpoint_device_quarantine",
+  stored: "endpoint_device_quarantines.status",
+  states: ["active", "released", "expired"],
+  initial: ["active"],
+  terminal: ["released", "expired"],
+  transitions: {
+    release: {
+      from: ["active"],
+      to: "released",
+      by: ["admin"],
+      summary: "An admin released the device after a step-up; its AI tools are governed by the normal policy again.",
+    },
+    expire: {
+      from: ["active"],
+      to: "expired",
+      by: ["system"],
+      summary: "The quarantine reached its end time and the execution dial is normal, so it ended on its own.",
+    },
+  },
+});
+export type EndpointDeviceQuarantineState = (typeof ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.states)[number];
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
@@ -595,7 +624,8 @@ export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
 });
 
 /**
- * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule. Proposed `pending_review` with a
+ * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule (a detector suggestion, or since
+ * slice 4d one published decision-table version). Proposed `pending_review` with a
  * named reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
  * `rule_step_switches.status`.
  */
@@ -610,7 +640,8 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
       from: ["pending_review"],
       to: "switched",
       by: ["approver"],
-      summary: "The named reviewer approves; the suggestion is switched in the same transaction.",
+      summary:
+        "The named reviewer approves; the suggestion, or the decision table's published version (slice 4d), is switched in the same transaction.",
     },
     reject: {
       from: ["pending_review"],
@@ -628,8 +659,9 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
     revert: {
       from: ["switched"],
       to: "reverted",
-      by: ["admin"],
-      summary: "An admin reverts the switch; the AI answers every request again. No approval needed.",
+      by: ["admin", "system"],
+      summary:
+        "An admin reverts the switch, or publishing a newer decision-table version reverts a switch of the old one; the AI answers every request again. No approval needed.",
     },
   },
 });
@@ -722,6 +754,53 @@ export const ENDPOINT_ADDON_TARGET_MACHINE = defineMachine({
   },
 });
 
+/** `pipeline_runs.status` (ADR-0232 §3–§5 as built by lane E49 slice 1). A pipeline run is one governed run of one
+ * published workflow-template version (ADR-0341): it never executes anything itself. `start` is recorded in the same
+ * transaction as the workflow instance the governed start path (`startWorkflowInstanceWithTemplates`) created, and
+ * `refuse` when that path refused (nothing ran). The settling events are observed from the instance's own terminal
+ * status: `completed` succeeds, `aborted` cancels, `denied` and `rolled_back` fail. */
+export const PIPELINE_RUN_STATES = ["requested", "running", "succeeded", "failed", "cancelled", "refused"] as const;
+export type PipelineRunState = (typeof PIPELINE_RUN_STATES)[number];
+export const PIPELINE_RUN_MACHINE = defineMachine({
+  id: "pipeline_run",
+  stored: "pipeline_runs.status",
+  states: PIPELINE_RUN_STATES,
+  initial: ["requested"],
+  terminal: ["succeeded", "failed", "cancelled", "refused"],
+  transitions: {
+    start: {
+      from: ["requested"],
+      to: "running",
+      by: ["system"],
+      summary: "The governed workflow start accepted the run and created its workflow instance.",
+    },
+    refuse: {
+      from: ["requested"],
+      to: "refused",
+      by: ["system"],
+      summary: "The governed workflow start refused the run (a retired template, attribution, a missing approver); nothing ran.",
+    },
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "The workflow instance completed.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "The workflow instance was denied at a sign-off or rolled back.",
+    },
+    cancel: {
+      from: ["running"],
+      to: "cancelled",
+      by: ["system"],
+      summary: "The workflow instance was aborted.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -732,6 +811,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
@@ -743,4 +823,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
+  [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
+  // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
+  [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

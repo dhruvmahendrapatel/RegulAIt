@@ -60,6 +60,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0315 (G7): an agent credential audience's admin-typed name
+  [s.agentCredentialAudiences, ["name"]],
   // ADR-0236 (P11): governed MCP bundles
   [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
@@ -180,6 +182,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   // ADR-0314: a vendor agent registry's own name and description for an agent, read-only and bounded at staging
   "agent_registry_records.description": "ingested",
   "agent_registry_records.display_name": "ingested",
+  // ADR-0336: a staged agent's component name (a knowledge source, a skill, a connector) as the vendor reports it
+  "agent_registry_record_components.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
   // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
@@ -192,6 +196,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "ai_incidents.title": "prose_owned_by_adr0102",
   "ai_policy_documents.title": "prose_owned_by_adr0102",
   "audit_log.tool_name": "audit_owned_by_adr0099",
+  // ADR-0315 (G7): a scope map row names the governed tool it maps
+  "agent_credential_audience_scopes.tool_name": "tool_reference",
   "approval_rules.tool_name": "tool_reference",
   "approvals.tool_name": "tool_reference",
   "config_canary_observations.tool_name": "tool_reference",

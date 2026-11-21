@@ -30,7 +30,7 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1160 kB"
+    "limit": "1170 kB"
   },
   {
     "name": "chunk: AccountSubpages",
@@ -73,6 +73,12 @@
     "path": "dist/assets/ConnectorCataloguePage-????????.js",
     "gzip": true,
     "limit": "6.8 kB"
+  },
+  {
+    "name": "chunk: CopilotRedteamGateCard",
+    "path": "dist/assets/CopilotRedteamGateCard-????????.js",
+    "gzip": true,
+    "limit": "5.3 kB"
   },
   {
     "name": "chunk: DataList",
@@ -135,6 +141,12 @@
     "limit": "3.9 kB"
   },
   {
+    "name": "chunk: ExternalSecondFactorDialog",
+    "path": "dist/assets/ExternalSecondFactorDialog-????????.js",
+    "gzip": true,
+    "limit": "3.7 kB"
+  },
+  {
     "name": "chunk: FairnessTestingPage",
     "path": "dist/assets/FairnessTestingPage-????????.js",
     "gzip": true,
@@ -193,6 +205,12 @@
     "path": "dist/assets/PmAndDecisions-????????.js",
     "gzip": true,
     "limit": "5.1 kB"
+  },
+  {
+    "name": "chunk: PortalSecondFactor",
+    "path": "dist/assets/PortalSecondFactor-????????.js",
+    "gzip": true,
+    "limit": "3.4 kB"
   },
   {
     "name": "chunk: ProfileEditModal",
@@ -271,6 +289,12 @@
     "path": "dist/assets/ThemesCard-????????.js",
     "gzip": true,
     "limit": "3.0 kB"
+  },
+  {
+    "name": "chunk: TotpQrCode",
+    "path": "dist/assets/TotpQrCode-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
   },
   {
     "name": "chunk: TrustDashboardPage",
