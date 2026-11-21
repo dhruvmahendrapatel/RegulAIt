@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `openapi.json` | The published OpenAPI 3.0.3 document — the `public-stable` and `public-beta` routes only. | **Generated.** Never edit it. |
 | `VERSIONING.md` | The versioning and deprecation policy in prose. The machine-readable twin is `GET /v1/api/versioning`. | Hand-written; the numbers in it are asserted against the code by `openapi.test.ts`. |
+| `AGENT_CREDENTIAL_VERIFIER.md` | How an outside enforcement point verifies a RegulAIt agent credential offline, including the status list and gateway configuration (ADR-0315). | Hand-written. |
 | `MCP_IDENTITY_ASSERTION.md` | The signed identity assertion RegulAIt can send to an upstream MCP server (ADR-0188 S8), and its OIDC profile (ADR-0210). | Hand-written. |
 | `MCP_UPSTREAM_AUTHENTICATION.md` | How RegulAIt authenticates to an upstream MCP server: the per-server static credential (ADR-0204) beside the identity assertion. | Hand-written. |
 

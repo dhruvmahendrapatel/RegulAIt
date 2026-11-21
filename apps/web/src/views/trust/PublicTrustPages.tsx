@@ -13,6 +13,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import { fmtAt } from "../../api/format";
 import { Badge, Button, Card, EmptyState, ErrorState, SkeletonBlock } from "../../ui/kit";
+import { PortalSecondFactor } from "../../ui/PortalSecondFactor";
+import { isMfaStart, mfaRefusal, type ExternalMfaStart, type MfaOutcome } from "../../ui/portalSecondFactorModel";
 import v from "../views.module.css";
 import t from "./trust.module.css";
 import { FIELD_LABELS, KIND_LABELS, fieldsFor, tokenFromHash, type PublicItem, type PublicTrustCenter } from "./trustModel";
@@ -134,6 +136,8 @@ export function AuditorPortalPage() {
   const [redeeming, setRedeeming] = useState(() => tokenFromHash(window.location.hash) !== null);
   const started = useRef(false);
   const [open, setOpen] = useState<string | null>(null);
+  // ADR-0240: the link is spent and a code opens the session; null once signed in (or when no factor is asked for)
+  const [challenge, setChallenge] = useState<ExternalMfaStart | null>(null);
 
   // redeem the fragment's single-use token once, then clear it from the address bar
   useEffect(() => {
@@ -143,16 +147,33 @@ export function AuditorPortalPage() {
     if (!token) return;
     window.history.replaceState(null, "", window.location.pathname);
     api
-      .post("/v1/auditor/session", { token })
-      .then(() => qc.invalidateQueries({ queryKey: ["public", "auditor"] }))
+      .post<unknown>("/v1/auditor/session", { token })
+      .then((out) => {
+        // 201 is a session; 200 with `mfa` is the second-factor step
+        if (isMfaStart(out)) return setChallenge(out);
+        return qc.invalidateQueries({ queryKey: ["public", "auditor"] });
+      })
       .catch((e: unknown) => setRedeemError(refusal(e)))
       .finally(() => setRedeeming(false));
   }, [qc]);
 
+  /** ADR-0240: send the code; the session cookie comes back on success */
+  const sendCode = async (code: string): Promise<MfaOutcome> => {
+    try {
+      await api.post("/v1/auditor/session/mfa", { code });
+    } catch (e) {
+      if (e instanceof ApiError) return mfaRefusal(e.status, e.payload);
+      throw e;
+    }
+    setChallenge(null);
+    await qc.invalidateQueries({ queryKey: ["public", "auditor"] });
+    return { kind: "signedIn" };
+  };
+
   const session = useQuery({
     queryKey: ["public", "auditor", "session"],
     queryFn: () => api.get<PortalSession>("/v1/auditor/session"),
-    enabled: !redeeming,
+    enabled: !redeeming && challenge === null,
     retry: false,
   });
   const item = useQuery({
@@ -170,6 +191,14 @@ export function AuditorPortalPage() {
         void qc.invalidateQueries({ queryKey: ["public", "auditor"] });
       });
 
+  if (challenge) {
+    return (
+      <Shell>
+        <h1>Auditor access</h1>
+        <PortalSecondFactor start={challenge} submit={sendCode} />
+      </Shell>
+    );
+  }
   if (redeeming || session.isLoading) {
     return (
       <Shell>
