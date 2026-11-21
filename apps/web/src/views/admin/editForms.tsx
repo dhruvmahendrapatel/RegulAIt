@@ -186,7 +186,8 @@ export function RenamePasskeyButton(props: { passkey: { id: string; label: strin
 
 // ---- external scorers ---------------------------------------------------------
 
-// ADR-0220: the three guardrail kinds a trained-detector service serves
+// ADR-0220: the three guardrail kinds a trained-detector service serves; ADR-0352: the local
+// embedder the meaning-based cache tier uses (the server only accepts it claimed alone)
 export const SCORER_KINDS: readonly Choice[] = [
   "llm_as_judge",
   "groundedness_judge",
@@ -194,6 +195,7 @@ export const SCORER_KINDS: readonly Choice[] = [
   "guardrail_pii",
   "guardrail_prompt_injection",
   "guardrail_harm",
+  "text_embedding",
 ].map((k) => ({ value: k, label: k }));
 
 export const EXTERNAL_SCORER_FIELDS: readonly PatchField[] = [
