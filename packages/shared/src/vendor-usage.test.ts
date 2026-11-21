@@ -18,6 +18,9 @@ import {
   vendorUsageFactKey,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
+  chatGptDailyUsagePageSchema,
+  normalizeChatGptDailyUsage,
+  type ChatGptDailyUsageRow,
 } from "./vendor-usage.js";
 import { STATE_MACHINES, VENDOR_USAGE_PULL_RUN_MACHINE as M } from "./state-machines.js";
 
@@ -264,5 +267,108 @@ describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines", () => {
     expect(awsCurBillingPeriods(new Date("2026-11-19T00:00:00Z"), 1, new Date("2026-12-03T00:00:00Z"))).toEqual(["2026-11", "2026-12"]);
     expect(awsCurBillingPeriods(new Date("2026-01-05T00:00:00Z"), 1, new Date("2026-12-20T00:00:00Z"))).toHaveLength(4);
     expect(awsCurBillingPeriods(new Date("2026-12-31T00:00:00Z"), 1, new Date("2027-01-02T00:00:00Z"))).toEqual(["2026-12", "2027-01"]);
+  });
+});
+
+describe("ADR-0322 slice 4b: ChatGPT Enterprise Daily Usage", () => {
+  const WS = "11111111-2222-4333-8444-555555555555";
+  const DAY = 1_795_046_400; // 2026-11-19T00:00:00Z
+  const window = { start: new Date(DAY * 1000), end: new Date((DAY + 2 * 86400) * 1000) };
+  const row = (over: Partial<ChatGptDailyUsageRow> = {}): ChatGptDailyUsageRow =>
+    chatGptDailyUsagePageSchema.parse({
+      object: "page",
+      has_more: false,
+      next_page: null,
+      data: [
+        {
+          object: "workspace.usage.result",
+          start_time: DAY,
+          end_time: DAY + 86400,
+          user_id: "user-a",
+          actor: { type: "ACCOUNT_USER", user_id: "user-a", email: "Ana@Example.test" },
+          totals: { chats: 4, messages: 9, credits: 3.5, cost_usd: null, estimated_cost_usd: 0.14 },
+          clients: [
+            { client_id: "CHAT_WEB", chats: 3, messages: 7, credits: 1, cost_usd: null, estimated_cost_usd: 0.04 },
+            { client_id: "CODEX_CLI", chats: 1, messages: 2, credits: 2, cost_usd: null, estimated_cost_usd: 0.08 },
+          ],
+          ...over,
+        },
+      ],
+    }).data[0]!;
+
+  it("validates the connector configuration strictly", () => {
+    const s = vendorUsagePublicConfigSchemas.openai_codex;
+    expect(s.parse({ workspaceId: WS })).toEqual({ workspaceId: WS, backfillDays: 7 });
+    expect(s.safeParse({ workspaceId: "../other" }).success).toBe(false);
+    expect(s.safeParse({ workspaceId: WS, backfillDays: 31 }).success).toBe(false);
+    expect(s.safeParse({ workspaceId: WS, group: "workspace" }).success).toBe(false);
+  });
+
+  it("records credit-priced usage at the vendor's estimate, marked, per client, with the unassigned rest", () => {
+    const { facts, creditRowsWithoutEstimate } = normalizeChatGptDailyUsage([row()], { workspaceId: WS, window });
+    expect(creditRowsWithoutEstimate).toBe(0);
+    expect(facts.map((f) => [f.service, f.amount, f.quantity, f.detail.basis, f.detail.estimate])).toEqual([
+      ["CHAT_WEB", 0.04, 1, "credit_estimate", true],
+      ["CODEX_CLI", 0.08, 2, "credit_estimate", true],
+      ["unattributed", 0.02, 0.5, "credit_estimate", true],
+    ]);
+    const f = facts[0]!;
+    expect([f.accountRef, f.accountKind, f.accountId, f.currency, f.periodStart, f.periodEnd]).toEqual([
+      "ana@example.test",
+      "user",
+      "ana@example.test",
+      "USD",
+      "2026-11-19T00:00:00.000Z",
+      "2026-11-20T00:00:00.000Z",
+    ]);
+    // the identity is the vendor's user id, not the email, so an email change does not fork the line
+    const renamed = normalizeChatGptDailyUsage([row({ actor: { type: "ACCOUNT_USER", user_id: "user-a", email: "new@example.test" } })], { workspaceId: WS, window });
+    expect(vendorUsageFactKey(renamed.facts[0]!)).toBe(vendorUsageFactKey(f));
+  });
+
+  it("records native USD usage unmarked, and keeps both bases on a transition day", () => {
+    const r = row({
+      totals: { chats: 2, messages: 3, credits: 1, cost_usd: 0.3, estimated_cost_usd: 0.04 },
+      clients: [{ client_id: "CODEX_CLI", chats: 2, messages: 3, credits: 1, cost_usd: 0.25, estimated_cost_usd: 0.04 }],
+    });
+    const { facts } = normalizeChatGptDailyUsage([r], { workspaceId: WS, window });
+    expect(facts.map((f) => [f.service, f.detail.basis, f.amount, f.detail.estimate, f.unit])).toEqual([
+      ["CODEX_CLI", "credit_estimate", 0.04, true, "credits"],
+      ["CODEX_CLI", "usd", 0.25, false, "messages"],
+      ["unattributed", "usd", 0.05, false, "messages"],
+    ]);
+  });
+
+  it("imports no credit line without an estimate, and counts the row instead", () => {
+    const r = row({
+      totals: { chats: 1, messages: 1, credits: 2, cost_usd: null },
+      clients: [{ client_id: "CHAT_WEB", chats: 1, messages: 1, credits: 2, cost_usd: null }],
+    });
+    expect(normalizeChatGptDailyUsage([r], { workspaceId: WS, window })).toEqual({ facts: [], creditRowsWithoutEstimate: 1 });
+  });
+
+  it("names a user without an email by the vendor's user id", () => {
+    const r = row({ actor: { type: "ACCOUNT_USER", user_id: "user-a", email: null } });
+    const [f] = normalizeChatGptDailyUsage([r], { workspaceId: WS, window }).facts;
+    expect([f!.accountRef, f!.accountId]).toEqual(["chatgpt user user-a", "user-a"]);
+  });
+
+  it("refuses a workspace row, a row that is not one UTC day or is outside the window, and a repeated row", () => {
+    const run = (rows: ChatGptDailyUsageRow[]) => () => normalizeChatGptDailyUsage(rows, { workspaceId: WS, window });
+    expect(run([row({ user_id: null, actor: null })])).toThrow(VendorUsageResponseError);
+    expect(run([row({ start_time: DAY + 3600, end_time: DAY + 90000 })])).toThrow(VendorUsageResponseError);
+    expect(run([row({ start_time: DAY + 2 * 86400, end_time: DAY + 3 * 86400 })])).toThrow(VendorUsageResponseError);
+    expect(run([row(), row()])).toThrow(VendorUsageResponseError);
+    expect(run([row({ actor: { type: "ACCOUNT_USER", user_id: "user-b", email: null } })])).toThrow(VendorUsageResponseError);
+  });
+
+  it("refuses a page whose amounts are not finite bounded numbers", () => {
+    const bad = { object: "page", has_more: false, next_page: null, data: [{ ...row(), totals: { chats: 1, messages: 1, credits: "3" } }] };
+    expect(chatGptDailyUsagePageSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("is never matched as already metered", () => {
+    const [f] = normalizeChatGptDailyUsage([row()], { workspaceId: WS, window }).facts;
+    expect(factOverlapsMetered("openai_codex", f!, vendorUsagePublicConfigSchemas.openai_codex.parse({ workspaceId: WS }))).toBe(false);
   });
 });
