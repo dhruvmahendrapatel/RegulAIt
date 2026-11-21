@@ -4812,6 +4812,13 @@ export const orgSettings = pgTable(
     editVsRewriteEnabled: boolean("edit_vs_rewrite_enabled").notNull().default(true),
     filePreprocessingEnabled: boolean("file_preprocessing_enabled").notNull().default(true),
     lazyToolLoadingEnabled: boolean("lazy_tool_loading_enabled").notNull().default(true),
+    /** ADR-0353 part 2: the registered ADR-0088 scorer (kind `routing_complexity`) that picks a dispatch's complexity
+     * for `routeModel`. NULL = off (the default): the built-in `classifyComplexity` heuristic. Setting it sends prompt
+     * text to that scorer, so it is a strictness relaxation (`settings_relax` step-up, audited). A deleted scorer turns
+     * the classifier off (the heuristic), never on. */
+    routingClassifierScorerId: uuid("routing_classifier_scorer_id").references((): AnyPgColumn => externalScorers.id, {
+      onDelete: "set null",
+    }),
     /** the org DEFAULT for users with no per-user routingMode. A user's own
      * setting still wins either way (it can only narrow, and 'automatic' is
      * only reachable when the technique toggles above allow it). */
