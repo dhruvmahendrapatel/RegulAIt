@@ -88,6 +88,9 @@ afterAll(async () => {
   await restoreMode?.();
 });
 
+/** machines whose column has no CHECK constraint yet; the migration that adds one is a follow-up batch */
+const NO_CHECK_YET = new Set(["approval"]);
+
 describe("ADR-0348 machines equal their CHECK constraints", () => {
   it.each(Object.values(STATE_MACHINES).map((m) => [m.def.id, m] as const))("%s", async (_id, m) => {
     const [table, column] = m.def.stored.split(".") as [string, string];
@@ -96,6 +99,11 @@ describe("ADR-0348 machines equal their CHECK constraints", () => {
           AND pg_get_constraintdef(oid) ~ ${`\\m${column}\\M.*(IN|ANY)`}`,
     )) as unknown as { rows?: Array<{ conname: string }> } & Array<{ conname: string }>;
     const names = (rows.rows ?? rows).map((r) => r.conname);
+    if (NO_CHECK_YET.has(m.def.id)) {
+      // a column with no CHECK yet (STATE_MACHINES.md §4): adding one moves it off this list
+      expect(names, `${m.def.stored} has a CHECK now: remove it from NO_CHECK_YET`).toHaveLength(0);
+      return;
+    }
     expect(names, `a CHECK on ${m.def.stored}`).toHaveLength(1);
     expect(await checkValues(names[0]!)).toEqual([...m.def.states].sort());
   });

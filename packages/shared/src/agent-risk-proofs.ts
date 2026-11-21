@@ -22,6 +22,7 @@
  * Every proof result is an ADR-0180 `MeasurementState` (`pass | fail | insufficient | not_run`): nothing but `pass` is
  * a pass. A tenant cannot edit the catalogue; it can only relax a proof's schedule (audited, `agent_risk_proof_settings`).
  */
+import { z } from "zod";
 import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type MetricSpec } from "./assurance.js";
 import { canonicalJson } from "./audit-chain.js";
 import { validateMetricParams } from "./condition-metrics.js";
@@ -567,3 +568,21 @@ export function agentRiskProofEvidence(r: {
     detail: r.detail,
   });
 }
+
+/**
+ * ADR-0345 slice 3: `PUT /v1/agent-risks/proofs/:proofKey/settings`. A proof is on at its catalogue interval unless
+ * an admin turns it off or lengthens it (1 to 168 hours; null = the catalogue default). Turning a proof off, or
+ * moving its interval past the catalogue default, is a relaxation: the route asks for a `settings_relax` step-up and
+ * audits the change with its reason.
+ */
+export const agentRiskProofSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    intervalHours: z.number().int().min(AGENT_RISK_PROOF_MIN_INTERVAL_HOURS).max(AGENT_RISK_PROOF_MAX_INTERVAL_HOURS).nullable(),
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+export type AgentRiskProofSettingsInput = z.infer<typeof agentRiskProofSettingsSchema>;
+
+/** a catalogue proof key, as the settings table's CHECK spells it */
+export const AGENT_RISK_PROOF_KEY_PATTERN = /^[a-z_]+[.][a-z_]+$/;
