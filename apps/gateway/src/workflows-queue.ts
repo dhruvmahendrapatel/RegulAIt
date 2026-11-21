@@ -314,3 +314,98 @@ export async function startStageRetryWorker(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0340 slice 2 — STAGE DEADLINES. A stage's `sla` sets two delayed jobs (a warning and a breach) on the
+// `workflow-stage-deadline` queue, sent in the transaction that ENTERS the stage, so a timer exists if and only if
+// the entry committed. A job carries ids only and names the stage execution (ADR-0284 key) it belongs to: one that
+// fires after the instance left that entry finds a different key and does nothing.
+// ---------------------------------------------------------------------------
+
+export const STAGE_DEADLINE_QUEUE = "workflow-stage-deadline";
+
+/** what a deadline job carries: ids only */
+export interface StageDeadlineJob extends StageRetryJob {
+  phase: "warn" | "breach";
+}
+
+/** the job's singleton key: one warning and one breach per stage execution */
+export function stageDeadlineKey(j: StageDeadlineJob): string {
+  return `${stageExecutionKey(j)}:${j.phase}`;
+}
+
+export type StageDeadlineEnqueue =
+  | { scheduled: true; jobId: string; key: string }
+  | { scheduled: false; key: string; reason: "already_scheduled" | "queue_not_configured" | "queue_unavailable"; error?: string };
+
+/**
+ * Schedule one deadline job inside `tx` (the transition's transaction), `afterSeconds` from now. As with a retry, a
+ * queue failure never keeps the transition from committing: the send runs under a savepoint.
+ */
+export async function enqueueStageDeadline(tx: Db, job: StageDeadlineJob, afterSeconds: number): Promise<StageDeadlineEnqueue> {
+  const key = stageDeadlineKey(job);
+  if (!senderDb) return { scheduled: false, key, reason: "queue_not_configured" };
+  try {
+    const boss = await sender(senderDb);
+    const jobId = await tx.transaction((sp) =>
+      boss.send(STAGE_DEADLINE_QUEUE, { ...job }, {
+        db: queueDb(sp as unknown as DrizzleTransactionLike),
+        singletonKey: key,
+        startAfter: afterSeconds,
+      }),
+    );
+    return jobId ? { scheduled: true, jobId, key } : { scheduled: false, key, reason: "already_scheduled" };
+  } catch (err) {
+    return { scheduled: false, key, reason: "queue_unavailable", error: errLine(err) };
+  }
+}
+
+/** what the runner's deadline handler did */
+export type StageDeadlineOutcome =
+  /** the instance is no longer resting at that stage execution: nothing to do */
+  | "superseded"
+  /** this phase already ran for this execution (a redelivered job) */
+  | "already_done"
+  | "warned"
+  | "notified"
+  | "failed_instance";
+
+export type StageDeadlineHandler = (job: StageDeadlineJob) => Promise<StageDeadlineOutcome>;
+const deadlineHandlers = new Map<Db, StageDeadlineHandler>();
+
+/** called once per app by `registerWorkflowRoutes` with the app's deadline handler; returns the unregister hook */
+export function configureStageDeadlines(db: Db, handler: StageDeadlineHandler): () => void {
+  deadlineHandlers.set(db, handler);
+  return () => {
+    if (deadlineHandlers.get(db) === handler) deadlineHandlers.delete(db);
+  };
+}
+
+/**
+ * The deadline WORKER, started on the boot path beside the retry worker and under the same switch. A handler that
+ * throws is retried by pg-boss (the queue's own retry settings); the actions are idempotent per execution and phase.
+ */
+export async function startStageDeadlineWorker(
+  db: Db,
+  opts: { pollingIntervalSeconds?: number; log?: Pick<Console, "warn" | "error"> } = {},
+): Promise<StageRetryWorker> {
+  const log = opts.log ?? console;
+  const handler = deadlineHandlers.get(db);
+  if (!handler) throw new Error("the workflow routes are not registered on this database handle, so no deadline handler exists");
+  const boss = new PgBoss({ ...baseOptions(db), supervise: true, reindex: false });
+  boss.on("error", (err: unknown) => log.error(`workflow deadline worker: ${errLine(err)}`));
+  await boss.start();
+  await boss.work(
+    STAGE_DEADLINE_QUEUE,
+    { batchSize: 1, localConcurrency: 1, pollingIntervalSeconds: opts.pollingIntervalSeconds ?? 15 },
+    async ([job]: { data: StageDeadlineJob }[]): Promise<{ outcome: StageDeadlineOutcome } | undefined> => {
+      if (!job) return;
+      return { outcome: await handler(job.data) };
+    },
+  );
+  return {
+    async stop() {
+      await boss.stop({ graceful: true, timeout: 30_000 }).catch((err: unknown) => log.warn(`workflow deadline worker stop: ${errLine(err)}`));
+    },
+  };
+}

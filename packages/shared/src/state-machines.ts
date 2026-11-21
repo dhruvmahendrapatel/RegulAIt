@@ -7,6 +7,7 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
@@ -803,6 +804,145 @@ export const PIPELINE_RUN_MACHINE = defineMachine({
 });
 
 /** Every declared machine, by id: the one list an agent or a document reads. */
+/** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
+ * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
+ * remediation workflow confirms the finding. */
+const ALL_DISPOSITIONS = SHADOW_AI_DISPOSITIONS;
+export const SHADOW_AI_FINDING_MACHINE = defineMachine({
+  id: "shadow_ai_finding",
+  stored: "shadow_ai_findings.disposition",
+  states: SHADOW_AI_DISPOSITIONS,
+  initial: ["open"],
+  terminal: [],
+  transitions: {
+    reopen: { from: ALL_DISPOSITIONS, to: "open", by: ["admin"], summary: "Put the finding back in the triage queue." },
+    confirm: {
+      from: ALL_DISPOSITIONS,
+      to: "confirmed",
+      by: ["admin", "system"],
+      summary: "The use is real and needs governance; linking a remediation workflow also confirms it.",
+    },
+    sanction: { from: ALL_DISPOSITIONS, to: "sanctioned", by: ["admin"], summary: "The use is known and allowed, with a reason." },
+    mark_false_positive: {
+      from: ALL_DISPOSITIONS,
+      to: "false_positive",
+      by: ["admin"],
+      summary: "The finding is not AI use, with a reason.",
+    },
+    mark_remediated: { from: ALL_DISPOSITIONS, to: "remediated", by: ["admin"], summary: "The use was brought under governance or stopped." },
+  },
+});
+
+/** `ai_use_cases.status` (ADR-0080 intake, ADR-0168 review policy). The intake workflow drives it: the sync maps the
+ * instance's status onto the use case (`statusForInstance` in use-cases.ts), a returned sign-off parks it at
+ * `needs_info`, an expired or re-reviewed approval re-opens it, and an admin retires it. Same values as
+ * `AI_USE_CASE_STATUSES` in @regulait/db. */
+export const USE_CASE_MACHINE = defineMachine({
+  id: "use_case",
+  stored: "ai_use_cases.status",
+  states: ["proposed", "under_review", "needs_info", "approved", "rejected", "retired"],
+  initial: ["proposed"],
+  terminal: ["retired"],
+  transitions: {
+    submit_for_review: {
+      from: ["proposed", "needs_info"],
+      to: "under_review",
+      by: ["system"],
+      summary: "The intake reached its sign-off: the use case waits on its reviewers.",
+    },
+    back_to_draft: {
+      from: ["under_review"],
+      to: "proposed",
+      by: ["system"],
+      summary: "The intake went back before its sign-off (a re-opened plan or artifact).",
+    },
+    return_for_info: {
+      from: ["proposed", "under_review"],
+      to: "needs_info",
+      by: ["approver"],
+      summary: "A reviewer returned the sign-off for more information.",
+    },
+    approve: {
+      from: ["proposed", "under_review", "needs_info"],
+      to: "approved",
+      by: ["approver"],
+      summary: "The intake workflow completed: the use case is approved, for a lifetime set by its tier.",
+    },
+    reject: {
+      from: ["proposed", "under_review", "needs_info"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The intake was denied or aborted.",
+    },
+    reopen_review: {
+      from: ["approved"],
+      to: "under_review",
+      by: ["admin", "system"],
+      summary: "An expired approval (recertification) or an admin's re-review puts the use case back in front of its reviewers.",
+    },
+    retire: {
+      from: ["proposed", "under_review", "needs_info", "approved", "rejected"],
+      to: "retired",
+      by: ["admin"],
+      summary: "An admin retires the use case, with a reason; nothing leaves retired.",
+    },
+  },
+});
+
+/** `approvals.status`, the ONE Approvals Queue (GOVERNANCE_LAYER_SPEC §6). A pending entry is decided once
+ * (approved, denied, or for an intake sign-off returned for information); an approved entry is spent by exactly one
+ * retried call; an entry the world has moved past (a re-opened stage, an expiry, a changed policy context, a failed
+ * signature recheck) is superseded. The column has no CHECK constraint yet (STATE_MACHINES.md §4). */
+export const APPROVAL_MACHINE = defineMachine({
+  id: "approval",
+  stored: "approvals.status",
+  states: ["pending", "approved", "denied", "returned", "consumed", "superseded"],
+  initial: ["pending"],
+  terminal: ["denied", "returned", "consumed", "superseded"],
+  transitions: {
+    approve: { from: ["pending"], to: "approved", by: ["approver"], summary: "The named approver (or a signed quorum) approved it." },
+    deny: { from: ["pending"], to: "denied", by: ["approver"], summary: "The approver denied it, with a reason." },
+    return: {
+      from: ["pending"],
+      to: "returned",
+      by: ["approver"],
+      summary: "An intake sign-off sent back for more information; the next version asks again in a new entry.",
+    },
+    consume: { from: ["approved"], to: "consumed", by: ["system"], summary: "The one retried call this approval allowed was made." },
+    supersede: {
+      from: ["pending", "approved"],
+      to: "superseded",
+      by: ["system"],
+      summary: "The work moved on (re-opened, reassigned, expired, or its policy context changed); the entry can no longer be decided or spent.",
+    },
+  },
+});
+
+/** `redteam_libraries.status` (ADR-0057, ADR-0208 G9). A draft is edited; publishing freezes it into an eval dataset
+ * (editing a published library mints the next version); retiring withdraws a draft or a published version for good. */
+export const REDTEAM_LIBRARY_MACHINE = defineMachine({
+  id: "redteam_library",
+  stored: "redteam_libraries.status",
+  states: ["draft", "published", "retired"],
+  initial: ["draft"],
+  terminal: ["retired"],
+  transitions: {
+    publish: {
+      from: ["draft"],
+      to: "published",
+      by: ["admin"],
+      summary: "Freeze the probes into an eval dataset; an empty library is refused.",
+    },
+    retire: {
+      from: ["draft", "published"],
+      to: "retired",
+      by: ["admin"],
+      summary: "Withdraw this version, with a reason (a published one needs a step-up); refused while a run is in progress.",
+    },
+  },
+});
+
+/** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
@@ -827,6 +967,10 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
-  // ADR-0366: a rogue-agent containment (proposed, contained, declined, released)
+  [SHADOW_AI_FINDING_MACHINE.def.id]: SHADOW_AI_FINDING_MACHINE,
+  [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
+  [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
+  [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
+  // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);
