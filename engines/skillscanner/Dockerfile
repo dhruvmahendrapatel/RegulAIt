@@ -1,9 +1,16 @@
 # ADR-0242 — the skillscanner engine image: Cisco skill-scanner 2.3.2 with ONLY its core local analyzers (static
 # signatures on the baked YARA-X rule packs, bytecode, pipeline taint, correlation), run by our driver (scan.py) on
-# one agent skill (SKILL.md and its bundled files) the gateway hands it. This file builds the SCANNER (the task an
-# executor runs in a no-network sandbox: `python -I /opt/skillscanner/scan.py <skill-dir> <out>`). The Node runner
-# shim joins it as the image's runner stage in phase 2 (ADR-0242 §6); until an image is published and recorded in
-# engines/images.lock.json the engine carries no digest and cannot be enabled.
+# one agent skill (SKILL.md and its bundled files) the gateway hands it. ONE image, two uses (ADR-0242 §6.1, as
+# modelscan's):
+#
+#   the runner  `node /app/dist/main.js` (packages/engine-admission-scan), on the internal `engines` network,
+#               holding the runner key on its state volume; it never runs the scanner
+#   the task    `node /app/dist/task-main.js skillscanner` (the manifest's taskEntry), started ONLY by the sandbox
+#               executor in a gVisor sandbox under the run's engine_worker placement: no network, no token, no
+#               state; it runs `python -I /opt/skillscanner/scan.py <input root> <report>` on the gateway's SKILL.md
+#
+# Until an image is published and recorded in engines/images.lock.json (§6.3) the engine carries no digest and
+# cannot be enabled.
 #
 # Built from the REPOSITORY ROOT:
 #
@@ -18,7 +25,7 @@
 #   - the licence gate (licence-gate.mjs) on the INSTALLED closure;
 #   - the rule packs skill-scanner loads (YARA-X rules, signatures, CEL gates, inside its wheel) must hash to
 #     rules.sha256 (committed): a rules change is a reviewed change, never a silent one;
-#   - the CEL helper skill-scanner runs as a subprocess is rebuilt from its hashed sdist with Go 1.27.3 (the wheel's
+#   - the CEL helper skill-scanner runs as a subprocess is rebuilt from its hashed sdist with Go 1.27.4 (the wheel's
 #     was built with Go 1.27.1, whose standard library carries published advisories), and its manifest rewritten;
 #   - an offline smoke scan of a known-bad and a clean skill, with no network, must flag and pass.
 #
@@ -26,7 +33,7 @@
 
 # ---- stage 1: skill-scanner's CEL helper, rebuilt with a patched Go ----------------------------------------------
 # The wheel bundles a Go helper built with Go 1.27.1, whose standard library carries published advisories. It is
-# rebuilt here from skill-scanner 2.3.2's own sdist (sha256 checked) with Go 1.27.3 and the flags its packaging script
+# rebuilt here from skill-scanner 2.3.2's own sdist (sha256 checked) with Go 1.27.4 and the flags its packaging script
 # uses; its Go modules are fetched by `go build` and checked against the sdist's go.sum (the module proxy and
 # checksum database at BUILD time only). cel-helper.py swaps it in and rewrites the helper manifest.
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS sdist
@@ -34,10 +41,10 @@ WORKDIR /build
 RUN python -I -c "import hashlib, sys, urllib.request; u = 'https://files.pythonhosted.org/packages/d8/77/c064e189682f5516579cba6dcc664c3c6243be8990f8fccabb7c188ab73c/cisco_ai_skill_scanner-2.3.2.tar.gz'; b = urllib.request.urlopen(u, timeout=120).read(); h = hashlib.sha256(b).hexdigest(); h == 'd019afd9c491794e4dda6cc05e629f2a0b2ce015bc65fbe91e514d5547b5e883' or sys.exit(f'sdist sha256 {h}'); open('/build/sdist.tar.gz', 'wb').write(b)" \
  && mkdir /src && tar -xzf /build/sdist.tar.gz -C /src --strip-components=1 cisco_ai_skill_scanner-2.3.2/tools/cel_runtime
 
-FROM --platform=linux/amd64 golang:1.27-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80 AS cel
+FROM --platform=linux/amd64 golang:1.27-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS cel
 COPY --from=sdist /src/tools/cel_runtime /src/cel_runtime
 WORKDIR /src/cel_runtime
-RUN test "$(go env GOVERSION)" = "go1.27.3" \
+RUN test "$(go env GOVERSION)" = "go1.27.4" \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-mod=readonly GOTOOLCHAIN=local \
     go build -trimpath -buildvcs=false -ldflags "-s -w -X main.helperVersion=2.3.2" -o /out/skill-scanner-cel-go-linux-amd64 . \
  && go version -m /out/skill-scanner-cel-go-linux-amd64 | head -3
@@ -59,10 +66,30 @@ RUN python -m venv /opt/skillscanner/venv \
  && rm -rf "$SP/oletools/thirdparty/xxxswf" "$SP/oletools/pyxswf.py" \
  && if [ -e "$SP/pcodedmp" ] || ls -d "$SP"/pcodedmp-* >/dev/null 2>&1; then echo "pcodedmp must not ship" >&2; exit 1; fi \
  && /opt/skillscanner/venv/bin/python -I -c "from oletools.oleid import OleID" \
- && /opt/skillscanner/venv/bin/python -I cel-helper.py "$SP" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3 \
+ && /opt/skillscanner/venv/bin/python -I cel-helper.py "$SP" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.4 \
  && node licence-gate.mjs "$SP" licence-allow.json --readings licence-readings.json --runtime python=PSF-2.0 \
  && cp rules.sha256 /opt/skillscanner/rules.sha256 \
  && find /opt/skillscanner/venv -name '__pycache__' -prune -exec rm -rf {} +
+
+# ---- the runner and task shim (ADR-0242 §6.1, as engines/modelscan/Dockerfile's) -----------------------------------
+# packages/engine-admission-scan, one package for both admission-scan images: `node /app/dist/main.js` is the runner
+# (on the internal `engines` network, holding the runner key; it never runs the scanner) and
+# `node /app/dist/task-main.js skillscanner` is the manifest's taskEntry, started ONLY by the sandbox executor in a gVisor
+# sandbox under the run's engine_worker placement, where it runs our driver on the gateway's subject file.
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+RUN corepack enable
+WORKDIR /src
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+# reproducible builds (ADR-0187 addendum 2026-10-21): pnpm records the install time and the order the concurrent
+# install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
+COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
+ARG SOURCE_DATE_EPOCH
+RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+ && pnpm --filter "@regulait/engine-admission-scan..." build \
+ && pnpm --filter @regulait/engine-admission-scan deploy --prod --legacy /out \
+ && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime ---------------------------------------------------------------------------------------
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
@@ -81,13 +108,36 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+# PR #212 review [4235322394] (ADR-0187 decision 129), as modelscan's: the Node binary comes from the node image, but
+# its shared libraries (libstdc++.so.6, libgcc_s.so.1) must come from THIS base, as Debian packages Trivy sees and
+# scans. Fail the build, here, if either package is missing, if any library node links against does not resolve, or
+# if node cannot start; never at the first run.
+RUN dpkg-query -W -f='${Package} ${Version}\n' libstdc++6 libgcc-s1 \
+ && if ldd /usr/local/bin/node | grep -q 'not found'; then ldd /usr/local/bin/node; exit 1; fi \
+ && node --version
 COPY --from=closure /opt/skillscanner /opt/skillscanner
+COPY --from=shim /out /app
 COPY engines/skillscanner/fixtures /opt/skillscanner/fixtures
 COPY engines/skillscanner/selftest.py /opt/skillscanner/selftest.py
 RUN chmod -R a-w /opt/skillscanner \
  && mkdir -p /work /in /out && chown 10001:10001 /work /in /out
-ENV HOME=/work \
+# the runner's state volume is its own (0700, uid 10001); the bridge's exchange directories are the runner's too
+RUN mkdir -p /state /jobs /results \
+ && chown 10001:10001 /state /jobs /results \
+ && chmod 0700 /state
+# REGULAIT_ADMISSION_ENGINE: which engine the runner serves (the task takes it from the manifest's argv).
+# REGULAIT_EGRESS_PROBE_ADDRESS: the public literal address the runner's egress self-test must FAIL to reach
+# (ADR-0187 decision 19); the task probes ENGINE_TASK_EGRESS_PROBE_ADDRESS itself (the sandbox init passes no env).
+ENV NODE_ENV=production \
+    HOME=/work \
     LANG=C.UTF-8 \
+    REGULAIT_ADMISSION_ENGINE=skillscanner \
+    REGULAIT_WORK_DIR=/work \
+    REGULAIT_RUNNER_STATE_DIR=/state \
+    REGULAIT_ADMISSION_JOBS_DIR=/jobs \
+    REGULAIT_ADMISSION_RESULTS_DIR=/results \
+    REGULAIT_EGRESS_PROBE_ADDRESS=93.184.215.14 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     LITELLM_LOCAL_MODEL_COST_MAP=True \
@@ -108,5 +158,5 @@ RUN --network=none /opt/skillscanner/venv/bin/python -I /opt/skillscanner/selfte
  && rm -f /work/bad.json /work/clean.json \
  && leftover="$(ls -A /work /tmp | grep -v -e '^/' -e '^$' || true)" \
  && { [ -z "$leftover" ] || { echo "the smoke scan left files in the image (they would make it unreproducible): $leftover" >&2; exit 1; }; }
-ENTRYPOINT ["/opt/skillscanner/venv/bin/python", "-I", "/opt/skillscanner/scan.py"]
-CMD ["/in", "/out/report.json"]
+# the runner; the task (`node /app/dist/task-main.js <engine>`) is started only by the sandbox executor
+CMD ["node", "/app/dist/main.js"]
