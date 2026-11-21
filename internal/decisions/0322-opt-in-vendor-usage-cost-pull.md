@@ -373,7 +373,7 @@ pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
 - **Read path**: per billing period, the manifest at `<prefix>/<exportName>/metadata/BILLING_PERIOD=YYYY-MM/`
   (`Manifest.json` or `<exportName>-Manifest.json`; the latest if AWS left several). Every data file it names must lie
   under the period's `data/` folder in the same bucket, checked before the first read. Only `.csv.gz` is read; a
-  Parquet export fails as `bad_response` with "this export is Parquet; recreate it as gzip-compressed CSV". Bounds: 20
+  Parquet export failed as `bad_response` (superseded by slice 4c, which reads Parquet). Bounds: 20
   data files a period, 32 MB an object (declared length and a running cap), 128 MB inflated (a gzip bomb is refused),
   one million rows a run (`page_limit`). A period with no manifest yet is skipped, not an error.
 - **Normalisation**: only the named `line_item_*` columns are read; tags, resource ids and the free-text description
@@ -430,3 +430,31 @@ pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
 - **Not built**: the `include=plugins|skills|tools` breakdowns, per-model lines, token counts and Codex code
   attribution (kept out of the ledger; they are usage detail, not spend); live-tenant tests (lane E11); the settings
   screen (#453).
+
+## As built — slice 4c (2026-11-21): AWS principal mode and Parquet
+
+- **Principal mode** (`credentialMode: "principal"`): the customer's role trusts RegulAIt's own AWS principal
+  (`REGULAIT_AWS_PRINCIPAL_ROLE_ARN`, the role ADR-0195's discovery already uses) and requires an external id.
+  RegulAIt reaches its principal by web identity with a token for the shared principal subject
+  (`regulait:aws-principal`, audience `sts.amazonaws.com`), then calls `AssumeRole` on the customer's `roleArn` with
+  the connector's external id, through cloud-discovery's existing `aws_assume_role` chain. Both exchanges run on the
+  guarded fetch; neither reads the default chain or instance metadata.
+- **External id** (ADR-0195 decision 3): `regulait-<uuid>`, generated when a connector is created in, or moved to,
+  principal mode; kept on later configuration changes so the trust policy holds; dropped when the connector leaves
+  principal mode (coming back generates a new one). It is stored in the connector's schema-validated
+  `public_config` and shown in the connector view so the admin can paste it into the trust policy. A request that
+  names it in any spelling is refused with `external_id_not_accepted`.
+- **Credential**: the marker `{"mode":"principal"}`, as for federated mode; storing it still needs the
+  unverified-scope attestation. A pull refuses as `no_credential`, sending nothing, while the principal role is unset
+  or federation has no issuer.
+- **Parquet**: AWS Data Exports writes Parquet Snappy-compressed (`<export>-<n>.snappy.parquet`). The reader decodes
+  it in-process with `hyparquet` 1.33.1 (MIT, no dependencies; comparison recorded in
+  `packages/cloud-discovery/THIRD_PARTY.md`). The footer is checked before any page is decoded: uncompressed size
+  against the 128 MB inflated bound, at most 1,000,000 rows a file. Only the nine line-item columns are decoded. A
+  DECIMAL or nested column among them is refused (`unsupported_format`) rather than read through a float. A file that
+  is not Parquet, or uses a codec other than Snappy or none, is `unsupported_format`.
+- **One normaliser**: Parquet cells become the strings the CSV path carries (timestamps as ISO-8601, doubles as
+  JavaScript writes them), and both formats run through `normalizeAwsCurTable`, so every refusal is the same and a
+  Parquet line restates the CSV line's fact in place.
+- **No new route or migration.** New runtime dependency: `hyparquet`. Test-only: `hyparquet-writer` 0.18.0 (MIT).
+- **Not built**: live-tenant tests (lane E11); the settings screen (#453); Google (optional slice 5).
