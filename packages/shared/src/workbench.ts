@@ -327,10 +327,16 @@ export interface TaskSchedule {
 /**
  * Does moving a task from `current` to `next` LOOSEN it (ADR-0180)? A later or removed due or warn time, a lower
  * priority, or a different escalation policy (it changes who the task escalates to) is a relaxation and needs an
- * admin's `settings_relax` step-up; a stage timer may never make one. An earlier due time, a higher priority, or a
- * policy set where there was none is a tightening.
+ * admin's `settings_relax` step-up; a stage timer may never make one. An earlier due time or a higher priority is a
+ * tightening, and so is a policy set where there was none, UNLESS that policy changes who decides the task (its breach
+ * reassigns or adds an assignee): changing who an approval goes to is a `settings_relax` (B4S-02), so attaching such a
+ * policy is the relaxation `escalation_policy_attached`. The caller says which with `nextPolicyChangesApprover`.
  */
-export function taskScheduleRelaxations(current: TaskSchedule, next: TaskSchedule): string[] {
+export function taskScheduleRelaxations(
+  current: TaskSchedule,
+  next: TaskSchedule,
+  opts: { nextPolicyChangesApprover?: boolean } = {},
+): string[] {
   const out: string[] = [];
   const later = (a: Date | null, b: Date | null) => (a !== null && b === null) || (a !== null && b !== null && b.getTime() > a.getTime());
   if (later(current.dueAt, next.dueAt)) out.push(next.dueAt ? "due_later" : "due_removed");
@@ -338,6 +344,7 @@ export function taskScheduleRelaxations(current: TaskSchedule, next: TaskSchedul
   const rank = (p: TaskPriority) => APPROVAL_TASK_PRIORITY_ORDER.indexOf(p);
   if (rank(next.priority) < rank(current.priority)) out.push("priority_lowered");
   if (current.slaPolicyId !== null && next.slaPolicyId !== current.slaPolicyId) out.push("escalation_policy_changed");
+  if (current.slaPolicyId === null && next.slaPolicyId !== null && opts.nextPolicyChangesApprover) out.push("escalation_policy_attached");
   return out;
 }
 

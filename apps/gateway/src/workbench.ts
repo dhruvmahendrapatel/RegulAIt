@@ -38,6 +38,7 @@
  *     make adding one a deliberate act rather than an accident.
  */
 import { z } from "zod";
+import { SYSTEM_ATTRIBUTION_ID } from "./system-attribution.js";
 import type { FastifyInstance } from "fastify";
 import {
   and,
@@ -616,91 +617,101 @@ export async function scheduleApprovalTask(
   ctx: TaskScheduleContext,
 ): Promise<TaskScheduleOutcome> {
   const now = ctx.now ?? new Date();
-  const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId)).for("update");
-  if (!row) return { ok: false, status: 404, error: "not_found", detail: "no such approval" };
-  if (row.status !== "pending") return { ok: false, status: 409, error: "not_pending", detail: `the approval is ${row.status}` };
-  const a = await ensureAssignment(db, row, ctx.actorUserId);
-  if (!a) return { ok: false, status: 409, error: "no_assignment", detail: "the approval has no assignment to schedule" };
+  // ONE transaction (review R4 [1] / S4 [2]): the row lock below is held until the write and its audit commit, so two
+  // schedules of one task (an admin and a stage timer, or two admins) serialise. Each decides its relaxations against
+  // the schedule the other committed, never a stale read, so no loosening lands without its step-up.
+  return db.transaction(async (txHandle) => {
+    const tx = txHandle as unknown as Db;
+    const [row] = await tx.select().from(approvals).where(eq(approvals.id, approvalId)).for("update");
+    if (!row) return { ok: false, status: 404, error: "not_found", detail: "no such approval" };
+    if (row.status !== "pending") return { ok: false, status: 409, error: "not_pending", detail: `the approval is ${row.status}` };
+    const a = await ensureAssignment(tx, row, ctx.actorUserId);
+    if (!a) return { ok: false, status: 409, error: "no_assignment", detail: "the approval has no assignment to schedule" };
 
-  const current: TaskSchedule = {
-    priority: (APPROVAL_TASK_PRIORITY_ORDER as readonly string[]).includes(a.priority) ? (a.priority as TaskPriority) : "normal",
-    warnAt: a.warnAt,
-    dueAt: a.dueAt,
-    slaPolicyId: a.slaPolicyId,
-  };
-  const next: TaskSchedule = {
-    priority: input.priority ?? current.priority,
-    dueAt: input.dueAt === undefined ? current.dueAt : input.dueAt,
-    warnAt: input.warnAt === undefined ? (input.dueAt === null ? null : current.warnAt) : input.warnAt,
-    slaPolicyId: input.slaPolicyId === undefined ? current.slaPolicyId : input.slaPolicyId,
-  };
-  if (next.warnAt && !next.dueAt) return { ok: false, status: 400, error: "invalid_schedule", detail: "a warn time needs a due time" };
-  if (next.warnAt && next.dueAt && next.warnAt.getTime() > next.dueAt.getTime()) {
-    return { ok: false, status: 400, error: "invalid_schedule", detail: "the warn time must not be after the due time" };
-  }
-  if (input.dueAt && input.dueAt.getTime() <= now.getTime()) {
-    return { ok: false, status: 400, error: "invalid_schedule", detail: "a new due time must be in the future" };
-  }
-  if (input.slaPolicyId) {
-    const [policy] = await db.select().from(approvalSlaPolicies).where(eq(approvalSlaPolicies.id, input.slaPolicyId));
-    if (!policy || !policy.enabled) return { ok: false, status: 400, error: "invalid_schedule", detail: "no such enabled SLA policy" };
-  }
-
-  const relaxations = taskScheduleRelaxations(current, next);
-  if (relaxations.length > 0) {
-    if (ctx.source === "stage_timer") {
-      return { ok: false, status: 409, error: "stage_timer_cannot_relax", detail: `a stage timer may only tighten a task (${relaxations.join(", ")})` };
+    const current: TaskSchedule = {
+      priority: (APPROVAL_TASK_PRIORITY_ORDER as readonly string[]).includes(a.priority) ? (a.priority as TaskPriority) : "normal",
+      warnAt: a.warnAt,
+      dueAt: a.dueAt,
+      slaPolicyId: a.slaPolicyId,
+    };
+    const next: TaskSchedule = {
+      priority: input.priority ?? current.priority,
+      dueAt: input.dueAt === undefined ? current.dueAt : input.dueAt,
+      warnAt: input.warnAt === undefined ? (input.dueAt === null ? null : current.warnAt) : input.warnAt,
+      slaPolicyId: input.slaPolicyId === undefined ? current.slaPolicyId : input.slaPolicyId,
+    };
+    if (next.warnAt && !next.dueAt) return { ok: false, status: 400, error: "invalid_schedule", detail: "a warn time needs a due time" };
+    if (next.warnAt && next.dueAt && next.warnAt.getTime() > next.dueAt.getTime()) {
+      return { ok: false, status: 400, error: "invalid_schedule", detail: "the warn time must not be after the due time" };
     }
-    if (!ctx.authorizeRelaxation || !(await ctx.authorizeRelaxation(relaxations))) {
-      return { ok: false, status: 403, error: "relaxation_not_authorized", detail: relaxations.join(", "), handled: Boolean(ctx.authorizeRelaxation) };
+    if (input.dueAt && input.dueAt.getTime() <= now.getTime()) {
+      return { ok: false, status: 400, error: "invalid_schedule", detail: "a new due time must be in the future" };
     }
-  }
+    let nextPolicyChangesApprover = false;
+    if (input.slaPolicyId) {
+      const [policy] = await tx.select().from(approvalSlaPolicies).where(eq(approvalSlaPolicies.id, input.slaPolicyId));
+      if (!policy || !policy.enabled) return { ok: false, status: 400, error: "invalid_schedule", detail: "no such enabled SLA policy" };
+      // review S4 [1]: a breach that reassigns or adds an assignee changes who decides the task (B4S-02)
+      nextPolicyChangesApprover = policy.escalateAction === "reassign" || policy.escalateAction === "add_assignee";
+    }
 
-  const timesChanged =
-    (current.dueAt?.getTime() ?? null) !== (next.dueAt?.getTime() ?? null) ||
-    (current.warnAt?.getTime() ?? null) !== (next.warnAt?.getTime() ?? null);
-  const patch: Partial<typeof approvalAssignments.$inferInsert> = {
-    priority: next.priority,
-    dueAt: next.dueAt,
-    warnAt: next.warnAt,
-    slaPolicyId: next.slaPolicyId,
-    dueSource: timesChanged ? ctx.source : a.dueSource,
-  };
-  // APPROVAL_SLA_MACHINE reschedule events (rearm_ok, rearm_warning): moving the clock BACK re-arms it here; moving it forward into warning or breach
-  // is the `clock` cause, left to the ADR-0046 evaluation below, so the audit and the escalation happen once
-  const implied = slaStateAt(next, now);
-  if (slaTransitionAllowed("reschedule", a.slaState, implied)) patch.slaState = implied;
-  const [written] = await db.update(approvalAssignments).set(patch).where(eq(approvalAssignments.id, a.id)).returning();
+    const relaxations = taskScheduleRelaxations(current, next, { nextPolicyChangesApprover });
+    if (relaxations.length > 0) {
+      if (ctx.source === "stage_timer") {
+        return { ok: false, status: 409, error: "stage_timer_cannot_relax", detail: `a stage timer may only tighten a task (${relaxations.join(", ")})` };
+      }
+      if (!ctx.authorizeRelaxation || !(await ctx.authorizeRelaxation(relaxations))) {
+        return { ok: false, status: 403, error: "relaxation_not_authorized", detail: relaxations.join(", "), handled: Boolean(ctx.authorizeRelaxation) };
+      }
+    }
 
-  const iso = (d: Date | null) => d?.toISOString() ?? null;
-  await db.insert(auditLog).values({
-    userId: ctx.actorUserId ?? row.userId,
-    objectType: row.objectType,
-    objectId: row.instanceId ?? row.runId ?? row.projectId ?? null,
-    serverId: row.serverId,
-    toolName: row.toolName,
-    detail: {
-      phase: "task_schedule",
-      adr: "0342",
-      approvalId: row.id,
-      assignmentId: a.id,
-      source: ctx.source,
-      ...(ctx.systemActor ? { actor: ctx.systemActor } : {}),
-      before: { priority: current.priority, warnAt: iso(current.warnAt), dueAt: iso(current.dueAt), slaPolicyId: current.slaPolicyId },
-      after: { priority: next.priority, warnAt: iso(next.warnAt), dueAt: iso(next.dueAt), slaPolicyId: next.slaPolicyId },
-      relaxations,
-      receiptClass: "excluded",
-    },
-    effect: "allow",
-    ruleId: relaxations.length > 0 ? "approval-task-schedule-relaxed" : "approval-task-scheduled",
-    ruleChain: [],
-    reason:
-      relaxations.length > 0
-        ? `human task schedule LOOSENED (${relaxations.join(", ")}) after a settings_relax step-up (ADR-0342)`
-        : `human task scheduled by ${ctx.source === "stage_timer" ? "a workflow stage timer" : "an admin"} (ADR-0342)`,
+    const timesChanged =
+      (current.dueAt?.getTime() ?? null) !== (next.dueAt?.getTime() ?? null) ||
+      (current.warnAt?.getTime() ?? null) !== (next.warnAt?.getTime() ?? null);
+    const patch: Partial<typeof approvalAssignments.$inferInsert> = {
+      priority: next.priority,
+      dueAt: next.dueAt,
+      warnAt: next.warnAt,
+      slaPolicyId: next.slaPolicyId,
+      dueSource: timesChanged ? ctx.source : a.dueSource,
+    };
+    // APPROVAL_SLA_MACHINE reschedule events (rearm_ok, rearm_warning): moving the clock BACK re-arms it here; moving it forward into warning or breach
+    // is the `clock` cause, left to the ADR-0046 evaluation below, so the audit and the escalation happen once
+    const implied = slaStateAt(next, now);
+    if (slaTransitionAllowed("reschedule", a.slaState, implied)) patch.slaState = implied;
+    const [written] = await tx.update(approvalAssignments).set(patch).where(eq(approvalAssignments.id, a.id)).returning();
+
+    const iso = (d: Date | null) => d?.toISOString() ?? null;
+    await tx.insert(auditLog).values({
+      // review S4 [3]: a stage timer acts as the system (`detail.actor` names it), never as the requester
+      userId: ctx.actorUserId ?? SYSTEM_ATTRIBUTION_ID,
+      objectType: row.objectType,
+      objectId: row.instanceId ?? row.runId ?? row.projectId ?? null,
+      serverId: row.serverId,
+      toolName: row.toolName,
+      detail: {
+        phase: "task_schedule",
+        adr: "0342",
+        approvalId: row.id,
+        assignmentId: a.id,
+        source: ctx.source,
+        ...(ctx.systemActor ? { actor: ctx.systemActor } : {}),
+        before: { priority: current.priority, warnAt: iso(current.warnAt), dueAt: iso(current.dueAt), slaPolicyId: current.slaPolicyId },
+        after: { priority: next.priority, warnAt: iso(next.warnAt), dueAt: iso(next.dueAt), slaPolicyId: next.slaPolicyId },
+        relaxations,
+        receiptClass: "excluded",
+      },
+      effect: "allow",
+      ruleId: relaxations.length > 0 ? "approval-task-schedule-relaxed" : "approval-task-scheduled",
+      ruleChain: [],
+      reason:
+        relaxations.length > 0
+          ? `human task schedule LOOSENED (${relaxations.join(", ")}) after a settings_relax step-up (ADR-0342)`
+          : `human task scheduled by ${ctx.source === "stage_timer" ? "a workflow stage timer" : "an admin"} (ADR-0342)`,
+    });
+    const assignment = await evaluateAssignmentSla(tx, row, written!, now);
+    return { ok: true as const, assignment, relaxations };
   });
-  const assignment = await evaluateAssignmentSla(db, row, written!, now);
-  return { ok: true, assignment, relaxations };
 }
 
 /**

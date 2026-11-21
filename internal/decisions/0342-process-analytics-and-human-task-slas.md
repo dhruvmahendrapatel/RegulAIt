@@ -135,11 +135,18 @@ else. No new dependency.
    input, { actorUserId, systemActor })` is the stage-timer entry point: it schedules every pending task of one
    workflow stage.
 
-   **Secure by default (ADR-0180).** A tightening (earlier due, higher priority, a policy where there was none) is
-   audited (`approval-task-scheduled`). A loosening (a later or removed due or warn time, a lower priority, or a
-   different escalation policy, because that changes who the task escalates to) needs a `settings_relax` step-up and is
-   audited as a relaxation (`approval-task-schedule-relaxed`). A stage timer may never loosen
-   (`stage_timer_cannot_relax`). A new due time must be in the future, and a named policy must exist and be enabled.
+   **Secure by default (ADR-0180).** A tightening (earlier due, higher priority, a notify-only policy where there was
+   none) is audited (`approval-task-scheduled`). A loosening needs a `settings_relax` step-up and is audited as a
+   relaxation (`approval-task-schedule-relaxed`). The loosenings are a later or removed due or warn time, a lower
+   priority, a different escalation policy, and attaching a policy whose breach reassigns or adds an assignee
+   (`escalation_policy_attached`): both of the last two change who decides the task, which B4S-02 makes a
+   `settings_relax`. A stage timer may never loosen (`stage_timer_cannot_relax`).
+
+   **One transaction per change.** The read of the task (`FOR UPDATE`), the relaxation decision, the write, its audit
+   row and the ADR-0046 evaluation commit together, so two changes to one task (an admin and a stage timer, or two
+   admins) serialise. Each one decides against what the other committed, never a stale read, so no loosening lands
+   without its step-up. A test races a tightening against a priority-only change. A stage timer's change is audited as
+   the system (`SYSTEM_ATTRIBUTION_ID`, with `detail.actor` naming the timer), never as the task's requester. A new due time must be in the future, and a named policy must exist and be enabled.
    The escalation target is always an admin-defined ADR-0046 SLA policy (`slaPolicyId`), never a free-form target,
    because creating a policy that hands a task to someone else already requires a step-up.
 

@@ -33,6 +33,7 @@ import {
 import { APPROVAL_SLA_MACHINE, STATE_MACHINES, evaluateSla, slaTransitionAllowed } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runApprovalSlaSweep, scheduleApprovalTask, scheduleStageApprovals } from "./workbench.js";
+import { SYSTEM_ATTRIBUTION_ID } from "./system-attribution.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
 
@@ -197,10 +198,23 @@ describe("ADR-0342 slice 2: the stage-timer contract (lane E21)", () => {
     const a2 = await mkApproval({ stageId: `signoff-${RUN}` });
     const t0 = new Date();
     const due = new Date(t0.getTime() + HOUR);
+    // review S4 [1]: the policy adds an assignee on breach, so attaching it changes who decides: a timer may not
+    const attach = await scheduleStageApprovals(
+      db,
+      { instanceId: INSTANCE, stageId: `signoff-${RUN}` },
+      { slaPolicyId: policyId },
+      { actorUserId: null, systemActor: "workflow-stage-timer", now: t0 },
+    );
+    expect(attach.map((o) => (o.outcome.ok ? "ok" : o.outcome.error))).toEqual(["stage_timer_cannot_relax", "stage_timer_cannot_relax"]);
+    // an admin attaches it (an authorised settings_relax); the timer then sets the due time and priority
+    for (const id of [a1, a2]) {
+      const set = await scheduleApprovalTask(db, id, { slaPolicyId: policyId }, { source: "explicit", actorUserId: adminId, authorizeRelaxation: async () => true });
+      expect(set.ok && set.relaxations).toEqual(["escalation_policy_attached"]);
+    }
     const out = await scheduleStageApprovals(
       db,
       { instanceId: INSTANCE, stageId: `signoff-${RUN}` },
-      { dueAt: due, priority: "high", slaPolicyId: policyId },
+      { dueAt: due, priority: "high" },
       { actorUserId: null, systemActor: "workflow-stage-timer", now: t0 },
     );
     expect(out.map((o) => o.outcome.ok)).toEqual([true, true]);
@@ -208,6 +222,17 @@ describe("ADR-0342 slice 2: the stage-timer contract (lane E21)", () => {
       const a = await assignmentOf(id);
       expect(a.dueSource).toBe("stage_timer");
       expect(a.priority).toBe("high");
+      // review S4 [3]: the timer's change is the system's act, never the requester's
+      const timerAudits = await withSystemContext(db, "audit_verify", "test.e23s", async (tx) =>
+        (await (tx as unknown as Db).select().from(auditLog).where(eq(auditLog.ruleId, "approval-task-scheduled"))).filter(
+          (r) => (r.detail as Record<string, unknown>)?.approvalId === id && (r.detail as Record<string, unknown>)?.source === "stage_timer",
+        ),
+      );
+      expect(timerAudits.length).toBeGreaterThanOrEqual(1);
+      for (const r of timerAudits) {
+        expect(r.userId).toBe(SYSTEM_ATTRIBUTION_ID);
+        expect((r.detail as Record<string, unknown>).actor).toBe("workflow-stage-timer");
+      }
     }
     // a timer may never loosen
     const loosen = await scheduleStageApprovals(
@@ -224,6 +249,44 @@ describe("ADR-0342 slice 2: the stage-timer contract (lane E21)", () => {
       const a = await assignmentOf(id);
       expect(a.slaState).toBe("breached");
       expect(a.escalationAssigneeId).toBe(escalateToId);
+    }
+  });
+});
+
+describe("ADR-0342 slice 2: review fixes (R4, S4)", () => {
+  it("R4 [1]: concurrent schedules serialise, so a priority-only call never writes back a stale due time", async () => {
+    for (let round = 0; round < 5; round++) {
+      const id = await mkApproval();
+      const base = new Date(Date.now() + 4 * HOUR);
+      expect((await scheduleApprovalTask(db, id, { dueAt: base }, { source: "explicit", actorUserId: adminId })).ok).toBe(true);
+      const earlier = new Date(base.getTime() - 2 * HOUR);
+      const [timer, admin] = await Promise.all([
+        scheduleApprovalTask(db, id, { dueAt: earlier }, { source: "stage_timer", actorUserId: null, systemActor: "workflow-stage-timer" }),
+        scheduleApprovalTask(db, id, { priority: "urgent" }, { source: "explicit", actorUserId: adminId }),
+      ]);
+      expect([timer.ok, admin.ok]).toEqual([true, true]);
+      const a = await assignmentOf(id);
+      expect(a.dueAt?.getTime()).toBe(earlier.getTime());
+      expect(a.priority).toBe("urgent");
+    }
+  });
+
+  it("S4 [1]: attaching a policy that changes who decides is a relaxation; a notify-only policy is not", async () => {
+    const [n] = await db
+      .insert(approvalSlaPolicies)
+      .values({ name: `e23s-notify-${RUN}`, warnAfterMinutes: 60, breachAfterMinutes: 120, escalateAction: "notify_only" })
+      .returning({ id: approvalSlaPolicies.id });
+    try {
+      const id = await mkApproval();
+      const refused = await scheduleApprovalTask(db, id, { slaPolicyId: policyId }, { source: "explicit", actorUserId: adminId });
+      expect(refused).toMatchObject({ ok: false, status: 403, error: "relaxation_not_authorized", detail: "escalation_policy_attached" });
+      expect((await assignmentOf(id)).slaPolicyId).toBeNull();
+      const notify = await scheduleApprovalTask(db, id, { slaPolicyId: n!.id }, { source: "stage_timer", actorUserId: null, systemActor: "workflow-stage-timer" });
+      expect(notify.ok && notify.relaxations).toEqual([]);
+      expect((await assignmentOf(id)).slaPolicyId).toBe(n!.id);
+    } finally {
+      await db.update(approvalAssignments).set({ slaPolicyId: null }).where(eq(approvalAssignments.slaPolicyId, n!.id));
+      await db.delete(approvalSlaPolicies).where(eq(approvalSlaPolicies.id, n!.id));
     }
   });
 });
