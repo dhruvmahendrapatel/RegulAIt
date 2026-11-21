@@ -19,8 +19,9 @@ What it reads, and with what:
     slice (ADR-0362 slice 2) reads it.
   - DOCX, XLSX, PPTX: the Python standard library only (zipfile + xml.etree). Office Open XML is a zip of XML
     parts; no maintained, permissively licensed reader beats reading the parts directly (ADR-0362 comparison).
-    A part that declares a DOCTYPE or an ENTITY is refused `malformed`: OOXML never needs one, so refusing it
-    closes entity-expansion bombs and external entities whatever the expat version.
+    A part that declares a DOCTYPE or an ENTITY is refused `malformed`, checked inside the XML parser so no
+    encoding (UTF-16 included) can hide it: OOXML never needs one, so refusing it closes entity-expansion bombs,
+    external entities and text injected through internal entities, whatever the expat version.
   - CSV and plain text: strict UTF-8 (BOM allowed), no NUL bytes.
   - ZIP archives: the standard library, each entry detected and read recursively, bounded by entry count,
     nesting depth, total and per-entry uncompressed bytes and the compression ratio. Sizes in headers are never
@@ -45,6 +46,7 @@ import sys
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 
 RESULT_VERSION = 1
 
@@ -250,10 +252,38 @@ XLSX_SHEET = re.compile(r"^xl/worksheets/sheet\d+\.xml$")
 CORE_PART = "docProps/core.xml"
 
 
+class _DtdRefused(Exception):
+    pass
+
+
+def _refuse_dtd(*_args) -> None:
+    raise _DtdRefused()
+
+
+def refuse_dtd(data: bytes) -> None:
+    """Refuse any DTD, entity declaration or external entity, whatever the part's encoding.
+
+    The check runs INSIDE expat, on the decoded document, so a UTF-16 (or any other expat-supported) encoding cannot
+    hide a declaration from it. OOXML never needs a DTD; refusing one closes entity expansion (and attacker text
+    injected through internal entities) before ElementTree ever sees the part. Malformed XML is refused too.
+    """
+    p = expat.ParserCreate()
+    p.StartDoctypeDeclHandler = _refuse_dtd
+    p.EntityDeclHandler = _refuse_dtd
+    p.UnparsedEntityDeclHandler = _refuse_dtd
+    p.ExternalEntityRefHandler = _refuse_dtd
+    try:
+        p.Parse(data, True)
+    except (_DtdRefused, expat.ExpatError, ValueError):
+        raise Refused("malformed")
+
+
 def parse_xml(data: bytes) -> ET.Element:
+    # a cheap first layer for the common case; the parser-level check below is the one that holds for every encoding
     lowered = data.lower()
     if b"<!doctype" in lowered or b"<!entity" in lowered:
         raise Refused("malformed")
+    refuse_dtd(data)
     try:
         return ET.fromstring(data)
     except ET.ParseError:
