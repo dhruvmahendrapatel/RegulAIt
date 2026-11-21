@@ -7,6 +7,7 @@
  * failing to compile or to validate.
  */
 import { z } from "zod";
+import { CONTENT_CONTEXT_ID_PATTERN } from "./provenance/index.js";
 
 export const BUILDER_SHARING_VALUES = ["private", "workspace", "people"] as const;
 export const BUILDER_CONNECTION_FORMAT_VALUES = ["shared", "per_user"] as const;
@@ -128,7 +129,17 @@ export const builderSetSubagentsSchema = z
 
 export const builderSetSkillsSchema = z.object({ skillIds: z.array(z.string().uuid()).max(50) }).strict();
 
-export const builderAddMemorySchema = z.object({ content: z.string().trim().min(1).max(2000) }).strict();
+export const builderAddMemorySchema = z
+  .object({
+    content: z.string().trim().min(1).max(2000),
+    /**
+     * ADR-0193 addendum (E50): the causal context (`run:<id>` or `builder_thread:<id>`) the memory was drawn from,
+     * when an agent's run writes it. The content-trust floor then refuses it if that context holds content below the
+     * write floor. Omitted for a person's own note: no context, nothing to refuse on (the injection scan still runs).
+     */
+    contextId: z.string().regex(CONTENT_CONTEXT_ID_PATTERN).optional(),
+  })
+  .strict();
 
 export const builderCreateScheduleSchema = z
   .object({

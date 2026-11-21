@@ -48,6 +48,7 @@ const DECISION_WRITERS = [
   "mcp-sap-business.ts", // ADR-0230 A2: an SAP business write refused for want of a live, budgeted project
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
+  "memory-write-gate.ts", // ADR-0193 addendum (E50): a shared-context or agent-memory write refused by the content-trust floor (insert(auditLog) on the chained handle)
   "model-call-consent.ts", // ADR-0251: a model call held for approval (insert(auditLog) on the chained handle)
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
