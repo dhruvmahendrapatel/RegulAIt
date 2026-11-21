@@ -2,14 +2,17 @@
  * ADR-0360 slice 1a — ENDPOINT AGENT FLEET OPERATIONS, the admin routes (admin-only: none is in NON_ADMIN_ROUTES; every
  * write audited under the source).
  *
- *   device groups      staging rings of one endpoint-agent source; a device is in at most one
+ *   (device groups     ADR-0350's org-wide groups, lane E31's table and routes, reused as the rollout stages; this file
+ *                      adds no group concept of its own)
  *   fleet settings     self-update, OFF by default: turning it on is a `settings_relax` step-up bound to the source,
  *                      recorded on the row (a CHECK holds "on" to a recorded relaxation); turning it off is free
- *   update rollouts    one target version over ordered stages (one group each); the lifecycle is the declared table in
+ *   update rollouts    one target version over ordered stages (one ADR-0350 group each; a device in several groups is
+ *                      offered the update by the first stage that holds it); the lifecycle is the declared table in
  *                      `endpoint-fleet-lifecycle.ts`, and every state write is a guarded UPDATE over its source states,
  *                      so a stale or concurrent write matches no row and is refused (409), never overwriting
  *   one-line enrolment a single-use (device cap 1), short-lived (15 minutes by default, at most 60), source-scoped
- *                      enrolment token, optionally placing the device in one group. Only its SHA-256 is kept; no audit
+ *                      enrolment token, optionally placing the device in one ADR-0350 group (a group only narrows a
+ *                      device's policy, so joining one is never a relaxation). Only its SHA-256 is kept; no audit
  *                      row, log line or later read carries the secret
  *
  * The device side (the signed directive, the release download route, update results) is slice 1c.
@@ -19,19 +22,15 @@ import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
-  asc,
   auditLog,
   desc,
   discoverySources,
-  endpointDeviceGroupMembers,
   endpointDeviceGroups,
-  endpointDevices,
   endpointEnrolmentTokens,
   endpointFleetSettings,
   endpointUpdateRollouts,
   endpointUpdateRolloutStages,
   eq,
-  gt,
   inArray,
   sql,
   type Db,
@@ -48,9 +47,6 @@ import { hashToken } from "./token-hash.js";
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** bounds (secure by default, ADR-0180: each is the strict value, none is a setting) */
-export const DEVICE_GROUPS_PER_SOURCE = 200;
-export const DEVICE_GROUP_MEMBERS_PER_WRITE = 500;
-export const DEVICE_GROUP_MEMBERS_PAGE = 500;
 export const ROLLOUT_MAX_STAGES = 20;
 export const ROLLOUTS_LISTED = 100;
 export const ONE_LINE_TOKEN_DEFAULT_MINUTES = 15;
@@ -64,14 +60,6 @@ export const selfUpdateRelaxStepUp = (sourceId: string): StepUpCheckArgs => ({
 });
 
 const uuid = z.string().uuid();
-const groupSchema = z.object({ name: z.string().trim().min(1).max(100) }).strict();
-const membersSchema = z
-  .object({
-    add: z.array(uuid).max(DEVICE_GROUP_MEMBERS_PER_WRITE).default([]),
-    remove: z.array(uuid).max(DEVICE_GROUP_MEMBERS_PER_WRITE).default([]),
-  })
-  .strict()
-  .refine((b) => b.add.length + b.remove.length > 0, { message: "add or remove at least one device" });
 const settingsSchema = z.object({ selfUpdate: z.boolean() }).strict();
 const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$/;
 const rolloutSchema = z
@@ -88,7 +76,6 @@ const oneLineSchema = z
     deviceGroupId: uuid.optional(),
   })
   .strict();
-const pageSchema = z.object({ after: uuid.optional() }).strict();
 
 const ROLLOUT_ACTIONS = ["start", "advance", "complete", "pause", "resume", "abort"] as const satisfies readonly RolloutEvent[];
 type RolloutAction = (typeof ROLLOUT_ACTIONS)[number];
@@ -145,7 +132,9 @@ function rolloutView(r: EndpointUpdateRolloutRow, stages: EndpointUpdateRolloutS
     updatedAt: r.updatedAt.toISOString(),
     stages: sorted.map((s) => ({
       ordinal: s.ordinal,
+      // null once the ADR-0350 group was deleted: the stage then offers the update to no device
       groupId: s.groupId,
+      groupName: s.groupName,
       state: s.state,
       startedAt: s.startedAt?.toISOString() ?? null,
       completedAt: s.completedAt?.toISOString() ?? null,
@@ -173,149 +162,11 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
       return null;
     }
     if (source.kind !== "endpoint_agent") {
-      await reply.status(409).send({ error: "not_an_agent_source", detail: "device groups, fleet settings and rollouts belong to an endpoint agent source" });
+      await reply.status(409).send({ error: "not_an_agent_source", detail: "fleet settings, rollouts and one-line enrolments belong to an endpoint agent source" });
       return null;
     }
     return source;
   };
-  const groupOf = async (reply: FastifyReply, groupId: string | null) => {
-    if (!groupId) {
-      await reply.status(400).send({ error: "invalid_request", detail: "groupId must be a uuid" });
-      return null;
-    }
-    const [g] = await db.select().from(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId));
-    if (!g) {
-      await reply.status(404).send({ error: "not_found", detail: "no such device group" });
-      return null;
-    }
-    return g;
-  };
-  const groupView = (g: typeof endpointDeviceGroups.$inferSelect, members: number) => ({
-    id: g.id,
-    sourceId: g.sourceId,
-    name: g.name,
-    members,
-    createdAt: g.createdAt.toISOString(),
-  });
-
-  // ---- device groups --------------------------------------------------------------------------------------------
-  app.get("/v1/discovery/sources/:sourceId/device-groups", async (req, reply) => {
-    const source = await agentSource(reply, param(req, "sourceId"));
-    if (!source) return reply;
-    // bounded by DEVICE_GROUPS_PER_SOURCE (the create refuses past it), so one page is the whole list
-    const rows = await db
-      .select({ g: endpointDeviceGroups, members: sql<number>`(select count(*)::int from ${endpointDeviceGroupMembers} where ${endpointDeviceGroupMembers.groupId} = ${endpointDeviceGroups.id})` })
-      .from(endpointDeviceGroups)
-      .where(eq(endpointDeviceGroups.sourceId, source.id))
-      .orderBy(asc(endpointDeviceGroups.name));
-    return reply.send({ groups: rows.map((r) => groupView(r.g, Number(r.members))) });
-  });
-
-  app.post("/v1/discovery/sources/:sourceId/device-groups", async (req, reply) => {
-    const source = await agentSource(reply, param(req, "sourceId"));
-    if (!source) return reply;
-    const b = groupSchema.safeParse(req.body ?? {});
-    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: "send {name} (1 to 100 characters)" });
-    try {
-      const row = await db.transaction(async (rawTx) => {
-        const tx = rawTx as unknown as Db;
-        // serialise creates per source so the cap holds under concurrency
-        await tx.select({ id: discoverySources.id }).from(discoverySources).where(eq(discoverySources.id, source.id)).for("update");
-        const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(endpointDeviceGroups).where(eq(endpointDeviceGroups.sourceId, source.id))) as [{ n: number }];
-        if (Number(n) >= DEVICE_GROUPS_PER_SOURCE) throw new Refusal(409, "group_limit_reached", `a source has at most ${DEVICE_GROUPS_PER_SOURCE} device groups`);
-        const [dup] = await tx.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(and(eq(endpointDeviceGroups.sourceId, source.id), eq(endpointDeviceGroups.name, b.data.name)));
-        if (dup) throw new Refusal(409, "group_name_taken", "this source already has a device group with that name");
-        const [g] = await tx.insert(endpointDeviceGroups).values({ sourceId: source.id, name: b.data.name, createdBy: req.authCtx.userId ?? null }).returning();
-        await audit(tx, actor(req), source.id, "endpoint-device-group-created", `device group '${g!.name}' created (ADR-0360)`, { groupId: g!.id });
-        return g!;
-      });
-      return reply.status(201).send({ group: groupView(row, 0) });
-    } catch (e) {
-      if (e instanceof Refusal) return send(reply, e);
-      throw e;
-    }
-  });
-
-  app.delete("/v1/discovery/device-groups/:groupId", async (req, reply) => {
-    const g = await groupOf(reply, param(req, "groupId"));
-    if (!g) return reply;
-    // a group a rollout names (any state: the stage keeps the history) is kept; the FK is RESTRICT as a backstop
-    const [used] = await db.select({ id: endpointUpdateRolloutStages.rolloutId }).from(endpointUpdateRolloutStages).where(eq(endpointUpdateRolloutStages.groupId, g.id)).limit(1);
-    if (used) return reply.status(409).send({ error: "group_in_rollout", detail: "a rollout names this group; it is kept with the rollout's history" });
-    const removed = await db.transaction(async (rawTx) => {
-      const tx = rawTx as unknown as Db;
-      const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(endpointDeviceGroupMembers).where(eq(endpointDeviceGroupMembers.groupId, g.id))) as [{ n: number }];
-      const del = await tx.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, g.id)).returning({ id: endpointDeviceGroups.id });
-      if (del.length === 0) return null;
-      await audit(tx, actor(req), g.sourceId, "endpoint-device-group-deleted", `device group '${g.name}' deleted; its ${Number(n)} device(s) are in no group now (ADR-0360)`, { groupId: g.id, members: Number(n) });
-      return Number(n);
-    });
-    if (removed === null) return reply.status(404).send({ error: "not_found", detail: "no such device group" });
-    return reply.status(204).send();
-  });
-
-  app.get("/v1/discovery/device-groups/:groupId/members", async (req, reply) => {
-    const g = await groupOf(reply, param(req, "groupId"));
-    if (!g) return reply;
-    const q = pageSchema.safeParse(req.query ?? {});
-    if (!q.success) return reply.status(400).send({ error: "invalid_request", detail: "after must be a device id" });
-    const rows = await db
-      .select({ deviceId: endpointDeviceGroupMembers.deviceId, addedAt: endpointDeviceGroupMembers.addedAt, pseudonym: endpointDevices.devicePseudonym, agentVersion: endpointDevices.agentVersion })
-      .from(endpointDeviceGroupMembers)
-      .innerJoin(endpointDevices, eq(endpointDevices.id, endpointDeviceGroupMembers.deviceId))
-      .where(and(eq(endpointDeviceGroupMembers.groupId, g.id), q.data.after ? gt(endpointDeviceGroupMembers.deviceId, q.data.after) : undefined))
-      .orderBy(asc(endpointDeviceGroupMembers.deviceId))
-      .limit(DEVICE_GROUP_MEMBERS_PAGE + 1);
-    const page = rows.slice(0, DEVICE_GROUP_MEMBERS_PAGE);
-    return reply.send({
-      members: page.map((r) => ({ deviceId: r.deviceId, devicePseudonym: r.pseudonym, agentVersion: r.agentVersion, addedAt: r.addedAt.toISOString() })),
-      next: rows.length > DEVICE_GROUP_MEMBERS_PAGE ? page[page.length - 1]!.deviceId : null,
-    });
-  });
-
-  app.post("/v1/discovery/device-groups/:groupId/members", async (req, reply) => {
-    const g = await groupOf(reply, param(req, "groupId"));
-    if (!g) return reply;
-    const b = membersSchema.safeParse(req.body ?? {});
-    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: `send {add?: [deviceId], remove?: [deviceId]} (at most ${DEVICE_GROUP_MEMBERS_PER_WRITE} each, at least one device)` });
-    const add = [...new Set(b.data.add)];
-    const remove = [...new Set(b.data.remove)];
-    if (add.some((d) => remove.includes(d))) return reply.status(400).send({ error: "invalid_request", detail: "a device is both added and removed" });
-    try {
-      const out = await db.transaction(async (rawTx) => {
-        const tx = rawTx as unknown as Db;
-        if (add.length) {
-          // only this source's live devices; a revoked device is not placed anywhere
-          const ok = await tx
-            .select({ id: endpointDevices.id })
-            .from(endpointDevices)
-            .where(and(inArray(endpointDevices.id, add), eq(endpointDevices.sourceId, g.sourceId), sql`${endpointDevices.revokedAt} IS NULL`));
-          if (ok.length !== add.length) throw new Refusal(409, "device_not_in_source", "every device must be a live device of this group's source");
-          // a device is in at most one group: adding it here moves it
-          await tx
-            .insert(endpointDeviceGroupMembers)
-            .values(add.map((deviceId) => ({ deviceId, groupId: g.id, addedBy: req.authCtx.userId ?? null })))
-            .onConflictDoUpdate({ target: endpointDeviceGroupMembers.deviceId, set: { groupId: g.id, addedBy: req.authCtx.userId ?? null, addedAt: sql`now()` } });
-        }
-        const removed = remove.length
-          ? await tx
-              .delete(endpointDeviceGroupMembers)
-              .where(and(eq(endpointDeviceGroupMembers.groupId, g.id), inArray(endpointDeviceGroupMembers.deviceId, remove)))
-              .returning({ id: endpointDeviceGroupMembers.deviceId })
-          : [];
-        await audit(tx, actor(req), g.sourceId, "endpoint-device-group-members-changed", `device group '${g.name}': ${add.length} device(s) added, ${removed.length} removed (ADR-0360)`, {
-          groupId: g.id,
-          added: add,
-          removed: removed.map((r) => r.id),
-        });
-        return { added: add.length, removed: removed.length };
-      });
-      return reply.send(out);
-    } catch (e) {
-      if (e instanceof Refusal) return send(reply, e);
-      throw e;
-    }
-  });
 
   // ---- fleet settings (self-update) -----------------------------------------------------------------------------
   const settingsView = async (sourceId: string) => {
@@ -386,8 +237,10 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     try {
       const created = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
-        const groups = await tx.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(and(inArray(endpointDeviceGroups.id, b.data.stages), eq(endpointDeviceGroups.sourceId, source.id)));
-        if (groups.length !== b.data.stages.length) throw new Refusal(409, "group_not_in_source", "every stage must name a device group of this source");
+        // ADR-0350 groups are org-wide; a stage offers the update to the members that are this source's devices
+        const groups = await tx.select({ id: endpointDeviceGroups.id, name: endpointDeviceGroups.name }).from(endpointDeviceGroups).where(inArray(endpointDeviceGroups.id, b.data.stages));
+        if (groups.length !== b.data.stages.length) throw new Refusal(409, "group_not_found", "every stage must name an existing device group");
+        const nameOf = new Map(groups.map((g) => [g.id, g.name]));
         const [open] = await tx.select({ id: endpointUpdateRollouts.id }).from(endpointUpdateRollouts).where(and(eq(endpointUpdateRollouts.sourceId, source.id), sql`${endpointUpdateRollouts.state} NOT IN ('completed', 'aborted')`));
         if (open) throw new Refusal(409, "rollout_open", "this source already has an open rollout; complete or abort it first");
         const inserted = await tx
@@ -400,7 +253,7 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
         const r = inserted[0]!;
         const stages = await tx
           .insert(endpointUpdateRolloutStages)
-          .values(b.data.stages.map((groupId, i) => ({ rolloutId: r.id, ordinal: i + 1, groupId })))
+          .values(b.data.stages.map((groupId, i) => ({ rolloutId: r.id, ordinal: i + 1, groupId, groupName: nameOf.get(groupId)! })))
           .returning();
         await audit(tx, actor(req), source.id, "endpoint-update-rollout-created", `update rollout to ${r.targetVersion} created over ${stages.length} stage(s) (ADR-0360)`, { rolloutId: r.id, targetVersion: r.targetVersion, stages: b.data.stages });
         return { r, stages };
@@ -478,8 +331,8 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     const issuer = identityIssuer();
     if (!issuer) return reply.status(503).send({ error: "issuer_not_configured", detail: "the gateway's public URL is not configured, so agents could not reach it" });
     if (b.data.deviceGroupId) {
-      const [g] = await db.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(and(eq(endpointDeviceGroups.id, b.data.deviceGroupId), eq(endpointDeviceGroups.sourceId, source.id)));
-      if (!g) return reply.status(409).send({ error: "group_not_in_source", detail: "the device group must belong to this source" });
+      const [g] = await db.select({ id: endpointDeviceGroups.id }).from(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, b.data.deviceGroupId));
+      if (!g) return reply.status(409).send({ error: "group_not_found", detail: "no such device group" });
     }
     const secret = ENDPOINT_BULK_TOKEN_PREFIX + randomBytes(32).toString("hex");
     const row = await db.transaction(async (rawTx) => {

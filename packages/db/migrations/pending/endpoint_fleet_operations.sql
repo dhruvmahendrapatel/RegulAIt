@@ -1,37 +1,21 @@
 -- ADR-0360 slice 1a (lane E41): endpoint agent fleet operations.
 --
--- Device groups (staging rings; a device is in at most one: the member table's primary key is the device), the
--- per-source self-update setting (absent row or false = off; on only with a recorded settings_relax step-up), staged
+-- The per-source self-update setting (absent row or false = off; on only with a recorded settings_relax step-up), staged
 -- update rollouts and their stages (lifecycles declared in the gateway's endpoint-fleet-lifecycle.ts; at most one open
 -- rollout per source), and one-line enrolment tokens on endpoint_enrolment_tokens (single use: device cap 1 and at
--- most 60 minutes; an optional device group kept in the token's own source by a composite foreign key).
+-- most 60 minutes; an optional device group).
+--
+-- Device groups are ADR-0350's (lane E31, migration endpoint_command_exceptions, which runs first): this migration
+-- creates no group table. A stage and a token reference endpoint_device_groups ON DELETE SET NULL, so deleting a
+-- group (an ADR-0350 step-up) is never blocked by a rollout; the stage keeps the group's name as evidence.
 --
 -- Row-level security, ENABLED and FORCED on every new table: an active admin principal (regulait_rls_is_admin(), which
--- also admits the bootstrap token) and the `system_task` and `migration` reasons. The one exception is INSERT into
--- endpoint_device_group_members under `public_ingest`: the agent's ticket redemption (an exempt route) places the
--- device in its one-line token's group in the same transaction that creates the device.
+-- also admits the bootstrap token) and the `system_task` and `migration` reasons. The one addition to an existing
+-- table is an INSERT-only policy on ADR-0350's endpoint_device_group_members under `public_ingest`: the agent's ticket
+-- redemption (an exempt route) places the device in its one-line token's group in the same transaction that creates
+-- the device. Joining a group only narrows a device's policy (ADR-0350 rules are ask or deny), so this grants nothing.
 --
 -- Hand-authored, additive and idempotent. No functions or triggers (zz-dbguard-0185 checked by hand).
-CREATE TABLE IF NOT EXISTS "endpoint_device_groups" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-  "source_id" uuid NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
-  "name" text NOT NULL,
-  "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
-  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "endpoint_device_groups_name_uq" UNIQUE ("source_id", "name"),
-  CONSTRAINT "endpoint_device_groups_id_source_uq" UNIQUE ("id", "source_id"),
-  CONSTRAINT "endpoint_device_groups_name_check" CHECK (length("name") BETWEEN 1 AND 100)
-);
---> statement-breakpoint
-CREATE TABLE IF NOT EXISTS "endpoint_device_group_members" (
-  "device_id" uuid PRIMARY KEY NOT NULL REFERENCES "endpoint_devices"("id") ON DELETE CASCADE,
-  "group_id" uuid NOT NULL REFERENCES "endpoint_device_groups"("id") ON DELETE CASCADE,
-  "added_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
-  "added_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "endpoint_device_group_members_group_idx" ON "endpoint_device_group_members" ("group_id");
---> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "endpoint_fleet_settings" (
   "source_id" uuid PRIMARY KEY NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
   "self_update" boolean DEFAULT false NOT NULL,
@@ -65,7 +49,8 @@ CREATE INDEX IF NOT EXISTS "endpoint_update_rollouts_source_idx" ON "endpoint_up
 CREATE TABLE IF NOT EXISTS "endpoint_update_rollout_stages" (
   "rollout_id" uuid NOT NULL REFERENCES "endpoint_update_rollouts"("id") ON DELETE CASCADE,
   "ordinal" integer NOT NULL,
-  "group_id" uuid NOT NULL REFERENCES "endpoint_device_groups"("id") ON DELETE RESTRICT,
+  "group_id" uuid REFERENCES "endpoint_device_groups"("id") ON DELETE SET NULL,
+  "group_name" text NOT NULL,
   "state" text DEFAULT 'pending' NOT NULL,
   "started_at" timestamp with time zone,
   "completed_at" timestamp with time zone,
@@ -91,30 +76,10 @@ ALTER TABLE "endpoint_enrolment_tokens" ADD CONSTRAINT "endpoint_enrolment_token
 ALTER TABLE "endpoint_enrolment_tokens" DROP CONSTRAINT IF EXISTS "endpoint_enrolment_tokens_device_group_fk";
 --> statement-breakpoint
 ALTER TABLE "endpoint_enrolment_tokens" ADD CONSTRAINT "endpoint_enrolment_tokens_device_group_fk"
-  FOREIGN KEY ("device_group_id", "source_id") REFERENCES "endpoint_device_groups"("id", "source_id") ON DELETE CASCADE;
+  FOREIGN KEY ("device_group_id") REFERENCES "endpoint_device_groups"("id") ON DELETE SET NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "endpoint_enrolment_tokens_device_group_idx"
   ON "endpoint_enrolment_tokens" ("device_group_id") WHERE "device_group_id" IS NOT NULL;
---> statement-breakpoint
-ALTER TABLE "endpoint_device_groups" ENABLE ROW LEVEL SECURITY;
---> statement-breakpoint
-ALTER TABLE "endpoint_device_groups" FORCE ROW LEVEL SECURITY;
---> statement-breakpoint
-DROP POLICY IF EXISTS "endpoint_device_groups_admin" ON "endpoint_device_groups";
---> statement-breakpoint
-CREATE POLICY "endpoint_device_groups_admin" ON "endpoint_device_groups" FOR ALL
-  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
-  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
---> statement-breakpoint
-ALTER TABLE "endpoint_device_group_members" ENABLE ROW LEVEL SECURITY;
---> statement-breakpoint
-ALTER TABLE "endpoint_device_group_members" FORCE ROW LEVEL SECURITY;
---> statement-breakpoint
-DROP POLICY IF EXISTS "endpoint_device_group_members_admin" ON "endpoint_device_group_members";
---> statement-breakpoint
-CREATE POLICY "endpoint_device_group_members_admin" ON "endpoint_device_group_members" FOR ALL
-  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
-  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
 --> statement-breakpoint
 ALTER TABLE "endpoint_fleet_settings" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint

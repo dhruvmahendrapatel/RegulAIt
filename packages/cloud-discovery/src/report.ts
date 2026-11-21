@@ -195,16 +195,36 @@ export async function paginate<P, T>(
   itemsOf: (page: P) => T[] | undefined,
   nextOf: (page: P) => string | undefined | null,
 ): Promise<T[]> {
-  const out: T[] = [];
+  return (await paginateBounded(maxPages, fetchPage, itemsOf, nextOf)).items;
+}
+
+/**
+ * `paginate`, also bounded by an item count, and saying whether it stopped before the listing ended (the page cap
+ * was reached with a next page pending, or items were left unread at the item cap). A caller that marks records
+ * absent from a complete read must check `truncated`.
+ */
+export async function paginateBounded<P, T>(
+  maxPages: number,
+  fetchPage: (token: string | undefined) => Promise<P>,
+  itemsOf: (page: P) => T[] | undefined,
+  nextOf: (page: P) => string | undefined | null,
+  maxItems = Number.POSITIVE_INFINITY,
+): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  if (maxItems <= 0) return { items, truncated: true };
   let token: string | undefined;
   for (let i = 0; i < maxPages; i++) {
     const page = await fetchPage(token);
-    out.push(...(itemsOf(page) ?? []));
+    const got = itemsOf(page) ?? [];
+    const room = maxItems - items.length;
+    items.push(...got.slice(0, room));
     const next = nextOf(page);
-    if (!next) return out;
+    if (got.length > room) return { items, truncated: true };
+    if (!next) return { items, truncated: false };
+    if (items.length >= maxItems) return { items, truncated: true };
     token = next;
   }
-  return out;
+  return { items, truncated: true };
 }
 
 /** drain an async iterator up to `max` items */
