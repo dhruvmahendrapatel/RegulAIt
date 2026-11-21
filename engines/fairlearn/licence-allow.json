@@ -26,7 +26,8 @@
   {
     "subject": "scikit_learn.libs/libgomp",
     "licence": "GPL-3.0-or-later WITH GCC-exception-3.1",
-    "decision": "reused from ADR-0187 decision 106 for fairlearn; owner to confirm (ADR-0346)",
-    "why": "the GNU OpenMP runtime, shipped unmodified inside scikit-learn's wheel (its licenses/COPYING names it as the GCC runtime library under the GCC Runtime Library Exception 3.1). Decision 106 accepted a GCC runtime library (libgfortran) under exactly this licence; libgomp is another library of the same runtime under the same exception, so the reuse is by licence, not by the same file: the owner should confirm it."
+    "decision": "accepted by owner 2026-11-21 (ADR-0346 decision 13)",
+    "why": "A narrow ADR-0176 exception (ADR-0346 decision 13). The GNU OpenMP runtime libgomp-e985bcbb.so.1.0.0, built by GCC 8.5.0 (2021-05-14) and shipped unmodified inside the hash-pinned scikit-learn 1.9.1 wheel (sha256 e5d7b18a…c9b83e); its licenses/COPYING names it as the GCC runtime library under the GCC Runtime Library Exception 3.1, which permits linking. Unmet requirement: scikit-learn's published wheel has no build without libgomp (its OpenMP parallelism is compiled in), and no validated alternative to scikit-learn meets fairlearn's dependency. Pinned to this file's sha256: a different file is DENIED. Re-check when scikit-learn's version or wheel hash changes, when the bundled libgomp changes, or when scikit-learn ships a wheel without it.",
+    "sha256": "a43904e4fa297301d4640dc1bb3c8a3480b406f99e498eba9b1914b68aab604a"
   }
 ]

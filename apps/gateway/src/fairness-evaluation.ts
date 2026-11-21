@@ -33,12 +33,15 @@ import {
   fairnessEvaluationThresholds,
   fairnessRunEvidence,
   fairnessRuns,
+  gte,
   modelCardEvidence,
   modelCards,
   orgSettings,
   ORG_SETTINGS_ID,
   receiptSigningKeys,
   sql,
+  usageEvents,
+  virtualKeys,
   type Db,
   type EngineRunRow,
   type FairnessRunRow,
@@ -410,6 +413,8 @@ export type ModelRunProblem =
   | "dataset_rows_gone"
   | "engine_problem"
   | "unparseable_over_cap"
+  | "calls_missing"
+  | "calls_exceed_rows"
   | "fairlearn_disagrees";
 
 /** decode the task's raw report; anything unreadable is null */
@@ -431,6 +436,12 @@ export function measureModelRun(args: {
   thresholds: readonly FairnessThreshold[];
   minGroupSize: number;
   maxUnparseableRate: number;
+  /**
+   * the model calls the gateway itself served under this run's keys since the input was placed (its own ledger, not
+   * the engine's word). An answered row needs a served call (fewer is `calls_missing`); more calls than rows is
+   * `calls_exceed_rows`, which would let an engine pick favourable replies. Review S8 2 / R8 [2].
+   */
+  servedCalls: number;
 }): {
   result: FairnessResult & { model: Record<string, unknown> };
   outcome: FairnessResult["outcome"];
@@ -464,6 +475,12 @@ export function measureModelRun(args: {
   if (unparseableOverCap(unparseableCount, n, args.maxUnparseableRate)) {
     return inconclusive("unparseable_over_cap", { unparseable: unparseableCount, rows: n, cap: args.maxUnparseableRate }, unparseableCount);
   }
+  // the engine's predictions are tied to the gateway's own record of the calls it served (the trust boundary: what
+  // each reply said stays the engine's report; that a call was made for every answered row does not)
+  const answered = n - unparseableCount;
+  const calls = { servedCalls: args.servedCalls, answered, rows: n };
+  if (args.servedCalls < answered) return inconclusive("calls_missing", calls, unparseableCount);
+  if (args.servedCalls > n) return inconclusive("calls_exceed_rows", calls, unparseableCount);
   // the parseable rows, measured exactly as an uploaded dataset's (ADR-0222's suppression runs inside computeFairness)
   const keep = r.predictions.map((p) => p !== null);
   const rows: FairnessRows = {
@@ -478,14 +495,16 @@ export function measureModelRun(args: {
   const check = fairlearnAgrees(oursValues, r.metrics);
   if (!check.agrees) {
     return {
-      result: { ...ours, outcome: "inconclusive", model: { problem: "fairlearn_disagrees" satisfies ModelRunProblem, disagreements: check.disagreements, unparseable: unparseableCount } },
+      result: { ...ours, outcome: "inconclusive", model: { problem: "fairlearn_disagrees" satisfies ModelRunProblem, disagreements: check.disagreements, unparseable: unparseableCount, ...calls } },
       outcome: "inconclusive",
       unparseableCount,
       metricsEngine: null,
     };
   }
   return {
-    result: { ...ours, model: { unparseable: unparseableCount, crossCheckedWith: `fairlearn ${r.fairlearn ?? FAIRLEARN_ENGINE_VERSION}` } },
+    // `predictionsSource` names the trust boundary in the signed body: the predictions are the engine's report, each
+    // backed by a call the gateway served (`servedCalls`), and the arithmetic is recomputed here
+    result: { ...ours, model: { unparseable: unparseableCount, crossCheckedWith: `fairlearn ${r.fairlearn ?? FAIRLEARN_ENGINE_VERSION}`, predictionsSource: "engine", ...calls } },
     outcome: ours.outcome,
     unparseableCount,
     metricsEngine: `fairlearn ${r.fairlearn ?? FAIRLEARN_ENGINE_VERSION}`,
@@ -510,6 +529,20 @@ export async function recordFairnessRunEndTx(
   if (!ev) return null;
   const rows = decryptModelInputs(ev.dataset);
   const thresholds = ev.thresholds;
+  // the agent calls the gateway served under every key this run has held (a re-issued lease rotates the key), since
+  // this input was last placed (a retried task re-places it and starts over)
+  const [served] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(usageEvents)
+    .where(
+      and(
+        eq(usageEvents.objectType, "agent"),
+        gte(usageEvents.at, pin.placedAt),
+        sql`${usageEvents.virtualKeyId} IN (SELECT ${virtualKeys.id} FROM ${virtualKeys} WHERE ${virtualKeys.engineRunId} = ${run.id}${
+          run.virtualKeyId ? sql` OR ${virtualKeys.id} = ${run.virtualKeyId}` : sql``
+        })`,
+      ),
+    );
   const measured = rows
     ? measureModelRun({
         rows,
@@ -519,6 +552,7 @@ export async function recordFairnessRunEndTx(
         thresholds,
         minGroupSize: ev.evaluation.minGroupSize,
         maxUnparseableRate: ev.evaluation.maxUnparseableRate,
+        servedCalls: Number(served?.n ?? 0),
       })
     : {
         result: { metricsVersion: "fairness-metrics/1", rowCount: 0, minGroupSize: ev.evaluation.minGroupSize, attributes: [], evaluations: [], outcome: "inconclusive" as const, model: { problem: "dataset_rows_gone" } },
@@ -677,7 +711,7 @@ export async function fairnessCardDeleteBlock(db: Pick<Db, "select">, cardId: st
     .select({ id: fairnessEngineInputs.engineRunId })
     .from(fairnessEngineInputs)
     .innerJoin(fairnessEvaluations, eq(fairnessEvaluations.id, fairnessEngineInputs.evaluationId))
-    .where(and(eq(fairnessEvaluations.cardId, cardId)))
+    .where(eq(fairnessEvaluations.cardId, cardId))
     .limit(1);
   return ran ? "fairness_evaluation_runs" : null;
 }

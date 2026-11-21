@@ -20,6 +20,8 @@ import {
   auditLog,
   createDb,
   engineRuns,
+  usageEvents,
+  virtualKeys,
   eq,
   fairnessDatasetInputColumns,
   fairnessDatasets,
@@ -88,6 +90,7 @@ let cardId: string;
 /** this suite's own admin key: the fairness write rate limit is per person, so the bootstrap token's budget is
  * never shared with another suite */
 let adminKey: { authorization: string };
+let adminUserId: string;
 let keyDir: string;
 const savedKeyEnv = { file: process.env.REGULAIT_RECEIPT_SIGNING_KEY, id: process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID };
 
@@ -159,6 +162,28 @@ async function fairlearnRun(evaluationId: string, target = agentId) {
   return r!;
 }
 
+/**
+ * the agent calls the gateway served under this run's engine key: rows on its own ledger (review S8 2 / R8 [2]), as
+ * the chat route writes them, made after the input was placed
+ */
+async function serveCalls(run: { id: string }, n: number) {
+  const [k] = await db
+    .insert(virtualKeys)
+    .values({
+      name: `fl-${run.id}`,
+      userId: adminUserId,
+      tokenHash: randomUUID(),
+      purpose: "engine",
+      projectId: randomUUID(),
+      engineRunId: run.id,
+      expiresAt: new Date(Date.now() + 3_600_000),
+      budgetUsd: 1,
+      allowedModels: [],
+    } as never)
+    .returning();
+  if (n > 0) await db.insert(usageEvents).values(Array.from({ length: n }, () => ({ userId: adminUserId, objectType: "agent", agentId, virtualKeyId: k!.id })) as never);
+}
+
 /** a result whose fairlearn values equal the gateway's own, for the given predictions */
 function resultFor(run: { id: string }, evaluationId: string, inputSha256: string, rows: { labels: number[]; attributes: Record<string, string[]> }, predictions: Array<0 | 1 | null>, nudge = 0) {
   const keep = predictions.map((p) => p !== null);
@@ -183,6 +208,7 @@ beforeAll(async () => {
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `fm-admin-${RUN}@example.test`, displayName: "fm admin", isAdmin: true } });
   const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "fm" } });
   adminKey = { authorization: `Bearer ${k.json().token}` };
+  adminUserId = u.json().id;
   const [a] = await db.insert(agents).values({ name: `fm-agent-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
   agentId = a!.id;
   const [c] = await db.insert(modelCards).values({ agentId, intendedUse: `loan pre-screening ${RUN}` }).returning({ id: modelCards.id });
@@ -260,6 +286,22 @@ describe("1. the model-input upload", () => {
     // a supplied-prediction run refuses a model-input dataset
     const run = await app.inject({ method: "POST", url: "/v1/mrm/fairness/runs", headers: adminKey, payload: { datasetId: row!.id, cardId } });
     expect(run.json().error).toBe("fairness_dataset_needs_model_run");
+
+    // review R8 [1]: a project classified under a `warn` profile never lowers the org's `block` (the stricter wins)
+    const tag = `fair-warn-${RUN}`.toLowerCase();
+    const prof = await app.inject({ method: "POST", url: "/v1/compliance/profiles", headers: adminKey, payload: { tag, piiMode: "warn" } });
+    expect(prof.statusCode, prof.body).toBeLessThan(300);
+    const proj = await app.inject({ method: "POST", url: "/v1/projects", headers: adminKey, payload: { name: `fair-warn-${RUN}`, classifications: [tag] } });
+    expect(proj.statusCode, proj.body).toBe(201);
+    const viaWarnProject = await app.inject({
+      method: "POST",
+      url: "/v1/mrm/fairness/datasets",
+      headers: adminKey,
+      payload: { kind: "model_inputs", name: `m3-${RUN}`, csv: modelCsv(` ${SECRET_CELL}`), labelColumn: "outcome", favourableLabel: "1", protectedAttributes: ["region"], inputColumns: ["summary"], cardId, projectId: proj.json().id },
+    });
+    expect(viaWarnProject.statusCode, viaWarnProject.body).toBe(422);
+    expect(viaWarnProject.json().error).toBe("dataset_pii_blocked");
+    expect(viaWarnProject.body).not.toContain(SECRET_CELL);
   });
 });
 
@@ -334,14 +376,17 @@ describe("3–4. the run's end, measured and signed", () => {
     const run = await fairlearnRun(ev.id);
     const input = await fairnessInputTx(db, run);
     if (!input.ok) throw new Error(input.code);
-    // a fair model: predictions equal the labels in both groups
+    // a fair model: predictions equal the labels in both groups; the gateway served one call per row
     const predictions = rows.labels.map((l) => (l === 1 ? 1 : 0)) as Array<0 | 1>;
+    await serveCalls(run, predictions.length);
     const out = await db.transaction(async (tx) =>
       recordFairnessRunEndTx(tx as unknown as Db, run, { status: "completed", placed: true, rawReportContentBase64: b64(resultFor(run, ev.id, input.sha256, rows, predictions)) }),
     );
     expect(out).toMatchObject({ outcome: "pass", evidence: "signed" });
     const [fr] = await db.select().from(fairnessRuns).where(eq(fairnessRuns.id, out!.fairnessRunId));
     expect(fr).toMatchObject({ mode: "model", evaluationId: ev.id, engineRunId: run.id, unparseableCount: 0, metricsEngine: "fairlearn 0.15.0", outcome: "pass" });
+    // the signed body says where the predictions came from and that the gateway served a call for each answered row
+    expect((fr!.result as { model: Record<string, unknown> }).model).toMatchObject({ predictionsSource: "engine", servedCalls: 80, answered: 80, rows: 80 });
     // the evidence verifies under the recorded public key, over the exact canonical body
     const [evd] = await db.select().from(fairnessRunEvidence).where(eq(fairnessRunEvidence.runId, fr!.id));
     expect(evd!.body).toBe(fairnessRunEvidenceBody(fr!));
@@ -358,7 +403,7 @@ describe("3–4. the run's end, measured and signed", () => {
   it("a disagreement, an input mismatch, too many unparseable replies or no result is inconclusive", () => {
     const rows = { labels: Array.from({ length: 80 }, (_, i) => i % 2), attributes: { region: Array.from({ length: 80 }, (_, i) => (i < 40 ? "north" : "south")) } };
     const expected = { runId: randomUUID(), evaluationId: randomUUID(), inputSha256: "f".repeat(64) };
-    const base = { rows, attributes: ["region"], expected, thresholds: FAIRNESS_DEFAULT_THRESHOLDS, minGroupSize: 30, maxUnparseableRate: 0 };
+    const base = { rows, attributes: ["region"], expected, thresholds: FAIRNESS_DEFAULT_THRESHOLDS, minGroupSize: 30, maxUnparseableRate: 0, servedCalls: 80 };
     const fair = rows.labels.map((l) => l as 0 | 1);
     const good = resultFor({ id: expected.runId }, expected.evaluationId, expected.inputSha256, rows, fair);
     expect(measureModelRun({ ...base, report: good }).outcome).toBe("pass");
@@ -373,6 +418,14 @@ describe("3–4. the run's end, measured and signed", () => {
     expect(measureModelRun({ ...base, maxUnparseableRate: 0.05, report: resultFor({ id: expected.runId }, expected.evaluationId, expected.inputSha256, rows, oneUnparseable) }).outcome).toBe("pass");
     expect((measureModelRun({ ...base, report: null }).result.model as { problem: string }).problem).toBe("no_result");
     expect((measureModelRun({ ...base, report: { ...good, problem: "budget_exhausted" } }).result.model as { problem: string }).problem).toBe("engine_problem");
+    // review S8 2 / R8 [2]: the engine's predictions must be backed by calls the gateway itself served
+    const missing = measureModelRun({ ...base, servedCalls: 79, report: good });
+    expect(missing).toMatchObject({ outcome: "inconclusive", metricsEngine: null });
+    expect(missing.result.model).toMatchObject({ problem: "calls_missing", servedCalls: 79, answered: 80, rows: 80 });
+    expect((measureModelRun({ ...base, servedCalls: 0, report: good }).result.model as { problem: string }).problem).toBe("calls_missing");
+    expect((measureModelRun({ ...base, servedCalls: 81, report: good }).result.model as { problem: string }).problem).toBe("calls_exceed_rows");
+    // an unparseable row needs no answered call: one call short of the rows passes when that row is unparseable
+    expect(measureModelRun({ ...base, servedCalls: 79, maxUnparseableRate: 0.05, report: resultFor({ id: expected.runId }, expected.evaluationId, expected.inputSha256, rows, oneUnparseable) }).outcome).toBe("pass");
   });
 
   it("a failed run that placed its task is recorded inconclusive (it holds); a cancelled one records nothing", async () => {
@@ -386,6 +439,22 @@ describe("3–4. the run's end, measured and signed", () => {
     await fairnessInputTx(db, run2);
     expect(await db.transaction(async (tx) => recordFairnessRunEndTx(tx as unknown as Db, run2, { status: "cancelled", placed: true, rawReportContentBase64: undefined }))).toBeNull();
     expect(await db.transaction(async (tx) => recordFairnessRunEndTx(tx as unknown as Db, run2, { status: "completed", placed: false, rawReportContentBase64: undefined }))).toBeNull();
+  });
+
+  it("an agreeing report with no calls on the gateway's ledger is inconclusive and holds the card", async () => {
+    const { dataset, rows } = await modelDataset();
+    const ev = await evaluationFor(dataset.id);
+    const run = await fairlearnRun(ev.id);
+    const input = await fairnessInputTx(db, run);
+    if (!input.ok) throw new Error(input.code);
+    const fair = rows.labels.map((l) => l as 0 | 1);
+    await serveCalls(run, 0);
+    const out = await db.transaction(async (tx) =>
+      recordFairnessRunEndTx(tx as unknown as Db, run, { status: "completed", placed: true, rawReportContentBase64: b64(resultFor(run, ev.id, input.sha256, rows, fair)) }),
+    );
+    expect(out?.outcome).toBe("inconclusive");
+    const [fr] = await db.select().from(fairnessRuns).where(eq(fairnessRuns.id, out!.fairnessRunId));
+    expect((fr!.result as { model: Record<string, unknown> }).model).toMatchObject({ problem: "calls_missing", servedCalls: 0, answered: 80 });
   });
 
   it("with no signing key the run is kept and nothing unsigned is stored", async () => {
@@ -426,6 +495,7 @@ describe("5. the card keeps its evidence; the pack counts it", () => {
     const input = await fairnessInputTx(db, run);
     if (!input.ok) throw new Error(input.code);
     const fair = rows.labels.map((l) => l as 0 | 1);
+    await serveCalls(run, fair.length);
     await db.transaction(async (tx) => recordFairnessRunEndTx(tx as unknown as Db, run, { status: "completed", placed: true, rawReportContentBase64: b64(resultFor(run, ev.id, input.sha256, rows, fair)) }));
     expect(await measured()).toBe(true);
     await db.update(modelCards).set({ pinnedModelVersion: `v-${RUN}` }).where(eq(modelCards.id, cardId));

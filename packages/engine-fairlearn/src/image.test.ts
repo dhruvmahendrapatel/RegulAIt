@@ -87,10 +87,14 @@ describe("the fairlearn image's inputs", () => {
     expect(dockerfile).toContain("apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1");
   });
 
-  it("every allow-file entry is a licence the owner accepted for an earlier engine, marked reused and waiting for the owner", () => {
+  it("every allow-file entry is a licence the owner accepted for an earlier engine (marked reused) or for fairlearn itself (pinned)", () => {
     expect(gate.allowProblems(allowFile)).toEqual([]);
     expect(gate.readingProblems(readings)).toEqual([]);
-    for (const e of allowFile) {
+    // ADR-0346 decision 13: libgomp is the owner's narrow ADR-0176 exception, pinned to the one file the wheel ships
+    const gomp = allowFile.find((e) => e.subject === "scikit_learn.libs/libgomp") as { decision: string; sha256?: string };
+    expect(gomp.decision).toBe("accepted by owner 2026-11-21 (ADR-0346 decision 13)");
+    expect(gomp.sha256).toBe("a43904e4fa297301d4640dc1bb3c8a3480b406f99e498eba9b1914b68aab604a");
+    for (const e of allowFile.filter((x) => x !== gomp)) {
       const m = /^reused from ADR-0187 decision (\d+) for fairlearn; owner to confirm \(ADR-0346\)$/.exec(e.decision);
       expect(m, e.subject).not.toBeNull();
       // the same licence carries that recorded acceptance in an earlier engine's allow file
@@ -122,5 +126,24 @@ describe("the fairlearn image's inputs", () => {
     // libgomp is admitted only where the allow file names it (scikit_learn.libs), never in another wheel
     expect(j.denied.map((r) => `${r.subject}:${r.term}`).sort()).toEqual(["other.libs/libgomp:GPL-3.0-or-later WITH GCC-exception-3.1", "other.libs/libmystery:null", "somepkg:AGPL-3.0-only"]);
     expect(j.allowed.map((r) => r.subject)).toEqual(["plainmit"]);
+  });
+
+  it("ADR-0346 decision 13: the libgomp admission covers only the pinned file, and an accepted GPL exception must pin one", async () => {
+    const site = await mkdtemp(path.join(tmpdir(), "fairlearn-pin-"));
+    await mkdir(path.join(site, "scikit_learn.libs"));
+    // a libgomp that is not the pinned file (a rebuilt or replaced library) is DENIED, with the hashes named
+    await writeFile(path.join(site, "scikit_learn.libs", "libgomp-e985bcbb.so.1.0.0"), "not the shipped library");
+    const j = gate.judge(gate.inventory(site), allowFile, () => null) as { denied: Array<Row & { why?: string }>; pending: Row[] };
+    expect(j.pending).toEqual([]);
+    expect(j.denied.map((r) => r.subject)).toEqual(["scikit_learn.libs/libgomp"]);
+    expect(j.denied[0]!.why).toMatch(/the admission pins a43904e4fa297301d4640dc1bb3c8a3480b406f99e498eba9b1914b68aab604a$/);
+    // the allow file refuses an owner-accepted GPL-family exception without a pin, and a malformed pin
+    const unpinned = allowFile.map((e) => (e.subject === "scikit_learn.libs/libgomp" ? { ...e, sha256: undefined } : e));
+    expect(gate.allowProblems(unpinned)).toEqual([
+      "entry 4 (scikit_learn.libs/libgomp) is an owner-accepted GPL-3.0-or-later WITH GCC-exception-3.1 exception and must pin its file's sha256",
+    ]);
+    expect(gate.allowProblems(allowFile.map((e) => (e.subject === "scikit_learn.libs/libgomp" ? { ...e, sha256: "abc" } : e)))).toEqual([
+      "entry 4 (scikit_learn.libs/libgomp) sha256 is not a sha256",
+    ]);
   });
 });

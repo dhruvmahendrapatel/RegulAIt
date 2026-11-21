@@ -5584,6 +5584,13 @@ export const orgSettings = pgTable(
     fairnessPromotionGate: boolean("fairness_promotion_gate").notNull().default(false),
     /** ADR-0346 decision 9: the newest run the promotion gate accepts is at most this many days old (strict 90) */
     fairnessRunMaxAgeDays: integer("fairness_run_max_age_days").notNull().default(90),
+    /** ADR-0346 decision 9 (owner 2026-11-21; migration fairness_gate_risk_tiers): the ADR-0085 risk tiers whose model
+     * cards the promotion gate always covers, whatever `fairnessPromotionGate` says. Secure by default: the high-risk
+     * tiers (prohibited, high) are on. Turning a tier off is a stepped-up, audited settings relaxation. */
+    fairnessGateTierProhibited: boolean("fairness_gate_tier_prohibited").notNull().default(true),
+    fairnessGateTierHigh: boolean("fairness_gate_tier_high").notNull().default(true),
+    fairnessGateTierLimited: boolean("fairness_gate_tier_limited").notNull().default(false),
+    fairnessGateTierMinimal: boolean("fairness_gate_tier_minimal").notNull().default(false),
 
     /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
      * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a

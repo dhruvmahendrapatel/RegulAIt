@@ -80,7 +80,7 @@ import {
   type FairnessRows,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { loadOrgSettings, orgPiiInternationalCategories } from "./org-settings.js";
+import { loadOrgSettings, orgDefaultPiiMode, orgPiiInternationalCategories } from "./org-settings.js";
 import { projectPiiMode } from "./projects.js";
 import { checkModelInputPii, encodeModelInputRows, parseModelInputCsv, signFairnessRunEvidenceTx, strictestPiiMode } from "./fairness-evaluation.js";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
@@ -554,7 +554,9 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
     }
     const parsed = parseModelInputCsv(body);
     if (!parsed.ok) return reply.status(parsed.status).send({ error: parsed.error, detail: parsed.detail });
-    const piiMode = strictestPiiMode(await projectPiiMode(db, body.projectId ?? null));
+    // ADR-0346 decision 3: the stricter of the named project's cascade mode and the org default. A classified project's
+    // profile (onboarding ships one at `warn`) never lowers the org's `block` (review R8 [1], ADR-0180).
+    const piiMode = strictestPiiMode(await projectPiiMode(db, body.projectId ?? null), orgDefaultPiiMode(await loadOrgSettings(db)));
     const pii = checkModelInputPii(parsed.rows, piiMode, international);
     if (!pii.ok) return reply.status(pii.status).send({ error: pii.error, detail: pii.detail });
     const csvBytes = Buffer.byteLength(body.csv, "utf8");

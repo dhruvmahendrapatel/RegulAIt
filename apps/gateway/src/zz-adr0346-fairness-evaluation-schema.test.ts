@@ -291,6 +291,16 @@ describe("ADR-0346 schema", () => {
       sql`SELECT column_default FROM information_schema.columns WHERE table_name = 'org_settings' AND column_name = 'fairness_promotion_gate'`,
     );
     expect(col.rows[0]?.column_default).toBe("false");
+    // owner 2026-11-21: the high-risk tiers force the gate by default; the column defaults are the shared defaults
+    const tiers = await db.execute<{ column_name: string; column_default: string | null }>(
+      sql`SELECT column_name, column_default FROM information_schema.columns WHERE table_name = 'org_settings' AND column_name LIKE 'fairness_gate_tier_%' ORDER BY column_name`,
+    );
+    expect(tiers.rows).toEqual([
+      { column_name: "fairness_gate_tier_high", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierHigh) },
+      { column_name: "fairness_gate_tier_limited", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierLimited) },
+      { column_name: "fairness_gate_tier_minimal", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierMinimal) },
+      { column_name: "fairness_gate_tier_prohibited", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierProhibited) },
+    ]);
 
     const rls = await db.execute<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(sql`
       SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class

@@ -29,6 +29,10 @@
  *     question 21). Such a row is admitted only when every file the distribution's RECORD lists with a hash
  *     is present and matches that hash (the hashes pip wrote from the hash-pinned wheel); a missing or
  *     changed file DENIES the row, so a patched MPL file can never ship under the admission.
+ *   - ADDITION 4, FILE PINS (ADR-0346 decision 13): an allow entry may carry `"sha256"`, the hex sha256 of the one
+ *     native library file it admits; the row is admitted only when the shipped file has exactly that hash, so the
+ *     admission cannot cover a rebuilt or replaced library. An owner acceptance of a GPL-family licence (a narrow
+ *     ADR-0176 exception) MUST carry the pin.
  *
  * Each licence term is ALLOWED when it is on the ADR-0176 list (MIT, Apache-2.0, BSD-2-Clause,
  * BSD-3-Clause, ISC, Unlicense, CC0-1.0, 0BSD); otherwise it is admitted only when
@@ -58,6 +62,9 @@ export function decisionValid(d) {
 /** the only condition an allow entry may carry, and the licences that must carry it */
 export const CONDITIONS = new Set(["unmodified"]);
 export const REQUIRED_CONDITION = { "MPL-2.0": "unmodified" };
+/** ADR-0346 decision 13: an owner acceptance of a GPL-family licence is a narrow exception and names its exact file */
+export const PIN_REQUIRED = /^(A|L)?GPL-/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /**
  * what is wrong with a distribution's installed files against its RECORD (null when every hashed file is
@@ -209,7 +216,8 @@ export function inventory(sitePackages, runtime = [], readings = []) {
         if (!/\.so(\.|$)/.test(lib)) continue;
         const base = lib.split("-")[0];
         const lic = Object.prototype.hasOwnProperty.call(NATIVE_LIBRARIES, base) ? NATIVE_LIBRARIES[base] : null;
-        rows.push({ subject: `${d}/${base}`, version: lib, licence: lic ?? "(unknown native library)", term: lic });
+        const sha256 = createHash("sha256").update(readFileSync(path.join(full, lib))).digest("hex");
+        rows.push({ subject: `${d}/${base}`, version: lib, licence: lic ?? "(unknown native library)", term: lic, sha256 });
       }
     }
   }
@@ -233,6 +241,9 @@ export function allowProblems(allow) {
     if (e.condition !== undefined && !CONDITIONS.has(e.condition)) out.push(`entry ${i} (${e.subject}) has an unknown condition "${e.condition}"`);
     const need = Object.prototype.hasOwnProperty.call(REQUIRED_CONDITION, e.licence) ? REQUIRED_CONDITION[e.licence] : null;
     if (need && e.condition !== need) out.push(`entry ${i} (${e.subject}) ${e.licence} is admitted only with condition "${need}"`);
+    if (e.sha256 !== undefined && !(typeof e.sha256 === "string" && SHA256_HEX.test(e.sha256))) out.push(`entry ${i} (${e.subject}) sha256 is not a sha256`);
+    if (typeof e.licence === "string" && PIN_REQUIRED.test(e.licence) && typeof e.decision === "string" && ACCEPTED_TEXT.test(e.decision) && e.sha256 === undefined)
+      out.push(`entry ${i} (${e.subject}) is an owner-accepted ${e.licence} exception and must pin its file's sha256`);
   });
   return out;
 }
@@ -254,6 +265,11 @@ export function judge(rows, allow, conditionProblem = () => "the condition was n
     const i = Array.isArray(allow) ? allow.findIndex((e) => e.subject === r.subject && e.licence === r.term && decisionValid(e.decision)) : -1;
     if (r.term !== null && i >= 0) {
       used.add(i);
+      const pinned = allow[i].sha256 !== undefined && r.sha256 !== allow[i].sha256 ? `file ${r.version} has sha256 ${r.sha256 ?? "(none)"}, the admission pins ${allow[i].sha256}` : null;
+      if (pinned) {
+        denied.push({ ...r, why: pinned });
+        continue;
+      }
       const why = allow[i].condition !== undefined ? conditionProblem(r, allow[i]) : null;
       if (why) denied.push({ ...r, why: `condition "${allow[i].condition}" not met: ${why}` });
       else pending.push(r);

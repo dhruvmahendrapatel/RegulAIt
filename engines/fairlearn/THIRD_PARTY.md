@@ -25,12 +25,25 @@ recorded owner acceptance for fairlearn.
 | `numpy` | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 (Zlib admitted) | 106 (modelscan, garak, spikee) |
 | `scipy.libs/libgfortran` (two builds) | GPL-3.0-or-later WITH GCC-exception-3.1 | 106: the same library, accepted inside numpy's wheel |
 | `scipy.libs/libquadmath` (two builds) | LGPL-2.1-or-later | 106: the same library, accepted inside numpy's wheel |
-| `scikit_learn.libs/libgomp` | GPL-3.0-or-later WITH GCC-exception-3.1 | 106 by licence: another GCC runtime library under the same exception (the owner should confirm it) |
+| `scikit_learn.libs/libgomp` | GPL-3.0-or-later WITH GCC-exception-3.1 | **accepted by the owner 2026-11-21 (ADR-0346 decision 13)**: a narrow ADR-0176 exception, pinned to one file (below) |
 
 The gate knows two native libraries only this closure bundles, each as its wheel's licence file names it:
 `scipy.libs/libscipy_openblas` (OpenBLAS, BSD-3-Clause, with its bundled LAPACK under BSD-3-Clause-Open-MPI, read as
 numpy's `libscipy_openblas64_` is) and `scikit_learn.libs/libgomp` (above). scipy's METADATA carries its licence as full
 text, so `licence-readings.json` records it as read from the wheel's `LICENSE.txt` (pinned by sha256): BSD-3-Clause.
+
+## Narrow ADR-0176 exception: libgomp (ADR-0346 decision 13)
+
+| Field | Value |
+|---|---|
+| Library | GNU OpenMP runtime, `scikit_learn.libs/libgomp-e985bcbb.so.1.0.0` |
+| Built by | GCC 8.5.0 (2021-05-14), per the file's annobin notes |
+| File sha256 | `a43904e4fa297301d4640dc1bb3c8a3480b406f99e498eba9b1914b68aab604a` |
+| Shipped in | `scikit-learn==1.9.1`, wheel `scikit_learn-1.9.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl`, sha256 `e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e` (`requirements.txt`) |
+| Licence | GPL-3.0-or-later WITH GCC-exception-3.1, as the wheel's `licenses/COPYING` names it. The GCC Runtime Library Exception permits linking and distributing it with code under any licence. |
+| Unmet requirement | scikit-learn's published wheels compile OpenMP in and always bundle libgomp. fairlearn requires scikit-learn, and no validated alternative to fairlearn fits (ADR-0346's comparison). |
+| How it is pinned | The wheel is hash-pinned (`pip install --require-hashes`), and the licence gate admits only a file with the sha256 above. Any other libgomp is DENIED and the image build fails. |
+| Re-check when | scikit-learn's version or wheel hash changes; the bundled libgomp changes (the gate fails the build first); or scikit-learn ships a wheel without libgomp. |
 
 Not scanned by the gate (CI's image scan covers it): the base image's OS layer.
 
