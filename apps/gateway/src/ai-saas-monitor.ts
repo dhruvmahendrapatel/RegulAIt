@@ -51,11 +51,13 @@ import {
   AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN,
   AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
   AI_SAAS_MONITOR_MAX_WINDOW_MS,
+  AI_SAAS_MONITOR_MIN_WINDOW_MS,
+  AI_SAAS_MONITOR_RUN_MACHINE,
+  AI_SAAS_MONITOR_WINDOW_LIMIT_CODES,
   AI_SAAS_MONITOR_SETTLE_MS,
   AI_SAAS_MONITOR_STATEMENT,
   AI_SAAS_MONITOR_VENDORS,
   aiSaasMonitorConfigSchemas,
-  aiSaasMonitorRunSources,
   configuredBackfillDays,
   detectPII,
   redactPII,
@@ -77,6 +79,7 @@ import { loadOrgSettings, orgDefaultPiiMode, piiInternationalCategories, retenti
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { requireStepUp } from "./step-up.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -86,6 +89,11 @@ const RUN_LEASE_SECONDS = 2 * 3600;
 /** a run stops itself well inside its lease */
 const RUN_MAX_MS = 90 * 60 * 1000;
 const RUNS_PAGE = 50;
+/** manual runs one admin may start a minute (security review S2): each can make up to MAX_USERS × MAX_PAGES_PER_USER
+ * vendor calls inside the request; the single-flight index already stops two at once per connector */
+export const AI_SAAS_MONITOR_MANUAL_RUNS_PER_MINUTE = 6;
+/** the event that closes a run into each terminal status (AI_SAAS_MONITOR_RUN_MACHINE) */
+const RUN_CLOSE_EVENT = { succeeded: "succeed", failed: "fail", refused: "refuse" } as const;
 const INTERACTIONS_PAGE = 100;
 const RETENTION_BATCH = 2000;
 const RETENTION_MAX_BATCHES = 10;
@@ -108,6 +116,7 @@ export const AI_SAAS_RULE_IDS = {
   runFailed: "ai-saas-monitor-run-failed",
   runRefused: "ai-saas-monitor-run-refused",
   interactionFinding: "ai-saas-interaction-finding",
+  interactionContentRead: "ai-saas-interaction-content-read",
   retentionPurged: "ai-saas-evidence-retention-purged",
 } as const;
 
@@ -172,8 +181,13 @@ async function connectorTags(db: DbOrTx, connectorId: string): Promise<string[]>
  * The connector's slice of the §8.3 cascade: its PII mode (the strictest of its tags' profiles, else the org default,
  * exactly as `projectPiiMode` resolves it for a project) and the retention its tags ask for.
  */
-export async function connectorCascade(db: Db, connectorId: string): Promise<{ tags: string[]; piiMode: "block" | "warn" | "log" | "redact" | null; auditRetentionDays: number | null }> {
-  const tags = await connectorTags(db, connectorId);
+export type ConnectorCascade = { tags: string[]; piiMode: "block" | "warn" | "log" | "redact" | null; auditRetentionDays: number | null };
+export async function connectorCascade(db: Db, connectorId: string): Promise<ConnectorCascade> {
+  return cascadeForTags(db, await connectorTags(db, connectorId));
+}
+
+/** the cascade a given tag set would resolve to (the config route compares before and after a tag change) */
+export async function cascadeForTags(db: Db, tags: string[]): Promise<ConnectorCascade> {
   const profiles = tags.length ? await complianceProfilesForTags(db, tags) : [];
   if (profiles.length === 0) return { tags, piiMode: orgDefaultPiiMode(await loadOrgSettings(db)), auditRetentionDays: null };
   const eff = effectiveCompliancePolicy(profiles);
@@ -228,11 +242,36 @@ export function scanInteraction(
  * connector that was off for a long time catches up over successive runs; and it never reaches closer to now than the
  * settle time.
  */
-export function monitorWindow(monitoredThrough: Date | null, backfillDays: number, now: Date): { start: Date; end: Date } {
+export function monitorWindow(monitoredThrough: Date | null, backfillDays: number, now: Date, spanMs: number = AI_SAAS_MONITOR_MAX_WINDOW_MS): { start: Date; end: Date } {
   const settled = now.getTime() - AI_SAAS_MONITOR_SETTLE_MS;
   const start = monitoredThrough ?? new Date(settled - Math.min(backfillDays, AI_SAAS_MONITOR_MAX_BACKFILL_DAYS) * DAY_MS);
-  const end = new Date(Math.min(settled, start.getTime() + AI_SAAS_MONITOR_MAX_WINDOW_MS));
+  const end = new Date(Math.min(settled, start.getTime() + spanMs));
   return { start, end };
+}
+
+/**
+ * How long the next window may be (review R7 [1]). Each run that failed on a per-run bound (too many interactions, or
+ * too many pages for one user) since the connector's last success halves it, down to AI_SAAS_MONITOR_MIN_WINDOW_MS;
+ * a success resets it. Other failures (the network, the vendor) neither count nor reset, so an outage between two
+ * bounded failures does not widen the window back.
+ */
+export function windowSpanMs(boundedFailuresSinceSuccess: number): number {
+  return Math.max(AI_SAAS_MONITOR_MIN_WINDOW_MS, Math.floor(AI_SAAS_MONITOR_MAX_WINDOW_MS / 2 ** Math.min(boundedFailuresSinceSuccess, 30)));
+}
+
+async function boundedFailuresSinceSuccess(db: Db, connectorId: string): Promise<number> {
+  const recent = await db
+    .select({ status: aiSaasMonitorRuns.status, errorCode: aiSaasMonitorRuns.errorCode })
+    .from(aiSaasMonitorRuns)
+    .where(and(eq(aiSaasMonitorRuns.connectorId, connectorId), inArray(aiSaasMonitorRuns.status, ["succeeded", "failed"])))
+    .orderBy(desc(aiSaasMonitorRuns.startedAt), desc(aiSaasMonitorRuns.id))
+    .limit(32);
+  let n = 0;
+  for (const r of recent) {
+    if (r.status === "succeeded") break;
+    if ((AI_SAAS_MONITOR_WINDOW_LIMIT_CODES as readonly string[]).includes(r.errorCode ?? "")) n += 1;
+  }
+  return n;
 }
 
 class RunStop extends Error {
@@ -282,7 +321,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     .where(
       and(
         eq(aiSaasMonitorRuns.connectorId, connector.id),
-        inArray(aiSaasMonitorRuns.status, aiSaasMonitorRunSources("failed")),
+        inArray(aiSaasMonitorRuns.status, [...AI_SAAS_MONITOR_RUN_MACHINE.sourcesOf("fail")]),
         lt(aiSaasMonitorRuns.startedAt, sql`now() - make_interval(secs => ${RUN_LEASE_SECONDS})`),
       ),
     );
@@ -318,7 +357,7 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
           usersRead: units.size,
           ...(extra.window ? { windowStart: extra.window.start, windowEnd: extra.window.end } : {}),
         })
-        .where(and(eq(aiSaasMonitorRuns.id, run.id), inArray(aiSaasMonitorRuns.status, aiSaasMonitorRunSources(status))))
+        .where(and(eq(aiSaasMonitorRuns.id, run.id), inArray(aiSaasMonitorRuns.status, [...AI_SAAS_MONITOR_RUN_MACHINE.sourcesOf(RUN_CLOSE_EVENT[status])])))
         .returning();
       if (status === "succeeded" && extra.window) {
         await tx.update(aiSaasMonitorConnectors).set({ monitoredThrough: extra.window.end, updatedAt: sql`now()` }).where(eq(aiSaasMonitorConnectors.id, connector.id));
@@ -333,6 +372,9 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     });
   };
 
+  /** the window this run asked for, once known: a failed run records it too, so its narrowing is visible */
+  let window: { start: Date; end: Date } | undefined;
+  let spanMs = AI_SAAS_MONITOR_MAX_WINDOW_MS;
   try {
     if (resolveDeployMode() === "air_gapped") throw new RunStop("refused", "air_gapped", "this deployment is air-gapped; AI SaaS monitoring cannot run");
     const policy = await loadAiSaasPolicy(db);
@@ -390,7 +432,8 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     }
     await db.update(aiSaasMonitorCredentials).set({ scopePosture: auth.scope, verifiedAt: sql`now()` }).where(eq(aiSaasMonitorCredentials.id, cred.id));
 
-    const window = monitorWindow(connector.monitoredThrough, configuredBackfillDays(connector.publicConfig), opts.now ?? new Date());
+    spanMs = windowSpanMs(await boundedFailuresSinceSuccess(db, connector.id));
+    window = monitorWindow(connector.monitoredThrough, configuredBackfillDays(connector.publicConfig), opts.now ?? new Date(), spanMs);
     if (window.start >= window.end) return await finish("succeeded", null, null, { window });
 
     const guardrails = await resolveGuardrailPolicy(db, {});
@@ -403,14 +446,18 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
       units.add(page.unit);
       counters.interactionsSeen += page.interactions.length;
       if (counters.interactionsSeen > AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN) {
-        throw new RunStop("failed", "interaction_limit", `the window held more than ${AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN} interactions; the pages read so far are kept and the window was not advanced`);
+        throw new RunStop("failed", "interaction_limit", `the window held more than ${AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN} interactions; the pages read so far are kept, the window was not advanced, and the next run asks for half as long`);
       }
       await writePage(db, connector, run.id, page.interactions, { guardrails, pii, capture, dataKey: opts.dataKey }, counters);
     }
     return await finish("succeeded", null, null, { window });
   } catch (err) {
     const stop = classifyRunError(err);
-    return finish(stop.status, stop.code, stop.detail);
+    const atFloor = spanMs <= AI_SAAS_MONITOR_MIN_WINDOW_MS && (AI_SAAS_MONITOR_WINDOW_LIMIT_CODES as readonly string[]).includes(stop.code);
+    const detail = atFloor
+      ? `even the narrowest window (${AI_SAAS_MONITOR_MIN_WINDOW_MS / 60_000} minutes) exceeded a per-run bound (${stop.code}); monitoring of this connector cannot advance until its user list is narrowed`
+      : stop.detail;
+    return finish(stop.status, stop.code, detail, window ? { window } : {});
   }
 }
 
@@ -619,6 +666,7 @@ async function replaceTags(tx: Tx, connectorId: string, tags: readonly string[])
 
 export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; deps?: AiSaasMonitorDeps | undefined } = {}): void {
   const actor = (req: FastifyRequest): string | null => req.authCtx.userId ?? null;
+  const runLimiter = new SharedRateLimitStore(db);
   const bad = (detail: string) => ({ error: "invalid_body", detail });
   const airGapped = { error: "ai_saas_monitor_air_gapped", detail: "this deployment is air-gapped; AI SaaS monitoring cannot be turned on" };
   const policyOff = { error: "ai_saas_monitor_disabled", detail: "turn AI SaaS monitoring on for the organisation first" };
@@ -702,15 +750,29 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     const unknown = await unknownTags(db, parsed.data.complianceTags);
     if (unknown.length) return reply.status(400).send({ error: "unknown_compliance_tag", detail: `no compliance profile named ${unknown.join(", ")}` });
     const beforeTags = await connectorTags(db, connector.id);
+    const afterTags = [...new Set(parsed.data.complianceTags)].sort();
     const widens = configWidens(connector.publicConfig, cfg.data);
     // widening who is read (more users, every user, fewer app filters) on an enabled connector is a relaxation
     if (connector.enabled && widens && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values: { config: "widened" } } })).ok) return reply;
+    // a tag change that keeps evidence for less time, or makes the PII action less strict, is a relaxation on any
+    // connector, enabled or not: the daily retention sweep acts on it either way (review R7 [3], ADR-0180)
+    const cascadeBefore = await cascadeForTags(db, beforeTags);
+    const cascadeAfter = await cascadeForTags(db, afterTags);
+    const loosens = cascadeLoosens(cascadeBefore, cascadeAfter);
+    if (loosens && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values: { cascade: loosens } } })).ok) return reply;
     const row = await db.transaction(async (tx) => {
       const [updated] = await tx.update(aiSaasMonitorConnectors).set({ publicConfig: cfg.data, updatedAt: sql`now()` }).where(eq(aiSaasMonitorConnectors.id, connector.id)).returning();
       await replaceTags(tx, connector.id, parsed.data.complianceTags);
       await audit(tx, actor(req), "ai_saas_monitor_connector", connector.id, AI_SAAS_RULE_IDS.connectorConfigured, "allow",
-        `AI SaaS monitor connector '${connector.name}' configuration changed${widens ? " (scope widened)" : ""}: ${parsed.data.reason}`,
-        { reason: parsed.data.reason, widened: widens, configKeys: Object.keys(cfg.data), tags: { from: beforeTags, to: [...new Set(parsed.data.complianceTags)].sort() } });
+        `AI SaaS monitor connector '${connector.name}' configuration changed${widens ? " (scope widened)" : ""}${loosens ? ` (compliance cascade loosened: ${loosens.join(", ")})` : ""}: ${parsed.data.reason}`,
+        {
+          reason: parsed.data.reason,
+          widened: widens,
+          configKeys: Object.keys(cfg.data),
+          tags: { from: beforeTags, to: afterTags },
+          retentionDays: { from: cascadeBefore.auditRetentionDays, to: cascadeAfter.auditRetentionDays },
+          piiMode: { from: cascadeBefore.piiMode, to: cascadeAfter.piiMode },
+        });
       return updated!;
     });
     return reply.send({ connector: await viewOf(row) });
@@ -794,6 +856,8 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     if (!p.success) return reply.status(404).send({ error: "not_found" });
     const connector = await loadConnector(p.data.connectorId);
     if (!connector) return reply.status(404).send({ error: "not_found" });
+    const limited = await manualRunRateCheck(runLimiter, `ai-saas-monitor-run:${actor(req) ?? "unknown"}`);
+    if (!limited.ok) return reply.status(limited.status).header("retry-after", String(limited.retryAfterSeconds)).send(limited.body);
     const run = await runAiSaasMonitor(db, connector.id, { trigger: "manual", dataKey: opts.dataKey, deps: opts.deps, requestedBy: actor(req) });
     const status = run.status === "succeeded" ? 200 : run.status === "refused" ? 409 : 502;
     return reply.status(status).send({ run: runView(run), statement: AI_SAAS_MONITOR_STATEMENT });
@@ -866,6 +930,14 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
       list.push({ detector: f.detector, category: f.category, hitCount: f.hitCount, action: f.action });
       byInteraction.set(f.interactionId, list);
     }
+    const withContent = rows.filter((r) => r.contentCiphertext && opts.dataKey);
+    if (withContent.length) {
+      // reading captured conversation text is a sensitive read: one audit row per page that returned any (review R7 [4],
+      // security S1). The row names who read which interactions; it never holds the text.
+      await audit(db, actor(req), "ai_saas_monitor_connector", connector.id, AI_SAAS_RULE_IDS.interactionContentRead, "allow",
+        `read the captured text of ${withContent.length} AI SaaS interaction(s) from connector '${connector.name}'`,
+        { connectorId: connector.id, count: withContent.length, interactionIds: withContent.map((r) => r.id), before: q.data.before ?? null, withFindings: q.data.withFindings === "true" });
+    }
     return reply.send({
       interactions: rows.map((r) => ({
         id: r.id,
@@ -886,6 +958,39 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
       nextBefore: rows.length === INTERACTIONS_PAGE ? rows[rows.length - 1]!.id : null,
     });
   });
+}
+
+const PII_STRICTNESS: Record<string, number> = { block: 4, redact: 3, warn: 2, log: 1 };
+
+/**
+ * What a tag change loosens, or null: a shorter tag retention (the sweep keeps evidence for the longer of the org audit
+ * floor and the tags' days, so fewer tag days, or none, can let evidence go sooner) and a PII mode whose action is less
+ * strict. The names go in the step-up facts and the audit row.
+ */
+export function cascadeLoosens(before: ConnectorCascade, after: ConnectorCascade): Array<"retention" | "pii_mode"> | null {
+  const out: Array<"retention" | "pii_mode"> = [];
+  if ((after.auditRetentionDays ?? 0) < (before.auditRetentionDays ?? 0)) out.push("retention");
+  if ((PII_STRICTNESS[after.piiMode ?? ""] ?? 0) < (PII_STRICTNESS[before.piiMode ?? ""] ?? 0)) out.push("pii_mode");
+  return out.length ? out : null;
+}
+
+/** the per-admin manual-run limit (security review S2); a store that gives no verdict refuses with 503 (fail closed) */
+export async function manualRunRateCheck(
+  limiter: Pick<SharedRateLimitStore, "incr">,
+  key: string,
+  max = AI_SAAS_MONITOR_MANUAL_RUNS_PER_MINUTE,
+): Promise<{ ok: true } | { ok: false; status: 429 | 503; retryAfterSeconds: number; body: Record<string, unknown> }> {
+  const verdict = await new Promise<{ current: number; ttl: number } | null>((resolve) => {
+    try {
+      limiter.incr(key, (e, r) => resolve(e || !r || !Number.isFinite(r.current) ? null : r), 60_000, max);
+    } catch {
+      resolve(null);
+    }
+  });
+  if (verdict === null) return { ok: false, status: 503, retryAfterSeconds: 60, body: { error: "rate_limit_unavailable", detail: "the manual run rate limit could not be checked; try again shortly" } };
+  if (verdict.current <= max) return { ok: true };
+  const retry = Math.max(1, Math.ceil(verdict.ttl / 1000));
+  return { ok: false, status: 429, retryAfterSeconds: retry, body: { error: "rate_limited", detail: `too many manual runs; the limit is ${max} a minute`, retryAfterSeconds: retry } };
 }
 
 /** does a configuration change read MORE than before (every user, more users, fewer app-class filters, more backfill)? */

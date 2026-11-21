@@ -83,6 +83,11 @@ export const AI_SAAS_MONITOR_MAX_PAGES_PER_USER = 50;
  * off for weeks) catches up over successive hourly runs instead of failing one oversized window over and over.
  */
 export const AI_SAAS_MONITOR_MAX_WINDOW_MS = 24 * 3600 * 1000;
+/** the narrowest window a run halves down to after runs that hit a per-run bound (review R7 [1]); a window this narrow
+ * that still overflows fails with that bound's code and a sentence saying the floor was reached */
+export const AI_SAAS_MONITOR_MIN_WINDOW_MS = 15 * 60 * 1000;
+/** the run error codes that mean "the window held too much": the next run asks for half as long */
+export const AI_SAAS_MONITOR_WINDOW_LIMIT_CODES = ["interaction_limit", "page_limit"] as const;
 export const AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN = 50_000;
 /** text scanned per interaction; longer text is truncated and the evidence row says so */
 export const AI_SAAS_MONITOR_MAX_TEXT_CHARS = 64 * 1024;
@@ -320,24 +325,8 @@ export function normalizeGraphInteraction(r: GraphAiInteraction): MonitoredInter
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// Runs: a declared lifecycle (owner rule 12, 2026-11-17)
+// Runs: the lifecycle is AI_SAAS_MONITOR_RUN_MACHINE in state-machines.ts (ADR-0348, in the STATE_MACHINES registry)
 // --------------------------------------------------------------------------------------------------------------------
-
-export const AI_SAAS_MONITOR_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
-export type AiSaasMonitorRunStatus = (typeof AI_SAAS_MONITOR_RUN_STATUSES)[number];
-
-/** the only moves a run makes: it opens `running` and closes once */
-export const AI_SAAS_MONITOR_RUN_TRANSITIONS: Readonly<Record<AiSaasMonitorRunStatus, readonly AiSaasMonitorRunStatus[]>> = {
-  running: ["succeeded", "failed", "refused"],
-  succeeded: [],
-  failed: [],
-  refused: [],
-};
-
-/** the states a run may move to `to` from, read off the table (the finish step's compare-and-set guard) */
-export function aiSaasMonitorRunSources(to: AiSaasMonitorRunStatus): AiSaasMonitorRunStatus[] {
-  return AI_SAAS_MONITOR_RUN_STATUSES.filter((from) => AI_SAAS_MONITOR_RUN_TRANSITIONS[from].includes(to));
-}
 
 /** every error code a run may record; the text beside it is always a sentence RegulAIt wrote */
 export const AI_SAAS_MONITOR_ERROR_CODES = [

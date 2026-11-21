@@ -207,7 +207,8 @@ posture read instead of pretending.
 ## As built (slice 1)
 
 - **Files.** `packages/shared/src/ai-saas-monitor.ts` (catalogue, per-vendor config schemas, the Graph response schema,
-  the normaliser, linear text extraction, the run transition table); `apps/gateway/src/ai-saas-connectors.ts` (the
+  the normaliser, linear text extraction); `AI_SAAS_MONITOR_RUN_MACHINE` in `state-machines.ts` (ADR-0348, registered in
+  `STATE_MACHINES`; initial `running` or `refused`); `apps/gateway/src/ai-saas-connectors.ts` (the
   connector contract and the Microsoft 365 Copilot connector); `apps/gateway/src/ai-saas-monitor.ts` (the run, the two
   scheduler jobs, retention, ten admin routes); migration `pending/ai_saas_monitoring.sql`.
 - **Reused, not copied:** `azureCredential` (`@regulait/cloud-discovery`), `entraWriteScope`, `scannerFetch` and
@@ -218,12 +219,19 @@ posture read instead of pretending.
   profiles, else the org default (`block` by default, ADR-0181). It sets the finding's action; `redact` counts as `warn`.
 - **Step-ups** (`settings_relax`): turning the policy on, turning content capture to `redacted` (separately), storing or
   rotating a credential, enabling a connector, and widening an enabled connector's configuration (more users, every
-  user, fewer app-class filters, more backfill). Revoking a credential and every narrowing need none.
+  user, fewer app-class filters, more backfill), and on any connector a tag change that shortens the tags' retention or
+  makes the PII action less strict (both values are audited). Revoking a credential and every narrowing need none.
 - **Data-key rotation.** Both ciphertext columns are in `CIPHERTEXT_COLUMNS`. The evidence guard lets the re-encryption
   walk rewrite `content_ciphertext` alone (the 0142 `regulait.secret_reencrypt` flag, every other column unchanged).
 - **Window.** A run resumes exactly where the last success ended and spans at most one day (cap 50,000 interactions),
   so a large tenant, a 30-day backfill or a connector that was off for months catches up over successive hourly runs
-  and never skips a gap. A run that still hits the cap fails without advancing, as §7 says.
+  and never skips a gap. A run that still hits a per-run bound (the interaction cap, or the per-user page cap) fails
+  without advancing, as §7 says, and records the window it asked for; each such failure since the last success halves
+  the next window, down to a 15-minute floor, and a success resets it. A window that overflows even at the floor fails
+  with that bound's code and says so.
+- **Reads of captured text** are audited: one row per page that returned any redacted text (who, which connector,
+  which interaction ids, never the text). Manual runs are limited to six a minute per admin (`SharedRateLimitStore`,
+  503 when the limit cannot be checked).
 - **Not built in slice 1:** the ADR-0220 trained detectors on monitored text; a federated (client-assertion) Entra
   credential (the secret path only, the same `azureCredential` supports both); ChatGPT Enterprise and Claude Enterprise
   (slice 2); remediation (slice 3).

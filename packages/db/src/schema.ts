@@ -20216,7 +20216,7 @@ export const aiSaasMonitorRuns = pgTable(
     check("ai_saas_monitor_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
     check("ai_saas_monitor_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
     check("ai_saas_monitor_runs_error_detail_check", sql`${t.errorDetail} IS NULL OR char_length(${t.errorDetail}) <= 500`),
-    check("ai_saas_monitor_runs_outcome_check", sql`(${t.status} IN ('failed', 'refused')) = (${t.errorCode} IS NOT NULL)`),
+    check("ai_saas_monitor_runs_outcome_check", sql`(${t.status} = 'failed' OR ${t.status} = 'refused') = (${t.errorCode} IS NOT NULL)`),
     check("ai_saas_monitor_runs_finished_check", sql`(${t.status} = 'running') = (${t.finishedAt} IS NULL)`),
     uniqueIndex("ai_saas_monitor_runs_live_uq").on(t.connectorId).where(sql`${t.status} = 'running'`),
     index("ai_saas_monitor_runs_connector_idx").on(t.connectorId, t.startedAt.desc(), t.id.desc()),
