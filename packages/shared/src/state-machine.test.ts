@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { defineMachine, IllegalTransitionError } from "./state-machine.js";
-import { MCP_ADMISSION_MACHINE, STATE_MACHINES, TRAINING_JOB_MACHINE } from "./state-machines.js";
+import {
+  AGENT_NHI_LINK_MACHINE,
+  APPROVAL_MACHINE,
+  EVAL_RUN_MACHINE,
+  INCIDENT_MACHINE,
+  MCP_ADMISSION_MACHINE,
+  REDTEAM_LIBRARY_MACHINE,
+  SHADOW_AI_FINDING_MACHINE,
+  STATE_MACHINES,
+  TRAINING_JOB_MACHINE,
+  USE_CASE_MACHINE,
+} from "./state-machines.js";
+import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
+import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
+import { INCIDENT_STATUSES } from "./accountability.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 
 const door = () =>
@@ -113,5 +127,64 @@ describe("ADR-0348 declared machines", () => {
     }
     expect(m.canMove("clean", "cleared")).toBe(false);
     expect(m.canMove("cleared", "cleared")).toBe(true);
+  });
+
+  it("incident: open, contained and resolved move freely by an edit; close is final; a halt contains only an open one", () => {
+    const m = INCIDENT_MACHINE;
+    expect([...m.def.states]).toEqual([...INCIDENT_STATUSES]);
+    const live = ["open", "contained", "resolved"] as const;
+    for (const a of live) for (const b of live) if (a !== b) expect(m.canMove(a, b)).toBe(true);
+    for (const a of live) expect(m.can(a, "close")).toBe(true);
+    expect(m.sourcesOf("contain_by_halt")).toEqual(["open"]);
+    for (const e of m.events) expect(m.can("closed", e)).toBe(false);
+  });
+
+  it("agent_nhi_link: only a staged link is decided, once, by an admin; both outcomes are final", () => {
+    const m = AGENT_NHI_LINK_MACHINE;
+    expect([...m.def.states]).toEqual([...AGENT_NHI_LINK_STATUSES]);
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
+    expect(m.next("staged", "confirm")).toBe("confirmed");
+    expect(m.next("staged", "reject")).toBe("rejected");
+    expect(m.sourcesOf("confirm")).toEqual(["staged"]);
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
+  });
+
+  it("eval_run: a running run ends completed or error, and nothing leaves a finished run", () => {
+    const m = EVAL_RUN_MACHINE;
+    expect(m.next("running", "complete")).toBe("completed");
+    expect(m.next("running", "crash")).toBe("error");
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
+  });
+  it("use_case: every move the intake sync makes is declared, and a retired use case never moves", () => {
+    const m = USE_CASE_MACHINE;
+    // statusForInstance (use-cases.ts) maps an instance onto these targets; the sync skips decided sources
+    for (const from of ["proposed", "under_review", "needs_info"] as const) {
+      for (const to of ["approved", "rejected"] as const) expect(m.canMove(from, to)).toBe(true);
+    }
+    expect(m.canMove("proposed", "under_review")).toBe(true);
+    expect(m.canMove("under_review", "proposed")).toBe(true);
+    expect(m.canMove("needs_info", "proposed")).toBe(false); // the sync keeps needs_info rather than rewinding
+    expect(m.canMove("approved", "under_review")).toBe(true); // recertification
+    for (const e of m.events) expect(m.can("retired", e)).toBe(false);
+  });
+
+  it("approval: decided once, spent once, superseded only while live", () => {
+    const m = APPROVAL_MACHINE;
+    for (const e of ["approve", "deny", "return"] as const) expect(m.sourcesOf(e)).toEqual(["pending"]);
+    expect(m.sourcesOf("consume")).toEqual(["approved"]);
+    expect(m.sourcesOf("supersede")).toEqual(["pending", "approved"]);
+    for (const s of m.def.terminal) for (const e of m.events) expect(m.can(s, e)).toBe(false);
+  });
+
+  it("redteam_library: publish only a draft; retire a draft or a published version, for good", () => {
+    const m = REDTEAM_LIBRARY_MACHINE;
+    expect(m.sourcesOf("publish")).toEqual(["draft"]);
+    expect(m.can("published", "retire")).toBe(true);
+    expect(m.can("retired", "publish")).toBe(false);
+  });
+
+  it("shadow_ai_finding: an admin may revise a disposition in any direction", () => {
+    const m = SHADOW_AI_FINDING_MACHINE;
+    for (const a of SHADOW_AI_DISPOSITIONS) for (const b of SHADOW_AI_DISPOSITIONS) expect(m.canMove(a, b)).toBe(true);
   });
 });

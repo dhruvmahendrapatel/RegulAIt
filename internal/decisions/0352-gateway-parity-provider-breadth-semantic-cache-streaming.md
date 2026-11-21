@@ -64,8 +64,9 @@ This ADR is built in three slices, one pull request each. This section records s
   `defaultBaseUrlFor` returns `null` for Bedrock (nothing to adjudicate without a baseUrl, like `custom`) and the
   vendor's compiled host for the other four, pinned by a drift test. The Vertex service-account token request also goes
   through the injected fetch, so on the guarded path `oauth2.googleapis.com` must be on the egress allow-list too; the
-  key's own `token_uri` is ignored, so a stored key cannot redirect the token request. Minted tokens are cached per
-  credential (keyed by a hash of the key, never shared across credentials) until a minute before expiry.
+  key's own `token_uri` is ignored, so a stored key cannot redirect the token request. Minted tokens are cached in
+  memory per credential (keyed by the exact credential, never shared across credentials; no weak digest of the
+  secret) until a minute before expiry.
 - **Env-key fallback** (ADR-0021/0181, off by default): Mistral (`MISTRAL_API_KEY`), Cohere (`COHERE_API_KEY`,
   `CO_API_KEY`) and Qwen (`DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`) join the four existing kinds. The org's
   `env_fallback_providers` column default is unchanged (the original four), so an existing install allows none of the new

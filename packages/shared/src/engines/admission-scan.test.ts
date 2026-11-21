@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ENGINE_IDS, ENGINE_KINDS } from "./contract.js";
+import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { ENGINE_MANIFEST } from "./manifest.js";
 import {
   ADMISSION_SCAN_ENGINES,
@@ -179,12 +180,16 @@ describe("ADR-0242 the gate's decision (fail closed)", () => {
 });
 
 describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
-  it("both engines are registered, off-able and unpublished (no digest, so they cannot be enabled)", () => {
+  it("both engines are registered, off-able and publishable: their digests are the lock's (null until CI publishes, so they cannot be enabled)", () => {
     expect(ENGINE_KINDS).toContain("admission_scan");
     for (const id of ["mcpscanner", "skillscanner"] as const) {
       expect(ENGINE_IDS).toContain(id);
       const m = ENGINE_MANIFEST[id];
-      expect(m).toMatchObject({ kind: "admission_scan", imageDigest: null, taskImage: null, needsModelAccess: false, licence: "Apache-2.0" });
+      // ADR-0242 L4.5: read from the lock, as spikee's
+      const lock = ENGINE_IMAGES_LOCK[id];
+      expect(m).toMatchObject({ kind: "admission_scan", imageDigest: lock.manifestDigest, taskImage: lock.imageId, needsModelAccess: false, licence: "Apache-2.0" });
+      expect(m.generation).toBe(1 + lock.publishGeneration);
+      if (lock.manifestDigest === null) expect(m.imageDigest).toBeNull();
       expect(m.version).toBe(ADMISSION_SCAN_ENGINES[id].version);
     }
     expect(admissionScanEngineFor("mcp_server")).toBe("mcpscanner");
@@ -219,7 +224,7 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     expect(readFileSync(path.join(root, "engines/mcpscanner/requirements-sdist.txt"), "utf8")).toMatch(/^yara-python==4\.5\.4 \\\n    --hash=sha256:[0-9a-f]{64}$/m);
   });
 
-  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.3", () => {
+  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.4", () => {
     for (const id of ["mcpscanner", "skillscanner"]) {
       const req = readFileSync(path.join(root, "engines", id, "requirements.txt"), "utf8");
       expect(req).toMatch(/^litellm==1\.108\.2 \\$/m);
@@ -227,8 +232,8 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     }
     const docker = readFileSync(path.join(root, "engines/skillscanner/Dockerfile"), "utf8");
     expect(docker).toMatch(/^FROM --platform=linux\/amd64 golang:1\.27-trixie@sha256:[0-9a-f]{64} AS cel$/m);
-    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.3"');
-    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3");
+    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.4"');
+    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.4");
   });
 
   it("#727 review: the skill driver fails closed on analyzers_failed, a failed or missing rule contract, an unexpected analyzer set and no to_dict (its own self-test, also run in the image build)", () => {

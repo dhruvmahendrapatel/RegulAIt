@@ -39,7 +39,7 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { isStdioClosureImage, MCP_STDIO_LIMITS, type McpUpstreamTransport } from "@regulait/shared";
+import { isStdioClosureImage, MCP_STDIO_LIMITS, type McpServerTransport, type McpUpstreamTransport } from "@regulait/shared";
 import { ExecutorStdioTransport, type StdioSession } from "./executor-stdio.js";
 
 // ---------------------------------------------------------------------------
@@ -172,6 +172,6 @@ export function openTransport(launch: UpstreamLaunch, opts: { deadlineMs: number
 }
 
 /** the transport a row names (absent on a pre-0169 row shape = Streamable HTTP) */
-export function rowTransport(row: { transport?: McpUpstreamTransport | null }): McpUpstreamTransport {
+export function rowTransport(row: { transport?: McpServerTransport | null }): McpServerTransport {
   return row.transport ?? "streamable_http";
 }

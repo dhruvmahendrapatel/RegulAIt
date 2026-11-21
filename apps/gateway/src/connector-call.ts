@@ -58,8 +58,8 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
-import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRules, type GovernedResource } from "@regulait/policy-kernel";
-import { governedEvaluateResource, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
+import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
+import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -83,6 +83,7 @@ import {
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
   contentTrustRefusalReason,
+  PROCESSING_NOT_PERMITTED,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { killSwitchState, loadExecutionDial, postureOf } from "./execution-posture.js";
@@ -477,7 +478,12 @@ export async function executeGovernedConnectorCall(
       coreError = err;
     }
     const dialHolds = dial.mode === "require_approval" && body.operation === "write";
-    const matchedRules = coreRestrictions ? matchingResourceApprovalRules(coreResource, coreRestrictions.approvalRules) : [];
+    // ADR-0239 slice 2b: on Cedar, sharing the kernel's one request; an engine error binds no consent here, and the
+    // kernel refuses the call on the same error (governedEvaluateResource below)
+    const matchVerdict = coreRestrictions
+      ? matchingResourceApprovalRulesWith(coreRestrictions.approvalRuleEvaluator, coreResource, coreRestrictions.approvalRules)
+      : null;
+    const matchedRules = matchVerdict?.kind === "matched" ? matchVerdict.rules : [];
     // ADR-0251 review #715 finding 1 — EVERY NAMED APPROVER SIGNS. The dial's approver and each matching rule's approver
     // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
     // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.
@@ -1019,6 +1025,19 @@ export async function executeGovernedConnectorCall(
       }
     }
 
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on what would leave the gateway (after any redaction). After the PII-mode rung, so a cascade `block`
+    // has already refused; before guardrails and provider.invoke, so a refusal executes nothing and bills nothing.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "connector", connectorId, connectorName: connector.name, operation: body.operation },
+      projectId,
+      input: JSON.stringify({ object: effectiveInvocation.object ?? null, payload: effectiveInvocation.payload ?? null }),
+    });
+    if (processingRefusal) {
+      return out.status(processingRefusal.status).send({ decision, error: processingRefusal.error, detail: processingRefusal.detail });
+    }
+
     // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
     // exclusion of PII (enforced on its own path above), the same audit rules.
     // Scoped to this connector's override (or the org default), MAX-composed
@@ -1551,6 +1570,8 @@ export async function executeGovernedConnectorCall(
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
     const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused" ||
+      // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal either
+      errCode === PROCESSING_NOT_PERMITTED ||
       // ADR-0186 decision 32: the refused input carries a credential
       errCode === CREDENTIAL_AUDIENCE_ERROR;
     const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;

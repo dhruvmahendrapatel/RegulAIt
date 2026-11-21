@@ -37,7 +37,6 @@ import { createMistral } from "@ai-sdk/mistral";
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Usage } from "@ai-sdk/provider";
 import { Hash } from "@smithy/hash-node";
 import { SignatureV4 } from "@smithy/signature-v4";
-import { createHash } from "node:crypto";
 import { JWT } from "google-auth-library";
 import {
   collectStream,
@@ -273,9 +272,10 @@ export function sigV4Fetch(
   };
 }
 
-/** Access tokens minted from a service account, keyed by a hash of the secret so a
- * token is only ever reused for the credential that minted it (never across users
- * or credentials). Bounded; expired entries are replaced on use. */
+/** Access tokens minted from a service account, keyed by the exact credential (email and
+ * private key, held in this process's memory only) so a token is only ever reused for the
+ * credential that minted it (never across users or credentials). Bounded to 64 entries;
+ * expired entries are dropped on every insert. */
 const vertexTokens = new Map<string, { token: string; expiresAt: number }>();
 const VERTEX_TOKEN_CACHE_MAX = 64;
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
@@ -289,7 +289,9 @@ async function vertexAccessToken(
   cred: Extract<VertexCredential, { kind: "service_account" }>,
   inner: typeof fetch,
 ): Promise<string> {
-  const key = createHash("sha256").update(`${cred.clientEmail}\n${cred.privateKey}`).digest("hex");
+  // The key is the exact credential (no digest): a hit needs the very same private key, so a
+  // token is never served to a different credential, and nothing secret is hashed weakly.
+  const key = `${cred.clientEmail}\n${cred.privateKey}`;
   const hit = vertexTokens.get(key);
   if (hit && hit.expiresAt - TOKEN_REFRESH_MARGIN_MS > Date.now()) return hit.token;
   const client = new JWT({
@@ -309,6 +311,8 @@ async function vertexAccessToken(
     throw new ModelProviderError("vertex: could not mint an access token from the service account", 502, { cause: err });
   }
   if (!token) throw new ModelProviderError("vertex: the token endpoint returned no access token", 502);
+  const now = Date.now();
+  for (const [k, v] of vertexTokens) if (v.expiresAt <= now) vertexTokens.delete(k);
   if (vertexTokens.size >= VERTEX_TOKEN_CACHE_MAX) vertexTokens.delete(vertexTokens.keys().next().value!);
   vertexTokens.set(key, { token, expiresAt: expiry ?? Date.now() + 5 * 60_000 });
   return token;
