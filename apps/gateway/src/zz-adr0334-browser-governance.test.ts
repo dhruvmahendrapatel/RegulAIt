@@ -286,13 +286,13 @@ describe("ADR-0334 enrolment and proofs", () => {
     expect(bound!.boundUserId).toBe(adminId);
     const [bindAudit] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-device-account-bound' and ${auditLog.objectId} = ${a.id}`);
     expect(bindAudit).toBeDefined();
-    // owner decision B1, on a device of its own: an unmatched account gets the org-wide rules (no rule yet: all denied)
+    // #1028 (B1 reversed), on a device of its own: an unmatched account gets nothing, audited by pseudonym only
     dev.c = await enrolledDevice("b1");
     const unknown = await signed(dev.c, BROWSER_EXTENSION_PATHS.policy, { profileEmail: `nobody-${RUN}@example.com` });
     const pu = await verifiedPolicy(unknown.json().policy);
     expect(pu.deviceId).toBe(dev.c.id);
-    expect(pu.sites.every((s) => s.denyReason === "no_site_rule")).toBe(true);
-    const [issued] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-policy-unmatched-account' and ${auditLog.objectId} = ${dev.c.id}`);
+    expect(pu.sites.every((s) => s.decision === "deny" && s.denyReason === "account_not_recognised")).toBe(true);
+    const [issued] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-policy-unrecognised-account' and ${auditLog.objectId} = ${dev.c.id}`);
     expect(issued).toBeDefined();
     expect(JSON.stringify(issued!.detail)).not.toContain(`nobody-${RUN}`);
     // a disabled person gets nothing
@@ -314,9 +314,32 @@ describe("ADR-0334 enrolment and proofs", () => {
     expect((await app.inject({ method: "PUT", url: "/v1/browser-governance/sites/not-a-site", headers: KEY, payload: { decision: "deny" } })).statusCode).toBe(404);
     const p = await verifiedPolicy((await signed(dev.a!, BROWSER_EXTENSION_PATHS.policy, { profileEmail: ADMIN_EMAIL })).json().policy);
     expect(p.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "allow", denyReason: null, accountDomains: ["example.com"] });
-    // B1: an unmatched account gets the same org-wide rule, account domains included
+    // #1028: an unmatched account does not get the org-wide allow
     const u = await verifiedPolicy((await signed(dev.c!, BROWSER_EXTENSION_PATHS.policy, { profileEmail: `nobody-${RUN}@example.com` })).json().policy);
-    expect(u.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "allow", denyReason: null, accountDomains: ["example.com"] });
+    expect(u.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "deny", denyReason: "account_not_recognised", accountDomains: [] });
+  });
+
+  it("#1028 regression: a disabled person cannot reach the org's rules by signing a new browser in with a personal account", async () => {
+    // the org allows ep-poe-web (previous test); two fresh devices are enrolled, then the admin is disabled
+    const fresh = await enrolledDevice("1028-personal");
+    const signedOut = await enrolledDevice("1028-signed-out");
+    await db.update(users).set({ disabledAt: sql`now()` }).where(eq(users.id, adminId));
+    try {
+      // on their bound device, their work account gets nothing
+      const work = await verifiedPolicy((await signed(dev.a!, BROWSER_EXTENSION_PATHS.policy, { profileEmail: ADMIN_EMAIL })).json().policy);
+      expect(work.sites.every((s) => s.decision === "deny" && s.denyReason === "user_disabled")).toBe(true);
+      // the bypass: a fresh device signed in with a personal account (B1 gave it the org-wide allow)
+      const personal = await verifiedPolicy((await signed(fresh, BROWSER_EXTENSION_PATHS.policy, { profileEmail: `personal-${RUN}@personal.example` })).json().policy);
+      expect(personal.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "deny", denyReason: "account_not_recognised", accountDomains: [] });
+      expect(personal.sites.every((s) => s.decision === "deny")).toBe(true);
+      // and a fresh device with the profile signed out
+      const none = await verifiedPolicy((await signed(signedOut, BROWSER_EXTENSION_PATHS.policy, { profileEmail: "" })).json().policy);
+      expect(none.sites.every((s) => s.decision === "deny" && s.denyReason === "account_not_recognised")).toBe(true);
+      const [audited] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'browser-policy-unrecognised-account' and ${auditLog.objectId} = ${signedOut.id}`);
+      expect(audited?.effect).toBe("deny");
+    } finally {
+      await db.update(users).set({ disabledAt: null }).where(eq(users.id, adminId));
+    }
   });
 
   it("stores a breach event once, attributed, with no path, account name or text in storage, append-only", async () => {

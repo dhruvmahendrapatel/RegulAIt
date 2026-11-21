@@ -330,7 +330,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
           .for("update");
         if (!cur) return "gone" as const;
         if (cur.boundSubject === null) {
-          // an unbound device with no account signed in is attributed to no one (owner decision B1's org-wide rules)
+          // an unbound device with no account signed in is attributed to no one (and its policy denies every site, #1028)
           if (!subject) return "ok" as const;
           const user = await userForEmail(t, email);
           await t
@@ -401,12 +401,13 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         rules,
         nowSeconds: Math.floor((await databaseNow(db)).getTime() / 1000),
       });
-      // owner decision B1: an account that matches no RegulAIt user gets the org-wide rules, and that is audited
-      if (email && !user) {
-        await audit(db, NIL_UUID, authed.device.id, "browser-policy-unmatched-account", "allow", "a browser policy was issued with the org-wide site rules for a profile account that matches no RegulAIt user (ADR-0334 B1)", {
+      // #1028 (owner decision 2026-11-21, reversing B1): an account that matches no active RegulAIt user, or no account,
+      // gets a policy that denies every site (`account_not_recognised`); that is audited, pseudonym only
+      if (!user) {
+        await audit(db, NIL_UUID, authed.device.id, "browser-policy-unrecognised-account", "deny", "a browser policy denying every site was issued for a profile account that matches no RegulAIt user, or for a signed-out profile (ADR-0334 §14, #1028)", {
           deviceId: authed.device.id,
-          subject,
-          allowedSites: policy.sites.filter((s) => s.decision === "allow").map((s) => s.siteId),
+          subject: subject || null,
+          signedIn: Boolean(email),
         });
       }
       return reply.status(200).send({ policy: signDevicePolicy(policy, key.signer) });
