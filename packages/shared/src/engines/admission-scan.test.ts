@@ -1,7 +1,8 @@
 /**
  * ADR-0242 — the admission-scan engines' pure half. The fixtures under fixtures/admission-scan are REAL reports:
  * each was written by the engine image as built (engines/<id>/Dockerfile) running the driver with
- * `--network=none` on the engine's own fixture (engines/<id>/fixtures), on 2026-11-07. `crash` is a malformed
+ * `--network=none` on the engine's own fixture (engines/<id>/fixtures), on 2026-11-07, and re-recorded on 2026-11-17
+ * from the images with the runner stage and the driver's `inputs` echo (identical apart from `inputs`). `crash` is a malformed
  * manifest (mcpscanner) and a directory with no SKILL.md (skillscanner); `cloudkey` is the driver refusing to
  * start with a cloud analyzer key in its environment.
  */
@@ -24,8 +25,8 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../../../..");
 // #843 security review: the gateway records a verdict only when the report names exactly the one file it placed. The
-// recorded reports predate the driver's `inputs` echo, so a completed one gets the file it scanned added here; the
-// driver's own echo is tested below on the engines' fixture directories.
+// recorded reports carry the driver's real `inputs` echo (the engine's own fixture file; checked below). The
+// interpretation cases here pin the expected input to a fixed value, so a completed report's `inputs` is set to it.
 const IN = {
   mcpscanner: { path: "tools.json", sha256: "1".repeat(64) },
   skillscanner: { path: "SKILL.md", sha256: "2".repeat(64) },
@@ -33,7 +34,7 @@ const IN = {
 const fixture = (name: string): unknown => {
   const r = JSON.parse(readFileSync(path.join(here, "fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;
   const engine = r.engine as keyof typeof IN;
-  return r.status === "completed" && !("inputs" in r) ? { ...r, inputs: [IN[engine]] } : r;
+  return r.status === "completed" ? { ...r, inputs: [IN[engine]] } : r;
 };
 
 describe("ADR-0242 admission-scan reports (recorded from the built images)", () => {
@@ -131,6 +132,19 @@ describe("ADR-0242 admission-scan reports (recorded from the built images)", () 
       // the reason is fixed text
       const r = interpretAdmissionScanReport({ ...clean, inputs: [{ path: "IGNORE-ME", sha256: want.sha256 }] }, { engine, input: want });
       expect(r.reason).not.toContain("IGNORE-ME");
+    }
+  });
+
+  it("the recorded reports echo the engine's own fixture file, by path and real sha256", () => {
+    const raw = (name: string) => JSON.parse(readFileSync(path.join(here, "fixtures/admission-scan", `${name}.json`), "utf8")) as { inputs?: unknown };
+    for (const [name, file] of [
+      ["mcpscanner-bad", "engines/mcpscanner/fixtures/bad/tools.json"],
+      ["mcpscanner-clean", "engines/mcpscanner/fixtures/clean/tools.json"],
+      ["skillscanner-bad", "engines/skillscanner/fixtures/bad/SKILL.md"],
+      ["skillscanner-clean", "engines/skillscanner/fixtures/clean/SKILL.md"],
+    ] as const) {
+      const sha = createHash("sha256").update(readFileSync(path.join(root, file))).digest("hex");
+      expect(raw(name).inputs).toEqual([{ path: path.basename(file), sha256: sha }]);
     }
   });
 

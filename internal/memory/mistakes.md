@@ -1992,7 +1992,16 @@ Superseded by the computed counter (2026-11-19, ADR-0252 addendum): `KNOWN_UI_GA
 ADR and lane's gaps are a file of their own in `scripts/known-ui-gaps/`, so census PRs no longer share a line. The rule
 still holds for any other shared hand-edited file.
 
-### M-119 (2026-11-18) - A sub-agent's worktree branch was merged into a lane branch
+### M-119 (2026-11-21) - REPEAT: subscribed to the wrong PR number after opening a PR
+
+Lane E17 opened #1130 and subscribed to #1133, a PR it does not own. The same slip happened earlier in the lane
+(#1117 instead of #1111). Both times the subscribe call was sent in the same response as the create call, with a guessed
+number, before the create call had returned its URL.
+
+Rule: subscribe only after the create call has returned, using the number in the URL it returned; never send the two in
+the same response.
+
+### M-120 (2026-11-18) - A sub-agent's worktree branch was merged into a lane branch
 
 Lane E27 built the fairlearn engine package in a sub-agent worktree (`builder/e27-fairlearn-engine-pkg`) and brought it
 back with `git merge` (1875afb2 merging fe343996) before opening #996. The branch-merge preflight refuses any merge of a

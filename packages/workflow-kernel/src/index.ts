@@ -234,6 +234,24 @@ const stageSchema = z.object({
    * as before P30. Every verdict still commits as ONE transition. Only valid
    * on an automated_check stage with named checks. */
   checkConcurrency: z.number().int().min(1).max(16).optional(),
+  /** ADR-0340 slice 2: a DEADLINE on the stage. When the instance enters it, timers are set; if the instance still
+   * rests at that same stage entry when they fire, `warnAfterSeconds` sends a reminder and `breachAfterSeconds`
+   * acts: `notify` (a notice to the initiator) or `fail` (the instance is cancelled, which compensates it when the
+   * template declares compensations). A human_approval stage takes only `onBreach: "fail"` and no reminder: a human
+   * task's reminders and escalation are the approvals queue's SLA sweep (ADR-0340 decision 9, ADR-0342), never a
+   * second path here. Absent = no deadline (as before). Not allowed on a trigger, a rollback or a compensation
+   * stage: those are failure paths an operator owns. Bounded: one minute to 90 days. */
+  sla: z
+    .object({
+      warnAfterSeconds: z.number().int().min(60).max(7_776_000).optional(),
+      breachAfterSeconds: z.number().int().min(60).max(7_776_000),
+      onBreach: z.enum(["notify", "fail"]).default("notify"),
+    })
+    .strict()
+    .refine((s) => s.warnAfterSeconds === undefined || s.warnAfterSeconds < s.breachAfterSeconds, {
+      message: "sla.warnAfterSeconds must be less than sla.breachAfterSeconds",
+    })
+    .optional(),
   /** ADR-0283 (P30): automatic retry with backoff after a retryable
    * `execution_failed` on an EXECUTED stage (git_operation, deployment, a
    * build with a nested run, a check stage with named checks; never a
@@ -259,6 +277,35 @@ const stageSchema = z.object({
 });
 export type Stage = z.infer<typeof stageSchema>;
 export type StageRetryPolicy = NonNullable<Stage["retry"]>;
+/** ADR-0340 slice 2: a stage's deadline and what its breach does */
+export type StageSla = NonNullable<Stage["sla"]>;
+
+// ---------------------------------------------------------------------------
+// ADR-0340 — THE STAGE DEADLINE LIFECYCLE, declared once (build rule 12). One deadline per stage ENTRY (its
+// `sla:<stage>` marker). Every move the gateway makes on a marker goes through `nextDeadlinePhase`; a move the table
+// does not list (a second warning, a warning after the breach, any timer after the deadline ended) is refused, and
+// the timer does nothing.
+//
+//   none ──enter──▶ scheduled ──warn──▶ warned ──breach──▶ breached
+//     │                 └──────────breach──────────────────▶ breached
+//     └──enter_unsent──▶ unscheduled   (the queue could not take the job: audited, the stage has no deadline)
+// ---------------------------------------------------------------------------
+
+export type DeadlinePhase = "none" | "scheduled" | "unscheduled" | "warned" | "breached";
+export type DeadlineTrigger = "enter" | "enter_unsent" | "warn" | "breach";
+
+export const STAGE_DEADLINE_LIFECYCLE: Readonly<Record<DeadlinePhase, Readonly<Partial<Record<DeadlineTrigger, DeadlinePhase>>>>> = {
+  none: { enter: "scheduled", enter_unsent: "unscheduled" },
+  scheduled: { warn: "warned", breach: "breached" },
+  warned: { breach: "breached" },
+  unscheduled: {},
+  breached: {},
+};
+
+/** the phase `trigger` moves a deadline to from `from`, or null when the table does not allow it */
+export function nextDeadlinePhase(from: DeadlinePhase, trigger: DeadlineTrigger): DeadlinePhase | null {
+  return STAGE_DEADLINE_LIFECYCLE[from][trigger] ?? null;
+}
 
 /** OPTIMIZATION §9: workflow-level bias for pillar 6's optimizer. Strictness
  * order (strictest last): cost-sensitive < standard < quality-sensitive. */
@@ -328,6 +375,23 @@ export const workflowDefinitionSchema = z
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry retry — only git_operation, automated_build with a run and automated_check with named checks can (a deployment is never re-deployed unattended)`,
         });
+      }
+      // ADR-0340 slice 2: a deadline belongs on a stage the instance rests at for someone; on a sign-off it can only
+      // cancel the instance, because the task's own reminders and escalation are the approvals queue's (decision 9)
+      if (s.sla !== undefined) {
+        if (s.type === "trigger" || s.type === "rollback" || s.compensates !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `stage '${s.id}' (${s.type}${s.compensates !== undefined ? ", a compensation" : ""}) cannot carry an sla — a trigger, a rollback and a compensation are not timed`,
+          });
+        } else if (s.type === "human_approval" && (s.sla.onBreach !== "fail" || s.sla.warnAfterSeconds !== undefined)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `human_approval stage '${s.id}' can only carry sla { breachAfterSeconds, onBreach: "fail" } — a sign-off's reminders ` +
+              "and escalation are the approvals queue's SLA (ADR-0340 decision 9), not a stage timer",
+          });
+        }
       }
       if (s.type === "artifact_generation" && !s.output) {
         ctx.addIssue({
