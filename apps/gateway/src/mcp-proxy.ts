@@ -1,4 +1,7 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
+import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
+import { isModernMcpRequest, serveModernMcp } from "./mcp-modern.js";
+import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -49,6 +52,7 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpServedDefinitions,
+  type McpServerTransport,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -73,6 +77,7 @@ import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-prin
 import {
   auditMcpUpstreamUnreachable,
   checkUpstreamDestination,
+  servedInProcess,
   guardedMcpConnect,
   McpEgressBlockedError,
   McpUpstreamRefusedError,
@@ -148,6 +153,8 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -235,6 +242,9 @@ export async function preflightUpstream(
   serverRow: McpUpstreamRow,
 ): Promise<void> {
   await assertAdmitted(db, serverRow.id);
+  // ADR-0364: a first-party server on the gateway's fixed list is served in-process — there is no destination to
+  // decide. Admission (above) and every per-call decision still apply; any other first-party row is refused below.
+  if (await servedInProcess(db, serverRow)) return;
   // ADR-0185 G4: the destination decision (today the URL egress check, audited
   // and thrown exactly as before) — the G4 slice branches it on transport
   await checkUpstreamDestination(db, serverRow);
@@ -798,7 +808,10 @@ export async function executeGovernedToolCall(
       // withhold, that is the marker, not the payload.
       // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
       inputText:
-        capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
+        capture && traceInput.value &&
+        !(outcome.kind === "denied" && (outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID ||
+          // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal
+          outcome.decision.ruleId === PRIVACY_RULE_IDS.dispatchRefused))
           ? toolPayloadPreview(traceInput.value, max)
           : null,
       outputText:
@@ -1500,6 +1513,17 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on the arguments that would reach the upstream (after any redaction). Still before the approval is
+    // consumed and before the upstream is contacted; answered as a policy denial so every caller reports it as one.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "mcp_tool", serverId, toolName },
+      projectId,
+      input: JSON.stringify(preparedPii?.effectiveArguments ?? args.arguments ?? null),
+    });
+    if (processingRefusal) return { kind: "denied", decision: processingRefusalDecision(processingRefusal) };
+
     // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
     // the other two for prompt-injection specifically: ADR-0034's amendment
     // showed a governed pipe can carry ATTACKER-CHOSEN BYTES back, so tool
@@ -2174,7 +2198,7 @@ async function observeServedDefinitions(
   client: Client,
   tools: readonly unknown[],
   /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
-  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+  observe: { serverId: string; transport?: McpServerTransport | null | undefined },
 ): Promise<McpServedDefinitions> {
   const caps = client.getServerCapabilities() ?? {};
   const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
@@ -2198,7 +2222,7 @@ export async function syncUpstreamTools(
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
   /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
-  transport?: McpUpstreamTransport | null,
+  transport?: McpServerTransport | null,
   /** the on-demand sync's audit row (mcp-tool-sync.ts), written in the transaction that stores the manifest */
   onStored?: (tx: Db, tools: Tool[]) => Promise<void>,
 ): Promise<Tool[]> {
@@ -2395,6 +2419,197 @@ export function mcpPreHijackRefusal(err: unknown): { status: 403 | 409; body: Re
   return null;
 }
 
+/**
+ * ADR-0311 decision 4 (slice 1): what one MCP POST knows about its caller, so the tool handlers are ONE code path for
+ * both protocol eras. Every field is resolved by the route before the request is served (auth, attribution, the
+ * server row, the stored manifest), exactly as the inline closures read them before.
+ */
+export interface McpToolCaller {
+  db: Db;
+  dataKey: string | undefined;
+  userId: string;
+  serverId: string;
+  serverRow: typeof mcpServers.$inferSelect;
+  projectId: string | null;
+  intent: string | null;
+  /** ADR-0188 S4 (for S5): set for a workload caller (its leaf grant, or the nil id) */
+  workloadGrantId: string | undefined;
+  /** ADR-0250: the engine run's workflow instance, read once per request */
+  planGateEngineInstance: string | null;
+  /** B3S-01: a stdio server's stored manifest, served with no process started */
+  storedManifest: Tool[] | null;
+  /** the manifest connection the route opened for a `tools/list`, read when the handler runs */
+  upstream: () => Client | null;
+  /** ADR-0040: server-derived session facts, read when the call is decided */
+  principal: () => AbacPrincipalContext;
+}
+
+/**
+ * `tools/list` for one caller: the manifest (synced, or the stored stdio one), filtered to what the caller is
+ * entitled to see and, under lazy tool-loading, to what is worth sending. Moved out of the v1 handler unchanged
+ * (ADR-0311 decision 4); the 2026-07-28 path (`mcp-modern.ts`) calls the same function.
+ */
+export async function listToolsForCaller(ctx: McpToolCaller): Promise<{ tools: Tool[] }> {
+  const { db, userId, serverId, serverRow, storedManifest, workloadGrantId, intent } = ctx;
+  const upstream = ctx.upstream();
+  // ADR-0097 DRIFT: the connect-time gate passed, but the manifest is
+  // re-scanned on every sync, so a server whose tools changed mid-session
+  // into something dirty is refused HERE — as a real MCP error naming the
+  // reason, never a fabricated empty tool list. The dirty manifest was not
+  // stored either (syncUpstreamTools scans before it upserts).
+  let upstreamTools: Tool[];
+  if (storedManifest) {
+    // B3S-01: a stdio server's stored manifest (admission scanned it when
+    // it was synced; the preflight above re-checked admission and the
+    // command) — no process is started to answer a listing
+    upstreamTools = storedManifest;
+  } else {
+    if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
+    upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport).catch(async (err: unknown) => {
+      if (err instanceof McpAdmissionHeldError) {
+        throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
+      }
+      if (classifyUpstreamError(err).why !== "our_own_refusal") {
+        await recordUpstreamFailure(db, serverRow, errMessage(err));
+      }
+      throw err;
+    });
+    await recordUpstreamSuccess(db, serverRow);
+  }
+  const entitlements = await loadEntitlements(db, userId, serverId);
+  const refs: ToolRef[] = upstreamTools
+    // ADR-0185 G3: a reserved `mcp:` name is never offered as a tool
+    .filter((t) => !isReservedToolName(t.name))
+    .map((t) => ({
+      serverId,
+      name: t.name,
+      kind: toolKind(t),
+    }));
+  const visible = new Set(
+    visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
+  );
+  // ADR-0188 S4: a workload caller is offered only the tools its whole chain may call (each link's grant
+  // scope, and its own grants under `own_grants`), read now; an unreadable chain lists nothing
+  if (workloadGrantId) {
+    const offered = await delegatedToolNames(db, workloadGrantId, refs);
+    for (const name of [...visible]) if (!offered.has(name)) visible.delete(name);
+  }
+  const entitled = upstreamTools.filter((t) => visible.has(t.name));
+
+  // OPTIMIZATION §8: lazy tool-loading. Governance filtering above decides
+  // what the user MAY see; this decides what is WORTH sending for the
+  // declared intent. Withheld tools remain fully callable — tools/call
+  // never consults this selection (§12: entitlements never shrink).
+  // ADR-0021: the org lazyToolLoadingEnabled toggle is the ceiling — off
+  // returns the full entitled manifest with no selection pass and no
+  // ledger row; the maxToolsInManifest dial rides into the kernel.
+  const org = await loadOrgSettings(db);
+  if (!org.lazyToolLoadingEnabled) {
+    return { tools: entitled };
+  }
+  const [policy] = await db
+    .select({ routingMode: userAgentPolicies.routingMode })
+    .from(userAgentPolicies)
+    .where(eq(userAgentPolicies.userId, userId));
+  const selection = selectTools({
+    intent: intent ?? null,
+    tools: entitled.map((t) => ({
+      name: t.name,
+      description: t.description ?? null,
+      manifestChars: JSON.stringify(t).length,
+    })),
+    routingMode: effectiveTechniqueMode(org, org.lazyToolLoadingEnabled, policy?.routingMode ?? null),
+    maxTools: org.maxToolsInManifest,
+  });
+  await db.insert(costEvents).values({
+    userId,
+    objectType: "mcp_tool",
+    objectId: serverId,
+    technique: "lazy_tool_loading",
+    estimatedTokensSaved: selection.estimatedTokensSaved,
+    estimatedCostSavedUsd: null,
+    estimationBasis: selection.estimationBasis,
+    ruleId: selection.ruleId,
+    detail: {
+      effect: selection.effect,
+      selectedCount: selection.selected.length,
+      withheldCount: selection.withheld.length,
+    },
+  });
+  const exposed = new Set(selection.selected);
+  return { tools: entitled.filter((t) => exposed.has(t.name)) };
+}
+
+/**
+ * `tools/call` for one caller: one governed decision (entitlements, approvals, scans, cost, audit) through
+ * `executeGovernedToolCall`, mapped to the MCP result or error. Moved out of the v1 handler unchanged (ADR-0311
+ * decision 4); the 2026-07-28 path (`mcp-modern.ts`) calls the same function.
+ */
+export async function callToolForCaller(
+  ctx: McpToolCaller,
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown>> {
+  const { db, userId, serverId, projectId, workloadGrantId, planGateEngineInstance } = ctx;
+  // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
+  // by the SERVER as the session so an operator can read a client's whole
+  // conversation with one MCP server as one thing. `beginTrace` returns
+  // null when tracing is off, and every line below then no-ops.
+  const toolTrace = await beginTrace(db, {
+    kind: "tool",
+    name: `mcp ${toolName}`,
+    userId,
+    projectId,
+    sessionId: `mcp:${serverId}`,
+    rootRefId: serverId,
+  });
+  // The proxy route is now a thin governance-to-MCP-error mapper over the
+  // shared primitive; the identical logic serves the worker loop too.
+  const outcome = await executeGovernedToolCall(db, ctx.dataKey, {
+    planGate: { engineInstanceId: planGateEngineInstance },
+    userId,
+    serverId,
+    toolName,
+    arguments: args,
+    projectId,
+    // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
+    // session row, never from a header the caller could set.
+    principal: ctx.principal(),
+    trace: toolTrace,
+    // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
+    // with no grant resolves to no grant and is refused in the core (never decided as the person)
+    ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+  }).catch(async (err: unknown) => {
+    // AER-024: the reply is already hijacked, so the primitive's admission
+    // hold / egress refusal cannot be the pre-hijack 403 the manifest path
+    // answers. It is the SAME named policy refusal the manifest handler
+    // raises post-hijack — never a generic internal error, and never the
+    // breaker's "retry later".
+    if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
+      await finishTrace(db, toolTrace, "denied");
+      throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+    }
+    // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
+    // before anything is answered, so a client never sees a value it could replay
+    isStdioSessionLostError(err);
+    throw err;
+  });
+  await finishTrace(
+    db,
+    toolTrace,
+    outcome.kind === "allowed" ? "ok" : outcome.kind === "unknown_tool" ? "error" : "denied",
+  );
+
+  switch (outcome.kind) {
+    case "unknown_tool":
+      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
+    case "allowed":
+      return outcome.content as Record<string, unknown>;
+    default:
+      throw mcpErrorForGovernanceOutcome(outcome);
+  }
+}
+
 /** `dataKey`: ADR-0188 S8, the pairwise subject of an outbound identity assertion is keyed from it */
 export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}) {
   // O10 (ADR-0027): admin-only per-tool price override (NOT in
@@ -2444,13 +2659,23 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
   // server-to-client SSE stream with GET. This proxy is stateless (one
   // transport per POST, no session id), so it offers none, and the spec's
   // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
-  // client report a transport error after every `initialize`. (No DELETE: a
-  // client sends it only to end a session, and no session id is ever issued.)
+  // client report a transport error after every `initialize`. DELETE ends a
+  // session, and none is ever issued, so it is 405 too (ADR-0311: the spec's
+  // answer for a server without sessions, where a 404 read as "session gone").
   // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
-  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
-    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
+  const postOnly = async (_req: unknown, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" });
+  app.get("/mcp/:serverId", postOnly);
+  app.delete("/mcp/:serverId", postOnly);
 
   app.post("/mcp/:serverId", async (req, reply) => {
+    // ADR-0311: the transport MUSTs the SDK does not enforce for us, before anything reaches an upstream
+    const originRefused = mcpOriginRefusal(req.headers.origin, resolvePublicUrl());
+    if (originRefused) return reply.status(originRefused.status).send({ error: originRefused.error, detail: originRefused.detail });
+    if (mcpBatchRefused(req.body, req.headers["mcp-protocol-version"])) return reply.status(400).send(MCP_BATCH_REFUSAL);
+    // ADR-0311 decision 4 (slice 1): the v2 SDK's own era classification. Side-effect free; every refusal below runs
+    // for both eras, and only the serving step at the end differs.
+    const modern = await isModernMcpRequest(req);
     const { serverId } = proxyParams.parse(req.params);
     const queryParse = proxyQuery.safeParse(req.query);
     if (!queryParse.success) {
@@ -2701,6 +2926,32 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     // method refuses (never decided as the person alone)
     const workloadGrantId =
       req.authCtx.via === "workload" ? (req.authCtx.delegationGrantId ?? "00000000-0000-0000-0000-000000000000") : undefined;
+    // ADR-0311 decision 4: one caller context, so both eras' tool handlers are the same governed functions
+    const caller: McpToolCaller = {
+      db,
+      dataKey: opts.dataKey,
+      userId,
+      serverId,
+      serverRow,
+      projectId,
+      intent: intent ?? null,
+      workloadGrantId,
+      planGateEngineInstance,
+      storedManifest,
+      upstream: () => upstream,
+      principal: () => abacPrincipalFromRequest(req),
+    };
+    if (modern) {
+      return serveModernMcp(req, reply, {
+        db,
+        userId,
+        serverId,
+        projectId,
+        listTools: () => listToolsForCaller(caller),
+        callTool: (name, args) => callToolForCaller(caller, name, args),
+        closeUpstream: closeUpstreamSession,
+      });
+    }
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
       { capabilities: protocolCapabilities(orgForProtocol.mcpProtocolMethods ?? []) },
@@ -2751,155 +3002,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       },
     });
 
-    proxy.setRequestHandler(ListToolsRequestSchema, async () => {
-      // ADR-0097 DRIFT: the connect-time gate passed, but the manifest is
-      // re-scanned on every sync, so a server whose tools changed mid-session
-      // into something dirty is refused HERE — as a real MCP error naming the
-      // reason, never a fabricated empty tool list. The dirty manifest was not
-      // stored either (syncUpstreamTools scans before it upserts).
-      let upstreamTools: Tool[];
-      if (storedManifest) {
-        // B3S-01: a stdio server's stored manifest (admission scanned it when
-        // it was synced; the preflight above re-checked admission and the
-        // command) — no process is started to answer a listing
-        upstreamTools = storedManifest;
-      } else {
-        if (!upstream) throw new McpError(ErrorCode.InternalError, "Missing manifest connection");
-        upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport).catch(async (err: unknown) => {
-          if (err instanceof McpAdmissionHeldError) {
-            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
-          }
-          if (classifyUpstreamError(err).why !== "our_own_refusal") {
-            await recordUpstreamFailure(db, serverRow, errMessage(err));
-          }
-          throw err;
-        });
-        await recordUpstreamSuccess(db, serverRow);
-      }
-      const entitlements = await loadEntitlements(db, userId, serverId);
-      const refs: ToolRef[] = upstreamTools
-        // ADR-0185 G3: a reserved `mcp:` name is never offered as a tool
-        .filter((t) => !isReservedToolName(t.name))
-        .map((t) => ({
-          serverId,
-          name: t.name,
-          kind: toolKind(t),
-        }));
-      const visible = new Set(
-        visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
-      );
-      // ADR-0188 S4: a workload caller is offered only the tools its whole chain may call (each link's grant
-      // scope, and its own grants under `own_grants`), read now; an unreadable chain lists nothing
-      if (workloadGrantId) {
-        const offered = await delegatedToolNames(db, workloadGrantId, refs);
-        for (const name of [...visible]) if (!offered.has(name)) visible.delete(name);
-      }
-      const entitled = upstreamTools.filter((t) => visible.has(t.name));
-
-      // OPTIMIZATION §8: lazy tool-loading. Governance filtering above decides
-      // what the user MAY see; this decides what is WORTH sending for the
-      // declared intent. Withheld tools remain fully callable — tools/call
-      // never consults this selection (§12: entitlements never shrink).
-      // ADR-0021: the org lazyToolLoadingEnabled toggle is the ceiling — off
-      // returns the full entitled manifest with no selection pass and no
-      // ledger row; the maxToolsInManifest dial rides into the kernel.
-      const org = await loadOrgSettings(db);
-      if (!org.lazyToolLoadingEnabled) {
-        return { tools: entitled };
-      }
-      const [policy] = await db
-        .select({ routingMode: userAgentPolicies.routingMode })
-        .from(userAgentPolicies)
-        .where(eq(userAgentPolicies.userId, userId));
-      const selection = selectTools({
-        intent: intent ?? null,
-        tools: entitled.map((t) => ({
-          name: t.name,
-          description: t.description ?? null,
-          manifestChars: JSON.stringify(t).length,
-        })),
-        routingMode: effectiveTechniqueMode(org, org.lazyToolLoadingEnabled, policy?.routingMode ?? null),
-        maxTools: org.maxToolsInManifest,
-      });
-      await db.insert(costEvents).values({
-        userId,
-        objectType: "mcp_tool",
-        objectId: serverId,
-        technique: "lazy_tool_loading",
-        estimatedTokensSaved: selection.estimatedTokensSaved,
-        estimatedCostSavedUsd: null,
-        estimationBasis: selection.estimationBasis,
-        ruleId: selection.ruleId,
-        detail: {
-          effect: selection.effect,
-          selectedCount: selection.selected.length,
-          withheldCount: selection.withheld.length,
-        },
-      });
-      const exposed = new Set(selection.selected);
-      return { tools: entitled.filter((t) => exposed.has(t.name)) };
-    });
-
-    proxy.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const toolName = request.params.name;
-      // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
-      // by the SERVER as the session so an operator can read a client's whole
-      // conversation with one MCP server as one thing. `beginTrace` returns
-      // null when tracing is off, and every line below then no-ops.
-      const toolTrace = await beginTrace(db, {
-        kind: "tool",
-        name: `mcp ${toolName}`,
-        userId,
-        projectId,
-        sessionId: `mcp:${serverId}`,
-        rootRefId: serverId,
-      });
-      // The proxy route is now a thin governance-to-MCP-error mapper over the
-      // shared primitive; the identical logic serves the worker loop too.
-      const outcome = await executeGovernedToolCall(db, opts.dataKey, {
-        planGate: { engineInstanceId: planGateEngineInstance },
-        userId,
-        serverId,
-        toolName,
-        arguments: request.params.arguments,
-        projectId,
-        // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
-        // session row, never from a header the caller could set.
-        principal: abacPrincipalFromRequest(req),
-        trace: toolTrace,
-        // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
-        // with no grant resolves to no grant and is refused in the core (never decided as the person)
-        ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
-      }).catch(async (err: unknown) => {
-        // AER-024: the reply is already hijacked, so the primitive's admission
-        // hold / egress refusal cannot be the pre-hijack 403 the manifest path
-        // answers. It is the SAME named policy refusal the manifest handler
-        // raises post-hijack — never a generic internal error, and never the
-        // breaker's "retry later".
-        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
-          await finishTrace(db, toolTrace, "denied");
-          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
-        }
-        // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
-        // before anything is answered, so a client never sees a value it could replay
-        isStdioSessionLostError(err);
-        throw err;
-      });
-      await finishTrace(
-        db,
-        toolTrace,
-        outcome.kind === "allowed" ? "ok" : outcome.kind === "unknown_tool" ? "error" : "denied",
-      );
-
-      switch (outcome.kind) {
-        case "unknown_tool":
-          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
-        case "allowed":
-          return outcome.content as Record<string, unknown>;
-        default:
-          throw mcpErrorForGovernanceOutcome(outcome);
-      }
-    });
+    proxy.setRequestHandler(ListToolsRequestSchema, async () => listToolsForCaller(caller));
+    proxy.setRequestHandler(CallToolRequestSchema, async (request) =>
+      callToolForCaller(caller, request.params.name, request.params.arguments),
+    );
 
     // Stateless mode: one transport per request, no session tracking yet.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

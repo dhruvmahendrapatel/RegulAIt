@@ -129,6 +129,30 @@ class OfficeTests(unittest.TestCase):
         data = zip_bytes({"[Content_Types].xml": CT, "word/document.xml": bomb})
         self.assertEqual(run_one(data)["reason"], "malformed")
 
+    def test_dtd_hidden_by_utf16_refused(self):
+        # review R-1 (#967): a UTF-16 part carries no ASCII "<!doctype"/"<!entity" bytes; the parser-level check
+        # must still refuse it, with and without a BOM, little- and big-endian
+        body = ('<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE r [<!ENTITY e "INJECTED">]>'
+                f'<w:document xmlns:w="{WNS}"><w:body><w:p><w:r><w:t>&e;</w:t></w:r></w:p></w:body></w:document>')
+        for enc in ("utf-16", "utf-16-le", "utf-16-be"):
+            part = body.encode(enc)
+            self.assertNotIn(b"<!doctype", part.lower())
+            data = zip_bytes({"[Content_Types].xml": CT, "word/document.xml": part})
+            r = run_one(data)
+            self.assertEqual((r["status"], r.get("reason")), ("refused", "malformed"), enc)
+            self.assertNotIn("text", r)
+
+    def test_utf16_part_without_dtd_still_reads(self):
+        body = f'<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="{WNS}"><w:body><w:p><w:r><w:t>wide text</w:t></w:r></w:p></w:body></w:document>'
+        data = zip_bytes({"[Content_Types].xml": CT, "word/document.xml": body.encode("utf-16")})
+        self.assertIn("wide text", run_one(data)["text"])
+
+    def test_external_entity_refused(self):
+        xml = b'<?xml version="1.0"?><!DOCTYPE r SYSTEM "http://example.invalid/x.dtd"><r/>'
+        with self.assertRaises(extract.Refused) as e:
+            extract.refuse_dtd(xml)
+        self.assertEqual(e.exception.reason, "malformed")
+
     def test_broken_xml_refused(self):
         data = zip_bytes({"[Content_Types].xml": CT, "word/document.xml": b"<w:document"})
         self.assertEqual(run_one(data)["reason"], "malformed")

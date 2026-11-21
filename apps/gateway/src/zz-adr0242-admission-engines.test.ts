@@ -19,7 +19,8 @@ import { engineAdmissionFor, recordAdmissionEngineScan } from "./admission-engin
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // #843 security review: a verdict is recorded only when the report names exactly the file the gateway placed. The
-// recorded reports predate the driver's `inputs` echo, so a completed one gets that file added here.
+// recorded reports echo the engine's own fixture file; these cases pin the expected input, so a completed report's
+// `inputs` is set to it.
 const IN = { mcpscanner: { path: "tools.json", sha256: "1".repeat(64) }, skillscanner: { path: "SKILL.md", sha256: "2".repeat(64) } } as const;
 const report = (name: string): unknown => {
   const r = JSON.parse(readFileSync(path.resolve(here, "../../../packages/shared/src/engines/fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;

@@ -42,11 +42,12 @@ import { fileURLToPath } from "node:url";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
 
 /**
- * ADR-0242: engines whose images CI builds twice and compares (engine-images-build.yml), but which are NOT
- * published and have no lock entry yet (§6.3 adds their lock entry and publish). `--plan` never publishes them,
- * because it only walks ENGINE_IDS.
+ * Engines whose images CI builds twice and compares (engine-images-build.yml), but which are NOT published and have
+ * no lock entry. `--plan` never publishes them, because it only walks ENGINE_IDS. Empty since ADR-0242 L4.5
+ * (2026-11-17): mcpscanner and skillscanner moved into ENGINE_IDS with all-null lock entries, as spikee (§6.3).
  */
-export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner", "contentextract"];
+// ADR-0362: contentextract stays unpublished until the owner decides its libpdfium licences (owner question 1)
+export const UNPUBLISHED_ENGINE_IDS = ["contentextract"];
 /**
  * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
  * admission-scan images share one runner and task shim.

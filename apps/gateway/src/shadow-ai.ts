@@ -141,6 +141,7 @@ import {
   type EvidenceRowRefusal,
   type Observation,
   type ShadowAiSeverity,
+  SHADOW_AI_FINDING_MACHINE,
 } from "@regulait/shared";
 import { defaultBaseUrlFor } from "@regulait/model-provider";
 import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
@@ -1556,6 +1557,9 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const body = dispositionSchema.parse(req.body);
     const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
     if (!row) return reply.status(404).send({ error: "unknown_finding" });
+    if (!SHADOW_AI_FINDING_MACHINE.canMove(row.disposition, body.disposition)) {
+      return reply.status(409).send({ error: "illegal_transition", lifecycle: SHADOW_AI_FINDING_MACHINE.describe(row.disposition) });
+    }
 
     const [updated] = await db
       .update(shadowAiFindings)
@@ -1568,8 +1572,17 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         dispositionAt: body.disposition === "open" ? null : new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(shadowAiFindings.id, findingId))
+      // ADR-0348: moved only from the disposition this request read, so two admins deciding at once cannot both
+      // win, and the audited "from" is the value that was really replaced
+      .where(and(eq(shadowAiFindings.id, findingId), eq(shadowAiFindings.disposition, row.disposition)))
       .returning();
+    if (!updated) {
+      const [now] = await db.select({ disposition: shadowAiFindings.disposition }).from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
+      return reply.status(409).send({
+        error: "disposition_changed",
+        detail: `the finding was moved to '${now?.disposition ?? "unknown"}' by someone else while this decision was made; reload it and decide again`,
+      });
+    }
 
     await audit(req.authCtx.userId, "shadow_ai_finding", findingId, SHADOW_AI_RULE_IDS.findingDisposition, "allow",
       `finding for ${row.provider} on ${row.subject} moved '${row.disposition}' → '${body.disposition}'${body.reason ? `: ${body.reason}` : ""}`,
