@@ -27,12 +27,25 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export class RobotChannelError extends Error {}
 
+/** a 503 `evidence_busy`: the same chunk may be sent again after `waitMs` (never a failure of the run on its own) */
+class EvidenceBusy extends Error {
+  constructor(readonly waitMs: number) {
+    super("evidence: the gateway is busy");
+  }
+}
+const EVIDENCE_BUSY_DEFAULT_MS = 250;
+const EVIDENCE_BUSY_MAX_WAIT_MS = 2_000;
+/** the total time one chunk may wait for the gateway-wide budget; the run's own wall clock still ends it sooner */
+export const EVIDENCE_BUSY_TOTAL_MS = 60_000;
+
 export class RobotGatewayClient implements RobotGateway {
   private readonly base: string;
   constructor(
     origin: string,
     readonly runId: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+    private readonly now: () => number = () => Date.now(),
   ) {
     if (!UUID.test(runId)) throw new RobotChannelError("not a run id");
     if (!/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(origin)) throw new RobotChannelError("not a loopback gateway channel");
@@ -50,6 +63,19 @@ export class RobotGatewayClient implements RobotGateway {
       });
     } catch {
       throw new RobotChannelError(`${name}: the gateway channel failed`);
+    }
+    if (res.status === 503 && name === "evidence") {
+      // the gateway-wide evidence budget is full: retry this same chunk (ADR-0364 S3 review, N-B)
+      let retryAfterMs = EVIDENCE_BUSY_DEFAULT_MS;
+      try {
+        const b = (await res.json()) as { error?: unknown; retryAfterMs?: unknown };
+        if (b.error !== "evidence_busy") throw new RobotChannelError(`${name}: the gateway answered 503`);
+        if (typeof b.retryAfterMs === "number" && Number.isFinite(b.retryAfterMs)) retryAfterMs = b.retryAfterMs;
+      } catch (e) {
+        if (e instanceof RobotChannelError) throw e;
+        throw new RobotChannelError(`${name}: the gateway answered 503`);
+      }
+      throw new EvidenceBusy(Math.min(Math.max(retryAfterMs, 50), EVIDENCE_BUSY_MAX_WAIT_MS));
     }
     if (res.status < 200 || res.status > 299) {
       await res.body?.cancel().catch(() => undefined);
@@ -78,7 +104,18 @@ export class RobotGatewayClient implements RobotGateway {
   }
 
   async evidence(chunk: RobotEvidenceUpload): Promise<void> {
-    await this.call("POST", "evidence", robotEvidenceUploadSchema.parse(chunk));
+    const body = robotEvidenceUploadSchema.parse(chunk);
+    const giveUpAt = this.now() + EVIDENCE_BUSY_TOTAL_MS;
+    for (;;) {
+      try {
+        await this.call("POST", "evidence", body);
+        return;
+      } catch (e) {
+        if (!(e instanceof EvidenceBusy)) throw e;
+        if (this.now() + e.waitMs > giveUpAt) throw new RobotChannelError("evidence: the gateway stayed busy");
+        await this.sleep(e.waitMs);
+      }
+    }
   }
 
   async result(result: RobotRunResult): Promise<void> {
