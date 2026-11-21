@@ -570,6 +570,13 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
   - **PII mode.** The run takes its project's PII mode through the compliance cascade, and an unresolved mode falls
     back to the org floor (`block`, ADR-0181). Under `block` there are no screenshots, and a download keeps only its
     sha256 and size (`robot_run_evidence.bytes_withheld`). Every other mode stores masked screenshots.
+    **Owner decision (2026-11-21):** the strict default stays. An unclassified project gets `block` (no
+    screenshots). An admin relaxes it per project through the project's compliance classification
+    (`POST /v1/projects/:projectId/classifications`). A first classification is audited (`project-classified`); a
+    change to an existing one needs a named reviewer's approval of the cascade diff.
+  - **Bundle (owner decision, 2026-11-21):** the `all JS` ceiling is not raised for S3. After merging `main` (whose
+    owner-approved 1160 → 1170 kB raise, `7ef39d0f`, was for another screen), S3's +129 B leaves `all JS` at
+    1,169,571 B, under the ceiling, so no lazy-loading was needed.
   - **Bounds and lifecycle.**
     - In-flight evidence is capped at 16 MiB per run and 64 MiB across runs.
     - The egress-log evidence keeps a 128 KiB head and a 128 KiB tail with a dropped-byte marker.
