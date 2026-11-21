@@ -57,7 +57,12 @@ def main(lock_path: str, out: str, variant: str = DEFAULT_VARIANT) -> None:
         d = os.path.join(out, m["dir"])
         os.makedirs(d, exist_ok=True)
         for name, sha in m["files"].items():
-            fetch(f"{HF}/{m['repo']}/resolve/{m['revision']}/{name}", os.path.join(d, name), sha)
+            dest = os.path.normpath(os.path.join(d, name))
+            # ADR-0352: a lock file name may sit in a sub-folder (onnx/model.onnx), never outside the model dir
+            if not dest.startswith(os.path.normpath(d) + os.sep):
+                sys.exit(f"lock file name {name!r} escapes its model directory")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            fetch(f"{HF}/{m['repo']}/resolve/{m['revision']}/{name}", dest, sha)
     wheels = os.path.join(out, "wheels")
     os.makedirs(wheels, exist_ok=True)
     for w in lock["wheels"]:

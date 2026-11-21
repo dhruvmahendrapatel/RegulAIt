@@ -39,7 +39,8 @@ import { EditExternalScorerButton } from "../editForms";
 /** the judge-backed kinds an instrument may claim, plus (ADR-0220) the three
  * guardrail kinds a trained-detector service serves on the Guardrails page —
  * the registration schema refuses anything else, so the lexical metrics are
- * not even expressible */
+ * not even expressible. ADR-0352 adds the local text embedder for the
+ * meaning-based cache tier; the server refuses it unless it is claimed alone. */
 const CLAIMABLE_KINDS = [
   "llm_as_judge",
   "groundedness_judge",
@@ -47,6 +48,7 @@ const CLAIMABLE_KINDS = [
   "guardrail_pii",
   "guardrail_prompt_injection",
   "guardrail_harm",
+  "text_embedding",
 ] as const;
 
 const useExternalScorers = () =>

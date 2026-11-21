@@ -251,6 +251,11 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   summarizerAgentId: exempt(OPTIMISATION),
   // ADR-0181: the semantic cache stores prompts and answers — off by default
   semanticCachePolicy: notEqual("off"),
+  // ADR-0352: the meaning-based tier trades exactness for savings — off by default; a lower similarity bar is looser
+  semanticCacheSimilarityEnabled: notEqual(false),
+  semanticCacheSimilarityMin: atLeast(0.95),
+  // which embedder serves is not a loosening by itself (the tier's switch is); naming one is exempt
+  semanticCacheEmbedderId: exempt(OPTIMISATION),
   // ADR-0181: a failed compaction refuses the call rather than sending the full context on
   compactionFailureMode: notEqual("fail_closed"),
 

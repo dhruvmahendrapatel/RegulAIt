@@ -15,7 +15,8 @@ Environment:
   DETECTOR_API_KEY   if set, every /score request must send
                      ``Authorization: Bearer <key>`` (register the same key on
                      the gateway's External scorers page)
-  DETECTOR_MODELS    comma-separated subset of pii,prompt_injection,harm to
+  DETECTOR_MODELS    comma-separated subset of pii,prompt_injection,harm,embedding to
+                     (embedding, ADR-0352, is opt-in: it is not in the default list)
                      load (default: all three)
 """
 
@@ -88,6 +89,35 @@ def load_models(wanted: list[str]) -> dict:
         if "harm" in wanted:
             models["harm"] = classifier(os.path.join(MODELS_DIR, "harm"))
 
+    if "embedding" in wanted:
+        # ADR-0352: the cache tier's local embedder, the pinned ONNX export as published
+        import numpy as np
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        path = os.path.join(MODELS_DIR, "embedding")
+        tok = Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
+        tok.enable_truncation(max_length=256)
+        tok.no_padding()
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = int(os.environ.get("DETECTOR_THREADS", "2"))
+        opts.inter_op_num_threads = 1
+        sess = ort.InferenceSession(os.path.join(path, "onnx", "model.onnx"), sess_options=opts, providers=["CPUExecutionProvider"])
+        names = {i.name for i in sess.get_inputs()}
+
+        def encode(text: str):
+            enc = tok.encode(text)
+            feeds = {
+                "input_ids": np.asarray([enc.ids], dtype=np.int64),
+                "attention_mask": np.asarray([enc.attention_mask], dtype=np.int64),
+            }
+            if "token_type_ids" in names:
+                feeds["token_type_ids"] = np.asarray([enc.type_ids], dtype=np.int64)
+            hidden = sess.run(None, feeds)[0][0]
+            return core.mean_pool_normalise(hidden.tolist(), enc.attention_mask)
+
+        models["embedding"] = encode
+
     if "pii" in wanted:
         import tldextract
 
@@ -137,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         started = time.monotonic()
-        if self.path != "/score":
+        if self.path not in ("/score", "/embed"):
             return self._reply(404, {"error": "not found"}, started)
         if self.api_key is not None:
             got = self.headers.get("authorization", "")
@@ -149,6 +179,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(411, {"error": "content-length required"}, started)
         if length < 0 or length > MAX_BODY_BYTES:
             return self._reply(413, {"error": "request too large"}, started)
+        if self.path == "/embed":
+            return self._embed(length, started)
         try:
             kind, text = core.parse_request(json.loads(self.rfile.read(length) or b"null"))
         except (core.RequestError, json.JSONDecodeError, UnicodeDecodeError) as err:
@@ -163,6 +195,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — a model failure is a 500, never a fabricated score
             return self._reply(500, {"error": "model failure"}, started)
         return self._reply(200, verdict, started)
+
+
+def _embed(self, length: int, started: float) -> None:
+    """ADR-0352: POST /embed {"scorerKind": "text_embedding", "input": str} -> {"embedding", "dims", "model"}."""
+    try:
+        text = core.parse_embed_request(json.loads(self.rfile.read(length) or b"null"))
+    except (core.RequestError, json.JSONDecodeError, UnicodeDecodeError) as err:
+        return self._reply(400, {"error": str(err) if isinstance(err, core.RequestError) else "invalid JSON"}, started)
+    if "embedding" not in self.models:
+        return self._reply(400, {"error": "scorerKind not loaded on this instance"}, started)
+    try:
+        with self.lock:
+            out = core.embed(text, self.models["embedding"], EMBEDDING_MODEL_ID)
+    except Exception:  # noqa: BLE001 — a model failure is a 500, never a fabricated vector
+        return self._reply(500, {"error": "model failure"}, started)
+    return self._reply(200, out, started)
+
+
+Handler._embed = _embed  # type: ignore[attr-defined]
+
+# the repository and pinned revision, so a model change makes every stored vector miss
+EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 
 
 def main() -> None:
