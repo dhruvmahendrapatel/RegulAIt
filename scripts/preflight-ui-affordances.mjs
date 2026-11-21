@@ -77,6 +77,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // (scripts/known-ui-gaps/adr-0251-l1-resource-rules.json holds the same routes).
   ["/v1/rules/resource/approval-rules/:x", "removing a governed-core approval rule (settings_relax step-up): API-only until the screen on #453"],
   ["/v1/rules/resource/rate-limits/:x", "removing a governed-core rate limit (settings_relax step-up): API-only until the screen on #453"],
+  // ADR-0356 (lane E37): the UI is built by the design builder; delete this entry when the screen lands
+  ["/v1/pm/identity-links/:x", "removing a PM identity link (audited; hand-overs from that identity are then denied): API-only until the PM identity-link screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 
 /**
