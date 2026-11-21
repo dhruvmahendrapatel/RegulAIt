@@ -694,6 +694,74 @@ an admin still clears its dependent rows.
 
 The existing webhook, mirror, drift, alert-ticket and importer suites pass unchanged under the policies.
 
+### As built (PM follow-on, 2026-11-21)
+
+Migration `pending/rls_pm_tables_followon.sql` layers on `rls_pm_tables` and keeps the extra coverage of an earlier
+draft of the PM batch. It sorts right after `rls_pm_tables.sql` and adds no system reason, so the registry is
+unchanged.
+
+**Per-row visibility under `pm_sync`.** `pm_sync` no longer opens every link. The helper
+`regulait_rls_pm_object_visible(type, id, writing)` mirrors the gateway's own object checks. It is plpgsql, STABLE,
+with a pinned `search_path`, and runs under `rls_membership` like the 0272 helpers:
+
+- `run`, `run_node`: the run's initiator; for a read only, the named approver of a pending approval on the run;
+- `workflow_instance`: the instance's initiator; for a read only, the named approver of a pending approval on it;
+- `decision`: its maker, or whoever the rules above admit for its run or instance (one level, never recursive);
+- `governance_alert`: its owner, read only.
+
+`pm_links_all` keeps the admin, `approval_maintenance`, `system_task` and `migration`. Under `pm_sync`, three new
+policies admit a read of an object the principal may see, and an insert or update of an object it may write. There is
+no delete under `pm_sync`; the code never deletes a link.
+
+**Column grant.** The app role may UPDATE only the sync-state columns of `pm_links`: `last_synced_at`, `orphaned_at`,
+`inbound_state`, `inbound_at` and `adopted_state`, the only ones `pm.ts` updates. A link's connection, object and
+external id are immutable, for an admin request too.
+
+**Append-only inbound log.** UPDATE, DELETE and TRUNCATE on `pm_sync_events` are revoked from the app role. An
+admin's connection delete still cascades: the foreign-key action runs as the table owner, outside row-level security.
+
+**`decisions`** is ENABLED and FORCED.
+
+- Read by an admin, `migration`, `rls_membership` (the helper), the decision's maker, and whoever may see its object.
+- Inserted only in the principal's own name, on an object it may write (or as an admin).
+- UPDATE, DELETE and TRUNCATE are revoked from the app role.
+
+Only `pm.ts`'s two `/v1/decisions` routes read or write the table, both under `pm_sync`.
+
+**Every `pm_sync` call site still runs for a principal whose rows the helper admits:**
+
+- the run and instance sync routes: admin or initiator;
+- the links and decisions reads: admin, initiator or pending approver;
+- the decision record: admin or initiator, then the maker for its own mirror link;
+- `mirrorNodeStatus`: admin or initiator, through `loadRunFor`;
+- the alert-ticket reads: the owner on `PUT …/owner`; filing is admin-only, a job, or the decide path;
+- the connection reads in `alert-ownership.ts` and `credential-inventory.ts`: `pm_connections` is unchanged.
+
+The decided-approval mirror needs no helper branch. `decideOneApproval` runs the whole step as the decider under
+`approval_maintenance`, so a decider who is not the initiator still mirrors once the approval is no longer pending.
+The same holds for the governance monitor that a decision re-runs.
+
+**Not done here.** The signed webhook still runs under `approval_maintenance`. A dedicated `pm_inbound` reason
+would mean redefining the 7a `users_select` and audit-append policies, and sorting after `shared_context_graph`,
+which last redefines the registry. That is more than a small follow-on. Separately, a non-admin who reassigns an
+alert they own no longer sees its ticket in the response, because they are no longer the owner.
+
+**Tests.** `zz-adr0234-rls-pm-followon.test.ts` (19) runs with no application filter. It checks:
+
+- the registry, SQL against TS;
+- the FORCE and the privileges;
+- no context sees nothing;
+- bob under `pm_sync` reads, inserts, updates and deletes nothing of alice's;
+- a pending approver reads, never writes, and loses the read once the approval is decided, except their own decision;
+- the decide scope still mirrors;
+- alice works on her own;
+- the column grant holds;
+- the append-only log and the cascade;
+- an admin sees everything.
+
+`zz-adr0234-rls-pm.test.ts` now seeds the alert its link points at, owned by the `pm_sync` principal. It expects
+that link to be read-only.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,

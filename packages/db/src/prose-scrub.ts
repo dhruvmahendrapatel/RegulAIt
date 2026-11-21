@@ -127,6 +127,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.endpointCommandExceptions, ["reason", "decisionReason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0219 follow-up (PR #810 review): why a person's role-derived access to a remote agent was revoked
+  [s.a2aAgentRevocations, ["reason"]],
   // ADR-0327 addendum — why the author proposed a decision-table version
   [s.decisionTableVersions, ["reason"]],
   // ADR-0327 slice 4a — why an admin asked to switch a rule-like step, and why it was reverted
