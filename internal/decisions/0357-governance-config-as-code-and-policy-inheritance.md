@@ -91,6 +91,12 @@ spec:
   re-computes the plan inside the transaction, holding an advisory lock; if the live configuration moved since the
   plan, the hash differs and apply is refused with `409 CHANGED_CONCURRENTLY`. What is written is exactly what was
   reviewed (the Terraform saved-plan property).
+- **Bounded documents.** A document is at most 4 MiB, and each section holds at most 2,000 objects. Workflow
+  templates are capped at 200 per document, because plan and apply validate each created or changed template against
+  the database (review S9 on #965).
+- **Live duplicates.** Rate limits have no unique key, so live may hold duplicates of one key. The duplicate
+  identical to the file pairs with it if there is one; otherwise the strictest (fewest calls, then the longest window,
+  compared numerically) pairs, and the rest are deleted as widenings (review R10 on #965).
 - **All or nothing.** One transaction. Any refusal, unresolved reference, validation error or database error rolls
   back every change.
 - **Step-up, always, on the relaxation path the UI uses.** Apply needs a `settings_relax` step-up bound to

@@ -160,6 +160,14 @@ describe("the classification table (ADR-0357 §3)", () => {
     expect(p.changes.map((c) => [c.op, c.effect])).toEqual([["delete", "widens"]]);
   });
 
+  it("rate limits: the strictest live duplicate is the one kept, compared numerically", () => {
+    const loose = { scope: "fleet" as const, maxCalls: 100, windowSeconds: 60 };
+    const strict = { ...loose, maxCalls: 20 }; // lexically "100" < "20"; numerically 20 is the stricter
+    const p = planGovernanceConfig({ ...EMPTY, rateLimits: normalizeSpec({ rateLimits: [loose, strict] }).rateLimits! }, normalizeSpec({ rateLimits: [strict] }));
+    expect(p.changes.map((c) => [c.op, (c.before as { maxCalls: number }).maxCalls])).toEqual([["delete", 100]]);
+    expect(normalizeSpec({ rateLimits: [loose, strict] }).rateLimits!.map((r) => r.maxCalls)).toEqual([20, 100]);
+  });
+
   it("MCP bundles", () => {
     const b = (x: Record<string, unknown>) => ({ mcpBundles: [{ name: "b", ...x }] });
     expect(codes(b({}), b({ items: [{ server: "s", tool: "t" }] }))).toEqual(["widens:bundle_item_added"]);
