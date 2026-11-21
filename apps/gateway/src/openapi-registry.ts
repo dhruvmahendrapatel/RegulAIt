@@ -131,6 +131,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/approvals": "public-stable",
   "GET /v1/approvals/export.xlsx": "internal",
   "POST /v1/approvals/:approvalId/claim": "internal",
+  // ADR-0342 slice 2: a human task's priority and due date (admin)
+  "PUT /v1/approvals/:approvalId/schedule": "internal",
   "POST /v1/approvals/:approvalId/decide": "public-stable",
   "GET /v1/approvals/assignment-rules": "internal",
   "POST /v1/approvals/assignment-rules": "internal",
@@ -1752,6 +1754,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/approvals": "approvals",
   "GET /v1/approvals/export.xlsx": "approvals",
   "POST /v1/approvals/:approvalId/claim": "approvals",
+  "PUT /v1/approvals/:approvalId/schedule": "approvals",
   "POST /v1/approvals/:approvalId/decide": "approvals",
   "GET /v1/approvals/assignment-rules": "approvals",
   "POST /v1/approvals/assignment-rules": "approvals",
