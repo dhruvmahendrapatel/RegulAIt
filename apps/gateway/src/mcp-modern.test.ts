@@ -1,6 +1,7 @@
 /**
- * ADR-0311 decision 4, slice 1 — the MCP 2026-07-28 stateless protocol on `POST /mcp/:serverId`, beside the
- * unchanged 2025-era path, on a real database through the real app.
+ * ADR-0311 decision 4, slices 1 and 2 — the MCP 2026-07-28 stateless protocol on `POST /mcp/:serverId`, beside
+ * the unchanged 2025-era path, on a real database through the real app. Slice 2 adds the governed resources,
+ * prompts and completion (the ADR-0185 G3 primitive, shared with the 2025-era path).
  *
  * The governance pipeline is the SAME code for both eras (`listToolsForCaller` / `callToolForCaller`), so these
  * cases pin the modern wire (discover, the envelope and header ladder, deterministic order, the refused methods)
@@ -15,12 +16,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { completable } from "@modelcontextprotocol/sdk/server/completable.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client as LegacyClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport as LegacyClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client as ModernClient, StreamableHTTPClientTransport as ModernClientTransport } from "@modelcontextprotocol/client";
 import { z } from "zod";
-import { and, auditLog, createDb, desc, eq, inArray, mcpServers, mcpTools, runMigrations, sql, type Db } from "@regulait/db";
+import { and, auditLog, createDb, desc, eq, inArray, mcpServers, mcpTools, orgSettings, ORG_SETTINGS_ID, runMigrations, sql, type Db } from "@regulait/db";
+import { MCP_PROTOCOL_METHODS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { setStdioPlacementAffinityForTest } from "./executor-stdio.js";
 import { MCP_STDIO_NO_ENTITLEMENT_RULE_ID } from "./mcp-proxy.js";
@@ -45,7 +48,22 @@ const STDIO_IMAGE = `sha256:${"c".repeat(64)}`;
 
 let upstreamRequests = 0;
 function buildUpstream(): McpServer {
-  const server = new McpServer({ name: "modern-upstream", version: "0.0.1" });
+  const server = new McpServer({ name: "modern-upstream", version: "0.0.1" }, { capabilities: { logging: {} } });
+  // slice 2: resources (one emits a log line and progress), a prompt with a completable argument
+  server.registerResource("readme", "file:///public/readme.md", { mimeType: "text/markdown" }, async (uri, extra) => {
+    await extra.sendNotification({ method: "notifications/message", params: { level: "info", data: "readme was read" } });
+    const progressToken = extra._meta?.progressToken;
+    if (progressToken !== undefined) {
+      await extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress: 1, total: 2 } });
+    }
+    return { contents: [{ uri: uri.href, text: "# public readme" }] };
+  });
+  server.registerResource("secret", "file:///private/secret.md", { mimeType: "text/markdown" }, async (uri) => ({
+    contents: [{ uri: uri.href, text: "private plans" }],
+  }));
+  server.registerPrompt("greet", { description: "greets", argsSchema: { who: completable(z.string(), (v) => ["world", "team"].filter((x) => x.startsWith(v))) } }, async ({ who }) => ({
+    messages: [{ role: "user", content: { type: "text", text: `Say hello to ${who}` } }],
+  }));
   server.registerTool("zeta_read", { description: "z", inputSchema: {}, annotations: { readOnlyHint: true } }, async () => ({
     content: [{ type: "text", text: "zeta" }],
   }));
@@ -287,14 +305,14 @@ describe("MCP 2026-07-28 on POST /mcp/:serverId (ADR-0311 decision 4, slice 1)",
     expect(row!.detail).toMatchObject({ method: "subscriptions/listen", protocolRevision: REVISION });
   });
 
-  it("any other method (resources/list here) is -32601 with an audit row", async () => {
-    const r = await modernPost(users.alice.auth, "resources/list");
+  it("a method outside every vocabulary is -32601 with an audit row", async () => {
+    const r = await modernPost(users.alice.auth, "regulait/unknown");
     expect(r.json().error?.code, r.body).toBe(-32601);
     const rows = await db
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.userId, users.alice.id), eq(auditLog.ruleId, "mcp-method-unsupported")));
-    expect(rows.some((e) => (e.detail as { method?: string }).method === "resources/list")).toBe(true);
+    expect(rows.some((e) => (e.detail as { method?: string }).method === "regulait/unknown")).toBe(true);
   });
 
   it("the pre-hijack refusals still run first: no API key is 401 and an unknown server is 404", async () => {
@@ -377,5 +395,244 @@ describe("MCP 2026-07-28 tools/list on a stdio server (B3S-01 stored manifest)",
       sql`select count(*)::int as n from audit_log where rule_id in ('execution-refused', 'execution-placed') and detail->>'mcpServerId' = ${stdioId}`,
     );
     expect((placed as unknown as { rows: Array<{ n: number }> }).rows[0]!.n).toBe(0);
+  });
+});
+
+// --- slice 2: the governed non-tool methods (ADR-0185 G3) on the 2026-07-28 path ---
+
+/** the JSON-RPC messages of an answer: one JSON body, or the `data:` frames of an SSE stream */
+function messagesOf(res: { headers: Record<string, unknown>; body: string }): Array<Record<string, any>> {
+  if (String(res.headers["content-type"] ?? "").includes("text/event-stream")) {
+    return res.body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice("data: ".length)));
+  }
+  return [JSON.parse(res.body)];
+}
+const answerOf = (res: { headers: Record<string, unknown>; body: string }) => messagesOf(res).find((m) => "id" in m && ("result" in m || "error" in m))!;
+
+describe("MCP 2026-07-28 governed resources, prompts and completion (ADR-0311 decision 4, slice 2)", () => {
+  let priorMethods: string[] = [];
+  const setMethods = async (methods: readonly string[]) => {
+    await db.update(orgSettings).set({ mcpProtocolMethods: [...methods] as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  };
+  let seq = 0;
+  async function newUser(): Promise<{ id: string; auth: { authorization: string } }> {
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `modern-s2-${RUN}-${seq++}@example.com`, displayName: `modern s2 ${RUN}` } });
+    expect(u.statusCode, u.body).toBe(201);
+    const id = u.json().id as string;
+    const token = (await app.inject({ method: "POST", url: `/v1/users/${id}/keys`, headers: AUTH, payload: { name: "modern-s2" } })).json().token as string;
+    return { id, auth: { authorization: `Bearer ${token}` } };
+  }
+  async function grant(userId: string, toolName: string) {
+    const g = await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/tools", payload: { userId, serverId, toolName } });
+    expect(g.statusCode, g.body).toBe(201);
+    return g.json().id as string;
+  }
+  /** the upstream HTTP requests `fn` cost */
+  async function upstreamCost(fn: () => Promise<unknown>): Promise<number> {
+    const before = upstreamRequests;
+    await fn();
+    return upstreamRequests - before;
+  }
+
+  beforeAll(async () => {
+    const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    priorMethods = (org?.mcpProtocolMethods ?? []) as string[];
+    // M-068: the org's enabled methods are global state; put back after this block
+    restore.push(async () => setMethods(priorMethods));
+  });
+
+  it("server/discover advertises exactly the enabled capabilities (never logging) and still contacts no upstream", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    let body: Record<string, any> = {};
+    const cost = await upstreamCost(async () => {
+      const r = await modernPost(users.alice.auth, "server/discover");
+      expect(r.statusCode, r.body).toBe(200);
+      body = r.json();
+    });
+    expect(cost, "a discover probe must not open an upstream").toBe(0);
+    expect(body.result.capabilities).toMatchObject({ tools: {}, resources: {}, prompts: {}, completions: {} });
+    expect(body.result.capabilities.logging, "logging/setLevel does not exist in 2026-07-28").toBeUndefined();
+
+    await setMethods(["prompts/list"]);
+    const only = (await modernPost(users.alice.auth, "server/discover")).json();
+    expect(Object.keys(only.result.capabilities).sort()).toEqual(["prompts", "tools"]);
+  });
+
+  it("a method the org has not enabled is denied by policy and audited (mcp-method-disabled), zero upstream", async () => {
+    await setMethods([]);
+    const u = await newUser();
+    await grant(u.id, "mcp:resources");
+    let r!: Awaited<ReturnType<typeof modernPost>>;
+    expect(await upstreamCost(async () => (r = await modernPost(u.auth, "resources/list")))).toBe(0);
+    expect(r.json().error?.message, r.body).toMatch(/Denied by policy: .*not enabled/);
+    const rows = await auditFor(u.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ effect: "deny", ruleId: "mcp-method-disabled", toolName: "mcp:resources" });
+    expect(rows[0]!.detail).toMatchObject({ phase: "protocol", method: "resources/list" });
+  });
+
+  it("resources/list: an entitled caller is served (2026 cache fields), an unentitled one is denied and audited", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    const grantId = await grant(u.id, "mcp:resources");
+    const r = await modernPost(u.auth, "resources/list");
+    expect(r.statusCode, r.body).toBe(200);
+    const { result } = r.json();
+    expect(result.resources.map((x: { uri: string }) => x.uri).sort()).toEqual(["file:///private/secret.md", "file:///public/readme.md"]);
+    expect(result).toMatchObject({ resultType: "complete", ttlMs: 0, cacheScope: "private" });
+    const allow = (await auditFor(u.id)).find((e) => e.effect === "allow" && e.objectType !== "content_provenance");
+    expect(allow).toMatchObject({ toolName: "mcp:resources", ruleId: grantId });
+    expect(allow!.detail).toMatchObject({ method: "resources/list" });
+
+    const nobody = await newUser();
+    let denied!: Awaited<ReturnType<typeof modernPost>>;
+    expect(await upstreamCost(async () => (denied = await modernPost(nobody.auth, "resources/list")))).toBe(0);
+    expect(denied.json().error?.message, denied.body).toMatch(/Denied by policy: no grant matches/);
+    const [deny] = await auditFor(nobody.id);
+    expect(deny).toMatchObject({ effect: "deny", ruleId: "default-deny", toolName: "mcp:resources" });
+  });
+
+  it("resources/read is decided on `uri`: a data-scope rule is an exact allow-list, a deny costs the upstream nothing", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    await grant(u.id, "mcp:resources");
+    const rule = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/rules/data-scopes",
+      payload: { userId: u.id, serverId, toolName: "mcp:resources", argPath: "uri", allowedValues: ["file:///public/readme.md"] },
+    });
+    expect(rule.statusCode, rule.body).toBe(201);
+    const ok = await modernPost(u.auth, "resources/read", { uri: "file:///public/readme.md" }, { headers: { "mcp-name": "file:///public/readme.md" } });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(answerOf(ok).result).toMatchObject({ contents: [{ uri: "file:///public/readme.md", text: "# public readme" }], resultType: "complete" });
+    for (const uri of ["file:///private/secret.md", "FILE:///public/readme.md"]) {
+      let r!: Awaited<ReturnType<typeof modernPost>>;
+      expect(await upstreamCost(async () => (r = await modernPost(u.auth, "resources/read", { uri }, { headers: { "mcp-name": uri } })))).toBe(0);
+      expect(r.json().error?.message, r.body).toMatch(/Denied by policy/);
+    }
+  });
+
+  it("resources/read of a resource the upstream does not have answers -32602 on 2026-07-28", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    await grant(u.id, "mcp:resources");
+    const uri = "file:///public/missing.md";
+    const r = await modernPost(u.auth, "resources/read", { uri }, { headers: { "mcp-name": uri } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().error?.code, r.body).toBe(-32602);
+  });
+
+  it("prompts/list, prompts/get and completion/complete are governed by their own grants", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    // no grant yet: each is denied and audited
+    expect((await modernPost(u.auth, "prompts/list")).json().error?.message).toMatch(/Denied by policy/);
+    const promptArgs = { name: "greet", arguments: { who: "world" } };
+    expect((await modernPost(u.auth, "prompts/get", promptArgs, { headers: { "mcp-name": "greet" } })).json().error?.message).toMatch(/Denied by policy/);
+    const completeArgs = { ref: { type: "ref/prompt", name: "greet" }, argument: { name: "who", value: "w" } };
+    expect((await modernPost(u.auth, "completion/complete", completeArgs)).json().error?.message).toMatch(/Denied by policy/);
+    const denies = (await auditFor(u.id)).filter((e) => e.effect === "deny");
+    expect(denies.map((e) => e.toolName).sort()).toEqual(["mcp:completion", "mcp:prompts", "mcp:prompts"]);
+
+    await grant(u.id, "mcp:prompts");
+    await grant(u.id, "mcp:completion");
+    const list = await modernPost(u.auth, "prompts/list");
+    expect(list.json().result, list.body).toMatchObject({ prompts: [{ name: "greet" }], resultType: "complete", ttlMs: 0, cacheScope: "private" });
+    const got = await modernPost(u.auth, "prompts/get", promptArgs, { headers: { "mcp-name": "greet" } });
+    expect(got.json().result?.messages, got.body).toEqual([{ role: "user", content: { type: "text", text: "Say hello to world" } }]);
+    const done = await modernPost(u.auth, "completion/complete", completeArgs);
+    expect(done.json().result?.completion?.values, done.body).toEqual(["world"]);
+    const allows = (await auditFor(u.id)).filter((e) => e.effect === "allow" && e.objectType !== "content_provenance");
+    expect(allows.map((e) => (e.detail as { method: string }).method).sort()).toEqual(["completion/complete", "prompts/get", "prompts/list"]);
+  });
+
+  it("logging/setLevel and ping do not exist in 2026-07-28: -32601, audited, nothing decided, zero upstream", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    await grant(u.id, "mcp:logging");
+    for (const [method, params] of [["logging/setLevel", { level: "debug" }], ["ping", {}]] as const) {
+      let r!: Awaited<ReturnType<typeof modernPost>>;
+      expect(await upstreamCost(async () => (r = await modernPost(u.auth, method, params)))).toBe(0);
+      expect(r.json().error?.code, r.body).toBe(-32601);
+    }
+    const rows = await auditFor(u.id);
+    expect(rows.map((e) => e.ruleId)).toEqual(["mcp-method-unsupported", "mcp-method-unsupported"]);
+    expect(rows.map((e) => (e.detail as { method: string }).method).sort()).toEqual(["logging/setLevel", "ping"]);
+    expect(rows.every((e) => e.effect === "deny" && (e.detail as { protocolRevision: string }).protocolRevision === REVISION)).toBe(true);
+  });
+
+  it("the always-refused methods stay refused and audited (mcp-method-unsupported), zero upstream", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    await grant(u.id, "mcp:resources");
+    let r!: Awaited<ReturnType<typeof modernPost>>;
+    expect(await upstreamCost(async () => (r = await modernPost(u.auth, "resources/subscribe", { uri: "file:///public/readme.md" })))).toBe(0);
+    // removed from 2026-07-28 (subscriptions/listen replaces it), so the SDK answers -32601 before any handler runs
+    expect(r.json().error?.code, r.body).toBe(-32601);
+    const rows = await auditFor(u.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ effect: "deny", ruleId: "mcp-method-unsupported" });
+    expect(rows[0]!.detail).toMatchObject({ method: "resources/subscribe", answeredBy: "sdk" });
+
+    // a client-bound method sent to the server: refused by name and audited, whatever the org enables
+    let s!: Awaited<ReturnType<typeof modernPost>>;
+    expect(await upstreamCost(async () => (s = await modernPost(u.auth, "sampling/createMessage", { messages: [], maxTokens: 1 })))).toBe(0);
+    expect(s.json().error?.code, s.body).toBe(-32601);
+    const sampling = (await auditFor(u.id)).filter((e) => (e.detail as { method?: string }).method === "sampling/createMessage");
+    expect(sampling).toHaveLength(1);
+    expect(sampling[0]).toMatchObject({ effect: "deny", ruleId: "mcp-method-unsupported" });
+
+    // a name under an always-refused prefix that is no spec method reaches the shared primitive: refused by name,
+    // audited, as on the 2025-era path ("Denied by policy", -32600)
+    const odd = await modernPost(u.auth, "roots/regulait-probe");
+    expect(odd.json().error, odd.body).toMatchObject({ code: -32600, message: expect.stringMatching(/Denied by policy: .*always refused/) });
+    const roots = (await auditFor(u.id)).filter((e) => (e.detail as { method?: string }).method === "roots/regulait-probe");
+    expect(roots).toHaveLength(1);
+    expect(roots[0]).toMatchObject({ effect: "deny", ruleId: "mcp-method-unsupported" });
+  });
+
+  it("progress is relayed on the request's own response stream; upstream log lines never are", async () => {
+    const u = await newUser();
+    await grant(u.id, "mcp:resources");
+    await grant(u.id, "mcp:logging");
+    const uri = "file:///public/readme.md";
+    const read = () => modernPost(u.auth, "resources/read", { uri }, { headers: { "mcp-name": uri }, meta: { ...META, progressToken: "p-1" } });
+
+    // the 2025-era rule: progress is relayed only when the org enables logging/setLevel
+    await setMethods(["resources/read"]);
+    const quiet = await read();
+    expect(messagesOf(quiet).filter((m) => !("id" in m))).toEqual([]);
+    expect(answerOf(quiet).result?.contents?.[0]?.text, quiet.body).toBe("# public readme");
+
+    await setMethods(["resources/read", "logging/setLevel"]);
+    const loud = await read();
+    const notes = messagesOf(loud).filter((m) => !("id" in m));
+    expect(notes, loud.body).toEqual([{ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "p-1", progress: 1, total: 2 } }]);
+    expect(answerOf(loud).result?.contents?.[0]?.text, loud.body).toBe("# public readme");
+    // no log relay was decided at all on this path (the 2025-era path writes a protocol-relay row)
+    const relayRows = (await auditFor(u.id)).filter((e) => (e.detail as { phase?: string }).phase === "protocol-relay");
+    expect(relayRows).toEqual([]);
+  });
+
+  it("the official v2 client lists and reads resources, gets a prompt and completes through the gateway", async () => {
+    await setMethods(MCP_PROTOCOL_METHODS);
+    const u = await newUser();
+    for (const g of ["mcp:resources", "mcp:prompts", "mcp:completion"]) await grant(u.id, g);
+    const client = new ModernClient({ name: "modern-sdk-s2", version: "0.0.1" }, { versionNegotiation: { mode: { pin: REVISION } } });
+    await client.connect(new ModernClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), { requestInit: { headers: u.auth } }));
+    expect(client.getServerCapabilities()).toMatchObject({ resources: {}, prompts: {}, completions: {} });
+    const { resources } = await client.listResources();
+    expect(resources.map((x) => x.uri).sort()).toEqual(["file:///private/secret.md", "file:///public/readme.md"]);
+    const read = await client.readResource({ uri: "file:///public/readme.md" });
+    expect(read.contents).toEqual([{ uri: "file:///public/readme.md", text: "# public readme" }]);
+    const prompt = await client.getPrompt({ name: "greet", arguments: { who: "team" } });
+    expect(prompt.messages[0]?.content).toEqual({ type: "text", text: "Say hello to team" });
+    const done = await client.complete({ ref: { type: "ref/prompt", name: "greet" }, argument: { name: "who", value: "t" } });
+    expect(done.completion.values).toEqual(["team"]);
+    await client.close();
   });
 });

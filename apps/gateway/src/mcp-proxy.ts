@@ -1,6 +1,6 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
 import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
-import { isModernMcpRequest, serveModernMcp } from "./mcp-modern.js";
+import { isModernMcpRequest, modernProtocolMethods, serveModernMcp } from "./mcp-modern.js";
 import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -12,6 +12,7 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
+  type ServerNotification,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -2610,6 +2611,62 @@ export async function callToolForCaller(
   }
 }
 
+/**
+ * One governed non-tool protocol request (ADR-0185 G3: resources, prompts, completion, logging) for one caller:
+ * `executeGovernedProtocolCall` in its own trace, mapped to the MCP result or error. Moved out of the v1 route's
+ * inline `call` unchanged (ADR-0311 decision 4, slice 2); the 2026-07-28 path (`mcp-modern.ts`) calls the same
+ * function, so entitlements, data scopes, approvals, scans and audit cannot differ between eras.
+ */
+export async function protocolCallForCaller(
+  ctx: McpToolCaller,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  extra: {
+    relay: (n: ServerNotification) => Promise<void>;
+    progressToken?: string | number;
+    /** ADR-0311 d4 slice 2: false on the 2026-07-28 path, which emits no `notifications/message` (logging removed) */
+    relayLogMessages?: boolean;
+  },
+): Promise<Record<string, unknown>> {
+  const { db, userId, serverId, projectId, workloadGrantId } = ctx;
+  const protocolTrace = await beginTrace(db, {
+    kind: "tool",
+    name: `mcp ${method.slice(0, 120)}`,
+    userId,
+    projectId,
+    sessionId: `mcp:${serverId}`,
+    rootRefId: serverId,
+  });
+  const outcome = await executeGovernedProtocolCall(db, {
+    userId,
+    serverId,
+    method,
+    dataKey: ctx.dataKey,
+    params,
+    projectId,
+    principal: ctx.principal(),
+    trace: protocolTrace,
+    relay: extra.relay,
+    progressToken: extra.progressToken,
+    ...(extra.relayLogMessages === false ? { relayLogMessages: false } : {}),
+    // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
+    ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+  }).catch(async (err: unknown) => {
+    // the same named policy refusal a tools/call raises post-hijack
+    if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
+      await finishTrace(db, protocolTrace, "denied");
+      throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+    }
+    throw err;
+  });
+  await finishTrace(
+    db,
+    protocolTrace,
+    outcome.kind === "allowed" ? "ok" : outcome.kind === "method_not_found" || outcome.kind === "invalid_params" ? "error" : "denied",
+  );
+  return protocolOutcomeResult(outcome, method, mcpErrorForGovernanceOutcome);
+}
+
 /** `dataKey`: ADR-0188 S8, the pairwise subject of an outbound identity assertion is keyed from it */
 export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}) {
   // O10 (ADR-0027): admin-only per-tool price override (NOT in
@@ -2949,6 +3006,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         projectId,
         listTools: () => listToolsForCaller(caller),
         callTool: (name, args) => callToolForCaller(caller, name, args),
+        // ADR-0311 d4 slice 2: the same capabilities input as the v1 path below, minus logging (removed in 2026-07-28)
+        capabilities: protocolCapabilities(modernProtocolMethods(orgForProtocol.mcpProtocolMethods ?? [])),
+        protocolCall: (method, params, extra) => protocolCallForCaller(caller, method, params, extra),
         closeUpstream: closeUpstreamSession,
       });
     }
@@ -2963,43 +3023,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       userId,
       serverId,
       projectId,
-      call: async (method, params, extra) => {
-        const protocolTrace = await beginTrace(db, {
-          kind: "tool",
-          name: `mcp ${method.slice(0, 120)}`,
-          userId,
-          projectId,
-          sessionId: `mcp:${serverId}`,
-          rootRefId: serverId,
-        });
-        const outcome = await executeGovernedProtocolCall(db, {
-          userId,
-          serverId,
-          method,
-          dataKey: opts.dataKey,
-          params,
-          projectId,
-          principal: abacPrincipalFromRequest(req),
-          trace: protocolTrace,
-          relay: extra.relay,
-          progressToken: extra.progressToken,
-          // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
-          ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
-        }).catch(async (err: unknown) => {
-          // the same named policy refusal a tools/call raises post-hijack
-          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
-            await finishTrace(db, protocolTrace, "denied");
-            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
-          }
-          throw err;
-        });
-        await finishTrace(
-          db,
-          protocolTrace,
-          outcome.kind === "allowed" ? "ok" : outcome.kind === "method_not_found" || outcome.kind === "invalid_params" ? "error" : "denied",
-        );
-        return protocolOutcomeResult(outcome, method, mcpErrorForGovernanceOutcome);
-      },
+      call: (method, params, extra) => protocolCallForCaller(caller, method, params, extra),
     });
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => listToolsForCaller(caller));
