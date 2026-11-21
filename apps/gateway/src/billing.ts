@@ -615,7 +615,8 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
     const [period] = await db.select().from(billingPeriods).where(eq(billingPeriods.id, id));
     if (!period) return reply.status(404).send({ error: "unknown_billing_period" });
 
-    if (period.status === "closed") {
+    const alreadyClosed = async () => {
+      const [current] = await db.select().from(billingPeriods).where(eq(billingPeriods.id, id));
       const [existing] = await db
         .select()
         .from(billingStatements)
@@ -623,27 +624,39 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
         .orderBy(desc(billingStatements.version))
         .limit(1);
       return reply.status(200).send({
-        period,
+        period: current ?? period,
         statement: existing ?? null,
         alreadyClosed: true,
         note:
           "This period was already closed; nothing was recomputed and no new statement version was " +
           "cut. Close is idempotent so an external cron can drive it without producing duplicates.",
       });
-    }
+    };
+    if (period.status === "closed") return alreadyClosed();
 
-    const res = await cutStatement(db, {
-      period,
-      actor: { userId: req.authCtx.userId ?? null, isAdmin: req.authCtx.isAdmin },
+    // ADR-0348: the cut and the close commit together under the period's row lock. Two closes at once (a cron and an
+    // admin) used to both read `open` and both cut a statement; the second now waits, sees `closed`, and answers as
+    // the idempotent path above does.
+    const outcome = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [locked] = await tx.select().from(billingPeriods).where(eq(billingPeriods.id, id)).for("update");
+      if (!locked || locked.status !== "open") return { kind: "already" as const };
+      const cut = await cutStatement(tx, {
+        period: locked,
+        actor: { userId: req.authCtx.userId ?? null, isAdmin: req.authCtx.isAdmin },
+      });
+      if (!cut.ok) return { kind: "refused" as const, cut };
+      const [row] = await tx
+        .update(billingPeriods)
+        .set({ status: "closed", closedAt: new Date(), closedByUserId: req.authCtx.userId ?? null })
+        .where(and(eq(billingPeriods.id, id), eq(billingPeriods.status, "open")))
+        .returning();
+      return { kind: "closed" as const, cut, row: row! };
     });
-    if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });
-
-    const now = new Date();
-    const [closed] = await db
-      .update(billingPeriods)
-      .set({ status: "closed", closedAt: now, closedByUserId: req.authCtx.userId ?? null })
-      .where(eq(billingPeriods.id, id))
-      .returning();
+    if (outcome.kind === "already") return alreadyClosed();
+    if (outcome.kind === "refused") return reply.status(outcome.cut.status).send({ error: outcome.cut.error, detail: outcome.cut.detail });
+    const res = outcome.cut;
+    const closed = outcome.row;
     await audit(
       req.authCtx.userId ?? null,
       "billing_period",

@@ -49,7 +49,8 @@ At the time of writing that list is exactly: `api.github.com`, `gitlab.com`,
 `api.bitbucket.org`, `dev.azure.com`, `portal.azure.com`, `console.cloud.google.com`,
 `api.linear.app`, `api.monday.com`, `app.asana.com`, `slack.com`,
 `generativelanguage.googleapis.com`, `api.x.ai`, `api.anthropic.com`, `api.openai.com`,
-`169.254.169.254` (the AWS instance-metadata
+`api.mistral.ai`, `api.cohere.com`, `dashscope-intl.aliyuncs.com`, `aiplatform.googleapis.com` (Vertex express mode)
+and `oauth2.googleapis.com` (the Vertex service-account token request; ADR-0352), `169.254.169.254` (the AWS instance-metadata
 address, which appears **only** in the egress guard that blocks it and in the comments explaining
 why), plus `localhost`/`127.0.0.1`/`*.internal` and `example.com`-style documentation strings.
 

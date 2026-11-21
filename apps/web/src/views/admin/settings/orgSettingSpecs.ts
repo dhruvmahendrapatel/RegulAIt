@@ -116,6 +116,7 @@ export const STEP_UP_ACTION_KINDS: readonly Choice[] = [
   { value: "identity_manage", label: "Managing agent identities" },
   { value: "pseudonym_reveal", label: "Revealing a person's name" },
   { value: "key_management", label: "Managing signing keys" },
+  { value: "endpoint_remediation", label: "Removing an MCP server from endpoints" },
 ];
 export const VENDORED_DETECTION_PACKS: readonly Choice[] = [
   { value: "pipelock-secrets", label: "Secret patterns (pipelock-secrets)" },
@@ -196,8 +197,9 @@ export const BATCH4_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     label: "Actions that need a step-up",
     strictDefault: STEP_UP_ALL,
     strict:
-      "All nine: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner, managing agent identities, revealing a person's name and managing signing keys.",
+      "All ten: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities, revealing a person's name, managing signing keys and removing an " +
+      "MCP server from endpoints.",
     relaxed: "Each action removed from the list can be done with the session alone.",
     control: { kind: "set", options: STEP_UP_ACTION_KINDS },
     isRelaxed: (v) => missingAny(v, STEP_UP_ALL),
@@ -651,6 +653,27 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     relaxed: "On: an admin can grant a named set of tools to a user, a role or a team at once. Every change is audited.",
     control: onOff("On", "Off"),
     isRelaxed: notEqual(false),
+  },
+  // ADR-0224 (owner 10-30): ships off; turning it off once on is a settings_relax step-up (gateway `fromStored`)
+  privacyOpsEnabled: {
+    key: "privacyOpsEnabled",
+    label: "Processing limit",
+    strictDefault: false,
+    strict: "Off as shipped. On, personal data with no record of processing is refused.",
+    relaxed: "Off lets personal data through without a record.",
+    control: onOff("On", "Off"),
+    isRelaxed: () => false,
+    looser: (v, b) => b === true && v === false,
+  },
+  dsrSlaDays: {
+    key: "dsrSlaDays",
+    label: "Data-subject request due (days)",
+    strictDefault: 30,
+    strict: "30 days (GDPR Art. 12(3)).",
+    relaxed: "Longer answers the person later.",
+    control: { kind: "int", min: 1, max: 90, unit: "days" },
+    isRelaxed: atMost(30),
+    looser: largerLooser,
   },
 };
 
