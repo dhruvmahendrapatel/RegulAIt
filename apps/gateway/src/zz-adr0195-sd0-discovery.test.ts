@@ -80,8 +80,8 @@ const UNMATCHED_PKG = `sd0-unmatched-${RUN}`;
 const REPO = `acme/sd0-${RUN}`;
 
 const OBSERVATIONS: ScanObservation[] = [
-  { evidenceKind: "repo_scan", subjectKind: "repo", subject: REPO, packageName: PKG, location: { path: "./package.json", line: 3, commit: "0123abcd" }, names: ["npx"] },
-  { evidenceKind: "repo_scan", subjectKind: "repo", subject: REPO, packageName: UNMATCHED_PKG },
+  { evidenceKind: "repo_scan", catalogVersion: 3, subjectKind: "repo", subject: REPO, packageName: PKG, location: { path: "./package.json", line: 3, commit: "0123abcd" }, names: ["npx"] },
+  { evidenceKind: "repo_scan", catalogVersion: 3, subjectKind: "repo", subject: REPO, packageName: UNMATCHED_PKG },
 ];
 const REGISTRY = scannerRegistry([noopTestScanner("repo_github", OBSERVATIONS, { requiresCredential: true }), noopTestScanner("endpoint_agent")]);
 
@@ -451,7 +451,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(finding!.signalSources).toContain("repo_scan");
     expect(finding!.lastImportId).toBe(imp!.id);
     // the sighting keeps where it was found and the names seen (never contents, never values)
-    expect(finding!.evidence[0]).toMatchObject({ source: "repo_scan", location: { path: "package.json", line: 3, commit: "0123abcd" }, names: ["npx"] });
+    expect(finding!.evidence[0]).toMatchObject({ source: "repo_scan", location: { path: "package.json", line: 3, commit: "0123abcd" }, names: ["npx"], catalogVersion: 3 });
     // nothing became a finding without a catalogue row
     expect((await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.subject, REPO))).length).toBe(1);
 

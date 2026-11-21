@@ -145,6 +145,11 @@ export interface ScanObservation {
   os?: "macos" | "windows" | "linux";
   /** Optional: the package ecosystem (npm, pypi…); a catalogue row scoped to an ecosystem matches only it */
   ecosystem?: string;
+  /**
+   * ADR-0083 §2: the compiled shadow-AI catalogue version the scanner matched against. REQUIRED on a `repo_scan`
+   * observation (one of `REPO_SCAN_CATALOG_VERSIONS`) and refused on any other evidence kind.
+   */
+  catalogVersion?: number;
 }
 
 /**

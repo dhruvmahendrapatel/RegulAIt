@@ -209,3 +209,20 @@ Azure accounts, and user machines (through a no-agent osquery pack and importers
 Where this ADR says discovery uses only customer-supplied evidence, or refuses collectors or endpoint collection,
 [ADR-0195](0195-shadow-ai-active-discovery.md) supersedes it. Everything built under this ADR stays and the new
 scanners write into the same findings model.
+
+## Addendum: repo-scan evidence names its catalogue version (lane E54, 2026-11-21)
+
+§2 says a result tagged `catalog vN` means the same thing forever. Repo scans did not carry that tag: after
+`analyseRepo` and the SD1 repo scanner switched their default to catalogue v3, a `repo_scan` sighting could not be
+told apart as a v2 or a v3 match. Now:
+
+- `analyseRepo` takes its compiled catalogue as `{ entries, version }` (default v3) and returns `catalogVersion`.
+  It refuses a version not in `REPO_SCAN_CATALOG_VERSIONS` (`[2, 3]`, frozen, in `packages/shared/src/repo-analysis.ts`).
+- The SD1 scanner stamps `catalogVersion` on every `repo_scan` observation.
+- The discovery worker (`checkObservations`) requires it on a `repo_scan` observation, refuses any value outside
+  `REPO_SCAN_CATALOG_VERSIONS`, and refuses it on any other evidence kind (secure by default, ADR-0180: no repo-scan
+  evidence without a version, and no unknown version).
+- The finding's evidence item keeps it (`FindingEvidence.catalogVersion`) in the existing `shadow_ai_findings.evidence`
+  jsonb, so there is no migration. Evidence already stored stays as written, without a version.
+- Uploaded repo-scan files (the import path) do not go through the compiled catalogue, so they carry no version.
+- A future frozen catalogue (v4) adds its version to `REPO_SCAN_CATALOG_VERSIONS` when the scanner adopts it.
