@@ -33,7 +33,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
-import { PAID_CALL_CHARGE_META_KEY, settlementAmount, sweepExpiredPaidCallHolds } from "./paid-calls.js";
+import { PAID_CALL_CHARGE_META_KEY, PAID_HOLD_STATES, PAID_HOLD_TRANSITIONS, paidHoldStatesInto, settlementAmount, sweepExpiredPaidCallHolds } from "./paid-calls.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -335,5 +335,15 @@ describe("ADR-0313 settlement arithmetic", () => {
     expect(settlementAmount({ priceUsd: 0.05 }, 0.1, -1)).toEqual({ amountUsd: 0.05, reported: false, capped: false });
     expect(settlementAmount({ priceUsd: 0.05 }, 0.1, "0.02")).toEqual({ amountUsd: 0.05, reported: false, capped: false });
     expect(settlementAmount({ priceUsd: 0.05 }, 0.1, undefined, { toolError: true })).toEqual({ amountUsd: 0, reported: false, capped: false });
+  });
+});
+
+describe("ADR-0313 the hold lifecycle is one declared table (owner rule 12)", () => {
+  it("held settles or releases, a released hold may still settle, and a settled hold is final", () => {
+    expect([...PAID_HOLD_STATES]).toEqual(["held", "settled", "released"]);
+    expect(PAID_HOLD_TRANSITIONS.settled).toEqual([]);
+    expect(paidHoldStatesInto("settled")).toEqual(["held", "released"]);
+    expect(paidHoldStatesInto("released")).toEqual(["held"]);
+    expect(paidHoldStatesInto("held")).toEqual([]);
   });
 });

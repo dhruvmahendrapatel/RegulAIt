@@ -32,6 +32,7 @@ import {
   desc,
   eq,
   gt,
+  inArray,
   mcpServers,
   mcpTools,
   orchestrationRuns,
@@ -288,6 +289,26 @@ export function reportedChargeOf(result: unknown): unknown {
   return charge?.amountUsd;
 }
 
+/**
+ * A paid-call hold's lifecycle, declared once (owner rule 12): every write below moves a hold only along these edges,
+ * and the SQL CHECK in `pending/paid_call_budgets.sql` holds the same three states.
+ *   held     -> settled   the call ran and billed (its usage row is linked)
+ *   held     -> released  the call failed or never ran, or the sweeper found it past its TTL; nothing billed
+ *   released -> settled   a call that outlived its hold still bills what it did (the hold had expired mid-call)
+ * A settled hold is final.
+ */
+export const PAID_HOLD_STATES = ["held", "settled", "released"] as const;
+export type PaidHoldState = (typeof PAID_HOLD_STATES)[number];
+export const PAID_HOLD_TRANSITIONS: Readonly<Record<PaidHoldState, readonly PaidHoldState[]>> = {
+  held: ["settled", "released"],
+  released: ["settled"],
+  settled: [],
+};
+/** the states a hold may leave for `to` */
+export function paidHoldStatesInto(to: PaidHoldState): PaidHoldState[] {
+  return PAID_HOLD_STATES.filter((from) => PAID_HOLD_TRANSITIONS[from].includes(to));
+}
+
 /** Settle a hold with the usage row that carries its spend. A hold already released (it expired mid-call) settles too. */
 export async function settlePaidCall(
   db: Db,
@@ -296,7 +317,7 @@ export async function settlePaidCall(
   await db
     .update(paidCallHolds)
     .set({ state: "settled", settledUsd: r.amountUsd, usageEventId: r.usageEventId, releaseReason: null, settledAt: sql`now()` })
-    .where(and(eq(paidCallHolds.id, r.holdId), sql`${paidCallHolds.state} <> 'settled'`, sql`${paidCallHolds.heldUsd} >= ${r.amountUsd}`));
+    .where(and(eq(paidCallHolds.id, r.holdId), inArray(paidCallHolds.state, paidHoldStatesInto("settled")), sql`${paidCallHolds.heldUsd} >= ${r.amountUsd}`));
   await auditPaid(db, r.userId, r.capped ? PAID_CALL_RULE_IDS.chargeCapped : PAID_CALL_RULE_IDS.settled, "allow",
     r.capped ? `paid call settled at its hold $${r.amountUsd.toFixed(6)}: the upstream reported more than was authorised`
       : `paid call settled at $${r.amountUsd.toFixed(6)}${r.reported ? " (upstream-reported charge)" : " (quoted price)"}`,
@@ -307,7 +328,7 @@ export async function releasePaidCall(db: Db, holdId: string, userId: string | n
   const res = await db
     .update(paidCallHolds)
     .set({ state: "released", releaseReason: reason })
-    .where(and(eq(paidCallHolds.id, holdId), eq(paidCallHolds.state, "held")))
+    .where(and(eq(paidCallHolds.id, holdId), inArray(paidCallHolds.state, paidHoldStatesInto("released"))))
     .returning({ id: paidCallHolds.id });
   if (res.length) {
     await auditPaid(db, userId, PAID_CALL_RULE_IDS.released, "allow", `paid call hold released (${reason}); nothing billed`, { holdId, reason }, holdId);
@@ -316,10 +337,11 @@ export async function releasePaidCall(db: Db, holdId: string, userId: string | n
 
 /** release every hold left open past its TTL (bounded per pass) */
 export async function sweepExpiredPaidCallHolds(db: Db, limit = 1_000): Promise<number> {
+  const releasable = sql`ARRAY[${sql.join(paidHoldStatesInto("released").map((x) => sql`${x}`), sql`, `)}]::text[]`;
   const res = await db.execute(sql`
     UPDATE paid_call_holds SET state = 'released', release_reason = 'expired'
-     WHERE id IN (SELECT id FROM paid_call_holds WHERE state = 'held' AND expires_at <= now() ORDER BY expires_at LIMIT ${limit})
-       AND state = 'held'`);
+     WHERE id IN (SELECT id FROM paid_call_holds WHERE state = ANY(${releasable}) AND expires_at <= now() ORDER BY expires_at LIMIT ${limit})
+       AND state = ANY(${releasable})`);
   const n = res.rowCount ?? 0;
   if (n > 0) await auditPaid(db, null, PAID_CALL_RULE_IDS.released, "allow", `${n} expired paid-call hold(s) released`, { reason: "expired", count: n });
   return n;
@@ -378,7 +400,7 @@ export const PAID_CALL_HOLDS_LIST: ListSpec<PaidCallHoldRow> = {
   idCol: paidCallHolds.id,
 };
 const holdFilters = z
-  .object({ state: z.enum(["held", "settled", "released"]).optional(), projectId: z.string().uuid().optional() })
+  .object({ state: z.enum(PAID_HOLD_STATES).optional(), projectId: z.string().uuid().optional() })
   .strict();
 
 function refuse(reply: FastifyReply, status: number, error: string, detail: string) {

@@ -97,7 +97,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
     // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
     // bundle routes left this list when the #453 bundle screen landed), the ADR-0230 A2 SAP business unmark until its
-    // #453 screen, ADR-0312's spend-budget removal until its #453 screen, ADR-0322 (lane E7) vendor usage credential
+    // #453 screen, ADR-0312's spend-budget removal and ADR-0313's paid-call price removal until their #453 screens, ADR-0322 (lane E7) vendor usage credential
     // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
     // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
     // three ADR-0350 (lane E31) device-group removals until the device-group screen on #453, and the ADR-0365 (lane
@@ -113,6 +113,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/discovery/entitlements/apps/:x/agent-link",
       "/v1/servers/:x/system-class",
       "/v1/users/:x/spend-budget",
+      "/v1/paid-call-prices/:x",
       "/v1/vendor-usage/connectors/:x/credential",
       "/v1/context-graph/sources/:x",
       "/v1/robots/:x/secrets/:x/:x",

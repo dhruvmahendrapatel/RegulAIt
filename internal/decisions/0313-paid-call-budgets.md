@@ -62,13 +62,18 @@ built in our own ledger. No new dependency.
 6. **Release.** A call that fails upstream releases its hold (`call_failed`), and so does an MCP call that leaves
    without billing (in its `finally`). Any hold left open is released by the `paid-call-hold-sweeper` job at its TTL.
    Until then it still counts against its budget, which is the safe direction. Holds are never deleted: the app role
-   has no DELETE or TRUNCATE on them.
+   has no DELETE or TRUNCATE on them. The hold lifecycle is one declared table (owner rule 12),
+   `PAID_HOLD_TRANSITIONS` in `paid-calls.ts`: `held → settled | released`, `released → settled` (a late settlement of
+   a swept hold still records the real charge), `settled` final. Settle, release, the sweeper and the list filter all
+   read their allowed source states from it, and the `UPDATE … WHERE state IN (…)` makes the transition atomic.
+   A replayed ADR-0230 SAP call (an idempotent repeat) settles its hold at $0.
 
 7. **Admin API (versioned, bounded).** `GET` and `POST /v1/paid-call-prices`, `DELETE /v1/paid-call-prices/:priceId`
    and `GET /v1/paid-call-holds` (ADR-0226 list contract, filters `state` and `projectId`). Adding a price makes calls
    stricter and is audited. Deleting one relaxes governance, so it needs a `settings_relax` step-up and is audited as a
    relaxation. The four routes are admin-only, `internal` in the OpenAPI registry, and API-only, with screens tracked
-   on #453 (`KNOWN_UI_GAPS`). Both tables are single-tenant admin registers like `usage_events`, so they have no RLS
+   on #453 (`scripts/known-ui-gaps/adr-0313-e2-paid-call-budgets.json`; the price DELETE is listed in
+   `DELIBERATELY_API_ONLY` until then). Both tables are single-tenant admin registers like `usage_events`, so they have no RLS
    tenant column.
 
 8. **3NF.** Every reference is a foreign key. `paid_call_holds.tool_name` is point-in-time evidence (the name the call
