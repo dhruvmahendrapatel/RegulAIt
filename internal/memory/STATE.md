@@ -1,6 +1,6 @@
 ---
-phase: demo-prep-live-integrations-merged
-last_updated: 2026-11-07
+phase: parallel-build-orchestrated
+last_updated: 2026-11-20
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -18,6 +18,40 @@ roadmap: ../product/ROADMAP.md
 > PR #75. **Lesson for future sessions: update STATE.md at the same moment as the session log, not
 > at the end of a long batch** — a session that ended unexpectedly during that window would have
 > handed its successor a file describing a project with "no workload to deploy".
+
+## Snapshot (2026-11-20, 15:30 UTC) - read this first
+
+> The recap below stopped at 2026-11-07 because recap entries now arrive as fragments (ADR-0252). 170 fragments are
+> waiting in `internal/fragments/` and fold into this file when an `assign-at-merge/<sha>` pull request merges. Those
+> PRs are held until the owner turns on the merge queue for `main`. Until then, this snapshot is the current picture.
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **How the build runs:** one master session dispatches about 20 builder lanes and six reviewer pairs
+  (`internal/process/orchestration/`). Each PR merges only after a code APPROVE and a SECURITY APPROVE at its head and
+  all-green checks. The master's merge loop merges it with a merge commit and audits the merge.
+  - 275 PRs have merged since 2026-11-01, 36 of them since 2026-11-19 (GitHub search `is:pr is:merged`, to
+    15:30 UTC).
+  - The 10-session cap is suspended by the owner (D-2026-11-20-01).
+- **Built by pillar** (on `main`, dev and demo only):
+  - **Pillar 1:** one governed decision core (ADR-0251) covers model, connector, MCP and A2A calls. Decision-core
+    approval rules run as one batched Cedar request (#1093). Also merged: MCP definition pinning, MCP 2026-07-28
+    conformance (#1066) and the portable agent credential, slice 1a (#1056).
+  - **Pillar 2:** the stage runner, and switching a rule-like step to its rule and serving it (#1062, #1084).
+    E49 pipeline runs are in review (#1095).
+  - **Pillar 3:** signed device-policy removal directives (#1085), device quarantine (#1087) and configured
+    detection responses (#1060).
+  - **Pillar 4:** context graph (E46) in review (#1092).
+  - **Pillar 5:** GitHub Copilot and Cursor vendor usage pull (#1069).
+  - **Pillar 7:** capability-combination exposure in the agent risk score (#1065) and Copilot Studio discovery
+    (#1094). E45 Robots (GUI-driving agents, ADR-0364) has S1 and S2 merged; the S3 browser runner is in review
+    (#1082). Free-form browsing is limited to 30 minutes and $2 a session (D-2026-11-19-03).
+  - **Pillar 8:** the inbound PM webhook has replay protection. Write-back and audit ingest are in open PRs.
+  - **UI:** external-portal second factor (#1070) and the red-team gate card (#1090). The known-UI-gap count is
+    computed now (#1067): 161 gap entries in `scripts/known-ui-gaps/*.json`, 151 of
+    them tracked on #453.
+- **Blocked on the owner:** enable the merge queue on `main` (ADR-0252). 55 merged migrations (`.sql` files) stay
+  unnumbered in `packages/db/migrations/pending/`, and outside CI they don't apply until it is on.
+- **Open queue:** 79 PRs, plus 7 from Dependabot. The current batch and lane roster are in `internal/process/orchestration/Status.md`.
 
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
@@ -5609,6 +5643,12 @@ form (one fact in one place, foreign keys for every reference, join tables inste
 attributes, one vocabulary per concept). Deliberate exceptions carry a column comment: snapshots and evidence (never
 normalized, ADR-0060), schema-validated config documents, verbatim external payloads, measured read models. Existing
 tables follow in audited expand-contract batches. Rule in CLAUDE.md (Data guidelines); DESIGN_GUIDELINES.md points to it.
+
+**ADR-0200 addendum (owner, 2026-11-17): four build rules.** (1) Compare at least two open-source approaches on GitHub
+before writing an unfamiliar feature. (2) Score bugs for frequency × severity (1–10 each); below 5 is a `triage-low`
+issue and the code is left alone; security-checklist gaps stay blocking. (3) Finish the whole job, ask the owner before
+deleting anything, end with a plain-words recap. (4) Explicit, reused, server-enforced state machines that serve UX, DX
+and AX together; app-wide inventory and approach from lane E29 (in flight). Rules in CLAUDE.md.
 
 **ADR-0233 (builder, 2026-11-06, Proposed): refuse credentials typed into content columns (PENDING S6).** Content
 (`name`, `title`, `description`, `summary`, `body`) is not redacted like ADR-0102's prose; a write that puts
