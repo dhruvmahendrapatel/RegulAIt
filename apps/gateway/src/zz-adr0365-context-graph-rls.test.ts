@@ -17,6 +17,8 @@ import { randomUUID } from "node:crypto";
 import {
   RLS_SYSTEM_REASONS,
   contextGraphEdges,
+  contextGraphNodeUserScopes,
+  orchestrationRuns,
   contextGraphNodeScopes,
   contextGraphNodes,
   contextGraphSources,
@@ -29,6 +31,7 @@ import {
   runMigrations,
   runWithRlsPrincipal,
   runWithRlsPrincipalStep,
+  runWithRlsSystem,
   sql,
   users,
   type Db,
@@ -219,5 +222,54 @@ describe("ADR-0365 the context graph is under forced row-level security", () => 
 
   it("an admin principal reaches every context graph table", async () => {
     for (const t of TABLES) expect([t, await as(id.root, () => count(t))]).toEqual([t, { context_graph_sources: 1, context_graph_nodes: 4, context_graph_edges: 3, context_graph_node_scopes: 4 }[t]]);
+  });
+});
+
+describe("ADR-0365 slice 2: run nodes, user scopes and the scheduler's system_task", () => {
+  const run = randomUUID();
+  const rNode = randomUUID();
+  beforeAll(async () => {
+    // alice's run, linked from n1 (scope A) by a tracks edge; the run node carries scope A and the user scope alice
+    await db.insert(orchestrationRuns).values({ id: run, name: "alice run", initiatingUserId: id.alice, graph: { nodes: [] }, state: { nodeStatuses: {} } } as typeof orchestrationRuns.$inferInsert);
+    await db.insert(contextGraphNodes).values({ id: rNode, sourceId: id.src, kind: "orchestration_run", orchestrationRunId: run });
+    await db.insert(contextGraphNodeScopes).values({ nodeId: rNode, projectId: id.projA });
+    await db.insert(contextGraphNodeUserScopes).values({ nodeId: rNode, userId: id.alice });
+    await db.insert(contextGraphEdges).values({ fromNodeId: id.n1, toNodeId: rNode, kind: "tracks" });
+  });
+
+  it("the user-scope table has row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute<{ on: boolean; forced: boolean }>(sql`
+      select relrowsecurity as on, relforcerowsecurity as forced from pg_class where relname = 'context_graph_node_user_scopes'`);
+    expect(r.rows).toEqual([{ on: true, forced: true }]);
+  });
+
+  it("a run node is read by its initiator only: another member of every scope project sees neither it nor its edge", async () => {
+    const tracks = async () => (await db.select({ id: contextGraphEdges.id }).from(contextGraphEdges).where(eq(contextGraphEdges.kind, "tracks"))).length;
+    expect(await as(id.alice, () => ids("context_graph_nodes"))).toContain(rNode);
+    expect(await as(id.alice, tracks)).toBe(1);
+    expect(await as(id.carol, () => ids("context_graph_nodes"))).not.toContain(rNode);
+    expect(await as(id.carol, tracks)).toBe(0);
+    expect(await as(id.carol, () => count("context_graph_node_user_scopes"))).toBe(0);
+    expect(await as(id.root, () => ids("context_graph_nodes"))).toContain(rNode);
+  });
+
+  it("system_task (the scheduled sync) writes the graph tables and only reads the imported items", async () => {
+    await runWithRlsSystem("system_task", "test.context-graph-sync", async () => {
+      expect(await count("context_graph_nodes")).toBe(5);
+      expect(await count("pm_imported_work_items")).toBe(4);
+      const [n] = await db.insert(contextGraphNodes).values({ sourceId: id.src, kind: "pm_work_item", pmImportedWorkItemId: id.iUnbound }).returning({ id: contextGraphNodes.id });
+      await db.insert(contextGraphNodeScopes).values({ nodeId: n!.id, projectId: id.projA });
+      await db.insert(contextGraphNodeUserScopes).values({ nodeId: n!.id, userId: id.alice });
+      await db.delete(contextGraphNodes).where(eq(contextGraphNodes.id, n!.id));
+      const upd = await db.update(pmImportedWorkItems).set({ itemType: "Bug" }).where(eq(pmImportedWorkItems.id, id.i1)).returning({ id: pmImportedWorkItems.id });
+      expect(upd).toEqual([]);
+      expect(await pgError(db.insert(pmImportedWorkItems).values({ connectionId: id.conn, externalId: "x", externalUrl: "u", itemType: "T" }))).toMatch(/row-level security/);
+    });
+  });
+
+  it("a request reason (context_graph_read) never writes the user scopes", async () => {
+    await runWithRlsPrincipalStep({ userId: id.alice }, "context_graph_read", "test/context-graph", async () => {
+      expect(await pgError(db.insert(contextGraphNodeUserScopes).values({ nodeId: id.n1, userId: id.alice }))).toMatch(/row-level security/);
+    });
   });
 });

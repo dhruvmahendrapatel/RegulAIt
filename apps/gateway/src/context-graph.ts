@@ -27,6 +27,7 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
+import type { SchedulerJobDefinition } from "./scheduler.js";
 
 /** the re-read window behind the cursor (ADR-0365 §2) */
 export const CONTEXT_GRAPH_SYNC_OVERLAP_MS = 10 * 60_000;
@@ -51,7 +52,7 @@ export function nodeReadable(caller: GraphCaller, nodeId: SQL | ReturnType<typeo
 }
 
 export type SyncResult =
-  | { ok: true; sourceId: string; created: { nodes: number; edges: number; scopes: number }; scanned: number; more: boolean; cursor: { firstSeenAt: string; itemId: string } | null }
+  | { ok: true; sourceId: string; created: { nodes: number; edges: number; scopes: number }; scanned: number; runs: RunLinkResult; more: boolean; cursor: { firstSeenAt: string; itemId: string } | null }
   | { ok: false; status: 404; error: "source_not_found"; detail: string };
 
 /**
@@ -148,6 +149,9 @@ export async function syncContextGraphSource(
     }
   }
 
+  // slice 2: the work-item-to-run edges from pm_links, after the item nodes this pass created exist
+  const runs = await projectRunLinks(tx, src, Boolean(args.full));
+
   // The cursor is the last item read (rows come in order, and the read starts at or before the old cursor, so this
   // never skips an unread item); a call that stopped early keeps exactly its place. Nothing read: unchanged.
   await tx
@@ -167,20 +171,102 @@ export async function syncContextGraphSource(
     userId: args.actorUserId,
     objectType: "context_graph_source",
     objectId: src.id,
-    detail: { subsystem: "context-graph", pmConnectionId: src.pmConnectionId, projectId: src.projectId, full: Boolean(args.full), scanned, created, more },
+    detail: { subsystem: "context-graph", pmConnectionId: src.pmConnectionId, projectId: src.projectId, full: Boolean(args.full), scanned, created, runs, more },
     effect: "allow",
     ruleId: "context-graph-synced",
     ruleChain: [],
-    reason: `context graph source ${src.id} synced${args.full ? " (full)" : ""}: ${scanned} item(s) read, ${created.nodes} node(s), ${created.edges} edge(s), ${created.scopes} scope row(s) created${more ? "; more remain" : ""}`,
+    reason: `context graph source ${src.id} synced${args.full ? " (full)" : ""}: ${scanned} item(s) read, ${created.nodes} node(s), ${created.edges} edge(s), ${created.scopes} scope row(s) created; runs: ${runs.runNodes} node(s), ${runs.tracks} edge(s) created, ${runs.removedEdges} stale edge(s) removed${more ? "; more remain" : ""}`,
   });
   return {
     ok: true,
     sourceId: src.id,
     created,
     scanned,
+    runs,
     more,
     cursor: cursor ? { firstSeenAt: new Date(cursor.at).toISOString(), itemId: cursor.id } : null,
   };
+}
+
+export interface RunLinkResult {
+  runNodes: number;
+  tracks: number;
+  removedEdges: number;
+  removedNodes: number;
+}
+
+/**
+ * ADR-0365 slice 2: project the source's live `pm_links` rows that tie one of its work items to an orchestration run
+ * (`run`, or `run_node` of that run) into a run node and a `tracks` edge from the work item.
+ *
+ * - The run node carries the source's project scope AND a user scope naming the run's initiator: a run is visible to
+ *   its initiator and admins only (orchestration.ts), so a member of the project who did not start it never sees it,
+ *   nor the edge to it.
+ * - Incremental: links created since `links_synced_at` minus the overlap, plus every link of a work-item node this
+ *   pass created (a link can predate the item's import). Full: every link, and edges whose link is gone or orphaned
+ *   are removed, with run nodes left without an edge. Both are idempotent (ON CONFLICT DO NOTHING).
+ * - Runs as the caller's transaction and scope (an admin route, or the scheduler's `system_task`).
+ */
+async function projectRunLinks(tx: Db, src: { id: string; pmConnectionId: string; projectId: string; linksSyncedAt: Date | null }, full: boolean): Promise<RunLinkResult> {
+  const overlapSecs = CONTEXT_GRAPH_SYNC_OVERLAP_MS / 1000;
+  const windowSql =
+    full || !src.linksSyncedAt
+      ? sql`true`
+      : sql`(l.created_at >= (SELECT s.links_synced_at FROM context_graph_sources s WHERE s.id = ${src.id}::uuid) - make_interval(secs => ${overlapSecs})
+             OR wn.created_at >= now())`;
+  // the live run links of this source's work-item nodes (a run_node link names its run in object_id)
+  const linkedFrom = sql`
+    FROM pm_links l
+    JOIN pm_imported_work_items w ON w.connection_id = l.connection_id AND w.external_id = l.external_id
+    JOIN context_graph_nodes wn ON wn.pm_imported_work_item_id = w.id AND wn.source_id = ${src.id}::uuid
+    JOIN orchestration_runs r ON r.id = l.object_id`;
+  const linkedWhere = sql`
+    WHERE l.connection_id = ${src.pmConnectionId}::uuid AND l.object_type IN ('run', 'run_node') AND l.orphaned_at IS NULL`;
+  const runNodes = await tx.execute(sql`
+    INSERT INTO context_graph_nodes (source_id, kind, orchestration_run_id)
+    SELECT DISTINCT ${src.id}::uuid, 'orchestration_run', r.id ${linkedFrom} ${linkedWhere} AND ${windowSql}
+    ON CONFLICT DO NOTHING RETURNING id`);
+  // every run node of the source carries the project scope and its run's initiator (cheap: one row each, idempotent)
+  await tx.execute(sql`
+    INSERT INTO context_graph_node_scopes (node_id, project_id)
+    SELECT n.id, ${src.projectId}::uuid FROM context_graph_nodes n
+    WHERE n.source_id = ${src.id}::uuid AND n.kind = 'orchestration_run'
+    ON CONFLICT DO NOTHING`);
+  await tx.execute(sql`
+    INSERT INTO context_graph_node_user_scopes (node_id, user_id)
+    SELECT n.id, r.initiating_user_id FROM context_graph_nodes n
+    JOIN orchestration_runs r ON r.id = n.orchestration_run_id
+    JOIN users u ON u.id = r.initiating_user_id
+    WHERE n.source_id = ${src.id}::uuid AND n.kind = 'orchestration_run'
+    ON CONFLICT DO NOTHING`);
+  const tracks = await tx.execute(sql`
+    INSERT INTO context_graph_edges (from_node_id, to_node_id, kind)
+    SELECT DISTINCT wn.id, rn.id, 'tracks' ${linkedFrom}
+    JOIN context_graph_nodes rn ON rn.source_id = ${src.id}::uuid AND rn.orchestration_run_id = r.id
+    ${linkedWhere} AND ${windowSql}
+    ON CONFLICT DO NOTHING RETURNING id`);
+  let removedEdges = 0;
+  let removedNodes = 0;
+  if (full) {
+    const gone = await tx.execute(sql`
+      DELETE FROM context_graph_edges e
+      USING context_graph_nodes wn, context_graph_nodes rn
+      WHERE e.kind = 'tracks' AND wn.id = e.from_node_id AND rn.id = e.to_node_id AND wn.source_id = ${src.id}::uuid
+        AND NOT EXISTS (
+          SELECT 1 FROM pm_links l JOIN pm_imported_work_items w ON w.connection_id = l.connection_id AND w.external_id = l.external_id
+          WHERE l.connection_id = ${src.pmConnectionId}::uuid AND l.object_type IN ('run', 'run_node') AND l.orphaned_at IS NULL
+            AND w.id = wn.pm_imported_work_item_id AND l.object_id = rn.orchestration_run_id)
+      RETURNING e.id`);
+    removedEdges = gone.rows.length;
+    const lonely = await tx.execute(sql`
+      DELETE FROM context_graph_nodes n
+      WHERE n.source_id = ${src.id}::uuid AND n.kind = 'orchestration_run'
+        AND NOT EXISTS (SELECT 1 FROM context_graph_edges e WHERE e.to_node_id = n.id)
+      RETURNING n.id`);
+    removedNodes = lonely.rows.length;
+  }
+  await tx.update(contextGraphSources).set({ linksSyncedAt: sql`now()` }).where(eq(contextGraphSources.id, src.id));
+  return { runNodes: runNodes.rows.length, tracks: tracks.rows.length, removedEdges, removedNodes };
 }
 
 /**
@@ -203,7 +289,7 @@ export async function rescopeContextGraphSource(tx: Db, sourceId: string, projec
 
 export interface GraphNodeView {
   id: string;
-  kind: "pm_project" | "pm_work_item";
+  kind: "pm_project" | "pm_work_item" | "orchestration_run";
   sourceId: string;
   label: string;
   provider: string;
@@ -215,12 +301,13 @@ export interface GraphNodeView {
 
 const NODE_SELECT = sql`
   SELECT n.id, n.kind, n.source_id, n.created_at,
-         CASE n.kind WHEN 'pm_project' THEN c.project ELSE w.external_id END AS label,
+         CASE n.kind WHEN 'pm_project' THEN c.project WHEN 'orchestration_run' THEN coalesce(o.name, 'run') ELSE w.external_id END AS label,
          c.provider, w.external_url, w.item_type, (w.missing_since IS NOT NULL) AS missing
   FROM context_graph_nodes n
   JOIN context_graph_sources s ON s.id = n.source_id
   JOIN pm_connections c ON c.id = s.pm_connection_id
-  LEFT JOIN pm_imported_work_items w ON w.id = n.pm_imported_work_item_id`;
+  LEFT JOIN pm_imported_work_items w ON w.id = n.pm_imported_work_item_id
+  LEFT JOIN orchestration_runs o ON o.id = n.orchestration_run_id`;
 
 type NodeRow = { id: string; kind: GraphNodeView["kind"]; source_id: string; created_at: Date | string; label: string; provider: string; external_url: string | null; item_type: string | null; missing: boolean };
 const toView = (r: NodeRow): GraphNodeView => ({
@@ -311,4 +398,82 @@ export async function readableNeighbourhood(
     edges: edges.rows.map((e) => ({ id: e.id, fromNodeId: e.from_node_id, toNodeId: e.to_node_id, kind: e.kind })),
     truncated,
   };
+}
+
+// ---- ADR-0365 slice 2: the scheduled sync ---------------------------------------------------------------------------
+
+export const CONTEXT_GRAPH_SYNC_JOB_NAME = "context-graph-sync";
+export const CONTEXT_GRAPH_FULL_SYNC_JOB_NAME = "context-graph-full-sync";
+/** the most sources one pass syncs (the least recently synced first); the rest wait for the next pass */
+export const CONTEXT_GRAPH_SYNC_MAX_SOURCES = 200;
+const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
+
+export interface ContextGraphSweepResult {
+  sources: number;
+  synced: number;
+  failed: { sourceId: string; error: string }[];
+  scanned: number;
+  more: number;
+}
+
+/**
+ * One pass over the bound sources, each in its own transaction (a failing source never blocks the rest, and its error
+ * is reported, not swallowed). With no source bound (the default) it does nothing. Runs under the scheduler's
+ * `system_task` scope; each source's audit row names the scheduler identity.
+ */
+export async function runContextGraphSyncSweep(
+  db: Db,
+  opts: { full: boolean; actorUserId?: string | null; maxSources?: number },
+): Promise<ContextGraphSweepResult> {
+  const sources = await db
+    .select({ id: contextGraphSources.id })
+    .from(contextGraphSources)
+    .orderBy(sql`${contextGraphSources.lastSyncedAt} ASC NULLS FIRST`, contextGraphSources.id)
+    .limit(opts.maxSources ?? CONTEXT_GRAPH_SYNC_MAX_SOURCES);
+  const out: ContextGraphSweepResult = { sources: sources.length, synced: 0, failed: [], scanned: 0, more: 0 };
+  for (const { id } of sources) {
+    try {
+      const r = await db.transaction((tx) =>
+        syncContextGraphSource(tx as unknown as Db, { sourceId: id, actorUserId: opts.actorUserId ?? NO_IDENTITY, full: opts.full }),
+      );
+      if (!r.ok) continue; // unbound between the list and the sync
+      out.synced += 1;
+      out.scanned += r.scanned;
+      if (r.more) out.more += 1;
+    } catch (e) {
+      out.failed.push({ sourceId: id, error: e instanceof Error ? e.message.slice(0, 300) : "sync failed" });
+    }
+  }
+  return out;
+}
+
+/** The two jobs: hourly incremental and daily full (the full pass also removes stale run edges). */
+export function contextGraphJobDefinitions(): SchedulerJobDefinition[] {
+  const job = (name: string, full: boolean, every: number, what: string): SchedulerJobDefinition => ({
+    name,
+    description: what,
+    adr: "ADR-0365",
+    defaultIntervalSeconds: every,
+    run: async (ctx) => {
+      const r = await runContextGraphSyncSweep(ctx.db, { full, actorUserId: ctx.actorUserId });
+      if (r.failed.length) throw new Error(`context graph sync failed for ${r.failed.length} source(s): ${r.failed.map((f) => f.sourceId).join(", ")}`);
+      return { itemsProcessed: r.scanned, detail: { ...r } };
+    },
+  });
+  return [
+    job(
+      CONTEXT_GRAPH_SYNC_JOB_NAME,
+      false,
+      3600,
+      "Incrementally sync every bound context graph source (ADR-0365): new PM work items and new work-item-to-run links " +
+        "since the last pass, re-read with a 10-minute overlap. With no source bound it does nothing.",
+    ),
+    job(
+      CONTEXT_GRAPH_FULL_SYNC_JOB_NAME,
+      true,
+      24 * 3600,
+      "Fully re-sync every bound context graph source (ADR-0365): every work item and run link, and remove run edges " +
+        "whose PM link is gone or orphaned. With no source bound it does nothing.",
+    ),
+  ];
 }
