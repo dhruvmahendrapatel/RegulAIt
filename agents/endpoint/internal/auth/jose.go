@@ -155,16 +155,29 @@ func RotationProof(newKey crypto.Signer, rotationURL string) (string, error) {
 	return sign(newKey, contract.TypKeyRotation, true, "", map[string]any{"aud": rotationURL, "iat": clock().Unix(), "jti": jti()})
 }
 
-// ReportSignature binds an upload's exact bytes to the device key: its claims carry the RFC 9530 Content-Digest
-// of the body, the snapshot id and the reports URL. DPoP alone covers the method, URL and token, not the body.
-func ReportSignature(key crypto.Signer, clientID, reportsURL, snapshotID, contentDigest string) (string, error) {
+// BodySignature binds an upload's exact bytes to the device key: a JWS of type typ whose claims carry the RFC 9530
+// Content-Digest of the body, the upload's id under idClaim, and the route's URL as the audience. DPoP alone covers
+// the method, URL and token, not the body. Each upload route has its own typ, id claim and audience, so a signature
+// never crosses routes.
+func BodySignature(key crypto.Signer, typ, clientID, aud, idClaim, id, contentDigest string) (string, error) {
 	kid, err := Thumbprint(key.Public())
 	if err != nil {
 		return "", err
 	}
-	return sign(key, contract.TypReportSignature, false, kid, map[string]any{
-		"iss": clientID, "aud": reportsURL, "iat": clock().Unix(), "jti": jti(), "snapshotId": snapshotID, "contentDigest": contentDigest,
+	return sign(key, typ, false, kid, map[string]any{
+		"iss": clientID, "aud": aud, "iat": clock().Unix(), "jti": jti(), idClaim: id, "contentDigest": contentDigest,
 	})
+}
+
+// ReportSignature is the BodySignature of a collection report: the snapshot id, the reports URL as the audience.
+func ReportSignature(key crypto.Signer, clientID, reportsURL, snapshotID, contentDigest string) (string, error) {
+	return BodySignature(key, contract.TypReportSignature, clientID, reportsURL, "snapshotId", snapshotID, contentDigest)
+}
+
+// DecisionsSignature is the BodySignature of a decision batch (ADR-0310 addendum): the batch id, the decisions URL
+// as the audience.
+func DecisionsSignature(key crypto.Signer, clientID, decisionsURL, batchID, contentDigest string) (string, error) {
+	return BodySignature(key, contract.TypDecisionsSignature, clientID, decisionsURL, "batchId", batchID, contentDigest)
 }
 
 // ContentDigest is the RFC 9530 `Content-Digest` value for body: `sha-256=:<base64>:`.

@@ -139,6 +139,7 @@ import {
   scrubAuditText,
   retireTemplateSchema,
   startInstanceSchema,
+  type changeDescriptorSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
 } from "@regulait/shared";
@@ -3411,6 +3412,59 @@ export async function gitConnectionUse(
   return { templates: tpl.length, instances: inst.length, templateNames: tpl.slice(0, 20).map((t) => t.name), instanceIds: inst.slice(0, 20).map((i) => i.id) };
 }
 
+/**
+ * The server-side half of a workflow start, shared by every route that starts an instance for a person
+ * (`POST /v1/workflows/instances` and `POST /v1/pipeline-runs`, ADR-0232), so the attributes that decide which stages
+ * and sign-offs apply can never drift between them:
+ * ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
+ * (never from the request body) and passed on the change descriptor so a
+ * role-scoped assignment rule can only ever fire for a genuine role holder.
+ * The kernel stays subject-free — it just matches these strings.
+ * ADR-0038: distinct — a role held both directly and via an IdP group
+ * mapping is two assignment rows and one role name.
+ * ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
+ * 5th: a change's data sensitivity is the set of compliance classification
+ * tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
+ * effectiveCompliancePolicy cascades from. That is the only
+ * server-authoritative sensitivity signal in the model, and it means the
+ * dim cannot be asserted by a client. No project, or a project with no
+ * classifications, yields [] — a sensitivity-scoped rule then simply does
+ * not fire (matches as absent; never an invented sensitivity).
+ * targetSystem is a legitimate client-supplied change attribute;
+ * initiatorRoles and dataSensitivities are authoritative server truth.
+ * Neither could ever reach here from a client — changeDescriptorSchema
+ * accepts neither — but rebuild explicitly.
+ *
+ * `cascadeTemplateIds` is the §8.3 cascade: a classified project's required templates, unioned in by the caller with
+ * `withCascadeTemplates` (it can force a workflow even when no assignment rule matches).
+ */
+export async function resolveServerChange(
+  db: Db,
+  userId: string,
+  clientChange: z.infer<typeof changeDescriptorSchema>,
+  projectId: string | null,
+): Promise<{
+  change: z.infer<typeof changeDescriptorSchema> & { initiatorRoles: string[]; dataSensitivities: string[] };
+  cascadeTemplateIds: string[];
+}> {
+  const initiatorRoleRows = await db
+    .select({ name: roles.name })
+    .from(roleAssignments)
+    .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+    .where(eq(roleAssignments.userId, userId));
+  const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
+  const dataSensitivities = projectId ? await projectClassifications(db, projectId) : [];
+  const cascadeTemplateIds = projectId ? await requiredTemplateIdsFor(db, projectId) : [];
+  return { change: { ...clientChange, initiatorRoles, dataSensitivities }, cascadeTemplateIds };
+}
+
+/** the §8.3 cascade union: the chosen templates first, in order, then each required template not already chosen */
+export function withCascadeTemplates(templateIds: readonly string[], cascadeTemplateIds: readonly string[]): string[] {
+  const out = [...templateIds];
+  for (const id of cascadeTemplateIds) if (!out.includes(id)) out.push(id);
+  return out;
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // ADR-0189 R25 item 13 prevention: every executor a route runs gets the same
   // completion guard the route's own transition does (the strict default when
@@ -3871,34 +3925,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
 
-    // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
-    // (never from the request body) and passed on the change descriptor so a
-    // role-scoped assignment rule can only ever fire for a genuine role holder.
-    // The kernel stays subject-free — it just matches these strings.
-    const initiatorRoleRows = await db
-      .select({ name: roles.name })
-      .from(roleAssignments)
-      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-      .where(eq(roleAssignments.userId, userId));
-    // ADR-0038: distinct — a role held both directly and via an IdP group
-    // mapping is two assignment rows and one role name.
-    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
-    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
-    // 5th: a change's data sensitivity is the set of compliance classification
-    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
-    // effectiveCompliancePolicy cascades from. That is the only
-    // server-authoritative sensitivity signal in the model, and it means the
-    // dim cannot be asserted by a client. No project, or a project with no
-    // classifications, yields [] — a sensitivity-scoped rule then simply does
-    // not fire (matches as absent; never an invented sensitivity).
-    const dataSensitivities = body.projectId
-      ? await projectClassifications(db, body.projectId)
-      : [];
-    // targetSystem is a legitimate client-supplied change attribute;
-    // initiatorRoles and dataSensitivities are authoritative server truth.
-    // Neither could ever reach here from a client — changeDescriptorSchema
-    // accepts neither — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles, dataSensitivities };
+    // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
+    // start path (resolveServerChange)
+    const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
 
     // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
     // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
@@ -3951,10 +3980,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // templates are unioned in with no manual per-control setup (and can
     // force a workflow even when no assignment rule matches). The existing
     // §4 union/strictest merge keeps every added sign-off stage.
-    if (body.projectId) {
-      const required = await requiredTemplateIdsFor(db, body.projectId);
-      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
-    }
+    templateIds = withCascadeTemplates(templateIds, cascadeTemplateIds);
     if (templateIds.length === 0) {
       // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
       // rule, installed above): say who can fix it
