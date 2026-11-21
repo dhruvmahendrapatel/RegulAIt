@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, pmLinks, pmWorkTriggers, runMigrations, sql, type Db } from "@regulait/db";
+import { and, auditLog, createDb, eq, pmLinks, pmWorkTriggers, runMigrations, sql, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -20,6 +20,8 @@ import { relaxStepUpAround } from "./testing/step-up-posture.js";
  *     saying why (the trigger then reads written_back).
  *  5. The lifecycle is enforced by the database: an undeclared move is refused.
  *  6. The admin routes are admin-only.
+ *  7. (ported from #986, lane L6) An @mention and an Automation rule start work end to end; a disabled linked person and
+ *     an unlinked person are denied; a shadow-AI remediation change type cannot be configured as the trigger's change.
  *
  * Shares one database with the other gateway suites; objects are prefixed pmt-.
  */
@@ -222,6 +224,65 @@ describe("ADR-0356 trigger path", () => {
       .from(auditLog)
       .where(and(eq(auditLog.objectId, t!.id), eq(auditLog.ruleId, "pm-trigger-denied")));
     expect(a?.effect).toBe("deny");
+  });
+
+  it("an @mention of the agent and an Automation rule each start work as the person (ported from #986)", async () => {
+    const mentionId = `m-${RUN}`;
+    const mention = JSON.stringify({
+      webhookEvent: "comment_created",
+      timestamp: Date.now(),
+      issue: { id: mentionId, key: `PMT-${mentionId}`, fields: {} },
+      comment: { id: "c-1", author: { accountId: "557058:pmt-alice" }, body: `[~accountid:${AGENT_ACCOUNT}] please take this` },
+    });
+    const m = await deliver(CONN, secret, mention, `d-${mentionId}`);
+    expect(m.json().triggers, m.body).toEqual([expect.objectContaining({ externalId: mentionId, mechanism: "mention", state: "running" })]);
+    expect((await triggersFor(mentionId))[0]).toMatchObject({ userId: alice.id });
+
+    const ruleId = `r-${RUN}`;
+    const rule = JSON.stringify({
+      webhookEvent: "regulait:trigger",
+      timestamp: Date.now(),
+      user: { accountId: "557058:pmt-alice" },
+      issue: { id: ruleId, key: `PMT-${ruleId}` },
+    });
+    const r = await deliver(CONN, secret, rule, `d-${ruleId}`);
+    expect(r.json().triggers, r.body).toEqual([expect.objectContaining({ externalId: ruleId, mechanism: "rule", state: "running" })]);
+  });
+
+  it("a disabled linked person, and a person whose link was removed, are denied (ported from #986)", async () => {
+    const mk = async (tag: string) => {
+      const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: `pmt-${tag}-${RUN}@example.com`, displayName: tag } });
+      const l = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/pm/identity-links",
+        payload: { connectionName: CONN, pmUserId: `557058:pmt-${tag}`, email: `pmt-${tag}-${RUN}@example.com` },
+      });
+      expect(l.statusCode, l.body).toBe(201);
+      return { userId: u.json().id as string, linkId: l.json().id as string };
+    };
+    const carol = await mk("carol");
+    await db.update(users).set({ disabledAt: new Date() }).where(eq(users.id, carol.userId));
+    const disabled = await deliver(CONN, secret, assignment(`dis-${RUN}`, "557058:pmt-carol"));
+    expect(disabled.json().triggers).toEqual([expect.objectContaining({ state: "written_back", outcomeCode: "user_disabled" })]);
+    expect(comments.find((c) => c.id === `dis-${RUN}`)?.body).toMatch(/disabled/);
+
+    const dave = await mk("dave");
+    const del = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/pm/identity-links/${dave.linkId}` });
+    expect(del.statusCode, del.body).toBe(200);
+    const unlinked = await deliver(CONN, secret, assignment(`unl-${RUN}`, "557058:pmt-dave"));
+    expect(unlinked.json().triggers).toEqual([expect.objectContaining({ state: "written_back", outcomeCode: "not_linked" })]);
+  });
+
+  it("a shadow-AI remediation cannot be the change a PM hand-over starts (ported from #986)", async () => {
+    const put = await app.inject({
+      method: "PUT",
+      headers: AUTH,
+      url: `/v1/pm/connections/${CONN}/trigger-settings`,
+      payload: { enabled: true, agentIdentities: [AGENT_ACCOUNT], agentId, change: { changeType: "shadow-ai-remediation", environment: "dev" } },
+    });
+    expect(put.statusCode, put.body).toBe(422);
+    expect(put.json().error).toBe("change_type_not_triggerable");
   });
 
   it("an item the tool cannot read fails with a reason, and the item can be handed over again", async () => {

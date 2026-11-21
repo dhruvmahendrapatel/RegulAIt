@@ -64,6 +64,7 @@ import { startWorkflowForChange } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { whereFrom } from "./state-transition.js";
+import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
 
 const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** at most this many triggers are handled from one delivery (a comment can mention the agent once; the rest is noise) */
@@ -463,6 +464,14 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
     const body = putSettingsSchema.parse(req.body);
     const conn = await connByName(name);
     if (!conn) return reply.status(404).send({ error: "unknown_connection" });
+    // a shadow-AI remediation starts only from its plan (ADR-0195 A4): a PM hand-over must never start one, nor install
+    // its default workflow (ported from #986, lane L6; the same refusal the pipeline-run start makes)
+    if (body.change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+      return reply.status(422).send({
+        error: "change_type_not_triggerable",
+        detail: "a shadow-AI remediation starts from its plan through the workflow start, not from a PM tool hand-over",
+      });
+    }
     const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
     if (!agent) return reply.status(400).send({ error: "invalid_reference", detail: "agentId names no registered agent" });
     if (body.projectId) {

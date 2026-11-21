@@ -218,7 +218,10 @@ function adoSignals(rawBody: string, query: Record<string, string | undefined>):
     case "workitem.updated": {
       const externalId = bounded(r.workItemId ?? revision?.id);
       if (!externalId) return [];
-      const actorIds = adoIdentity(r.revisedBy);
+      // the actor is `revisedBy`; a payload without it carries the same person as the revision's System.ChangedBy
+      // (ported from #986, lane L6), so a hand-over is never denied as "not linked" for a missing field
+      const revisedBy = adoIdentity(r.revisedBy);
+      const actorIds = revisedBy.length > 0 ? revisedBy : adoIdentity(adoNew(revFields["System.ChangedBy"] ?? fields["System.ChangedBy"]));
       if (query.trigger === "rule") return [{ externalId, mechanism: "rule", actorIds, targetIds: [] }];
       const assigned = fields["System.AssignedTo"];
       // only a CHANGE of assignee in this update is an assignment (an unrelated edit of an assigned item is not)
