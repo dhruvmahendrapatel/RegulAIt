@@ -1020,6 +1020,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/robots/:robotId/versions/:version/retire": "internal",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "internal",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "internal",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "internal",
+  "GET /v1/robots/:robotId/runs/:runId": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -2577,6 +2579,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/robots/:robotId/versions/:version/submit": "builder",
   "POST /v1/robots/:robotId/versions/:version/retire": "builder",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "builder",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "builder",
+  "GET /v1/robots/:robotId/runs/:runId": "builder",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "builder",
   "GET /v1/copilot/tools": "copilot",
   "POST /v1/copilot/ask": "copilot",

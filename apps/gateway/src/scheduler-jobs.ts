@@ -879,6 +879,7 @@ import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.j
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
+import { robotRunJobDefinitions } from "./robot-runs.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -904,6 +905,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
+    ...robotRunJobDefinitions(), // ADR-0364 S3: robot-run-stale-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

@@ -73,11 +73,13 @@ export const WORKLOAD_KINDS = [
   "code_exec",
   "engine_worker",
   "byoc_worker",
+  // ADR-0364 S3: one governed RPA robot run (the first-party robot runner and its browser), one sandbox per run
+  "robot_browser",
 ] as const;
 export type WorkloadKind = (typeof WORKLOAD_KINDS)[number];
 
 /** the kinds an executor places in a sandbox; the others run at L0 or on a third party's host */
-export const ISOLABLE_WORKLOAD_KINDS = ["mcp_stdio", "code_exec", "engine_worker", "byoc_worker"] as const;
+export const ISOLABLE_WORKLOAD_KINDS = ["mcp_stdio", "code_exec", "engine_worker", "byoc_worker", "robot_browser"] as const;
 export type IsolableWorkloadKind = (typeof ISOLABLE_WORKLOAD_KINDS)[number];
 
 /** what a non-isolable kind records instead of a class (decision 9) */
@@ -380,6 +382,12 @@ export const executionProfileNetworkSchema = z.discriminatedUnion("mode", [
         .refine(uniqueBy((e: { host: string; port: number }) => `${e.host}:${e.port}`), { message: "duplicate allow-list entry" }),
     })
     .strict(),
+  /**
+   * ADR-0364 S3: the sandbox's ONLY peer is its own per-run egress proxy (Smokescreen) on a per-run internal network.
+   * The profile names no hosts: each run's targets travel on its offer (`executionOfferSchema.egress`) and the executor
+   * generates that run's proxy ACL from them. Only a `robot_browser` profile may use it (the body's superRefine).
+   */
+  z.object({ mode: z.literal("egress_proxy") }).strict(),
 ]);
 export type ExecutionProfileNetwork = z.infer<typeof executionProfileNetworkSchema>;
 
@@ -526,6 +534,19 @@ export const executionProfileBodySchema = z
         message: "injected_at_egress needs network.mode allow_list (the credential is added only to allow-listed requests)",
       });
     }
+    // ADR-0364 S3: a robot run has a per-run egress proxy and nothing else; no other kind may have one, and a profile
+    // that runs robots runs nothing else (the executor builds the proxy only for a robot_browser offer)
+    const robot = b.workloadKinds.includes("robot_browser");
+    if (robot && (b.workloadKinds.length !== 1 || b.network.mode !== "egress_proxy")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workloadKinds"],
+        message: "a profile that runs robot_browser runs only robot_browser, with network.mode egress_proxy",
+      });
+    }
+    if (!robot && b.network.mode === "egress_proxy") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["network"], message: "network.mode egress_proxy is for robot_browser profiles only" });
+    }
     // an input mounted on the work directory would shadow the one writable place
     for (const [i, input] of b.filesystem.inputs.entries()) {
       const w = b.filesystem.workDir.path.replace(/\/$/, "");
@@ -561,9 +582,11 @@ export function executionProfileDigest(body: ExecutionProfileBody): string {
 export function runscFlags(body: ExecutionProfileBody): string[] {
   return [
     "--oci-seccomp",
-    // every mode starts with no network of the sandbox's own: the decision 4 channel is wired by the executor,
-    // and allow-listed egress leaves through that channel to the trusted side
-    "--network=none",
+    // every mode but one starts with no network of the sandbox's own: the decision 4 channel is wired by the executor,
+    // and allow-listed egress leaves through that channel to the trusted side. ADR-0364 S3: an `egress_proxy` sandbox
+    // runs gVisor's own netstack (`sandbox`) on a per-run INTERNAL Docker network whose only other member is its proxy,
+    // under a separate runsc runtime the operator registers with that flag
+    body.network.mode === "egress_proxy" ? "--network=sandbox" : "--network=none",
     `--sidecar-usage-policy=${body.runsc.sidecarUsagePolicy}`,
     `--sidecar-release-enforcement-policy=${body.runsc.sidecarReleaseEnforcementPolicy}`,
     `--platform=${body.runsc.platform}`,
@@ -594,7 +617,8 @@ export const EXECUTION_PROFILE_RELAXABLE_FIELDS = [
 ] as const;
 export type ExecutionProfileRelaxableField = (typeof EXECUTION_PROFILE_RELAXABLE_FIELDS)[number];
 
-const NETWORK_RANK: Record<ExecutionProfileNetwork["mode"], number> = { allow_list: 0, gateway_only: 1, none: 2 };
+/** ADR-0364 S3: `egress_proxy` ranks loosest (its hosts arrive per run, not in the body): any move to it is a relaxation */
+const NETWORK_RANK: Record<ExecutionProfileNetwork["mode"], number> = { egress_proxy: 0, allow_list: 1, gateway_only: 2, none: 3 };
 const SECRETS_RANK: Record<(typeof EXECUTION_SECRETS_MODES)[number], number> = { injected_at_egress: 0, task_scoped: 1, none: 2 };
 
 function addsAny(next: readonly string[], base: readonly string[]): boolean {

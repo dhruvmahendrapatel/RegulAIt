@@ -5106,6 +5106,7 @@ export * from "./pipeline-steps.js";
 export * from "./kill-switch-guard.js";
 export * from "./vendor-agent-control.js";
 export * from "./robots.js";
+export * from "./robots-run.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits
