@@ -689,6 +689,7 @@ import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
+import { registerDeployerRegisterRoutes } from "./deployer-register.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
@@ -6475,6 +6476,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // §8.3 cascade via its tag, and every control's status is computed from a
   // SELECT over the real ledgers — there is no column an admin can tick.
   registerCompliancePackRoutes(app, db);
+  // ADR-0351 slice 2: the EU AI Act deployer-obligation register (admin-only via the default gate)
+  registerDeployerRegisterRoutes(app, db);
   // ADR-0056 — THE AI GOVERNANCE COPILOT. The ultimate dogfood: our own
   // flagship agent is a TENANT of the kernel it fronts. Its reads are narrowed
   // to the INVOKING USER's own project scope at query construction (there is no
