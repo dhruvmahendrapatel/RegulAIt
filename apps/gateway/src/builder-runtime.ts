@@ -512,6 +512,21 @@ async function withAgentGate(
   source: string,
   body: (model: ModelRow, lease: string | null) => Promise<TurnOutcome>,
 ): Promise<TurnOutcome> {
+  // ADR-0366 / ADR-0124: a halted builder agent (a rogue-agent containment, or an admin) runs no turn of any source
+  // (chat, schedule, inbound message, resume). Read fresh: the row in hand may predate a containment that just landed.
+  const [halt] = await db
+    .select({ haltedAt: builderAgents.haltedAt, haltedReason: builderAgents.haltedReason })
+    .from(builderAgents)
+    .where(eq(builderAgents.id, agent.id));
+  if (halt?.haltedAt) {
+    await audit(db, userId, agent.id, "builder-agent-halted-refused", `turn refused: builder agent '${agent.name}' is halted`, { source }, "deny");
+    return {
+      ok: false,
+      status: 409,
+      error: "builder_agent_halted",
+      detail: `this agent is halted: ${halt.haltedReason ?? "(no reason recorded)"}. An administrator releases it.`,
+    };
+  }
   // owner rule (2026-10-04): every builder agent bills to a project. A legacy
   // agent created before the rule is refused before anything is dispatched.
   if (!agent.projectId) {
