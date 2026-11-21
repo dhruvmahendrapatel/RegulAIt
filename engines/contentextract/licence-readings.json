@@ -1,0 +1,10 @@
+[
+  {
+    "subject": "pypdfium2",
+    "version": "5.15.2",
+    "file": "licenses/LICENSES/Apache-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "licence": "Apache-2.0 OR BSD-3-Clause",
+    "read": "pypdfium2's own code is dual-licensed Apache-2.0 or BSD-3-Clause (LICENSES/Apache-2.0.txt and LICENSES/BSD-3-Clause.txt, REUSE.toml); METADATA gives only \"BSD-3-Clause, Apache-2.0, dependency licenses\". The bundled libpdfium.so's own components are listed in THIRD_PARTY.md."
+  }
+]
