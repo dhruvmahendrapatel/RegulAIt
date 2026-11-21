@@ -125,6 +125,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.approvalDelegations, ["reason"]],
   // ADR-0350 (lane E31) — why a per-device command-rule exception is asked for, and the approver's note
   [s.endpointCommandExceptions, ["reason", "decisionReason"]],
+  // ADR-0333 §5b — the admin's reason for a per-rule detection suppression
+  [s.detectionSuppressions, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
   // ADR-0219 follow-up (PR #810 review): why a person's role-derived access to a remote agent was revoked

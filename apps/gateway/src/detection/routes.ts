@@ -7,12 +7,19 @@
  *   GET /v1/detection/incidents                      incidents, newest first, keyset-paginated
  *   GET /v1/detection/incidents/:incidentId          one incident with its evidence chain and receipts
  *   PUT /v1/detection/incidents/:incidentId/status   acknowledge or close (audited)
+ *   POST /v1/detection/rule-pack/dry-run             ADR-0333 §5b: evaluate the active or a proposed pack over a past
+ *                                                    window, read-only; per-rule hit counts (audited)
+ *   GET  /v1/detection/suppressions                  per-rule suppressions (§5b), newest first, keyset-paginated
+ *   POST /v1/detection/suppressions                  create one: `settings_relax` step-up bound to its terms (audited)
+ *   POST /v1/detection/suppressions/:suppressionId/revoke
+ *                                                    end one early (narrowing; audited)
  *   GET  /v1/detection/quarantines                   device quarantines (ADR-0333 §6), newest first, keyset-paginated
  *   GET  /v1/detection/quarantines/:quarantineId     one quarantine and its lifecycle
  *   POST /v1/detection/quarantines/:quarantineId/release
  *                                                    a human admin ends it early: `settings_relax` step-up bound to the
  *                                                    quarantine, only under the `normal` execution dial (audited)
  */
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -21,6 +28,8 @@ import {
   desc,
   detectionIncidents,
   detectionRulePacks,
+  detectionSuppressions,
+  DETECTION_SUPPRESSION_STATUSES,
   endpointDeviceQuarantines,
   ENDPOINT_DEVICE_QUARANTINE_STATUSES,
   eq,
@@ -31,12 +40,13 @@ import {
 import { requireStepUp } from "../step-up.js";
 import { ReceiptKeyError, resolveReceiptSigningKey } from "../receipt-signing-key.js";
 import { registerReceiptSigningKey } from "../decision-receipts.js";
-import { DETECTION_RULE_IDS, loadActiveDetectionPack } from "./sweep.js";
+import { DETECTION_RULE_IDS, DRY_RUN_LIMITS, dryRunDetectionPack, loadActiveDetectionPack } from "./sweep.js";
 import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE, ENDPOINT_DEVICE_QUARANTINE_MACHINE } from "@regulait/shared";
 import { whereFrom } from "../state-transition.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "../pagination.js";
 import { packChangeIsRelaxation, packDigest, parseDetectionPack, signDetectionPack } from "./pack.js";
 import { QUARANTINE_DEVICE_ENFORCEMENT, releaseQuarantine } from "./quarantine.js";
+import { createSuppression, describeSuppression, revokeSuppression, SUPPRESSION_LIMITS } from "./suppressions.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const PAGE_MAX = 100;
@@ -74,6 +84,7 @@ type Rows<T> = { rows: T[] };
 
 export function registerDetectionRoutes(app: FastifyInstance, db: Db): void {
   registerQuarantineRoutes(app, db);
+  registerSuppressionRoutes(app, db);
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) =>
     reply.status(status).send({ error, ...(detail ? { detail } : {}) });
@@ -304,6 +315,143 @@ function registerQuarantineRoutes(app: FastifyInstance, db: Db): void {
     }
     const [after] = await db.select().from(endpointDeviceQuarantines).where(eq(endpointDeviceQuarantines.id, p.data.quarantineId));
     return { quarantine: view(after!) };
+  });
+}
+
+const GROUP_KEY = /^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const suppressionParam = z.object({ suppressionId: z.string().uuid() });
+const createSuppressionBody = z
+  .object({
+    ruleId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+    groupKey: z.string().regex(GROUP_KEY, "a grant:, user: or endpoint: key with one uuid; never a wildcard"),
+    hours: z.number().int().min(1).max(SUPPRESSION_LIMITS.hoursMax),
+    reason: z.string().trim().min(1).max(SUPPRESSION_LIMITS.reasonMax),
+  })
+  .strict();
+const suppressionListQuery = z
+  .object({
+    status: z.enum(DETECTION_SUPPRESSION_STATUSES).optional(),
+    ruleId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
+    limit: z.coerce.number().int().min(1).max(PAGE_MAX).default(50),
+    before: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+const dryRunBody = z
+  .object({
+    /** a proposed pack to try; omitted = the active pack */
+    pack: z.unknown().optional(),
+    from: z.string().datetime({ offset: true }),
+    to: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/** ADR-0333 §5b: suppressions and the dry run (called from registerDetectionRoutes) */
+function registerSuppressionRoutes(app: FastifyInstance, db: Db): void {
+  const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) =>
+    reply.status(status).send({ error, ...(detail ? { detail } : {}) });
+  const view = (row: typeof detectionSuppressions.$inferSelect) => ({ ...row, ...describeSuppression(row) });
+  const human = (req: FastifyRequest): string | null => {
+    const id = req.authCtx.userId;
+    return id && id !== NIL_UUID ? id : null;
+  };
+
+  app.post("/v1/detection/rule-pack/dry-run", async (req, reply) => {
+    const body = dryRunBody.safeParse(req.body);
+    if (!body.success) return refuse(reply, 400, "invalid_request", "body must be { from, to, pack? } with ISO timestamps");
+    const from = new Date(body.data.from);
+    const to = new Date(body.data.to);
+    if (!(from < to)) return refuse(reply, 400, "invalid_window", "from must be before to");
+    if (to.getTime() > Date.now() + 60_000) return refuse(reply, 400, "invalid_window", "a dry run covers the past only");
+    if ((to.getTime() - from.getTime()) / 1000 > DRY_RUN_LIMITS.maxWindowSeconds) {
+      return refuse(reply, 400, "invalid_window", `the window is at most ${DRY_RUN_LIMITS.maxWindowSeconds / 86400} days`);
+    }
+    let pack;
+    let source: "active" | "proposed" = "active";
+    if (body.data.pack !== undefined) {
+      try {
+        pack = parseDetectionPack(body.data.pack);
+        source = "proposed";
+      } catch (err) {
+        const issue = err instanceof z.ZodError ? err.issues[0] : undefined;
+        return refuse(reply, 400, "invalid_detection_pack", issue ? `${issue.path.join(".")}: ${issue.message}` : undefined);
+      }
+    } else {
+      pack = (await loadActiveDetectionPack(db)).pack;
+    }
+    const result = await dryRunDetectionPack(db, pack, { from, to });
+    // the dry run reads the audit trail: who ran it, over which window and pack, is itself audited
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? NIL_UUID,
+      objectType: "detection_rule_pack",
+      detail: { subsystem: "agent-detection", adr: "0333", dryRun: true, source, packDigest: packDigest(pack), from: result.window.from, to: result.window.to, rowsRead: result.rowsRead, truncated: result.truncated },
+      effect: "allow",
+      ruleId: DETECTION_RULE_IDS.packDryRun,
+      ruleChain: [],
+      reason: `Detection rule pack dry run (${source} pack) over a past window; nothing was raised`,
+    });
+    return { source, packDigest: packDigest(pack), ...result };
+  });
+
+  app.get("/v1/detection/suppressions", async (req, reply) => {
+    const q = suppressionListQuery.safeParse(req.query);
+    if (!q.success) return refuse(reply, 400, "invalid_request");
+    const conds = [];
+    if (q.data.status) conds.push(eq(detectionSuppressions.status, q.data.status));
+    if (q.data.ruleId) conds.push(eq(detectionSuppressions.ruleId, q.data.ruleId));
+    if (q.data.before) {
+      const cursor = decodeCursor(q.data.before);
+      if (!cursor) return refuse(reply, 400, "invalid_request", "before is not a valid cursor");
+      conds.push(afterCursorDesc(detectionSuppressions.createdAt, detectionSuppressions.id, cursor));
+    }
+    const rows = await db
+      .select({ s: detectionSuppressions, cursorAt: atTextSql(detectionSuppressions.createdAt) })
+      .from(detectionSuppressions)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(detectionSuppressions.createdAt), desc(detectionSuppressions.id))
+      .limit(q.data.limit + 1);
+    const more = rows.length > q.data.limit;
+    const page = more ? rows.slice(0, q.data.limit) : rows;
+    const last = page[page.length - 1];
+    return { suppressions: page.map((r) => view(r.s)), next: more && last ? encodeCursor({ at: last.cursorAt, id: last.s.id }) : null };
+  });
+
+  app.post("/v1/detection/suppressions", async (req, reply) => {
+    const body = createSuppressionBody.safeParse(req.body);
+    if (!body.success) {
+      const issue = body.error.issues[0];
+      return refuse(reply, 400, "invalid_request", issue ? `${issue.path.join(".") || "body"}: ${issue.message}` : undefined);
+    }
+    const actorUserId = human(req);
+    if (!actorUserId) return refuse(reply, 403, "human_admin_required", "a suppression is a human admin's decision");
+    const active = await loadActiveDetectionPack(db);
+    if (!active.pack.rules.some((r) => r.id === body.data.ruleId)) {
+      return refuse(reply, 422, "unknown_rule", "the active rule pack has no rule with that id");
+    }
+    // a suppression relaxes detection: a settings_relax step-up bound to exactly these terms
+    const reasonDigest = createHash("sha256").update(body.data.reason).digest("hex");
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { detection: "suppression", ruleId: body.data.ruleId, groupKey: body.data.groupKey, hours: body.data.hours, reasonDigest },
+    });
+    if (!su.ok) return reply;
+    const out = await createSuppression(db, { ...body.data, actorUserId, stepUp: su.method });
+    if (!out.ok) return refuse(reply, out.status, out.code, out.detail);
+    return reply.status(201).send({ suppression: view(out.row) });
+  });
+
+  app.post("/v1/detection/suppressions/:suppressionId/revoke", async (req, reply) => {
+    const p = suppressionParam.safeParse(req.params);
+    if (!p.success) return refuse(reply, 400, "invalid_request", "suppressionId must be a uuid");
+    const body = z.object({}).strict().safeParse(req.body ?? {});
+    if (!body.success) return refuse(reply, 400, "invalid_request", "the body takes no fields");
+    // a narrowing: any admin principal may end a suppression early (no step-up); the audit row names who
+    const row = await revokeSuppression(db, { id: p.data.suppressionId, actorUserId: human(req) });
+    if (!row) {
+      const [exists] = await db.select().from(detectionSuppressions).where(eq(detectionSuppressions.id, p.data.suppressionId));
+      if (!exists) return refuse(reply, 404, "not_found");
+      return refuse(reply, 409, "suppression_not_active", `the suppression is ${describeSuppression(exists).state}`);
+    }
+    return { suppression: view(row) };
   });
 }
 
