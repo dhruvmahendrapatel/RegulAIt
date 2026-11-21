@@ -29,7 +29,7 @@ outputs:
     description: "'true' when an engine's own input changed: engines/**, any Dockerfile, the lockfile, the engine allow-lists and gate scripts, the image workflows (not packages/ or apps/, which the shim stage also copies)"
     value: ${{ steps.scope.outputs.engines }}
   gateway:
-    description: "'true' unless the PR changes only apps/web/** or docs (ADR-0323): 'false' runs one gateway runner with the tests that read apps/web, not the five shards"
+    description: "'true' unless the PR changes only apps/web/** or docs (ADR-0323): 'false' runs one gateway runner with the tests that read apps/web, not the six shards"
     value: ${{ steps.scope.outputs.gateway }}
 runs:
   using: composite
