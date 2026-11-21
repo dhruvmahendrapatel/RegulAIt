@@ -32,6 +32,8 @@ type cursorInput struct {
 	CursorVersion string `json:"cursor_version"`
 	ToolName      string `json:"tool_name"`
 	MCPServerName string `json:"mcp_server_name"`
+	// conversation_id is a common field, read only for the decision record; Cursor reports no permission mode
+	ConversationID string `json:"conversation_id"`
 	// beforeShellExecution and beforeReadFile; content (the whole file) is never decoded
 	Command        string   `json:"command"`
 	Cwd            string   `json:"cwd"`
@@ -58,7 +60,7 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 		if in.Command == "" {
 			c.Unresolved = "the coding agent's hook input does not show the command"
 		}
-		return Call{Tool: "shell", Command: c}, nil
+		return Call{Tool: "shell", Command: c, SessionID: in.ConversationID}, nil
 	case "beforeReadFile":
 		c := &CommandCall{Workspace: roots}
 		if in.FilePath == "" {
@@ -66,7 +68,7 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 		} else {
 			c.Files = []FileAccess{{Path: in.FilePath}}
 		}
-		return Call{Tool: "read", Command: c, NoAsk: true}, nil
+		return Call{Tool: "read", Command: c, NoAsk: true, SessionID: in.ConversationID}, nil
 	case "beforeMCPExecution":
 	default:
 		return Call{}, errors.New("not a beforeMCPExecution, beforeShellExecution or beforeReadFile event")
@@ -75,7 +77,7 @@ func ParseCursorBeforeMCP(r io.Reader) (Call, error) {
 		return Call{}, errors.New("no tool_name")
 	}
 	// a missing mcp_server_name leaves Server empty, which Decide denies
-	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName}}, nil
+	return Call{Tool: in.ToolName, MCP: &MCPCall{Server: in.MCPServerName, Tool: in.ToolName}, SessionID: in.ConversationID}, nil
 }
 
 type cursorOutput struct {

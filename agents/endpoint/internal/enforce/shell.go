@@ -10,6 +10,7 @@ package enforce
 
 import (
 	"path"
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -48,6 +49,9 @@ func parseShell(line string, depth int) []action {
 		return []action{{kind: "unresolved", cause: "a command line the shell parser cannot read"}}
 	}
 	var acts []action
+	// envTouched: the line sets or exports a variable (FOO=x alone, export, declare, set, source), so every program
+	// in it may run with an environment the check does not see (review #952)
+	envTouched := false
 	syntax.Walk(file, func(n syntax.Node) bool {
 		switch x := n.(type) {
 		case *syntax.Stmt:
@@ -56,6 +60,7 @@ func parseShell(line string, depth int) []action {
 			}
 		case *syntax.CallExpr:
 			if len(x.Args) == 0 {
+				envTouched = envTouched || len(x.Assigns) > 0
 				return true // assignments only; their values are walked for substitutions
 			}
 			argv, ok := literalArgv(x.Args)
@@ -63,15 +68,61 @@ func parseShell(line string, depth int) []action {
 				acts = append(acts, action{kind: "unresolved", cause: "a word that is not literal, such as a variable or a command substitution"})
 				return true
 			}
-			acts = append(acts, argvActions(argv, depth)...)
-		case *syntax.DeclClause, *syntax.LetClause, *syntax.ArithmCmd, *syntax.TestClause:
+			if envChangers[argv[0]] {
+				envTouched = true
+			}
+			inner := argvActions(argv, depth)
+			if len(x.Assigns) > 0 { // FOO=x prog: the assignment is in prog's environment only
+				markEnv(inner)
+			}
+			acts = append(acts, inner...)
+		case *syntax.DeclClause:
+			envTouched = true // export, declare, typeset, local, readonly
+		case *syntax.LetClause, *syntax.ArithmCmd, *syntax.TestClause:
 			// builtins with no program to run; their words are walked for substitutions
 		case *syntax.CoprocClause:
 			acts = append(acts, action{kind: "unresolved", cause: "a coprocess"})
 		}
 		return true
 	})
+	if envTouched {
+		markEnv(acts)
+	}
 	return acts
+}
+
+// envChangers are builtins that change the environment later programs in the line run with
+var envChangers = set("set", "unset", "source", ".", "shopt", "alias")
+
+func markEnv(acts []action) {
+	for i := range acts {
+		if acts[i].kind == "exec" {
+			acts[i].envSet = true
+		}
+	}
+}
+
+// SimpleCommand returns line's argv when line is exactly one simple command whose every word is literal: no list,
+// pipeline, subshell, background job, negation, redirection, assignment or substitution. ok is false otherwise, and
+// for a line the bash parser cannot read. The tamper report (internal/decisionlog) uses it to recognise a hook
+// registration whose verdict nothing can discard.
+func SimpleCommand(line string) (argv []string, ok bool) {
+	if len(line) > maxCommandBytes {
+		return nil, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(line), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return nil, false
+	}
+	st := file.Stmts[0]
+	if st.Negated || st.Background || st.Coprocess || len(st.Redirs) > 0 {
+		return nil, false
+	}
+	call, isCall := st.Cmd.(*syntax.CallExpr)
+	if !isCall || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return nil, false
+	}
+	return literalArgv(call.Args)
 }
 
 // literalArgv returns the words as the shell would pass them, when every word is literal.
@@ -202,7 +253,12 @@ var opaque = set("eval", "source", ".", "trap")
 // argvActions decides one argv: the program itself, what it wraps, and any package install it is.
 func argvActions(argv []string, depth int) []action {
 	acts := []action{{kind: "exec", argv: argv}}
-	prog := path.Base(argv[0])
+	// a program named by a relative path (./x, ../x, dir/x) is a file in or near the workspace whose contents are not
+	// seen: unresolved, as a script file is (review #941)
+	if p := filepath.ToSlash(argv[0]); strings.Contains(p, "/") && !rooted(argv[0]) {
+		acts = append(acts, action{kind: "unresolved", cause: "a program file named by path"})
+	}
+	prog := path.Base(filepath.ToSlash(argv[0]))
 	switch {
 	case opaque[prog]:
 		acts = append(acts, action{kind: "unresolved", cause: "`" + prog + "` runs code that is not on the command line"})
@@ -220,11 +276,20 @@ func argvActions(argv []string, depth int) []action {
 	default:
 		if w, ok := wrappers[prog]; ok {
 			if inner := unwrap(argv[1:], w); len(inner) > 0 {
-				acts = append(acts, argvActions(inner, depth)...)
+				innerActs := argvActions(inner, depth)
+				if prog == "env" {
+					markEnv(innerActs) // env sets, unsets or clears variables for the program it runs
+				}
+				if prog == "xargs" && isClient(inner) {
+					// xargs appends arguments read from stdin: URLs and options the argv does not show
+					innerActs = append(innerActs, action{kind: "unresolved", cause: "an HTTP client or gh run by xargs"})
+				}
+				acts = append(acts, innerActs...)
 			}
 		}
 	}
 	acts = append(acts, packageActions(argv)...)
+	acts = append(acts, clientActions(argv)...)
 	return acts
 }
 

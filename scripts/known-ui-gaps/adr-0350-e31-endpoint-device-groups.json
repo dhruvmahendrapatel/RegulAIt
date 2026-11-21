@@ -1,0 +1,20 @@
+{
+  "adr": "ADR-0350",
+  "lane": "E31",
+  "tracking": "ADR-0350 (lane E31): master brief for lane E31 (2026-11-17) rule 3: new routes go to the census with a KNOWN_UI_GAPS entry on #453; the UI is built by the design builder",
+  "gaps": {
+    "POST /v1/endpoint-device-groups": "creates an endpoint device group whose rules only narrow its devices' on-device policy (audited)",
+    "GET /v1/endpoint-device-groups": "lists endpoint device groups with their devices and narrowing rules",
+    "DELETE /v1/endpoint-device-groups/:groupId": "deletes a device group with its memberships and rules, a relaxation (settings_relax step-up, audited)",
+    "POST /v1/endpoint-device-groups/:groupId/members": "adds an enrolled device to a device group (audited)",
+    "DELETE /v1/endpoint-device-groups/:groupId/members/:deviceId": "removes a device from a group, a relaxation (settings_relax step-up, audited)",
+    "POST /v1/endpoint-device-groups/:groupId/rules": "adds an ask or deny command, file or package rule to a device group (audited)",
+    "DELETE /v1/endpoint-device-groups/:groupId/rules/:ruleId": "removes a group's narrowing rule, a relaxation (settings_relax step-up, audited)",
+    "POST /v1/endpoint-command-exceptions": "requests a time-limited exception relaxing one rule on one device, naming another admin as approver (audited)",
+    "GET /v1/endpoint-command-exceptions": "lists per-device command-rule exceptions with their derived state and the lifecycle table",
+    "POST /v1/endpoint-command-exceptions/:exceptionId/approve": "approves an exception by its terms digest (approval_decide step-up, plus settings_relax beyond 24 hours; audited)",
+    "POST /v1/endpoint-command-exceptions/:exceptionId/reject": "rejects a requested exception (audited)",
+    "POST /v1/endpoint-command-exceptions/:exceptionId/cancel": "cancels the caller's own requested exception (audited)",
+    "POST /v1/endpoint-command-exceptions/:exceptionId/revoke": "revokes an active exception before its expiry (audited)"
+  }
+}

@@ -17,7 +17,11 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/auth"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/directive"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
 )
@@ -39,6 +43,13 @@ type Cycle struct {
 	Env func() (*collect.Env, error)
 	// Identity is what the pseudonymity guard refuses to send.
 	Identity privacy.Identity
+	// ManagedFiles are the vendor hook files the tamper report reads (decisionlog.DefaultManagedFiles when nil).
+	ManagedFiles []decisionlog.ManagedFile
+	// DirectiveKeyring verifies add-on removal directives (ADR-0331): the compiled enforcement keyring. Each cycle adds
+	// the device-policy keys pinned in the root-owned config (ADR-0330 §8, B4); a pin never overrides a compiled key.
+	DirectiveKeyring enforce.Keyring
+	// Notify shows the developer a removal notice (directive.PlatformNotifier in production).
+	Notify directive.Notifier
 
 	lastConfig *auth.Response
 }
@@ -48,6 +59,8 @@ type Result struct {
 	Interval time.Duration
 	Report   *contract.Report
 	Rotated  bool
+	// Directives is the add-on removal sync (ADR-0331); nil when it did not run.
+	Directives *DirectiveRun
 }
 
 func clampInterval(seconds int) time.Duration {
@@ -111,7 +124,9 @@ func (c *Cycle) client(ctx context.Context, cfg *Config, s *State) (*auth.Client
 	return nil, nil, errors.New("no device key of this user loads; re-registration is needed")
 }
 
-// RunOnce registers if needed, fetches and verifies the collection pack, collects, and uploads one signed report.
+// RunOnce registers if needed, fetches and verifies the collection pack, collects, and uploads one signed report;
+// then it uploads the hook decisions spooled on the device and this cycle's managed-file report (ADR-0310 addendum).
+// The two uploads are independent: a failed report still lets the decisions go, and the report's error is returned.
 func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	c.defaults()
 	s, err := Register(ctx, c.Options)
@@ -126,12 +141,31 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	out, repErr := c.report(ctx, cl, cfg, s)
+	if _, err := c.uploadDecisions(ctx, cl); err != nil {
+		c.Log.Warn("decision upload failed; the next run resends it", "err", err)
+	}
+	if repErr != nil {
+		return nil, repErr
+	}
+	if cl.RotateDue(c.Now()) {
+		if err := c.rotate(ctx, cfg, cl, store, s); err != nil {
+			c.Log.Warn("key rotation failed; the next run retries", "err", err)
+		} else {
+			out.Rotated = true
+		}
+	}
+	return out, nil
+}
+
+// report is the collection half of a cycle: the pack, the facts, and one signed report.
+func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *State) (*Result, error) {
 	res := c.lastConfig
 	if res.Status != http.StatusOK {
 		return nil, &auth.HTTPError{Op: "config", Status: res.Status, Code: res.Code()}
 	}
 	var conf contract.ConfigResponse
-	if err := strictJSON(res.Body, &conf); err != nil {
+	if err := fsutil.StrictJSON(res.Body, &conf); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	verified, err := pack.Verify(conf.Pack, c.Keyring, s.PackVersion)
@@ -197,14 +231,66 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 	out := &Result{Interval: clampInterval(conf.OrgPolicy.IntervalSeconds), Report: rep}
-	if cl.RotateDue(c.Now()) {
-		if err := c.rotate(ctx, cfg, cl, store, s); err != nil {
-			c.Log.Warn("key rotation failed; the next run retries", "err", err)
-		} else {
-			out.Rotated = true
-		}
+	// ADR-0331: removal directives, bounded by the manifest verified above; a failure here never fails the cycle
+	if run, err := c.syncDirectives(ctx, cl, s, verified.Collection, env, c.DirectiveKeyring.With(cfg.DevicePolicyKeys)); err != nil {
+		c.Log.Info("removal directives not synced", "err", err)
+	} else {
+		out.Directives = run
 	}
 	return out, nil
+}
+
+// uploadDecisions drains the user's decision spool into signed batches (decisionlog.Spool.Drain), with this cycle's
+// managed-file report in the first one. Each body passes the pseudonymity guard and is sent with its RFC 9530
+// Content-Digest and a decisions signature by the device key, as a report is.
+func (c *Cycle) uploadDecisions(ctx context.Context, cl *auth.Client) (decisionlog.DrainResult, error) {
+	files := c.ManagedFiles
+	if files == nil {
+		files = decisionlog.DefaultManagedFiles(runtime.GOOS)
+	}
+	return decisionlog.New(c.Paths.StateDir).Drain(ctx, decisionlog.DrainOptions{
+		AgentVersion: Version,
+		Integrity:    decisionlog.CheckIntegrity(files, c.SystemOwner),
+		Guard:        c.Identity.Check,
+		Now:          c.Now,
+		Log:          c.Log,
+		Send: func(ctx context.Context, batchID string, body []byte) error {
+			return c.sendDecisions(ctx, cl, batchID, body)
+		},
+	})
+}
+
+// sendDecisions posts one batch. A 202 (a duplicate included) is success. A client error a resend cannot change is
+// permanent (the batch is dropped and counted, so one bad batch never blocks the ones after it); authentication,
+// rate limits, a stale signature (the device clock), a missing route (an older gateway) and server errors may pass,
+// and the same bytes are resent.
+func (c *Cycle) sendDecisions(ctx context.Context, cl *auth.Client, batchID string, body []byte) error {
+	digest := auth.ContentDigest(body)
+	res, err := cl.Do(ctx, http.MethodPost, contract.RouteDecisions, body, func(h http.Header) error {
+		sig, err := auth.DecisionsSignature(cl.Key, cl.ClientID, cl.Issuer+contract.RouteDecisions, batchID, digest)
+		if err != nil {
+			return err
+		}
+		h.Set(contract.HeaderContentDigest, digest)
+		h.Set(contract.HeaderDecisionsSignature, sig)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if res.Status != http.StatusAccepted {
+		he := &auth.HTTPError{Op: "decisions", Status: res.Status, Code: res.Code()}
+		if permanentRefusal(res.Status, res.Code()) {
+			return errors.Join(decisionlog.ErrRefused, he)
+		}
+		return he
+	}
+	// extra members (audited, refused) are informational
+	var dr contract.DecisionsResponse
+	if err := json.Unmarshal(res.Body, &dr); err != nil || !dr.Accepted {
+		return errors.New("the decisions answer is malformed")
+	}
+	return nil
 }
 
 // upload sends one report: the exact body bytes, their RFC 9530 Content-Digest, and a report signature by the
@@ -235,10 +321,18 @@ func (c *Cycle) upload(ctx context.Context, cl *auth.Client, rep *contract.Repor
 		return &auth.HTTPError{Op: "report", Status: res.Status, Code: res.Code()}
 	}
 	var rr contract.ReportResponse
-	if err := strictJSON(res.Body, &rr); err != nil || !rr.Accepted {
+	if err := fsutil.StrictJSON(res.Body, &rr); err != nil || !rr.Accepted {
 		return errors.New("the report answer is malformed")
 	}
 	return nil
+}
+
+func permanentRefusal(status int, code string) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return status >= 400 && status < 500 && code != "decisions_signature_stale"
 }
 
 // rotate replaces the device key (ADR-0188 S7 point 4): a new key in the same store, its proof of possession, and
@@ -271,7 +365,7 @@ func (c *Cycle) rotate(ctx context.Context, cfg *Config, cl *auth.Client, store 
 	}
 	var rr contract.RegisterResponse
 	newID, _ := auth.ClientID(next.Public())
-	if err := strictJSON(res.Body, &rr); err != nil || rr.ClientID != newID {
+	if err := fsutil.StrictJSON(res.Body, &rr); err != nil || rr.ClientID != newID {
 		return errors.New("the rotation answer is malformed")
 	}
 	old := s.KeyID

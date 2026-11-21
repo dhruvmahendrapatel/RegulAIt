@@ -55,6 +55,8 @@ type CommandRules struct {
 	Exec       []ExecRule `json:"exec"`
 	Files      FileRules  `json:"files"`
 	Packages   PkgRules   `json:"packages"`
+	// Actions are the compiled one-policy rules (ADR-0350 §9), one per catalogue action at most.
+	Actions []ActionRule `json:"actions"`
 }
 
 // ExecRule matches one argv. Argv holds one doublestar glob per argument, compared position by position; argv[0] is
@@ -200,6 +202,9 @@ func (c *CommandRules) validate(p *Policy) error {
 			return refuse("commands: rule %q is a catch-all allow", r.ID)
 		}
 	}
+	if err := validateActions(c.Actions, use); err != nil {
+		return err
+	}
 	if len(p.Exceptions) > maxExceptions {
 		return refuse("exceptions: too many")
 	}
@@ -235,8 +240,10 @@ type CommandCall struct {
 	Files []FileAccess
 	// Cwd is the working directory relative paths resolve against.
 	Cwd string
-	// Workspace are the roots an access inside of which is "in the workspace" (the project directory, or the
-	// agent's workspace roots).
+	// Workspace are the roots the agent itself declares (Cursor's workspace_roots); with HookEnv.ProjectDir they are
+	// the only workspace. The cwd never counts on its own, and a root that is a filesystem or drive root, the home
+	// directory or an ancestor of it is ignored (review #941 S-B1), so a session started from / or ~ has no workspace
+	// and every file action gets the outside defaults.
 	Workspace []string
 	// Unresolved is set by an adapter that saw a governed tool but could not find what it acts on.
 	Unresolved string
@@ -270,6 +277,10 @@ type action struct {
 	eco   string
 	name  string
 	cause string
+	// envSet: the program runs with an environment the command line changed (FOO=x prog, env FOO=x prog, or an
+	// export, declare or set earlier in the line). A proxy, config home or preload there is not visible to the
+	// check, so an action allow does not relax the default for it (review #952).
+	envSet bool
 }
 
 // outcome is one action's verdict and why.
@@ -277,11 +288,13 @@ type outcome struct {
 	verdict string
 	rule    string
 	reason  string
+	// kind is the deciding action's kind (Decision.Action), set by decideCommand; "" for an unresolved one
+	kind string
 }
 
 // decideCommand returns the strictest outcome across the call's actions. It never returns no verdict.
 func decideCommand(p *Policy, c CommandCall, env HookEnv) outcome {
-	env.roots = append(append([]string{}, c.Workspace...), env.ProjectDir)
+	env.roots = acceptableRoots(append(append([]string{}, c.Workspace...), env.ProjectDir), env.Home)
 	acts := commandActions(c, env)
 	best := outcome{verdict: RuleAllow, rule: "default.workspace", reason: "inside the workspace"}
 	first := true
@@ -289,9 +302,25 @@ func decideCommand(p *Policy, c CommandCall, env HookEnv) outcome {
 		o := decideAction(p, a, env)
 		if first || strictness(o.verdict) > strictness(best.verdict) {
 			best, first = o, false
+			best.kind = actionKind(a.kind)
 		}
 	}
 	return best
+}
+
+// actionKind names an action's kind for the decision record; an unresolved action names none.
+func actionKind(kind string) string {
+	switch kind {
+	case "exec":
+		return KindExec
+	case "package":
+		return KindPackage
+	case "read":
+		return KindRead
+	case "write":
+		return KindWrite
+	}
+	return ""
 }
 
 func commandActions(c CommandCall, env HookEnv) []action {
@@ -319,9 +348,15 @@ func commandActions(c CommandCall, env HookEnv) []action {
 	}
 	// resolve every path once, against the call's working directory
 	for i := range acts {
-		if acts[i].kind == "read" || acts[i].kind == "write" {
-			acts[i].path = absolute(acts[i].path, c.Cwd, env)
+		if acts[i].kind != "read" && acts[i].kind != "write" {
+			continue
 		}
+		if p := acts[i].path; strings.HasPrefix(p, "~") && p != "~" && !strings.HasPrefix(p, "~/") {
+			// ~user is another account's home: the check does not resolve it, so it is not a relative path
+			acts[i] = action{kind: "unresolved", cause: "a path under another user's home (~user)"}
+			continue
+		}
+		acts[i].path = absolute(acts[i].path, c.Cwd, env)
 	}
 	return acts
 }
@@ -352,18 +387,32 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 	case "unresolved":
 		return outcome{verdict: r.Unresolved, rule: unresolvedRuleID, reason: "RegulAIt: this command cannot be checked (" + a.cause + ")."}
 	case "exec":
+		byPath := strings.ContainsAny(a.argv[0], `/\`)
 		o := strictest(p, env, func(yield func(id, verdict string)) {
 			for _, x := range r.Exec {
-				if argvMatch(x.Argv, a.argv) {
-					yield(x.ID, x.Verdict)
+				if !argvMatch(x.Argv, a.argv) {
+					continue
 				}
+				// a bare-name rule matches a program named by path for deny and ask (/bin/rm is still rm), but it
+				// never ALLOWS one: an allow names the program found on PATH, or names its full path (review #941)
+				if x.Verdict == RuleAllow && byPath && !strings.Contains(x.Argv[0], "/") {
+					continue
+				}
+				yield(x.ID, x.Verdict)
 			}
 		})
-		if o.rule == "" {
-			return outcome{verdict: r.Default, rule: defaultExecRuleID, reason: "RegulAIt: `" + a.argv[0] + "` is decided by your organisation's default for commands."}
+		if o.verdict == RuleAllow && byPath && o.rule != "" {
+			// an exception may relax a bare-name rule, but not to an allow of a program named by path
+			if x, ok := execRule(r, o.rule); ok && !strings.Contains(x.Argv[0], "/") {
+				o.verdict = RuleAsk
+			}
 		}
-		o.reason = "RegulAIt: `" + a.argv[0] + "` matches your organisation's command rule " + o.rule + "."
-		return o
+		if o.rule == "" {
+			o = outcome{verdict: r.Default, rule: defaultExecRuleID, reason: "RegulAIt: `" + a.argv[0] + "` is decided by your organisation's default for commands."}
+		} else {
+			o.reason = "RegulAIt: `" + a.argv[0] + "` matches your organisation's command rule " + o.rule + "."
+		}
+		return withActions(r, a, byPath, o)
 	case "package":
 		o := strictest(p, env, func(yield func(id, verdict string)) {
 			for _, x := range r.Packages.Rules {
@@ -410,6 +459,37 @@ func decideAction(p *Policy, a action, env HookEnv) outcome {
 	}
 }
 
+// withActions applies the one-policy action rules (ADR-0350 §9) to an exec outcome. An action rule always tightens.
+// It relaxes only the default for commands, and only when every action the argv performs is allowed and was read
+// exactly by a program named by its bare name (review #952): an allowed issue create never carries a second URL, an
+// unread option or a look-alike binary through. Device exceptions never apply to action rules: they come from the
+// subject's gateway entitlements, and only the gateway may loosen them.
+func withActions(r *CommandRules, a action, byPath bool, o outcome) outcome {
+	argv := a.argv
+	matches := cliActions(argv)
+	relax := o.rule == defaultExecRuleID && !byPath && !a.envSet && len(matches) > 0
+	allowRule := ""
+	for _, m := range matches {
+		ar, ok := r.actionRule(m.id)
+		if !ok {
+			relax = false
+			continue
+		}
+		if ar.Verdict != RuleAllow || !m.exact {
+			relax = false
+		} else if allowRule == "" {
+			allowRule = ar.ID
+		}
+		if strictness(ar.Verdict) > strictness(o.verdict) {
+			o = outcome{verdict: ar.Verdict, rule: ar.ID, reason: "RegulAIt: `" + argv[0] + "` performs an action your organisation's rule " + ar.ID + " decides."}
+		}
+	}
+	if relax && strictness(o.verdict) > strictness(RuleAllow) {
+		o = outcome{verdict: RuleAllow, rule: allowRule, reason: "RegulAIt: `" + argv[0] + "` performs an action your organisation's rule " + allowRule + " allows."}
+	}
+	return o
+}
+
 // strictest applies active exceptions and keeps the strictest matching rule.
 func strictest(p *Policy, env HookEnv, each func(func(id, verdict string))) outcome {
 	var best outcome
@@ -436,6 +516,31 @@ func relaxed(p *Policy, env HookEnv, id, verdict string) string {
 		}
 	}
 	return verdict
+}
+
+var driveRoot = regexp.MustCompile(`^[A-Za-z]:[\\/]?$`)
+
+// acceptableRoots drops roots that would make most of the disk "inside the workspace": empty, relative, a filesystem
+// or drive root, the home directory, or an ancestor of the home directory.
+func acceptableRoots(roots []string, home string) []string {
+	var out []string
+	for _, r := range roots {
+		if r == "" || driveRoot.MatchString(r) || !rooted(r) {
+			continue
+		}
+		c := filepath.Clean(r)
+		if c == string(filepath.Separator) || c == "/" || c == `\` {
+			continue
+		}
+		if home != "" {
+			h := filepath.Clean(home)
+			if c == h || strings.HasPrefix(h, strings.TrimSuffix(c, string(filepath.Separator))+string(filepath.Separator)) {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 func insideAny(p string, roots []string) bool {
@@ -468,6 +573,15 @@ func pathMatch(pattern, p, home string) bool {
 		pattern, p = strings.ToLower(pattern), strings.ToLower(p)
 	}
 	return globMatch(pattern, p)
+}
+
+func execRule(r *CommandRules, id string) (ExecRule, bool) {
+	for _, x := range r.Exec {
+		if x.ID == id {
+			return x, true
+		}
+	}
+	return ExecRule{}, false
 }
 
 func argvMatch(pats, argv []string) bool {

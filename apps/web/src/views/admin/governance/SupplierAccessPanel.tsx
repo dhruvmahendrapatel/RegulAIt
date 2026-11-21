@@ -21,6 +21,8 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Row
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useToast } from "../../../ui/toast";
 import { QueryGate, ReasonModal, useAction } from "../adminKit";
+import { ExternalSecondFactorDialog } from "../ExternalSecondFactorDialog";
+import type { ExternalFactorResetResult, ExternalFactorView } from "../externalSecondFactor";
 import {
   acceptOutcome,
   ACCESS_STATE_LABEL,
@@ -103,6 +105,7 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
   // row dialogs
   const [linkFor, setLinkFor] = useState<SupplierGrant | null>(null);
   const [revokeFor, setRevokeFor] = useState<SupplierGrant | null>(null);
+  const [factorFor, setFactorFor] = useState<SupplierGrant | null>(null);
   const [acceptFor, setAcceptFor] = useState<ReviewSubmission | null>(null);
   const [rejectFor, setRejectFor] = useState<ReviewSubmission | null>(null);
   const [unscannedFor, setUnscannedFor] = useState<ReviewSubmission | null>(null);
@@ -305,6 +308,13 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
                       g.state !== "revoked" ? (
                         <Button size="sm" variant="danger" aria-label={`Revoke access for ${g.email}`} aria-disabled={act.busy || undefined} onClick={() => !act.busy && setRevokeFor(g)}>
                           Revoke
+                        </Button>
+                      ) : null
+                    }
+                    rest={
+                      g.state !== "revoked" ? (
+                        <Button size="sm" variant="ghost" aria-label={`Second factor for ${g.email}`} onClick={() => setFactorFor(g)}>
+                          Second factor
                         </Button>
                       ) : null
                     }
@@ -533,6 +543,16 @@ export default function SupplierAccessPanel(props: { vendorId: string; vendorNam
         confirmLabel="Create link"
         onConfirm={() => linkFor && issueLink(linkFor)}
         onCancel={() => setLinkFor(null)}
+      />
+
+      {/* ADR-0240: read only while open; the reset asks for a reason, then step-up */}
+      <ExternalSecondFactorDialog
+        holder={factorFor?.email ?? null}
+        queryKey={["admin", "vendor", props.vendorId, "supplier-access", factorFor?.id ?? "none", "mfa"]}
+        load={() => api.get<ExternalFactorView>(`${base}/supplier-access/${factorFor!.id}/mfa`)}
+        reset={(reason) => withStepUp((h) => stepUpApi.post<ExternalFactorResetResult>(`${base}/supplier-access/${factorFor!.id}/mfa/reset`, { reason }, h))}
+        onClose={() => setFactorFor(null)}
+        onReset={() => refetch()}
       />
 
       <ReasonModal

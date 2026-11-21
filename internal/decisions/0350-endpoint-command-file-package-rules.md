@@ -40,7 +40,7 @@ Rules are data, never code, and every default is stated in the policy (the devic
 
 | Kind | Matches | Default when no rule matches |
 |---|---|---|
-| exec | one doublestar glob per argument; `argv[0]` by base name unless the pattern has a `/`; a final `**` is "any remaining arguments" | `default` |
+| exec | one doublestar glob per argument; `argv[0]` by base name unless the pattern has a `/` (for deny and ask; an allow without a `/` matches only a program found on `PATH`); a final `**` is "any remaining arguments" | `default` |
 | file | access (`read`, `write`, `any`) and an absolute path glob (`/`, `~/`, `**/`, `C:/`) | inside the workspace: allow; outside: `outsideRead` / `outsideWrite` |
 | package | ecosystem (`npm`, `pypi`, `apt`, `dnf`, `apk`, `brew`, `cargo`, `go`, `gem`, `*`) and a name glob | `packages.default` |
 | unresolved | anything the parser cannot reduce to literal words | `unresolved` (ask or deny, never allow) |
@@ -63,9 +63,18 @@ or tag (`left-pad@1` is `left-pad`; `Flask_Login[x]>=1` is `flask-login`); an in
 with an empty name.
 
 File paths are made absolute against the call's working directory, cleaned (so `..` cannot step out of a rule), and
-resolved through symlinks on the longest existing prefix. The workspace is the call's `cwd` plus the agent's own root
-(Claude Code's `CLAUDE_PROJECT_DIR`, Cursor's `workspace_roots`). Path matching is case-insensitive on Windows and
+resolved through symlinks on the longest existing prefix. The workspace is only the roots the agent declares (Claude
+Code's `CLAUDE_PROJECT_DIR`, Cursor's `workspace_roots`); the `cwd` never counts on its own, and a root that is a
+filesystem or drive root, the home directory or an ancestor of it is ignored, so a session started from `/` or `~` has
+no workspace and every file action gets the outside defaults (review of #941, security B1). Copilot CLI and Codex
+declare no root, so all their file actions get the outside defaults. Path matching is case-insensitive on Windows and
 macOS.
+
+A program named by a relative path (`./git`, `bin/npm`) is a file whose contents are not seen, so it is unresolved, as
+a script file is. A deny or ask rule naming a bare program still matches it by base name (`/bin/rm` is `rm`), but an
+allow rule naming a bare program never allows one named by path, and an exception cannot relax such a rule into that
+allow; an admin who wants `/usr/bin/git` allowed writes the path (review of #941, code finding 1). `PATH` itself is
+not checked: a bare-name allow trusts whichever program `PATH` resolves to.
 
 **This is a guardrail, not containment.** Matching is on what the command line says, never on what a program does: a
 renamed or copied binary, a script file, an interpreter one-liner (`python -c`), an option order a rule did not
@@ -109,11 +118,33 @@ now governed, so with no policy they deny.
   | rejected, cancelled, revoked, expired | (terminal) |
 
   A reason is mandatory. Approval is a step-up (`requireStepUp`, a fresh MFA) by someone other than the requester,
-  bound to the exact rule, device and expiry, and reuses the approvals queue's payload binding (ADR-0104/0105) rather
-  than a second approval path. The expiry is mandatory; the default maximum is 24 hours and an admin may raise it to
+  bound to the exact rule, device and expiry. It reuses the approvals queue's payload binding (the ADR-0104 terms
+  digest), but the decision is this lane's own `/approve` route, not the Approvals Queue decide path. The terms are
+  frozen in the database once written, and the approval recomputes the digest from the row before it accepts it
+  (review #964). Any admin other than the requester may reject, because rejecting is the stricter outcome. The
+  lifecycle is the declared machine `ENDPOINT_COMMAND_EXCEPTION_MACHINE` (ADR-0348), with `expired` derived and
+  excluded from the stored states, and each change commits in one transaction with its audit row. The expiry is
+  mandatory; the default maximum is 24 hours and an admin may raise it to
   seven days (a `settings_relax` step-up, audited). Every transition is audited. `expired` is derived from the clock
   (database `now()`), and the device's own expiry check (§3) means a lapsed exception stops applying even before the
   next policy fetch.
+
+**As built (slice 3).** Tables `endpoint_device_groups`, `endpoint_device_group_members` (a join table),
+`endpoint_device_group_rules` and `endpoint_command_exceptions` (migration `pending/endpoint_command_exceptions.sql`,
+row-level security admin-only). The lifecycle table is `ENDPOINT_EXCEPTION_TRANSITIONS` in `@regulait/shared`, and
+every transition is a conditional `UPDATE` from the state it names. Two choices differ from the text above and are
+recorded here:
+
+- **The approval reuses the approvals queue's binding, not its table.** The request stores the ADR-0104 digest of
+  the exact terms (`approvalArgumentsDigest`), the approver names that digest, and the `approval_decide` step-up is
+  bound to it. Rows do not go into `approvals`, because the generic decide route admits a self-review with a reason,
+  and these exceptions must never be self-approved. The database refuses it as well (CHECK).
+- **Longer than 24 hours is a step-up on that exception**, not an org setting: approving one beyond 24 hours needs a
+  second, `settings_relax` grant bound to the exception and its hours. That keeps the default strict without a new
+  org-wide switch. 168 hours stays the hard limit, on both the control plane and the device.
+
+Removing a device from a group, or a rule from a group, is a relaxation and needs a `settings_relax` step-up; adding
+either narrows and needs none. Revoking an active exception tightens and needs none.
 
 ### 6. One compiler, from the gateway's own entitlements (slice 2)
 
@@ -163,8 +194,44 @@ direct API call. Creating a gist is the worked example: the GitHub MCP `create_g
 - **Conformance test:** one shared fixture file lists each action's equivalent calls on every route and the expected
   verdict for a given policy. The Go engine and the gateway's decision core each run the whole file in CI; a
   disagreement fails both suites. The gist example is the first fixture.
-- **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal is unresolved (§2), and an action
-  the catalogue does not list is decided by the ordinary exec rules. Matching on the device is still textual.
+- **Entitlement is the source (as built, slice 2a).** `compileActionRules` (`packages/shared/src/endpoint-actions.ts`)
+  gives each action **allow exactly when the subject is entitled to one of its MCP tools** on a server whose upstream is
+  the action's (the kernel's `visibleTools`, through `EffectiveMcpPolicy`), and **deny** otherwise; an admin override
+  may only tighten it (to ask or deny), and an unknown override is refused. The gateway's MCP answer
+  (`gatewayMcpActionVerdict`) is the same entitlement plus the same rule. On the device the rule applies to the MCP
+  tool (by server and tool name), to the CLI argv, and to the HTTP call inside `curl`, `wget`, `http`/`https`/`xh`
+  and `gh api`. On the CLI and HTTP routes an action rule **only tightens** the exec decision (review #952): a deny
+  or ask always applies, and an allow may relax only the default for commands, and only when the argv was read
+  exactly. That means every option is in the client's declared table, there is one URL, no proxy, resolver override,
+  insecure TLS, second request or config file, and the program is named by its bare name. The line must not change
+  the environment: no `FOO=x prog`, `env`, `export`, `declare`, `set` or `source`. curl must start with `-q` so that
+  no `.curlrc` is read, and wget must have `--no-config`. httpie and xh are never exact, because they read a config
+  file they cannot skip. A `--request-target`, `Host` header or `--location-trusted` voids exactness. A client run by
+  `xargs`, or a curl or wget call with no URL on its argv, is unresolved. For gh, a `--flag=value` before the
+  command words is skipped as cobra skips it (the call is then not exact); any other flag there is unresolved. Every local file the call
+  reads or writes (`-d @f`, `-T`, `-o`, `--body-file`, a gist's files) is its own file action, decided by the file
+  rules. An HTTP client argv that cannot be read completely is unresolved (ask or deny), so a deny is never
+  bypassed by an unread option. Device exceptions never apply to action rules, because they come from gateway
+  entitlements. An MCP call whose tool name cannot be read takes the strictest rule naming its server, and at least
+  ask. URLs are compared the same way on both sides: host in lower case without a trailing dot, dot segments
+  removed, path case-insensitive. The fixture's `deviceRules` must equal the compiler's output (TypeScript test), and
+  the Go suite decides every route from them (`TestOnePolicyConformance`); flipping one expected verdict fails seven
+  device checks. The catalogue starts with `github.gist.create`, `github.pull.merge` and `github.issue.create`.
+- **Limits of matching the command line as text.** The device sees one tool call's command line, not the process
+  it starts. It cannot see:
+  - variables exported by an earlier, separate tool call;
+  - a shell alias or function defined earlier;
+  - gh aliases and extensions;
+  - a `~/.curlrc` when `-q` is missing (the call is then not exact, so it only tightens);
+  - proxy variables set outside the line.
+
+  A hidden environment or config file can make an exact allow wrong. A renamed command (an alias, a function, a gh
+  alias or extension) can also avoid a deny, because the deny is matched on the text. On-device matching guards an
+  agent's ordinary commands; it is not a sandbox against a process set on evading it. The gateway's own decision on
+  the MCP and connector routes (slice 2b) is the backstop.
+- **Unknown routes stay unknown.** An HTTP call whose method or URL is not literal, or whose argv the client table
+  cannot fully read, is unresolved (§2). An action the catalogue does not list (`gh api graphql`, a GitHub Enterprise
+  Server `/api/v3` path) is decided by the ordinary exec rules. Matching on the device is still textual.
 
 ### 10. Response vocabulary (lane E35)
 
@@ -196,10 +263,13 @@ The same credential on several devices or users is a finding, found without anyo
 ### Slices
 
 1. **This PR:** §1–4 and §8 in `agents/endpoint` (the engine, the four adapters, fixtures, the matrix). Default off.
-2. The compiler (§6) in shared code and the gateway, signed by the B4 signer (stacks on #867), and policy delivery to
-   the device with its device id; the action catalogue, action rules and the cross-route conformance test (§9); the
-   E35 response mapping (§10).
+2. a. The action catalogue, the action-rule compiler from entitlements, the device's recognisers on every route and
+      the cross-route conformance test (§9). Built.
+   b. The whole-policy compiler (§6) in the gateway, signed by the B4 signer (stacks on #867); policy delivery to the
+      device with its device id; the gateway's connector route consulting the same rules; the E35 response mapping
+      (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
+   Built. Folding approved exceptions and group rules into each device's compiled policy is part of 2b.
 4. Credential reuse across endpoints (§11). Built.
 
 ## Owner questions open (built with the secure default)

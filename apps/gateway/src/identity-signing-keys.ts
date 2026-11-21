@@ -232,8 +232,30 @@ export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = pro
   } catch {
     throw bad();
   }
-  if (!st.isFile() || st.size > MAX_KEY_FILE_BYTES) throw bad();
   if (memo && memo.file === file && memo.mtimeMs === st.mtimeMs && memo.size === st.size) return memo.keys;
+  const keys = await readSigningKeyFile(file, bad);
+  memo = { file, mtimeMs: st.mtimeMs, size: st.size, keys };
+  return keys;
+}
+
+/**
+ * Read an operator-managed key file: one or more PKCS#8 private keys and nothing else (no public key, certificate or
+ * encrypted key), each Ed25519 or P-256 (`algorithms` narrows it), kid = the RFC 7638 thumbprint, no duplicates.
+ * Shared by the issuer's keys and ADR-0334's device-policy signer, so both parse a rotation file the same way.
+ * Any fault throws `bad()` for the whole file.
+ */
+export async function readSigningKeyFile(
+  file: string,
+  bad: () => Error,
+  algorithms: readonly IdentitySigningKeyAlgorithm[] = ["Ed25519", "ES256"],
+): Promise<ConfiguredSigningKey[]> {
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    throw bad();
+  }
+  if (!st.isFile() || st.size > MAX_KEY_FILE_BYTES) throw bad();
   const text = readFileSync(file, "utf8");
   const blocks = text.match(pkcs8BlockPattern()) ?? [];
   // anything but PKCS#8 private key blocks and whitespace is refused (a public key, a certificate, an encrypted key)
@@ -262,12 +284,12 @@ export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = pro
     } else {
       throw bad();
     }
+    if (!algorithms.includes(algorithm)) throw bad();
     const kid = await calculateJwkThumbprint(publicJwk, "sha256");
     if (!IDENTITY_SIGNING_KID_PATTERN.test(kid)) throw bad();
     if (keys.some((k) => k.kid === kid)) throw bad();
     keys.push({ kid, algorithm, privateKey, publicJwk });
   }
-  memo = { file, mtimeMs: st.mtimeMs, size: st.size, keys };
   return keys;
 }
 

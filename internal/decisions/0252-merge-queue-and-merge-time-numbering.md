@@ -153,3 +153,33 @@ The full suite on `merge_group`, a push to `main` and nightly is unchanged. On a
   `build-and-test` judges the build, the gateway shards and their coverage check against `code`.
 - The required check names do not change.
 
+
+## Addendum (2026-11-19): the known-UI-gap count is computed, one file per ADR and lane
+
+Owner approval: 2026-11-19 ("Computed counter"), relayed by the master session. Builder branch
+`builder/hotfix-computed-ui-census`.
+
+§6 kept one hand-set number, `KNOWN_UI_GAPS_MAX`, and its test pin. It became the merge hot spot that C-04 removed for
+the other three lists. Every PR that added an API-only route edited the same line in
+`scripts/preflight-ui-route-census.mjs` and the same pin, so any two such PRs conflicted and had to merge one at a time
+(M-118).
+
+- **The count is computed.** The `KNOWN_UI_GAPS` entries now live in `scripts/known-ui-gaps/`, one JSON file per ADR
+  and lane (`adr-NNNN-<lane>-<topic>.json`, or `lane-<lane>-<topic>.json` when there is no ADR). Each file names its
+  `adr`, its owner `lane`, a `tracking` note that cites the issue (`#NNN`) or ADR, and `gaps`, one route per line with
+  what it does. The census loads every file. `KNOWN_UI_GAPS_MAX` and its pin are removed, and the count is the number
+  of entries.
+- **Why files and not a sorted list.** Two branches that add lines at the same place in one list (its end, or next to
+  each other in sorted order) still conflict. A PR that adds its own file never touches a line another PR touches, so
+  the merge is clean. This was checked with two branches that each added a file. Follow-up work in the same lane edits
+  that lane's file, and a lane's PRs are sequential anyway.
+- **The protection stays.** A route that no screen calls and no list explains fails (`no-ui`). An entry whose route the
+  UI now calls fails as `stale entry: delete it`, so the count falls as screens land. An entry for a route the gateway
+  does not serve is stale. A file with a missing or malformed `lane`, `tracking`, `adr` or `does` fails (`bad-entry`).
+  So do an unknown field, an empty file and a file name that does not match its ADR. A route in two files fails
+  (`double-listed`). The census test checks all of these, and checks that the shipped files load with no problem.
+- **What changes.** Adding a gap no longer needs a counter edit. The gap must still be API-only by its brief, cite its
+  tracking issue and name its lane, and `scripts/known-ui-gaps/` is code-owned like the census scripts. The 161
+  entries on main at `9f57a070` moved into 32 files. The routes and their `does` text are unchanged. Groups whose entries
+  carried only `#453` got their ADR and lane from the comments next to them, and ADR-0240's lane is its builder
+  branch, `portal-mfa` (#709).
