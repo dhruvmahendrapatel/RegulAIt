@@ -838,6 +838,10 @@ describe("every sweep is registered", () => {
         // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
         // in zz-adr0345-proof-runner.test.ts
         AGENT_RISK_PROOF_JOB_NAME,
+        // ADR-0365 slice 2 (lane E46): the context graph's hourly incremental and daily full sync; driven end to end in
+        // zz-adr0365-context-graph-sync.test.ts (with no source bound it does nothing)
+        SCHEDULER_JOB_NAMES.contextGraphSync,
+        SCHEDULER_JOB_NAMES.contextGraphFullSync,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

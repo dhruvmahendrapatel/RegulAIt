@@ -144,6 +144,9 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
   agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
   agentRiskDailyMark: "agent-risk-daily-mark",
+  // ADR-0365 slice 2 (lane E46): the context graph's scheduled sync (context-graph.ts); with no source bound it does nothing
+  contextGraphSync: "context-graph-sync",
+  contextGraphFullSync: "context-graph-full-sync",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -879,6 +882,7 @@ import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.j
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
+import { contextGraphJobDefinitions } from "./context-graph.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -904,6 +908,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
+    ...contextGraphJobDefinitions(), // ADR-0365 slice 2: context-graph-sync, context-graph-full-sync
   ];
 }
 // ===== end ADR-0182 block ====================================================
