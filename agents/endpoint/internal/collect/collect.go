@@ -22,6 +22,7 @@ import (
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/secrets"
 )
 
 // Gap reason codes. They are the only text a collector reports about what went wrong.
@@ -47,6 +48,8 @@ const (
 // Env is what the collectors may read. Tests build one over fstest.MapFS fixtures.
 type Env struct {
 	OS string
+	// Fingerprint, when set, fingerprints every reported key under the tenant's credential-reuse key (ADR-0350 §11).
+	Fingerprint *secrets.Fingerprinter
 	// Roots maps each root that exists on this OS to a filesystem rooted there.
 	Roots map[contract.Root]fs.FS
 	// PathDirs are the PATH directories, already resolved to a root and a path the report may carry.
@@ -148,6 +151,9 @@ func Collect(env *Env, col *pack.Collection, disabled map[contract.Kind]string) 
 		env.MaxFileBytes = DefaultMaxFileBytes
 	}
 	c := &collector{env: env, gaps: map[string]contract.Gap{}, seen: map[string]bool{}}
+	// the key helpers are plain functions; one collection runs at a time, so the fingerprinter is set for its length
+	activeFingerprint = env.Fingerprint
+	defer func() { activeFingerprint = nil }()
 	byKind := map[contract.Kind][]pack.Entry{}
 	for _, e := range col.Entries {
 		byKind[e.Kind] = append(byKind[e.Kind], e)
@@ -341,4 +347,16 @@ func cleanVersion(v string) string {
 		}
 	}
 	return v
+}
+
+// activeFingerprint is the running collection's fingerprinter (nil: fingerprints off).
+var activeFingerprint *secrets.Fingerprinter
+
+// keyFound reports one key, with its credential-reuse fingerprint when a key is configured. value is used only here.
+func keyFound(name, rule, value string) contract.KeyFound {
+	k := contract.KeyFound{KeyName: name, RuleID: rule, Present: true}
+	if activeFingerprint != nil && strings.TrimSpace(value) != "" {
+		k.Fingerprint, k.FingerprintKeyID = activeFingerprint.Of(value), activeFingerprint.KeyID()
+	}
+	return k
 }

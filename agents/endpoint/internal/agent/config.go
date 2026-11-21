@@ -15,6 +15,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/secrets"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/transport"
 )
 
@@ -33,6 +34,9 @@ type LocalConfig struct {
 	// Pinning authorises policies signed by these keys, and so whatever they allow; a pin never overrides a compiled
 	// key, and nothing here relaxes the agent without such a signed policy.
 	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
+	// CredentialReuseKey is the tenant's credential-reuse fingerprint key (ADR-0350 §11), 32 bytes base64url, the
+	// same on every device of the tenant (`regulait-agent credential-reuse-key` makes one). Absent: no fingerprints.
+	CredentialReuseKey string `json:"credentialReuseKey,omitempty"`
 }
 
 // Config is the validated local config.
@@ -42,6 +46,8 @@ type Config struct {
 	Disabled map[contract.Kind]bool
 	// DevicePolicyKeys is the validated pinned device-policy keyring (empty when none is pinned).
 	DevicePolicyKeys enforce.Keyring
+	// CredentialReuse fingerprints reported keys; nil when no key is configured.
+	CredentialReuse *secrets.Fingerprinter
 }
 
 // LoadConfig reads and validates the config file and its CA bundle.
@@ -66,6 +72,11 @@ func LoadConfig(path string, owner int) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}, DevicePolicyKeys: keys}
+	if lc.CredentialReuseKey != "" {
+		if cfg.CredentialReuse, err = secrets.NewFingerprinter(lc.CredentialReuseKey); err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+	}
 	for _, k := range lc.DisabledKinds {
 		known := false
 		for _, kk := range contract.Kinds {

@@ -241,6 +241,25 @@ agents' own (allow, ask, deny), and the mapping is agreed with E35 through the m
 "advise" with confirmation, deny as a block of the call, and block-session and disable as control-plane responses
 the device carries out by refusing every call (as a missing policy already does). Slice 2 builds that mapping.
 
+### 11. Credential reuse across endpoints (owner-approved addition, 2026-11-17)
+
+The same credential on several devices or users is a finding, found without anyone, including us, learning it.
+
+- **On the device:** every reported key carries `fingerprint`, an HMAC-SHA256 of its value (domain-separated) under the
+  tenant's **credential-reuse key**, and `fingerprintKeyId`, a 16-hex name of that key. The value is used only to
+  compute the HMAC and is never reported or kept. The key is 32 random bytes made by `regulait-agent
+  credential-reuse-key` and deployed by the admin, the same on every device of the tenant, in the agent's root-owned
+  config (`credentialReuseKey`). No key: no fingerprints. A malformed key refuses the config.
+- **On the control plane:** fingerprints are stored per agent identity (device and user pseudonym joined, never
+  copied: `endpoint_credential_fingerprints`, migration `pending/endpoint_credential_fingerprints.sql`, RLS
+  admin-only). A fingerprint held by two or more devices or users under the same key id is a finding: raised once per
+  identity in the audit trail (`endpoint-credential-reuse-detected`) and listed by `GET /v1/endpoint-credential-reuse`,
+  which shows a 12-character prefix only. Revoked devices stop counting. Env-name facts and switched-off MCP facts,
+  which the report path refuses, contribute nothing.
+- **The control plane never holds the key**, so a copy of its database cannot be used to test guesses offline. Anyone
+  who can read the device's config can compute fingerprints of guesses, but sees no one else's; that is stated, and
+  it is why the key is per tenant and rotatable (a new key id starts a fresh comparison).
+
 ### Slices
 
 1. **This PR:** §1–4 and §8 in `agents/endpoint` (the engine, the four adapters, fixtures, the matrix). Default off.
@@ -251,6 +270,7 @@ the device carries out by refusing every call (as a missing policy already does)
       (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
    Built. Folding approved exceptions and group rules into each device's compiled policy is part of 2b.
+4. Credential reuse across endpoints (§11). Built.
 
 ## Owner questions open (built with the secure default)
 

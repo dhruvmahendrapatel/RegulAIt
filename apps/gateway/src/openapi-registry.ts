@@ -1179,6 +1179,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/endpoint-addons/versions": "internal",
   "GET /v1/endpoint-addons/sightings": "internal",
   "GET /v1/endpoint-addons/flagged": "internal",
+  // ADR-0350 §11 (lane E31): credential reuse across endpoints, from fingerprints only
+  "GET /v1/endpoint-credential-reuse": "internal",
   // ADR-0350 (lane E31): endpoint device groups and time-limited per-device command-rule exceptions
   "POST /v1/endpoint-device-groups": "internal",
   "GET /v1/endpoint-device-groups": "internal",
@@ -2672,6 +2674,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/endpoint-addons/versions": "shadow-ai",
   "GET /v1/endpoint-addons/sightings": "shadow-ai",
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
+  "GET /v1/endpoint-credential-reuse": "shadow-ai",
   "POST /v1/endpoint-device-groups": "shadow-ai",
   "GET /v1/endpoint-device-groups": "shadow-ai",
   "DELETE /v1/endpoint-device-groups/:groupId": "shadow-ai",

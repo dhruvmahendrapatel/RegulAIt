@@ -2072,6 +2072,9 @@ export const auditLog = pgTable(
         "endpoint_addon_removal",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0350 §11 (lane E31): the same credential fingerprint on several endpoints (objectId = the reporting
+        // identity). Plain text column — no DDL.
+        "endpoint_credential_reuse",
         // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
         // changes (objectId = the device). Plain text column — no DDL.
         "endpoint_device",
@@ -18632,6 +18635,34 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ===== ADR-0350 §11 (lane E31): credential reuse across endpoints (pending migration endpoint_credential_fingerprints) =====
+// A device reports a keyed HMAC of each discovered secret under the tenant's credential-reuse key, never the value; the
+// control plane never holds the key. One row per (agent identity, key id, fingerprint): the identity names the device
+// and its user pseudonym (joined, never copied). The same fingerprint under the same key on two devices or two users
+// is a credential-reuse finding. `reuse_reported_at` marks the row as already reported, so the finding is raised once.
+export const endpointCredentialFingerprints = pgTable(
+  "endpoint_credential_fingerprints",
+  {
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    keyId: text("key_id").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    ruleId: text("rule_id"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    reuseReportedAt: timestamp("reuse_reported_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.identityId, t.keyId, t.fingerprint] }),
+    index("endpoint_credential_fingerprints_match_idx").on(t.keyId, t.fingerprint),
+    check("endpoint_credential_fingerprints_key_id_check", sql`${t.keyId} ~ '^[0-9a-f]{16}$'`),
+    check("endpoint_credential_fingerprints_fingerprint_check", sql`${t.fingerprint} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type EndpointCredentialFingerprintRow = typeof endpointCredentialFingerprints.$inferSelect;
+// ===== end ADR-0350 §11 =====
 
 // ---------------------------------------------------------------------------
 // ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
