@@ -129,7 +129,7 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp" | "endpoint-agent";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp" | "endpoint-agent" | "browser-extension";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; ADR-0187 'engine' is the compat model routes,
    *  pinned to one project. 'pdp' is retired (ADR-0188 S7, migration 0195: no

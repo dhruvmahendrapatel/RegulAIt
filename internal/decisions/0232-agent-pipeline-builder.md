@@ -594,3 +594,51 @@ accepts this ADR; the comparison below is the first slice when it is unpaused.
 - the entry bundle stays under its ceiling, with the canvas lazy-loaded on `/builder/pipelines`;
 - it works offline;
 - it meets the DESIGN_GUIDELINES accessibility rules (keyboard-operable nodes and edges).
+
+## As built: lane E49 slice 1 (2026-11-20): the step catalogue and governed runs over ADR-0341's templates
+
+This section records how §2–§5 were first built on top of ADR-0341; the decision text above is unchanged.
+ADR-0341 §1 made the workflow template the pipeline document, so this slice has no `Pipeline` format and no
+`pipeline-kernel`: a pipeline run is one run of one **published template version**.
+
+- **Runs execute through the workflow engine, never around it (§3, ADR-0254).** `POST /v1/pipeline-runs` starts the
+  run with `startWorkflowInstanceWithTemplates`, the engine's one instance-creation path (ADR-0080), passing the same
+  server-side change attributes (initiator roles, project data sensitivity) and the same §8.3 compliance cascade that
+  `POST /v1/workflows/instances` applies to an explicit template. Every stage is run, gated and audited by the engine.
+  Admin only, as an explicit-template start is (`explicit_template_is_admin_only`).
+- **Version binding (§1 content hash).** The run names a template and optionally a version; it starts only while that
+  version is live (its content hash equals the live definition's), under the template's row lock, which a publish also
+  takes. A template never opened in the builder gets its baseline version first (ADR-0341 §3, `ensureBaseline`).
+- **Step catalogue (§2).** `packages/shared/src/pipeline-steps.ts`, served by `GET /v1/pipelines/catalogue`. The
+  `available` steps are exactly the workflow kernel's `EXECUTABLE_STAGE_TYPES` (a test holds them equal), each naming
+  the governed primitive it runs through and whether it writes; every other §2 step is `planned` with its §12 slice.
+  A step that writes is never automatically retried (§3).
+- **Run state is a declared machine (ADR-0348).** `PIPELINE_RUN_MACHINE` (`requested → running | refused`,
+  `running → succeeded | failed | cancelled`). `start` or `refuse` commits with the instance; the settling states are
+  observed from the instance's terminal status on read (`completed` succeeds, `aborted` cancels, `denied` and
+  `rolled_back` fail) and written once under `whereFrom`. A database trigger holds the same edges and freezes a run's
+  identity; a run is never deleted.
+- **Tables (§5), migration `pending/workflow_template_pipeline_runs.sql`.** `pipeline_runs` (template version, the
+  workflow instance, requester, project, trigger, idempotency key, status, refusal code, times from `now()`) and
+  `pipeline_run_steps` (append-only: the plan the run started with, one row per stage with its catalogue step type and
+  write class as a point-in-time snapshot). Third normal form: the template is reached through the version and each
+  step's live status is read from the instance state, never copied. RLS enabled and forced: the requester and an admin
+  read, an admin request or the system writes.
+- **A refused start is recorded.** When the engine refuses (a retired template, attribution, a missing second
+  approver), the run is `refused` with the engine's code and the engine's own answer is returned beside it.
+- **Not built here:** triggers other than manual (§12 slice 6), packages and deployments with run-as owners (slice 2),
+  calls, control-flow and data steps (slices 3, 4, 7), per-step `usage_events` attribution, the step-row lease queue
+  and retries (slice 5), the monitor screens (slice 8; the four routes are KNOWN_UI_GAPS for #453), and a test run of
+  an unpublished draft (ADR-0341 drafts are never executed).
+
+**Open source first (ADR-0176), compared before building.** The slice needed a run lifecycle and a place to record a
+run's plan, not an execution engine:
+
+| Option | Licence | Verdict |
+|---|---|---|
+| Run through the existing workflow engine (chosen) | ours | The engine already persists, gates and audits every stage; ADR-0254 kept it as pillar 2's engine. Nothing new executes. |
+| vercel/workflow on Postgres | Apache-2.0 | Rejected by ADR-0254 (own schemas and migration journal, no RLS, plaintext step data, about 18× the per-step cost). |
+| graphile-worker 0.18 / pg-boss 12 | MIT | A job queue, not durable execution; ADR-0254 names them for retry/backoff and fan-out under the existing runner. Not needed until slice 5, and §3 keeps the step row as the queue. |
+| Temporal (server MIT, TS SDK MIT) | MIT | A separate service and database outside our migrations and RLS, with a second copy of each run's state; fails air-gapped single-deployment fit. |
+| Serverless Workflow 1.0 SDK | Apache-2.0 | A document format; ADR-0341 already chose the workflow template as the document. |
+| XState v5 for the run lifecycle | MIT | ADR-0348's comparison applies: `defineMachine` compiles to the SQL guard and serialises for agents; XState does neither. |

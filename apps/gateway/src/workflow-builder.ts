@@ -224,7 +224,7 @@ async function latestVersion(db: Db, templateId: string): Promise<WorkflowTempla
 
 /** the template's latest version; the first time, its live definition is recorded as version 1 (origin baseline).
  * Called under the template's row lock, so two first opens cannot both write version 1. */
-async function ensureBaseline(tx: Db, t: TemplateRow, actorUserId: string | null): Promise<WorkflowTemplateVersionRow> {
+export async function ensureBaseline(tx: Db, t: TemplateRow, actorUserId: string | null): Promise<WorkflowTemplateVersionRow> {
   const existing = await latestVersion(tx, t.id);
   if (existing) return existing;
   const [v] = await tx

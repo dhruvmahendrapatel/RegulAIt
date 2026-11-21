@@ -1,0 +1,15 @@
+{
+  "adr": "ADR-0365",
+  "lane": "E46",
+  "tracking": "ADR-0365 (lane E46, slice 1): the live context graph is API-only in the lane brief; its admin bindings screen and the member graph view are requested on #453. raised under the lane brief (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0365)",
+  "gaps": {
+    "GET /v1/context-graph/sources": "lists the PM connections bound into the context graph, each with the project whose members may read it and when it last synced",
+    "POST /v1/context-graph/sources": "binds a PM connection to a project (a settings_relax step-up, audited), letting that project's members read its work-item linkage",
+    "PATCH /v1/context-graph/sources/:sourceId": "rebinds a source to another project (same step-up, audited); its nodes are re-scoped in the same transaction",
+    "DELETE /v1/context-graph/sources/:sourceId": "unbinds a source (audited), removing its nodes, edges and scopes",
+    "POST /v1/context-graph/sources/:sourceId/sync": "runs an incremental (or full) sync of the source's imported work items into the graph, audited",
+    "GET /v1/context-graph/nodes": "lists the graph nodes the caller may read (filtered by their own project memberships)",
+    "GET /v1/context-graph/nodes/:nodeId": "reads one node the caller may read (404 otherwise)",
+    "GET /v1/context-graph/nodes/:nodeId/neighbours": "reads a node's neighbourhood (1 or 2 hops) over readable nodes and edges only"
+  }
+}
