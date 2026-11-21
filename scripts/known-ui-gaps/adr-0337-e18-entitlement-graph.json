@@ -9,6 +9,9 @@
     "GET /v1/discovery/agent-identifiers": "lists the vendor app identifiers declared for agents",
     "POST /v1/discovery/agent-identifiers": "declares an agent's app id on one platform; apps with exactly that id are auto-linked, each audited",
     "DELETE /v1/discovery/agent-identifiers/:identifierId": "removes a declared identifier (audited); existing links stay until an admin unlinks them",
-    "GET /v1/discovery/entitlements/findings": "the SaaS entitlement findings (unused grant, excessive scope, oversharing, publicly exposed agent), computed at read time with their evidence and what is not assessable (ADR-0337 §5)"
+    "GET /v1/discovery/entitlements/findings": "the SaaS entitlement findings (unused grant, excessive scope, oversharing, publicly exposed agent), computed at read time with their evidence and what is not assessable (ADR-0337 §5)",
+    "POST /v1/discovery/entitlements/findings/reviews": "raises a SaaS entitlement finding the report flags now into the approvals queue for a second administrator's decision (remove the grant, or accept the risk); nothing executes",
+    "GET /v1/discovery/entitlements/findings/reviews": "lists raised finding reviews with their state and the transitions allowed next",
+    "POST /v1/discovery/entitlements/findings/reviews/:reviewId/withdraw": "withdraws a pending finding review (audited); its queue item is superseded"
   }
 }

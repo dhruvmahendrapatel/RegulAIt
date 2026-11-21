@@ -10,6 +10,9 @@
  *  - oversharing: a tenant consent to anything but a read; a user consent or a read scope is not.
  *  - publicly-exposed-agent: a published Copilot Studio agent with no authentication; Agentforce is not assessable.
  *  - Computing the report writes nothing (no audit row); the route is admin-only and bounds the window.
+ *  - Slice 3b: a finding flagged NOW is raised into the approvals queue for a second admin (a stale key, a self
+ *    approver and a second pending review are refused); the requester never decides it; approved = remediate, denied =
+ *    accepted, withdrawn = superseded; nothing executes (the grant is untouched); the report marks the review.
  *
  * Global state (M-068, M-077): the identity family switch is restored; every source, pseudonym and user this file
  * creates is deleted in afterAll (sources cascade). Assertions are scoped to this file's own sources.
@@ -33,6 +36,8 @@ import {
   saasEntitlementAppUsage,
   saasEntitlementApps,
   saasEntitlementUsageReads,
+  saasFindingReviews,
+  approvals,
   sql,
   users,
   type Db,
@@ -42,6 +47,7 @@ import { buildApp } from "./app.js";
 import { scannerRegistry, type Scanner } from "./discovery-scanners.js";
 import { runDiscoveryPass } from "./discovery-worker.js";
 import { computeSaasFindings, type SaasFindingsReport } from "./saas-entitlement-findings.js";
+import { SAAS_FINDING_REVIEW_APPROVAL_PREFIX, reviewArgumentsDigest } from "./saas-finding-reviews.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -327,3 +333,99 @@ describe("GET /v1/discovery/entitlements/findings", () => {
     expect((await get("/v1/discovery/entitlements/findings", { authorization: `Bearer ${key}` })).statusCode).toBe(403);
   });
 });
+
+describe("slice 3b: raising a finding for a recorded decision", () => {
+  type Who = { id: string; key: { authorization: string } };
+  const admins: Who[] = [];
+  const REVIEWS = "/v1/discovery/entitlements/findings/reviews";
+  const post = (who: Who, url: string, payload: unknown) => app.inject({ method: "POST", url, headers: who.key, payload: payload as object });
+  const keyOf = async (ruleId: string, sourceId: string, app_: string, scope: string) =>
+    mine(await computeSaasFindings(db, { windowDays: 90 }), ruleId, sourceId).find((f) => f.app?.externalId === app_ && f.grant?.scope === scope)!.key;
+  const decide = (who: Who, approvalId: string, decision: "approved" | "denied") => post(who, `/v1/approvals/${approvalId}/decide`, { decision, reason: `e18f ${decision}` });
+
+  beforeAll(async () => {
+    for (const n of ["a", "b", "c"]) {
+      const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `e18f-admin-${n}-${RUN}@example.com`, displayName: `e18f admin ${n}` } });
+      const id = u.json().id as string;
+      createdUsers.push(id);
+      await db.update(users).set({ isAdmin: true, totpEnabled: true }).where(eq(users.id, id));
+      const token = (await app.inject({ method: "POST", url: `/v1/users/${id}/keys`, headers: AUTH, payload: { name: "k" } })).json().token as string;
+      admins.push({ id, key: { authorization: `Bearer ${token}` } });
+    }
+  });
+  afterAll(async () => {
+    const ids = admins.map((a) => a.id);
+    if (ids.length) {
+      const rs = await db.select({ approvalId: saasFindingReviews.approvalId }).from(saasFindingReviews).where(inArray(saasFindingReviews.requestedBy, ids));
+      await db.delete(saasFindingReviews).where(inArray(saasFindingReviews.requestedBy, ids));
+      if (rs.length) await db.delete(approvals).where(inArray(approvals.id, rs.map((r) => r.approvalId)));
+      await db.update(users).set({ totpEnabled: false }).where(inArray(users.id, ids));
+    }
+  });
+
+  it("refuses a key the report does not flag now, and the requester as approver", async () => {
+    const [a, b] = admins;
+    const stale = await post(a!, REVIEWS, { key: `unused-grant:grant:${randomUUIDLike()}`, approverUserId: b!.id, reason: "x" });
+    expect(stale.statusCode, stale.body).toBe(404);
+    expect(stale.json().error).toBe("finding_not_current");
+    const key = await keyOf("unused-grant", m365Src.id, "idle", "Mail.Send");
+    expect((await post(a!, REVIEWS, { key, approverUserId: a!.id, reason: "x" })).json().error).toBe("approver_is_requester");
+  });
+
+  it("denied: the risk is accepted, decided by the second admin only; nothing executes", async () => {
+    const [a, b, c] = admins;
+    const key = await keyOf("unused-grant", m365Src.id, "idle", "Mail.Send");
+    const raised = await post(a!, REVIEWS, { key, approverUserId: b!.id, reason: "agent was retired last quarter" });
+    expect(raised.statusCode, raised.body).toBe(201);
+    const review = raised.json().review;
+    expect(review).toMatchObject({ findingKey: key, ruleId: "unused-grant", status: "pending", subjectGone: false });
+    const [row] = await db.select().from(saasFindingReviews).where(eq(saasFindingReviews.id, review.id));
+    const [ap] = await db.select().from(approvals).where(eq(approvals.id, row!.approvalId));
+    expect(ap).toMatchObject({ objectType: "saas_finding_review", stageId: `${SAAS_FINDING_REVIEW_APPROVAL_PREFIX}${review.id}`, approverUserId: b!.id, status: "pending" });
+    expect(ap!.argumentsDigest).toBe(reviewArgumentsDigest(row!));
+    // one pending review per finding
+    expect((await post(a!, REVIEWS, { key, approverUserId: b!.id, reason: "again" })).json().error).toBe("review_already_pending");
+    // the requester never decides it, nor an admin it does not name
+    const own = await decide(a!, ap!.id, "approved");
+    expect(own.statusCode, own.body).toBe(403);
+    expect((await decide(c!, ap!.id, "approved")).statusCode).toBe(403);
+    expect((await db.select().from(saasFindingReviews).where(eq(saasFindingReviews.id, review.id)))[0]!.status).toBe("pending");
+
+    const grantsBefore = Number((await db.execute(sql`SELECT count(*)::int AS n FROM saas_entitlement_grants g JOIN saas_entitlement_apps a ON a.id = g.app_id WHERE a.source_id = ${m365Src.id}`)).rows[0]!.n);
+    const ok = await decide(b!, ap!.id, "denied");
+    expect(ok.statusCode, ok.body).toBe(200);
+    const [after] = await db.select().from(saasFindingReviews).where(eq(saasFindingReviews.id, review.id));
+    expect(after).toMatchObject({ status: "accepted", decidedBy: b!.id });
+    const n = Number((await db.execute(sql`SELECT count(*)::int AS n FROM audit_log WHERE object_id = ${review.id} AND rule_id = 'saas-finding-review-accepted'`)).rows[0]!.n);
+    expect(n).toBe(1);
+    // nothing was revoked: the graph is unchanged
+    expect(Number((await db.execute(sql`SELECT count(*)::int AS n FROM saas_entitlement_grants g JOIN saas_entitlement_apps a ON a.id = g.app_id WHERE a.source_id = ${m365Src.id}`)).rows[0]!.n)).toBe(grantsBefore);
+    // the report still shows the finding, marked accepted
+    const rep = (await app.inject({ method: "GET", url: "/v1/discovery/entitlements/findings", headers: AUTH })).json() as SaasFindingsReport;
+    expect(mine(rep, "unused-grant", m365Src.id).find((f) => f.key === key)!.review).toMatchObject({ id: review.id, status: "accepted" });
+  });
+
+  it("approved: remediate; withdrawn: superseded, and only from pending", async () => {
+    const [a, b] = admins;
+    const key = await keyOf("oversharing", m365Src.id, "busy", "Files.ReadWrite.All");
+    const r1 = (await post(a!, REVIEWS, { key, approverUserId: b!.id, reason: "write to every file" })).json().review;
+    const w = await post(a!, `${REVIEWS}/${r1.id}/withdraw`, {});
+    expect(w.statusCode, w.body).toBe(200);
+    expect(w.json().review.status).toBe("withdrawn");
+    expect((await db.select().from(approvals).where(eq(approvals.id, r1.approvalId)))[0]!.status).toBe("superseded");
+    const again = await post(a!, `${REVIEWS}/${r1.id}/withdraw`, {});
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("invalid_transition");
+
+    const r2 = (await post(a!, REVIEWS, { key, approverUserId: b!.id, reason: "second look" })).json().review;
+    expect((await decide(b!, r2.approvalId, "approved")).statusCode).toBe(200);
+    expect((await db.select().from(saasFindingReviews).where(eq(saasFindingReviews.id, r2.id)))[0]!.status).toBe("remediate");
+    const list = (await app.inject({ method: "GET", url: `${REVIEWS}?findingKey=${encodeURIComponent(key)}`, headers: AUTH })).json();
+    expect(list.reviews.map((r: { status: string }) => r.status).sort()).toEqual(["remediate", "withdrawn"]);
+  });
+});
+
+function randomUUIDLike() {
+  const h = randomBytes(16).toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}

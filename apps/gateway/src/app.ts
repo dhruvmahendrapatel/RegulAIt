@@ -644,6 +644,12 @@ import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
+import {
+  applySaasFindingReviewDecision,
+  precheckSaasFindingReviewDecision,
+  registerSaasFindingReviewRoutes,
+  saasFindingReviewApprovalLabels,
+} from "./saas-finding-reviews.js";
 import { registerContextGraphRoutes } from "./context-graph-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -4689,6 +4695,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
     );
     // ADR-0338: what a vendor agent control action asks the approver to approve
+    // ADR-0337 §5 slice 3b: what a SaaS entitlement finding review asks the approver to decide
+    const saasFindingReviewLabel = await saasFindingReviewApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "saas_finding_review").map((r) => r.stageId),
+    );
     const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
@@ -4775,6 +4786,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "saas_finding_review" && r.stageId ? (saasFindingReviewLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5283,6 +5295,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0337 §5 slice 3b — a SaaS entitlement finding review: never its requester, only an admin in the pool (no
+    // override), and the approval must still bind the review as raised. Nothing executes on either decision.
+    if (row.objectType === "saas_finding_review") {
+      const refusal = await precheckSaasFindingReviewDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5688,6 +5706,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approver's step-up is spent here, with the move.
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0337 §5 slice 3b: approved = remediate in the vendor's console, denied = risk accepted; nothing is sent
+      if (updated.objectType === "saas_finding_review") {
+        await applySaasFindingReviewDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6359,6 +6381,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
   // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
   registerSaasEntitlementRoutes(app, db);
+  registerSaasFindingReviewRoutes(app, db);
   registerContextGraphRoutes(app, db);
   // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
   // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.

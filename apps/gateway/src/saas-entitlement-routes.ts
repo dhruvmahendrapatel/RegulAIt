@@ -34,6 +34,7 @@ import {
   parseSaasFindingWindowDays,
 } from "@regulait/shared";
 import { SAAS_FINDINGS_PER_RULE_MAX, computeSaasFindings } from "./saas-entitlement-findings.js";
+import { latestReviewsByKey } from "./saas-finding-reviews.js";
 import { GUID } from "./discovery-wider-scanners.js";
 import { autoLinkApps, changeAgentLink } from "./saas-entitlements.js";
 
@@ -89,7 +90,11 @@ export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): voi
     if (windowDays === null) {
       return reply.status(400).send({ error: "invalid_request", detail: `windowDays: a whole number of days from ${SAAS_FINDING_WINDOW_DAYS_MIN} to ${SAAS_FINDING_WINDOW_DAYS_MAX}` });
     }
-    return computeSaasFindings(db, { windowDays, perRule: q.data.limit });
+    const report = await computeSaasFindings(db, { windowDays, perRule: q.data.limit });
+    // each finding's latest review (slice 3b): an accepted risk stays visible, marked, never hidden
+    const reviews = await latestReviewsByKey(db, report.rules.flatMap((r) => r.findings.map((f) => f.key)));
+    for (const r of report.rules) for (const f of r.findings) f.review = reviews.get(f.key) ?? null;
+    return report;
   });
 
   // the apps one entitlement source holds, each with its link state and what can be done with it next

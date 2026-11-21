@@ -52,8 +52,10 @@ export interface SaasFinding {
   grant: { id: string; scope: string; resource: string; access: SaasScopeAccess; accessReason: string; grantType: string; consent: string } | null;
   agentRecord: { id: string; registry: string; externalId: string; displayName: string; agentId: string | null } | null;
   evidence: Record<string, string | number | boolean | null>;
-  /** nothing here executes: the action is a person's, in the vendor's own console (or the approvals queue, slice 3b) */
-  action: { kind: "vendor-console"; note: string };
+  /** nothing here executes: the action is a person's, in the vendor's own console, decided through the approvals queue */
+  action: { kind: "vendor-console"; note: string; raise: { method: "POST"; path: "/v1/discovery/entitlements/findings/reviews"; key: string } };
+  /** the finding's latest review (slice 3b), when one was raised; set by the route, null otherwise */
+  review?: { id: string; status: string; decidedAt: string | null } | null;
 }
 
 export interface SaasNotAssessable {
@@ -131,7 +133,7 @@ function usageProblem(r: Pick<GrantRow, "coverage" | "window_start" | "recorded_
 }
 
 /** compute every V1 rule; reads only, writes nothing */
-export async function computeSaasFindings(db: Db, opts: { windowDays: number; perRule?: number; now?: Date }): Promise<SaasFindingsReport> {
+export async function computeSaasFindings(db: Db, opts: { windowDays: number; perRule?: number; now?: Date; key?: string }): Promise<SaasFindingsReport> {
   const now = opts.now ?? new Date();
   const perRule = Math.min(opts.perRule ?? SAAS_FINDINGS_PER_RULE_MAX, SAAS_FINDINGS_PER_RULE_MAX);
   const windowDays = opts.windowDays;
@@ -164,11 +166,13 @@ export async function computeSaasFindings(db: Db, opts: { windowDays: number; pe
   const add = (f: Omit<SaasFinding, "ruleVersion" | "rationale" | "action">, params: Record<string, string | number>) => {
     const rep = reports.get(f.ruleId)!;
     rep.count += 1;
+    // one finding asked for by key (raising a review): every other finding is counted, not kept
+    if (opts.key !== undefined && f.key !== opts.key) return;
     if (rep.findings.length >= perRule) {
       rep.truncated = true;
       return;
     }
-    rep.findings.push({ ...f, ruleVersion: SAAS_FINDING_RULES_VERSION, rationale: renderRecommendationRationale(rule(f.ruleId), params), action: { kind: "vendor-console", note: VENDOR_ACTION } });
+    rep.findings.push({ ...f, ruleVersion: SAAS_FINDING_RULES_VERSION, rationale: renderRecommendationRationale(rule(f.ruleId), params), action: { kind: "vendor-console", note: VENDOR_ACTION, raise: { method: "POST", path: "/v1/discovery/entitlements/findings/reviews", key: f.key } } });
   };
   // one not-assessable entry per rule and source
   const notAssessed = new Map<string, true>();

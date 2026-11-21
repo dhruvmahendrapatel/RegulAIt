@@ -2092,6 +2092,9 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0337 §5 slice 3b: a SaaS entitlement finding review (raised, decided, withdrawn; objectId = the review).
+        // Plain text column — no DDL.
+        "saas_finding_review",
       ],
     })
       .notNull()
@@ -18308,6 +18311,60 @@ export const saasEntitlementAppUsage = pgTable(
   ],
 );
 export type SaasEntitlementAppUsageRow = typeof saasEntitlementAppUsage.$inferSelect;
+
+// ADR-0337 §5 slice 3b (pending migration `saas_finding_reviews`): a finding raised into the approvals queue for a
+// second administrator's recorded decision. Nothing executes: RegulAIt never revokes a vendor-side grant.
+/** the states of SAAS_FINDING_REVIEW_MACHINE (@regulait/shared); the ADR-0348 suite pins them to the CHECK */
+export const SAAS_FINDING_REVIEW_STATE_VALUES = ["pending", "remediate", "accepted", "withdrawn"] as const;
+export const SAAS_FINDING_RULE_ID_VALUES = ["unused-grant", "excessive-scope", "oversharing", "publicly-exposed-agent"] as const;
+
+export const saasFindingReviews = pgTable(
+  "saas_finding_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the finding's stable key (rule + grant row, or rule + registry record) */
+    findingKey: text("finding_key").notNull(),
+    ruleId: text("rule_id", { enum: SAAS_FINDING_RULE_ID_VALUES }).notNull(),
+    ruleVersion: integer("rule_version").notNull(),
+    /** the subject; SET NULL when the vendor-side grant or the registry record goes (the review then says so) */
+    grantId: uuid("grant_id").references(() => saasEntitlementGrants.id, { onDelete: "set null" }),
+    agentRecordId: uuid("agent_record_id").references(() => agentRegistryRecords.id, { onDelete: "set null" }),
+    /** DELIBERATE COPY (point-in-time evidence, ADR-0200 addendum): the source the finding was read from, as raised;
+     * it outlives the grant row the source is otherwise reached through. Deleting the source deletes its reviews. */
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    /** DELIBERATE COPY (point-in-time evidence): the rendered rationale and the evidence as raised, so the decision
+     * is bound to what the approver saw (the arguments digest covers them) */
+    rationale: text("rationale").notNull(),
+    evidence: jsonb("evidence").$type<Record<string, string | number | boolean | null>>().notNull(),
+    /** ADR-0348 machine SAAS_FINDING_REVIEW_MACHINE (@regulait/shared) */
+    status: text("status", { enum: SAAS_FINDING_REVIEW_STATE_VALUES }).notNull().default("pending"),
+    reason: text("reason").notNull(),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("saas_finding_reviews_pending_uq").on(t.findingKey).where(sql`${t.status} = 'pending'`),
+    uniqueIndex("saas_finding_reviews_approval_uq").on(t.approvalId),
+    index("saas_finding_reviews_key_idx").on(t.findingKey, t.createdAt),
+    index("saas_finding_reviews_source_idx").on(t.sourceId),
+    check("saas_finding_reviews_status_check", sql`${t.status} IN ('pending', 'remediate', 'accepted', 'withdrawn')`),
+    check("saas_finding_reviews_rule_check", sql`${t.ruleId} IN ('unused-grant', 'excessive-scope', 'oversharing', 'publicly-exposed-agent')`),
+    check("saas_finding_reviews_key_check", sql`${t.findingKey} ~ '^[a-z-]{1,40}:(grant|record):[0-9a-f-]{36}$'`),
+    check("saas_finding_reviews_subject_check", sql`${t.grantId} IS NULL OR ${t.agentRecordId} IS NULL`),
+    check("saas_finding_reviews_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 1000`),
+    check("saas_finding_reviews_rationale_check", sql`length(${t.rationale}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type SaasFindingReviewRow = typeof saasFindingReviews.$inferSelect;
 // ===== end ADR-0337 =====
 
 // ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====

@@ -4,9 +4,9 @@
 - **Date**: 2026-11-16
 - **Index**: **SaaS entitlement graph: read-only `entitlement_*` discovery sources (M365 Graph, Google Workspace, Salesforce, Slack) store each agent's granted OAuth scopes and permissions in four 3NF tables, inside the run's fenced transaction with its audit row; a frozen, versioned scope classifier; usage comparison, unused-grant, excessive-scope, oversharing and public-exposure findings follow as recommendations through the approvals queue, never auto-revoked.**
 - **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1), `builder/e18-saas-entitlements-s2` (slice 2),
-  `builder/e18-saas-entitlements-s3` (slice 3a: usage and findings)
-- **Migration**: `pending/saas_entitlement_graph.sql` and (slice 3) `pending/saas_entitlement_usage.sql`, numbered at merge
-  (ADR-0252)
+  `builder/e18-saas-entitlements-s3` (slice 3: usage, findings and their review)
+- **Migration**: `pending/saas_entitlement_graph.sql`, and for slice 3 `pending/saas_entitlement_usage.sql` and
+  `pending/saas_finding_reviews.sql`, numbered at merge (ADR-0252)
 - **Related**: ADR-0195 (active discovery framework: sources, credentials, worker, pseudonyms), ADR-0235 (Entra consent
   discovery, the wider-source helpers reused here), ADR-0092 (access recommendations, the frozen rule-set discipline),
   ADR-0090 (certification campaigns), ADR-0255 (governed connector catalogue), ADR-0089 (agent ownership),
@@ -112,8 +112,8 @@ the window is not seen and is never removed for that reason.
 ### 5. Findings are recommendations, through the approvals queue (slice 3)
 
 Slice 3 compares grants with observed use and emits four findings: `unused-grant`, `excessive-scope`, `oversharing`,
-`publicly-exposed-agent`. Nothing calls a vendor to revoke. Slice 3a (built) observes use and computes the findings;
-slice 3b raises a finding into the approvals queue (or an ADR-0090 campaign) for a recorded decision.
+`publicly-exposed-agent`. Nothing calls a vendor to revoke. Slice 3a observes use and computes the findings; slice 3b
+raises a finding into the approvals queue for a recorded decision. Both are built.
 
 **Observed use, read-only only (slice 3a).** Each reader may return a usage block with a coverage that says how finely
 it could see use, and the worker stores it in the run's transaction (`saas_entitlement_usage_reads`, one row per
@@ -152,6 +152,29 @@ The window is anchored at the source's latest usage read, not at the request tim
 read's time. A source whose read could not observe use, or covered less than the window, is listed under the rule's
 `notAssessable` with the reason, never as unused (the ADR-0082 disclosure). A grant younger than the window is not
 judged. The route is a census entry on #453 until a screen exists.
+
+**Raising a finding for a decision (slice 3b).** `POST /v1/discovery/entitlements/findings/reviews` (admin-only)
+raises a finding the report flags NOW (recomputed server side: a stale or invented key is refused, 404
+`finding_not_current`) into the one approvals queue (kind `saas_finding_review`), naming another active admin as
+approver (never the requester, nor anyone delegation-linked). `saas_finding_reviews` keeps the rationale and evidence as
+raised, a deliberate point-in-time copy, and the approval's arguments digest binds them: the approver decides exactly
+what was raised, and a review whose binding no longer matches is refused (409 `approval_unbound`). At most one pending
+review per finding (409 `review_already_pending`).
+
+- The lifecycle is the declared ADR-0348 machine `SAAS_FINDING_REVIEW_MACHINE` (`pending -> remediate | accepted |
+  withdrawn`, all three final; a finding can be raised again as a new review). Every write is guarded on the states its
+  event may leave from, and audited (`saas-finding-review-raised | -remediate | -accepted | -withdrawn`).
+- Approved = `remediate`: the grant is to be removed or narrowed in the vendor's console. Denied = `accepted`: the grant
+  is kept, with the decider's reason. **Nothing executes on either**; a test pins that the graph is unchanged.
+- The requester never decides their own review, by any route; the decider must be in the approval's pool (no admin
+  override). No step-up: a decision changes nothing outside RegulAIt, it records a judgement (a second administrator
+  is the control).
+- An accepted risk is never hidden: the findings report marks each finding with its latest review. A grant the vendor
+  later removes leaves its review in place, `subjectGone`.
+- Not used: an ADR-0090 campaign. Its items are RegulAIt grant rows and its denial revokes the row in the decision's
+  transaction; neither holds for a vendor-side grant.
+- `GET .../findings/reviews` (filtered, keyset-paged) and `POST .../findings/reviews/:reviewId/withdraw` (pending only;
+  the queue item is superseded). Census entries on #453 until a screen exists.
 
 ### 4a. Salesforce and Slack (slice 2)
 
@@ -218,8 +241,7 @@ Salesforce JWT bearer assertion.
   from one graph, with each read audited and every person pseudonymised.
 - Collision note: `discovery_sources_kind_check` and `discovery_runs_kind_check` are rewritten with the full kind list.
   A lane that adds discovery kinds and merges after this one must include these four kinds in its own list.
-- Follow-ups: slice 3b (raise a finding into the approvals queue for a recorded decision); Salesforce usage from
-  API event log files; Microsoft Graph activity logs where a customer exports them. The agent-link and app-listing routes came with
+- Follow-ups: Salesforce usage from API event log files; Microsoft Graph activity logs where a customer exports them. The agent-link and app-listing routes came with
   the owner's 2026-11-17 decisions (§6), with route census and KNOWN_UI_GAPS entries pointing at #453. Keyless Google delegation (IAM Credentials `signJwt` under
   workload identity federation) would remove the static key.
 

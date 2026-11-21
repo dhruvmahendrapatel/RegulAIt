@@ -159,3 +159,8 @@ each with its evidence and the rule's limits:
 A source that could not observe use, or observed less than the window, is listed as not assessable, never as unused.
 Nothing is revoked: act on a finding in the vendor's own admin console, and the next read shows the change.
 
+To have a second administrator decide a finding, raise it: `POST /v1/discovery/entitlements/findings/reviews` with the
+finding's `key`, the `approverUserId` of another admin and a `reason`. It appears in the approvals queue. Approving it
+records that the grant is to be removed or narrowed in the vendor's console; denying it records the risk as accepted.
+Either way nothing is sent to the vendor, and the findings report shows the decision on the finding.
+
