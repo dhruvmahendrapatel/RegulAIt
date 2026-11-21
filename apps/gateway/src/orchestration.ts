@@ -558,7 +558,9 @@ export async function resolveSuppliedContext(
   // stated where the worker (and anyone reading a transcript) can see it, so a
   // divergence between what lineage claims was supplied and what the prompt
   // actually carried would be visible rather than latent.
-  const manifest = items.map((i) => `${i.key} v${i.revision}`).join(", ");
+  // keys are JSON-quoted wherever they reach the prompt (#905 security review [1]): a key from a promoted artifact
+  // does not pass the API's key pattern, so quoting, not validation, is what keeps it from forging a frame
+  const manifest = items.map((i) => `${JSON.stringify(i.key)} v${i.revision}`).join(", ");
   return {
     system:
       `Shared project context supplied to this worker: ${manifest}.\n` +
@@ -567,11 +569,11 @@ export async function resolveSuppliedContext(
       items
         .map(
           (i) =>
-            `--- context '${i.key}' v${i.revision} (written by user ${i.contributedByUserId}` +
+            `--- context ${JSON.stringify(i.key)} v${i.revision} (written by user ${i.contributedByUserId}` +
             `${i.producedByAgentId ? `, agent ${i.producedByAgentId}` : ""}${i.producedByRunId ? `, run ${i.producedByRunId}` : ""}` +
             `; expires ${i.expiresAt.toISOString()}) ---\n` +
             // quoted as one JSON string, like builder memory, so stored text can never close its own block (#905 review 2)
-            `${JSON.stringify(i.content)}\n--- end context '${i.key}' ---`,
+            `${JSON.stringify(i.content)}\n--- end context ${JSON.stringify(i.key)} ---`,
         )
         .join("\n\n"),
     items: items.map((i) => ({ id: i.id, key: i.key, revision: i.revision })),

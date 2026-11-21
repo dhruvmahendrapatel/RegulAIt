@@ -2274,6 +2274,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       ),
     ]);
 
+    // ADR-0347 (#905 security review [2]): every node says whether it has expired, as history does
+    const graphNow = await databaseNow(db);
     // accepted head per key = highest accepted revision (rows are asc by rev)
     const currentByKey = new Map<string, number>();
     for (const r of rows) if (r.accepted) currentByKey.set(r.key, r.revision);
@@ -2288,6 +2290,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         baseRevision: r.baseRevision,
         accepted: r.accepted,
         pending: pendingMap.has(r.id),
+        expired: r.expiresAt <= graphNow,
+        expiresAt: r.expiresAt,
         content:
           r.content.length > PREVIEW_LEN ? `${r.content.slice(0, PREVIEW_LEN)}…` : r.content,
         contributor: {
