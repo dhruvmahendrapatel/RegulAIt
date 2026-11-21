@@ -1,6 +1,6 @@
 # ADR-0339: Agent risk score recomputed on every change, and author vs runner identity
 
-- **Status**: Accepted (slice 1 built; slice 2 designed, built in the next PR of lane E20)
+- **Status**: Accepted (slice 1 built; slice 2 built; addendum: capability combinations, method `adr0339-v3`)
 - **Date**: 2026-11-16
 - **Driver**: owner, 2026-11-16: close the gaps found against Obsidian Security's AI Agent Security product. Builder
   lane E20 covers gap rows 3 (author vs runner, orphaned agents, NHI mapping) and 7 (risk score on every publish or
@@ -12,7 +12,8 @@
   (toxic combinations), [ADR-0089](0089-agent-ownership-alignment.md) (owner and orphan flag),
   [ADR-0188](0188-batch6-agent-workload-identity.md) (agent principal, sponsors, actor chain),
   [ADR-0156](0156-ai-system-dependency-graph-risk-propagation.md) (dependents).
-- **Migration**: slice 1 `pending/agent_risk_scores.sql` (numbered at merge, ADR-0252).
+- **Migration**: slice 1 `pending/agent_risk_scores.sql`, slice 2 `pending/agent_identity_links.sql`, addendum
+  `pending/risk_score_capability_marks.sql` (trigger-only; all numbered at merge, ADR-0252).
 - **Setting**: none. The score changes no enforcement; it is read-only toward every agent, grant and setting.
 
 ## Context
@@ -98,23 +99,102 @@ as, and whether its owner is gone or inactive.
      lookups after.
    - `POST /v1/agent-risk/recompute` (admin).
 
-### Slice 2: author, runner, non-human identity, orphans (next PR)
+### Slice 2: author, runner, non-human identity, orphans
 
-6. **Author**: recorded at creation from the request principal, and for imported agents from the vendor record's
-   pseudonymous creator (the import in PR #855). Existing agents are `unknown`, never a guessed author.
-7. **Runner**: computed on read: the workload identity it runs as (ADR-0188), the people seen invoking it (usage
-   ledger, observation window), and for builder agents the connection format (owner's connections or each caller's).
-8. **Non-human identity links**: an agent is linked to cloud service accounts or vendor agent identities (AWS role
-   ARN, Entra service principal, GCP service account, vendor agent id), staged by an importer or an admin. A staged
-   link confers nothing; confirming one is an admin act with a step-up, audited in the same transaction. Read-only
-   toward the vendor platform. Vendor-neutral: the provider is a closed vocabulary with `other`.
-9. **Orphans**: the ADR-0089 flag gains `inactive` (owner has not signed in within a configurable window, strict
-   default 90 days) beside `unowned` and `orphaned`; each is a finding and feeds the ownership factor above.
+6. **Author** (`agent_authorship`, one row per agent): an insert trigger records it in the creating transaction. A
+   registry agent's author is the request's row-level-security principal (`regulait_rls_user_id()`, when it names an
+   existing user); a builder agent's is its owner at creation; with no principal (the bootstrap credential, a job) it is
+   `unknown`. Existing agents are backfilled `unknown`: an author is never guessed. The row is never rewritten (UPDATE
+   refused except the SET NULL of a deleted author, DELETE only with its agent, TRUNCATE refused). `vendor_record` with a
+   pseudonym is reserved for the vendor import (PR #855) to write.
+7. **Runner**, computed on read and never stored: the ADR-0188 workload identity the agent runs as (with its sponsors),
+   the people the ledgers saw invoking it in the last 30 days (usage events for a registry agent, chat threads for a
+   builder agent; top 10), and for a builder agent whose connections its tools use (`per_user` or the owner's shared
+   ones) and that its unattended runs run as its owner (ADR-0172).
+8. **Non-human identity links** (`agent_identity_links`): a cloud service account, vendor agent identity or OAuth client,
+   with the provider from a closed, vendor-neutral list (`aws`, `azure`, `gcp`, `entra`, `okta`, `other`) and an
+   identifier checked against the shapes that provider issues. An admin (later an importer) stages a link, audited in the
+   same transaction; it is `staged` and confers nothing. A **second, named** admin confirms or rejects it with an
+   `identity_manage` step-up bound to the link and the decision, audited in the same transaction. The stager cannot
+   decide (route check and a DB CHECK), the bootstrap credential cannot decide (it names nobody), and an API key cannot
+   carry the step-up. A link never calls the vendor (read-only toward vendor platforms) and never grants anything.
+9. **Orphans**: the ADR-0089 flag gains `inactive`: the owner is in the directory but has not been seen (the newest
+   session, API key use or federated sign-in, with the account's creation as a floor) within
+   `AGENT_OWNER_INACTIVE_DAYS` = 90 (strict default, a constant until the owner asks for a setting). The flag feeds the
+   risk score's ownership factor (owned 0, inactive 8, unowned 10, orphaned 15; method `adr0339-v2`), and
+   `GET /v1/agent-identity/ownership-findings` (admin) lists every agent whose flag is not `owned`, scanning one keyset
+   page of agents at a time.
+10. **Routes** (API only, KNOWN_UI_GAPS on #453): `GET /v1/agent-identity/:kind/:subjectId` (admin or the agent's own
+    steward/owner, 404 otherwise, `private, no-store`), `GET /v1/agent-identity/ownership-findings` (admin),
+    `POST /v1/agent-identity/:kind/:subjectId/links` (admin), `POST /v1/agent-identity/links/:linkId/decision` (admin,
+    step-up, four eyes).
+
+### Addendum (2026-11-19, owner-approved follow-up): capability-combination exposure findings
+
+The owner asked for capability-combination findings (the lethal trifecta and similar) as factors in the score, reusing
+ADR-0091 toxic combinations and the ADR-0059 blast radius, each explaining itself with a ranked fix. Method
+`adr0339-v3`.
+
+1. **Capabilities, one row each.** The gateway resolves what an agent itself holds (`agent-capabilities.ts`):
+   - a builder agent's tool and connector bindings (Ask-first = `requires_approval`), its inbound channels and computer
+     use;
+   - a registry agent's active workload identity grants (ADR-0188/0262, direct and through identity roles, merged by
+     `loadActorEntitlements`).
+
+   A registry agent with no active identity holds nothing of its own: its combinations read "not applicable". Each row
+   says whether the capability reads, writes, has Ask-first (null for a registry agent, which has no switch), the
+   ADR-0193 tier of its source, whether it reaches the open world, whether it is destructive, and how many other agents
+   hold it.
+2. **Fails closed.**
+   - An MCP tool reads or writes by its `kind` (no `readOnlyHint` is a write).
+   - It reaches the open world unless its admitted definition pin says `openWorldHint: false`.
+   - A write is destructive if an admin marked it dangerous (ADR-0236), or unless its admitted definition says
+     `destructiveHint: false`. These are the MCP specification's defaults.
+   - A source nobody classified is untrusted (ADR-0193).
+   - A connector reads and writes by its provider (`connectorOperations`); a read never reaches the open world, and it
+     is not destructive.
+3. **Legs** (pure, `capabilityLegs` in @regulait/shared):
+   - private data: any read;
+   - untrusted content: an inbound channel, computer use, or a read from a source not classified trusted or standard;
+   - external communication: a write without Ask-first, or an open-world read (a fetch can carry data out);
+   - unconfirmed destructive action: a destructive write without Ask-first.
+4. **Combinations** replace the coarse builder-only "untrusted input + data + unconfirmed action":
+   - `lethal_trifecta`: private data + untrusted content + external communication (OWASP LLM01, LLM02, ASI01, ASI02);
+   - `untrusted_input_unconfirmed_destructive`: untrusted content + unconfirmed destructive action (LLM01, LLM03,
+     ASI01, ASI02);
+   - `sod_rule_held_by_agent` (ADR-0091) is unchanged.
+
+   Each combination lists every leg with its members and the reason each one is there, also when a leg is empty and the
+   combination is broken.
+5. **Ranked fix options** (`rankFixOptions`): one option per leg, each of which breaks the combination on its own.
+   - The fewest members to change comes first.
+   - Ask-first comes before removal, because it keeps the capability. It is offered only when every member of the leg
+     is a write with an Ask-first switch.
+   - Then the smaller blast radius: members held by fewer other agents.
+   - Then the leg order.
+
+   The first option is the combination's `fix`. The score-level counterfactual list is unchanged.
+6. **Blast radius weights the combinations.** Every toxic combination now adds `round(15 x reach multiplier)`, the same
+   ADR-0059 reach band that multiplies exposure.
+7. **Every change.** `pending/risk_score_capability_marks.sql` marks the holders when any of these change:
+   - an MCP tool's kind or dangerous flag;
+   - a connector's provider or disabled state;
+   - an ADR-0193 tier;
+   - a tool's admitted definition;
+   - an identity's grants, roles or status;
+   - a role's tool, server or connector grants.
+
+   It is named to sort after `agent_risk_scores.sql` and `connector_disable.sql`, whose objects it uses.
+8. **Not counted as a mitigation (strict default):** the ADR-0193 write floor and per-call approval rules. The floor
+   gates only calls made with a run or thread context, and an approval rule is not Ask-first on every call. Counting
+   either would understate the risk.
+9. **No new table, column or route.** The census counter is untouched.
 
 ## Reuse and open source (ADR-0176)
 
 - **Reused, not re-derived:** `loadFloorEvidence` and `loadAutonomyFacts` and the A8 derivation (autonomy.ts),
-  `ownershipFlagFor` (inventory.ts), `checkSodFootprint` (sod.ts), `regulait_refuse_mutation` and
+  the ADR-0089 ownership flag (widened, not forked), `checkSodFootprint` (sod.ts), the ADR-0188 workload identities and
+  the `identity_manage` step-up, `regulait_refuse_mutation` and
   `regulait_refuse_truncate` (append-only guards), `canonicalJson` (digest), the scheduler registry, the ADR-0214
   counterfactual and the evaluator catalog's OWASP refs. The per-asset posture score (and its screen, PR #831) is a
   different question and is not duplicated: it is not an input and its routes are untouched.
@@ -122,7 +202,24 @@ as, and whether its owner is gone or inactive.
   the arithmetic is sums and a band lookup, and the queue is one table drained by the existing scheduler (pg-boss is
   already in the tree, but a dirty-mark table written by triggers is what guarantees coverage of every write path).
 
+- **Addendum comparison (owner rule 9):**
+  - **Invariant Labs mcp-scan "toxic flows"** (Apache-2.0) labels tools through its cloud API, so it does not work
+    air-gapped. Only the leg taxonomy is reused.
+  - **Invariant Guardrails** (Apache-2.0) checks runtime traces in Python. That is a different layer from a capability
+    set.
+  - **OPA/Rego** and **Cedar** (Apache-2.0) could express the rules, but they add a policy runtime for a set
+    intersection, and they decide allow or deny, not exposure.
+  - **MCP tool annotations** (the specification, MIT) are adopted as the vocabulary, with the specification's
+    fail-closed defaults.
+  - The rule itself comes from the lethal-trifecta and "rule of two" write-ups (concepts, no code).
+  - No rule library fits, so the rules stay ours (the ADR-0176 §4 exception for governance semantics).
+
 ## Consequences
+
+- Addendum: an agent that reads from an unclassified MCP server reaching the open world forms the trifecta with one
+  tool. That is the strict default, not a false positive: classifying the server (ADR-0193) or admitting a definition
+  that says `openWorldHint: false` is the fix. Scores move up when `adr0339-v3` first runs. Old assessments keep their
+  `adr0339-v2` meaning.
 
 - Every agent has a score and a history from the first sweep after the migration. A change of evidence that is not
   an agent change (a red-team run, a guardrail policy edit, a sign-off, an SoD rule, the owner's account) shows in

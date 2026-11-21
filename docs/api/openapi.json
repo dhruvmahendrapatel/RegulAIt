@@ -1133,7 +1133,13 @@
                 "eval_run",
                 "compliance_profile",
                 "model_call",
-                "agent_risk_proof"
+                "custom_classifier",
+                "decision_table",
+                "agent_risk_proof",
+                "rule_step_switch",
+                "robot_version",
+                "endpoint_addon_removal",
+                "vendor_agent_control"
               ]
             }
           },

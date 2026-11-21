@@ -1,31 +1,43 @@
 # Build status
 
-## Current state (2026-11-18, 18:10 UTC)
+## Current state (2026-11-20, 03:40 UTC)
 
-- **Rule 15 (finish before starting)** is in force for every builder lane.
-- **Queue:** about 75 open PRs. Target: under 50, then lift rule 15 a few lanes at a time, E45 (RPA) code first.
-- **Sessions:** phasing down to 10 (D-2026-11-18-04). Archived today: E24, E25.
-- **Merge loop:** runs from the master's scratchpad, restarted every 7000 s. One census-counter PR released at a time
-  (M-118).
+- **UI-gaps counter is computed (#1067, owner 2026-11-19).** `KNOWN_UI_GAPS_MAX` is no longer hand-set. PRs that add
+  routes add their own `KNOWN_UI_GAPS` entries and merge in parallel; the one-at-a-time queue (M-118) is retired. About
+  45 open PRs still carry an old MAX edit: each builder merges main and drops it when the PR next comes up.
+- **Rule 15 is lifted for every idle lane** (D-2026-11-19-01, D-2026-11-19-02, D-2026-11-20-01). New lanes E46-E49
+  are running.
+- **Session cap suspended:** the owner chose to keep lanes running past the 10-session cap (D-2026-11-20-01).
+- **Reviewers:** six pairs, R2 + Xtyd8, R3 + a3BYi, R4 + S4, WaRPg + S3, R5 + S5 and R6 + S6 (D-2026-11-20-01).
+  Check-ins run about every 20 minutes while the queue is busy.
+- **Queue:** 67 open PRs, not counting Dependabot's.
+- **Merge loop:** runs from the master's scratchpad and restarts every 7000 s. When the owner enables the merge queue,
+  it switches to `gh pr merge --merge --auto`.
+- **CVE-2026-97054 hotfix (#1058, 03:42-04:45 UTC).** Rule: a new advisory that turns main red gets one hotfix lane,
+  released ahead of the queue.
 
 ## Pending
 
 | Item | Owner | Since | Notes |
 |---|---|---|---|
-| Census queue: #902 E1, #883 E20, #848 E2, #855 E3, #861 E7, #867 E16, #865 E15 | builders, one at a time | 2026-11-18 | M-118; #902 first |
-| #952 E31 | merge loop | 2026-11-18 | Released at ac673b69 |
-| #1020 E12, #982 E44, #871 E13 | builders | 2026-11-18 | Request changes; waiting for READY |
-| #884 E18 SaaS entitlement graph | E18 | 2026-11-18 | Security request changes; no READY yet |
+| Enable the merge queue on `main` (ADR-0252) | owner | 2026-11-07 | Steps sent 2026-11-19 23:15. `main` has no ruleset yet. About 45 pending migrations, `robots.sql` included, stay unnumbered until it's on |
+| E45 S3 browser runner (ADR-0364) | E45 | 2026-11-19 | Owner go; free-form limits set (D-2026-11-19-03) |
+| In review: #1065 E20, #1069 E7 | reviewers | 2026-11-19 | |
+| Fixing review findings: #1060 E15, #1062 E12 | builders | 2026-11-19 | |
+| Not yet READY: #1066 E1, #1056 E3, designer #1070, #1075, #1077, #1078 | builders | 2026-11-19 | #1075 over its bundle budget |
 | #996 E27 fairness slice 2 | E27 | 2026-11-18 | Three failing checks |
-| #936 Codex C1 CI build-once | Codex | 2026-11-18 | Route first when READY |
-| #1006 C2, #1007 C3 | Codex | 2026-11-18 | Drafts, checks failing |
-| Census counter computed instead of hand-set | owner | 2026-11-18 | Proposal only |
-| #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4; one re-run allowed |
-| S7 RLS PM-tables batch push | S7 | 2026-11-18 | Owner approved the push (D-2026-11-18-08); confirm that S7 pushed |
+| #936 Codex C1 CI build-once, #1006 C2, #1007 C3 | Codex | 2026-11-18 | Checks failing |
+| #1009 flaky SAP idempotency test | triage-low | 2026-11-18 | F2 × S2 = 4 |
 | E10 rehearsal | parked | 2026-11-18 | Owner deferred (D-2026-11-18-09) |
 
 ## Done log (newest first)
 
+- 2026-11-20 (night): #1065, #1060, #1081, #1062, #1066 and #1070 merged, each audited (second parent = released SHA). #1069 released 03:11.
+- 2026-11-19 (day to evening): #1020, #1061, #871, #892, #884, #1059 (E45 Robots S2), #982, #964, #1044, #1055,
+  #1067 (computed counter) and #1068 merged, each audited (second parent = released SHA).
+- 2026-11-19 (night to morning): #1045, #855, #1058 (CVE hotfix), #861, #867 and #865 merged, each audited
+  (second parent = released SHA); dhruv/active fast-forwarded after each.
+- 2026-11-18 (late): #1040, #952, #902, #883 and #1039 merged, each audited (second parent = released SHA).
 - 2026-11-18 (evening): #1035, #744 and #1019 merged, each audited. M-118 logged.
 - 2026-11-18 (afternoon): #1013, #904, #1010 and #903 merged, each audited (second parent = released SHA).
 - 2026-11-18: master hand-over (about 08:54 UTC). #941 merged (82142059, second parent 3b86b4e0, audited); #973 and

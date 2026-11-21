@@ -53,6 +53,10 @@ import {
   runWithRlsSystem,
 } from "@regulait/db";
 import {
+  checkSaasEntitlementBatch,
+  entitlementPlatformOf,
+  SaasEntitlementBatchRefused,
+  type SaasEntitlementBatch,
   classifyObservation,
   correlateObservations,
   DISCOVERY_KIND_SPECS,
@@ -85,19 +89,23 @@ import {
   federationSourceSubject,
   type DiscoverySourceKind,
   normaliseGuid,
+  nextDiscoveryWriteScope,
+  discoveryWriteScopeFinal,
 } from "@regulait/shared";
 import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
-import { loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, loadDiscoverySettings } from "./discovery-posture.js";
 import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { errMessage } from "./err-serializer.js";
 import { runEndpointMcpRetention } from "./endpoint-mcp-config.js";
+import { persistEntitlementBatch } from "./saas-entitlements.js";
+import { RegistryRecordRefused, checkRegistryAgents, stageRegistryRecords } from "./agent-registry-records.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -373,7 +381,7 @@ export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code:
 // pseudonyms (ADR-0195 decision 20)
 // ---------------------------------------------------------------------------
 
-async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
+export async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
   const read = async () => (await db.select().from(discoveryPseudonymKeys).limit(1))[0];
   let row = await read();
   if (!row) {
@@ -617,8 +625,12 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   if (!source) return fail("source_missing", "the source was deleted");
   if (!source.enabled) return fail("source_disabled", "the source was disabled before the run started");
   // ADR-0235: a run of a family switched off after it was queued stops here, before any credential is read
-  const familyOff = familySwitchProblem(source.kind, (await loadDiscoverySettings(db)).families);
+  const runSettings = await loadDiscoverySettings(db);
+  const familyOff = familySwitchProblem(source.kind, runSettings.families);
   if (familyOff) return fail("family_disabled", familyOff);
+  // ADR-0337 §4: the Directory token listing switched off after the run was queued stops here, before any credential
+  const directoryOff = directoryTokensProblem(source.kind, source.target, runSettings);
+  if (directoryOff) return fail("directory_tokens_not_allowed", directoryOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 
@@ -628,7 +640,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
   // decision 7 (review of #403): a credential found to grant write access is never used again
-  if (cred?.writeScope === "refused") {
+  if (cred && discoveryWriteScopeFinal(cred.writeScope)) {
     return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
   }
   let secret: string | null = null;
@@ -737,7 +749,9 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   }
   if (leaseGone.signal.aborted) return "lease_lost";
 
-  if (result.credentialWriteScope === "write" && cred) {
+  // ADR-0336 decision 9: the credential's state moves only along DISCOVERY_WRITE_SCOPE_TRANSITIONS
+  const nextScope = cred ? nextDiscoveryWriteScope(cred.writeScope, result.credentialWriteScope) : null;
+  if (cred && nextScope === "refused") {
     // record the refusal on the credential (audited), so the source is blocked until it is replaced
     await db.update(discoveryCredentials).set({ writeScope: "refused" }).where(eq(discoveryCredentials.id, cred.id));
     await audit(db, "discovery_source", source.id, "discovery-credential-refused", "deny",
@@ -747,7 +761,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   if (result.credentialWriteScope === "write") {
     return fail("credential_has_write_scope", "the credential grants write access; a discovery credential must be read-only (ADR-0195 decision 7). Replace it.");
   }
-  if (result.credentialWriteScope === "read_only" && cred && cred.writeScope !== "read_only") {
+  if (cred && nextScope === "read_only") {
     await db.update(discoveryCredentials).set({ writeScope: "read_only" }).where(eq(discoveryCredentials.id, cred.id));
   }
 
@@ -758,20 +772,58 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const nowIso = new Date((await db.execute<{ now: string }>(sql`SELECT now()::text AS now`)).rows[0]!.now).toISOString();
   let observations: Observation[];
   let readOutcomes: DiscoveryReadOutcome[];
+  let registry: ReturnType<typeof checkRegistryAgents>;
   try {
     observations = checkObservations(source.kind, result.observations ?? [], nowIso, classifyCatalogue);
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
+    // ADR-0314: a registry source's agents are shape-checked like observations; a refused record refuses the run
+    registry = checkRegistryAgents(source.kind, result.registryAgents, result.registriesComplete);
   } catch (err) {
-    if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
+    if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;
+  }
+  // ADR-0337: an entitlement reader's graph is checked here and stored with the run's completion, in its transaction
+  const platform = entitlementPlatformOf(source.kind);
+  let entitlements: SaasEntitlementBatch | null = null;
+  if (result.entitlements !== undefined && !platform) return fail("entitlements_refused", `a ${source.kind} source may not return an entitlement graph`);
+  if (platform) {
+    if (result.entitlements === undefined) return fail("entitlements_missing", "the entitlement reader returned no entitlement graph");
+    try {
+      entitlements = checkSaasEntitlementBatch(result.entitlements, platform);
+    } catch (err) {
+      if (err instanceof SaasEntitlementBatchRefused) return fail("entitlements_refused", err.message);
+      throw err;
+    }
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
   // ADR-0363 slice 1: an Entra scan that read the tenant's complete Purview label list commits it with the run
   const labelTenant = source.kind === "idp_entra" ? normaliseGuid(cred?.publicConfig.tenantId) : null;
   const labels = result.labelDefinitions;
-  const inCommit = labels && labelTenant
+  // every write that must commit with the run, fenced on its lease: the labels (ADR-0363), the staged registry agents (ADR-0314) and the entitlement graph (ADR-0337)
+  const writes: Array<(t: Db) => Promise<void>> = [];
+  if (labels && labelTenant) {
+    writes.push(async (t) => {
+      await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+    });
+  }
+  if (registry.records.length || registry.complete.length) {
+    writes.push(async (t) => {
+      const staged = await stageRegistryRecords(t, source.id, run.id, registry.records, registry.complete);
+      await audit(t, "discovery_run", run.id, "agent-registry-records-staged", "allow",
+        `discovery run of '${source.name}' staged ${staged.staged} registry agent(s) for import; ${staged.absent} no longer listed`,
+        { sourceId: source.id, kind: source.kind, staged: staged.staged, absent: staged.absent, completeRegistries: registry.complete });
+    });
+  }
+  // ADR-0337: an entitlement batch (only an `entitlement_*` kind returns one)
+  if (entitlements) {
+    const batch = entitlements;
+    writes.push(async (t) => {
+      await persistEntitlementBatch(t, { runId: run.id, sourceId: source.id, sourceName: source.name }, batch);
+    });
+  }
+  const inCommit = writes.length
     ? async (t: Db) => {
-        await upsertLabelDefinitions(t, { tenantId: labelTenant, sourceId: source.id, definitions: labels });
+        for (const w of writes) await w(t);
       }
     : undefined;
   return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes, inCommit);

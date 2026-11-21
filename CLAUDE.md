@@ -282,7 +282,7 @@ agent output tokens; "normal mode" to turn off.
 How the build itself is run (master session, worker sessions, merge loop, hand-over) is in
 [internal/process/orchestration/](internal/process/orchestration/README.md). Read `RULES.md` there before starting or
 steering worker sessions. In brief:
-- at most 10 worker sessions at once;
+- a worker-session cap (currently suspended by the owner, D-2026-11-20-01; see `RULES.md`);
 - Opus at medium effort for code, Sonnet for mechanical work;
 - worker reports are claims that the master checks;
 - the hand-over files are kept current after every task.

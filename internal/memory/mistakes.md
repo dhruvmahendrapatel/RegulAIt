@@ -1988,6 +1988,10 @@ shared hand-edited file (the census counter, a journal, an index). Release only 
 release the next after the previous one merges and its builder has merged main. PRs that do not touch the file can be
 released in parallel.
 
+Superseded by the computed counter (2026-11-19, ADR-0252 addendum): `KNOWN_UI_GAPS_MAX` and its pin are gone, and each
+ADR and lane's gaps are a file of their own in `scripts/known-ui-gaps/`, so census PRs no longer share a line. The rule
+still holds for any other shared hand-edited file.
+
 ### M-119 (2026-11-18) - A sub-agent's worktree branch was merged into a lane branch
 
 Lane E27 built the fairlearn engine package in a sub-agent worktree (`builder/e27-fairlearn-engine-pkg`) and brought it

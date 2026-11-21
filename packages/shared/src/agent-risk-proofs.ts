@@ -23,6 +23,7 @@
  * a pass. A tenant cannot edit the catalogue; it can only relax a proof's schedule (audited, `agent_risk_proof_settings`).
  */
 import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type MetricSpec } from "./assurance.js";
+import { canonicalJson } from "./audit-chain.js";
 import { validateMetricParams } from "./condition-metrics.js";
 import { OWASP_AGENTIC_NAMES } from "./owasp-framework-mappings.js";
 import { OWASP_LLM_EDITIONS, OWASP_MCP_IDS } from "./owasp-packs.js";
@@ -30,7 +31,7 @@ import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
-export const AGENT_RISK_CATALOG_VERSION = 1;
+export const AGENT_RISK_CATALOG_VERSION = 2;
 
 /**
  * The origin tag on every proof's test traffic. It rides the same `purpose` slot the red-team tag does (ADR-0057 §2),
@@ -337,7 +338,9 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
       probeProof(
         "memory.untrusted_context_write",
         "untrusted_context_write",
-        "An untrusted source's write into shared context is refused by the trust floor.",
+        // v2: worded to what the ADR-0193 floor enforces (a write tool call). The shared-context write route is not
+        // gated by the floor yet; until it is, this proof must not claim it.
+        "A write tool call whose causal context holds untrusted content is refused by the trust floor.",
       ),
     ],
   },
@@ -533,4 +536,31 @@ export function effectiveRiskTier(
 ): EuAiActTier | "unscreened" {
   if (screened === "unscreened" || floor === null) return screened;
   return EU_AI_ACT_TIER_RANK[floor] > EU_AI_ACT_TIER_RANK[screened] ? floor : screened;
+}
+
+/**
+ * The canonical bytes an agent-risk proof result's `content_hash` and signature cover (ADR-0345 decision 5): ADR-0060's
+ * canonical JSON over the fields that make the result what it is. The runner hashes them; the evidence reader
+ * recomputes them.
+ */
+export function agentRiskProofEvidence(r: {
+  proofKey: string;
+  riskKey: string;
+  catalogVersion: number;
+  trigger: AgentRiskProofTrigger;
+  outcome: MeasurementState;
+  startedAt: Date;
+  finishedAt: Date;
+  detail: Record<string, unknown>;
+}): string {
+  return canonicalJson({
+    proofKey: r.proofKey,
+    riskKey: r.riskKey,
+    catalogVersion: r.catalogVersion,
+    trigger: r.trigger,
+    outcome: r.outcome,
+    startedAt: r.startedAt.toISOString(),
+    finishedAt: r.finishedAt.toISOString(),
+    detail: r.detail,
+  });
 }
