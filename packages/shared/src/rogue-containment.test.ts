@@ -82,8 +82,12 @@ describe("ADR-0366 rogue-agent containment (pure)", () => {
   it("the lifecycle: proposals are decided once, containments are released once, and terminal states stay terminal", () => {
     expect(CONTAINMENT_MACHINE.next("proposed", "approve")).toBe("contained");
     expect(CONTAINMENT_MACHINE.next("proposed", "decline")).toBe("declined");
-    expect(CONTAINMENT_MACHINE.next("contained", "release")).toBe("released");
-    expect(CONTAINMENT_MACHINE.can("released", "release")).toBe(false);
+    // a release is a request a different administrator approves (owner decision 2026-11-21)
+    expect(CONTAINMENT_MACHINE.next("contained", "request_release")).toBe("release_pending");
+    expect(CONTAINMENT_MACHINE.next("release_pending", "approve_release")).toBe("released");
+    expect(CONTAINMENT_MACHINE.next("release_pending", "deny_release")).toBe("contained");
+    expect(CONTAINMENT_MACHINE.can("contained", "approve_release")).toBe(false);
+    expect(CONTAINMENT_MACHINE.can("released", "request_release")).toBe(false);
     expect(CONTAINMENT_MACHINE.can("declined", "approve")).toBe(false);
     expect(CONTAINMENT_MACHINE.can("contained", "approve")).toBe(false);
     expect(STATE_MACHINES.agent_containment).toBe(CONTAINMENT_MACHINE);

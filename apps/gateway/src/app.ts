@@ -5295,9 +5295,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
-    // ADR-0366 — a rogue-agent containment: only an active administrator decides, never the agent's steward
+    // ADR-0366 — a rogue-agent containment or its release: only an active administrator decides, never the agent's
+    // steward nor the release's requester, with an MFA `approval_decide` step-up (owner decision 2026-11-21)
     if (row.objectType === "agent_containment") {
-      const refusal = await precheckContainmentDecision(db, row, deciderUserId);
+      const refusal = await precheckContainmentDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
@@ -5706,9 +5707,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
-      // ADR-0366: approved = the agent is halted through ADR-0124's halt; denied = declined, it keeps running
+      // ADR-0366: a proposal approved = the agent is halted (ADR-0124's halt), denied = it keeps running; a release
+      // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
       if (updated.objectType === "agent_containment") {
-        await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+        await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);

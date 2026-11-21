@@ -110,7 +110,7 @@ import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from ".
 import { detectionMonitorInput } from "./monitor-detection-rules.js";
 import { errMessage } from "./err-serializer.js";
 import { modelDriftMonitorInput } from "./classical-drift-monitor.js";
-import { CONTAINMENT_RULE_IDS, containRaisedAlerts } from "./rogue-containment.js";
+import { CONTAINMENT_RULE_IDS, containOpenSignals } from "./rogue-containment.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -593,22 +593,23 @@ export async function applyMonitorFindings(
     reason: `governance monitor evaluated: ${n} active alert(s)`,
   });
 
-  // ADR-0366 — rogue-agent containment for newly RAISED episodes that mean "acting outside its declared role":
-  // a proposal in the Approvals Queue, or an automatic halt at or above the org's threshold. Runs before the
-  // notifications so a critical agent is halted first. A failure never fails the pass, and it is audited.
-  if (raisedIds.length > 0) {
+  // ADR-0366 — rogue-agent containment for every OPEN episode that means "acting outside its declared role" and has
+  // no containment yet: a proposal in the Approvals Queue, or an automatic halt at or above the org's threshold. Runs
+  // on every pass, before the notifications, so a critical agent is halted first and a failed attempt is retried on
+  // the next pass (fail-closed, owner decision 2026-11-21). A failure never fails the monitor pass, and it is audited.
+  {
     try {
-      await containRaisedAlerts(db, raisedIds, now);
+      await containOpenSignals(db, now);
     } catch (err) {
       await db.insert(auditLog).values({
         userId: actor,
         objectType: "governance_monitor",
         objectId: null,
-        detail: { raised: raisedIds.length, error: errMessage(err).slice(0, 500) },
+        detail: { raised: raisedIds.length, error: errMessage(err).slice(0, 500), retry: "next monitor pass" },
         effect: "deny",
         ruleId: CONTAINMENT_RULE_IDS.failed,
         ruleChain: [],
-        reason: "rogue-agent containment pass failed; the raised alerts still notify, and nothing was contained",
+        reason: "rogue-agent containment pass failed; the alerts still notify, and every unfiled signal is retried on the next pass",
       }).catch(() => undefined);
     }
   }

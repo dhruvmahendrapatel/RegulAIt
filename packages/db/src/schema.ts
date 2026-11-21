@@ -20158,8 +20158,14 @@ export const agentContainments = pgTable(
     containedAt: timestamp("contained_at", { withTimezone: true }),
     decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** owner decision 2026-11-21: a release is a request (who asked, when, its approval), decided by another admin */
+    releaseRequestedByUserId: uuid("release_requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releaseRequestedAt: timestamp("release_requested_at", { withTimezone: true }),
+    releaseApprovalId: uuid("release_approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** the administrator who APPROVED the release */
     releasedByUserId: uuid("released_by_user_id").references(() => users.id, { onDelete: "set null" }),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** the requester's reason */
     releaseReason: text("release_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -20168,6 +20174,7 @@ export const agentContainments = pgTable(
     index("agent_containments_agent_idx").on(t.agentId, t.status),
     index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
     index("agent_containments_created_idx").on(t.createdAt),
+    index("agent_containments_release_approval_idx").on(t.releaseApprovalId),
   ],
 );
 export type AgentContainmentRow = typeof agentContainments.$inferSelect;

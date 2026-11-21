@@ -35,7 +35,7 @@ import {
 } from "@regulait/db";
 import { BATCH4_STRICT_DEFAULTS } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { CONTAINMENT_RULE_IDS, containRaisedAlerts } from "./rogue-containment.js";
+import { CONTAINMENT_RULE_IDS, containAlerts, containOpenSignals, containmentDecideStepUp, containmentReleaseRequestStepUp } from "./rogue-containment.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -66,7 +66,15 @@ async function as(who: string, args: StepUpCheckArgs | null, method: Method, url
   const r = args ? stepUpRequest(g) : sessionRequest(g);
   return app.inject({ method, url, headers: r.headers, cookies: r.cookies, ...(payload === undefined ? {} : { payload: payload as object }) });
 }
-const releaseStep = (id: string): StepUpCheckArgs => ({ kind: "settings_relax", facts: { containmentId: id, values: { released: true } } });
+const releaseStep = (id: string): StepUpCheckArgs => containmentReleaseRequestStepUp(id);
+/** decide a containment approval as `who`: with the MFA step-up bound to it (or none / a wrong one), and a reason
+ * (needed when `who` is not the addressed approver: the admin override) */
+async function decide(approvalId: string, decision: "approved" | "denied", who: string, grant: "right" | "none" | "wrong" = "right") {
+  const [ap] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+  const g = await grantStepUpForTest(db, who, containmentDecideStepUp(approvalId, decision, grant === "wrong" ? "0".repeat(64) : ap!.argumentsDigest!));
+  const r = grant === "none" ? sessionRequest(g) : stepUpRequest(g);
+  return app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, headers: r.headers, cookies: r.cookies, payload: { decision, reason: `a366 decided ${RUN}` } });
+}
 const setPolicy = (p: { containmentAutoSeverity?: "off" | "low" | "medium" | "high" | "critical"; containmentApproverUserId?: string | null }) =>
   db.update(orgSettings).set(p).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
@@ -136,9 +144,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (db) {
-    const rows = await db.select({ approvalId: agentContainments.approvalId }).from(agentContainments).where(inArray(agentContainments.signalRefId, alertIds.length ? alertIds : ["-"]));
+    const rows = await db
+      .select({ approvalId: agentContainments.approvalId, releaseApprovalId: agentContainments.releaseApprovalId })
+      .from(agentContainments)
+      .where(inArray(agentContainments.signalRefId, alertIds.length ? alertIds : ["-"]));
     await db.delete(agentContainments).where(inArray(agentContainments.signalRefId, alertIds.length ? alertIds : ["-"]));
-    const apIds = rows.map((r) => r.approvalId).filter((x): x is string => !!x);
+    const apIds = rows.flatMap((r) => [r.approvalId, r.releaseApprovalId]).filter((x): x is string => !!x);
     if (apIds.length) await db.delete(approvals).where(inArray(approvals.id, apIds));
     if (alertIds.length) await db.delete(governanceAlerts).where(inArray(governanceAlerts.id, alertIds));
     if (builderIds.length) await db.delete(builderAgents).where(inArray(builderAgents.id, builderIds));
@@ -183,8 +194,8 @@ describe("ADR-0366: automatic containment at or above the threshold", () => {
     const before = await chat(b.id);
     expect(before.json().error).not.toBe("builder_agent_halted");
     const alertId = await autonomyAlert(b.id, "assist", "autonomous");
-    const r = await containRaisedAlerts(db, [alertId]);
-    expect(r).toMatchObject({ autoContained: 1, proposed: 0 });
+    const r = await containAlerts(db, [alertId]);
+    expect(r).toMatchObject({ autoContained: 1, proposed: 0, failed: 0 });
     const c = (await containmentOf(alertId))!;
     expect(c).toMatchObject({ status: "contained", automatic: true, severity: "critical", haltApplied: true, approvalId: null, builderAgentId: b.id });
     const [row] = await db.select().from(builderAgents).where(eq(builderAgents.id, b.id));
@@ -196,7 +207,7 @@ describe("ADR-0366: automatic containment at or above the threshold", () => {
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error).toBe("builder_agent_halted");
     // the same episode never files twice
-    expect(await containRaisedAlerts(db, [alertId])).toMatchObject({ autoContained: 0, skipped: 1 });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 0, skipped: 1 });
   });
 
   it("the monitor pass itself contains: a raised autonomy episode halts the agent before the pass returns", async () => {
@@ -227,23 +238,42 @@ describe("ADR-0366: automatic containment at or above the threshold", () => {
     await setPolicy({ containmentAutoSeverity: "off" });
     const b = await builderAgent("off");
     const alertId = await autonomyAlert(b.id, "assist", "autonomous");
-    expect(await containRaisedAlerts(db, [alertId])).toMatchObject({ autoContained: 0, proposed: 1 });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 0, proposed: 1 });
     const [row] = await db.select().from(builderAgents).where(eq(builderAgents.id, b.id));
     expect(row!.haltedAt).toBeNull();
     await setPolicy({ containmentAutoSeverity: "critical" });
   });
 });
 
+describe("ADR-0366: the automatic path is fail-closed (owner decision 2026-11-21)", () => {
+  it("an open signal episode that was never filed (a missed or failed pass) is filed on the next pass", async () => {
+    await setPolicy({ containmentAutoSeverity: "critical", containmentApproverUserId: approverId });
+    const b = await builderAgent("retry");
+    const alertId = await autonomyAlert(b.id, "assist", "autonomous");
+    expect(await containmentOf(alertId)).toBeUndefined(); // raised, never filed
+    const pass = await containOpenSignals(db);
+    expect(pass.autoContained).toBeGreaterThanOrEqual(1);
+    expect((await containmentOf(alertId))!).toMatchObject({ status: "contained", automatic: true, approvalId: null });
+    // a resolved episode is never filed late
+    const b2 = await builderAgent("resolved");
+    const resolved = await autonomyAlert(b2.id, "assist", "autonomous");
+    await db.update(governanceAlerts).set({ status: "resolved", resolvedAt: new Date() }).where(eq(governanceAlerts.id, resolved));
+    await containOpenSignals(db);
+    expect(await containmentOf(resolved)).toBeUndefined();
+  });
+});
+
 describe("ADR-0366: containment proposals in the Approvals Queue", () => {
-  it("routes a non-critical signal to the named admin; the steward cannot decide; approval halts the agent", async () => {
+  it("routes a non-critical signal to the named admin; the steward cannot decide; an MFA step-up is required; approval halts", async () => {
     await setPolicy({ containmentAutoSeverity: "critical", containmentApproverUserId: approverId });
     const agentId = await registryAgent("drift");
     const alertId = await alert("classical_model_drift", `model_card:${agentId}`, "high", { agentId, cardId: "c", monitorId: "m", reportId: "r", features: [] });
-    expect(await containRaisedAlerts(db, [alertId])).toMatchObject({ proposed: 1 });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ proposed: 1 });
     const c = (await containmentOf(alertId))!;
     expect(c).toMatchObject({ status: "proposed", automatic: false, severity: "high" });
     const [ap] = await db.select().from(approvals).where(eq(approvals.id, c.approvalId!));
     expect(ap).toMatchObject({ objectType: "agent_containment", approverUserId: approverId, userId: stewardId, status: "pending" });
+    expect(ap!.argumentsDigest).toMatch(/^[0-9a-f]{64}$/);
     const [a0] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
     expect(a0!.haltedAt).toBeNull();
 
@@ -252,9 +282,12 @@ describe("ADR-0366: containment proposals in the Approvals Queue", () => {
     const listed = (queue.json().approvals ?? queue.json()) as Array<{ id: string; objectLabel?: string | null }>;
     expect(listed.find((x) => x.id === ap!.id)?.objectLabel ?? "").toMatch(/^contain \(halt\), high: /);
 
-    const bySteward = await as(stewardId, null, "POST", `/v1/approvals/${ap!.id}/decide`, { decision: "approved" });
-    expect(bySteward.statusCode).toBe(403);
-    const ok = await as(approverId, null, "POST", `/v1/approvals/${ap!.id}/decide`, { decision: "approved" });
+    expect((await decide(ap!.id, "approved", stewardId)).statusCode).toBe(403);
+    const noStep = await decide(ap!.id, "approved", approverId, "none");
+    expect(noStep.statusCode, noStep.body).toBe(403);
+    const wrongStep = await decide(ap!.id, "approved", approverId, "wrong");
+    expect(wrongStep.statusCode, wrongStep.body).toBe(403);
+    const ok = await decide(ap!.id, "approved", approverId);
     expect(ok.statusCode, ok.body).toBe(200);
     expect((await containmentOf(alertId))!).toMatchObject({ status: "contained", haltApplied: true, decidedByUserId: approverId });
     const [a1] = await db.select({ haltedAt: agents.haltedAt, reason: agents.haltedReason }).from(agents).where(eq(agents.id, agentId));
@@ -266,71 +299,119 @@ describe("ADR-0366: containment proposals in the Approvals Queue", () => {
   it("a declined proposal leaves the agent running", async () => {
     const agentId = await registryAgent("decline");
     const alertId = await alert("classical_model_drift", `model_card:${agentId}`, "high", { agentId, cardId: "c", monitorId: "m" });
-    await containRaisedAlerts(db, [alertId]);
+    await containAlerts(db, [alertId]);
     const c = (await containmentOf(alertId))!;
-    const d = await as(approverId, null, "POST", `/v1/approvals/${c.approvalId!}/decide`, { decision: "denied" });
+    const d = await decide(c.approvalId!, "denied", approverId);
     expect(d.statusCode, d.body).toBe(200);
     expect((await containmentOf(alertId))!.status).toBe("declined");
     const [a] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
     expect(a!.haltedAt).toBeNull();
   });
 
-  it("with no approver named the proposal is recorded unrouted and audited; unregistered traffic files nothing", async () => {
+  it("with no approver named it falls back to the tenant's admins: any other admin decides with the MFA step-up", async () => {
     await setPolicy({ containmentApproverUserId: null });
-    const agentId = await registryAgent("unrouted");
+    const agentId = await registryAgent("fallback");
     const alertId = await alert("classical_model_drift", `model_card:${agentId}`, "high", { agentId });
-    expect(await containRaisedAlerts(db, [alertId])).toMatchObject({ unrouted: 1 });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ proposed: 1 });
+    const c = (await containmentOf(alertId))!;
+    const [ap] = await db.select().from(approvals).where(eq(approvals.id, c.approvalId!));
+    expect(ap!.approverUserId).not.toBe(stewardId);
+    const proposed = (await auditFor(c.id)).find((a) => a.ruleId === CONTAINMENT_RULE_IDS.proposed)!;
+    expect((proposed.detail as Record<string, unknown>).adminFallback).toBe(true);
+    // an admin the row is not addressed to decides it (the admin override, reason recorded) with the MFA step-up
+    const decider = ap!.approverUserId === adminId ? approverId : adminId;
+    const ok = await decide(ap!.id, "approved", decider);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await containmentOf(alertId))!.status).toBe("contained");
+    await setPolicy({ containmentApproverUserId: approverId });
+  });
+
+  it("an agent with no steward is recorded unrouted and audited; unregistered traffic files nothing", async () => {
+    const [orphan] = await db.insert(agents).values({ name: `a366-orphan-${RUN}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+    agentIds.push(orphan!.id);
+    const alertId = await alert("classical_model_drift", `model_card:${orphan!.id}`, "high", { agentId: orphan!.id });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ unrouted: 1 });
     const c = (await containmentOf(alertId))!;
     expect(c).toMatchObject({ status: "proposed", approvalId: null });
     expect((await auditFor(c.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.unrouted);
-    const traffic = await alert("unregistered_ai_traffic", `project:${agentId}`, "medium", { subjectType: "project" });
-    expect(await containRaisedAlerts(db, [traffic])).toEqual({ autoContained: 0, proposed: 0, unrouted: 0, skipped: 0 });
+    const traffic = await alert("unregistered_ai_traffic", `project:${orphan!.id}`, "medium", { subjectType: "project" });
+    expect(await containAlerts(db, [traffic])).toEqual({ autoContained: 0, proposed: 0, unrouted: 0, skipped: 0, failed: 0 });
     expect(await containmentOf(traffic)).toBeUndefined();
-    await setPolicy({ containmentApproverUserId: approverId });
   });
 });
 
-describe("ADR-0366: release", () => {
-  it("needs a reason and a step-up, is refused while the dial is not normal, and lifts only a containment's halt", async () => {
-    await setPolicy({ containmentAutoSeverity: "critical" });
+describe("ADR-0366: release needs approval (owner decision 2026-11-21)", () => {
+  const reason = { reason: `a366 reviewed, safe to resume ${RUN}` };
+  const request = (who: string, id: string, body: unknown = reason) => as(who, releaseStep(id), "POST", `/v1/containments/${id}/release`, body);
+
+  it("is a request: reason + step-up, refused while the dial is not normal, and the agent stays halted until approved", async () => {
+    await setPolicy({ containmentAutoSeverity: "critical", containmentApproverUserId: approverId });
     const b = await builderAgent("release");
     const first = await autonomyAlert(b.id, "assist", "autonomous");
     const second = await autonomyAlert(b.id, "assist", "autonomous");
-    await containRaisedAlerts(db, [first, second]);
+    await containAlerts(db, [first, second]);
     const c1 = (await containmentOf(first))!;
     const c2 = (await containmentOf(second))!;
     expect(c1.haltApplied).toBe(true);
     expect(c2.haltApplied).toBe(false); // already halted by the first
-    const reason = { reason: `a366 reviewed, safe to resume ${RUN}` };
 
-    const noStep = await as(adminId, null, "POST", `/v1/containments/${c1.id}/release`, reason);
-    expect(noStep.statusCode).toBe(403);
-    const short = await as(adminId, releaseStep(c1.id), "POST", `/v1/containments/${c1.id}/release`, { reason: "ok" });
-    expect(short.statusCode).toBe(400);
-    const notAdmin = await as(stewardId, releaseStep(c1.id), "POST", `/v1/containments/${c1.id}/release`, reason);
-    expect(notAdmin.statusCode).toBe(403);
-
+    expect((await as(adminId, null, "POST", `/v1/containments/${c1.id}/release`, reason)).statusCode).toBe(403);
+    expect((await request(adminId, c1.id, { reason: "ok" })).statusCode).toBe(400);
+    expect((await request(stewardId, c1.id)).statusCode).toBe(403);
     await db.update(orgSettings).set({ executionMode: "read_only", executionModeReason: `a366 read only ${RUN}` }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    const dial = await as(adminId, releaseStep(c1.id), "POST", `/v1/containments/${c1.id}/release`, reason);
+    const dial = await request(adminId, c1.id);
     expect(dial.statusCode, dial.body).toBe(409);
     expect(dial.json().error).toBe("execution_dial_not_normal");
     await db.update(orgSettings).set({ executionMode: "normal", executionModeReason: null }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
-    // the second containment still holds the agent: the halt stays
-    const r1 = await as(adminId, releaseStep(c1.id), "POST", `/v1/containments/${c1.id}/release`, reason);
-    expect(r1.statusCode, r1.body).toBe(200);
-    expect(r1.json()).toMatchObject({ haltLifted: false, containment: { status: "released" } });
-    expect((await chat(b.id)).json().error).toBe("builder_agent_halted");
-    const again = await as(adminId, releaseStep(c1.id), "POST", `/v1/containments/${c1.id}/release`, reason);
-    expect(again.statusCode).toBe(409);
+    const asked = await request(adminId, c1.id);
+    expect(asked.statusCode, asked.body).toBe(202);
+    expect(asked.json().containment).toMatchObject({ status: "release_pending", releaseRequestedByUserId: adminId });
+    const approvalId = asked.json().approvalId as string;
+    const [ap] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(ap).toMatchObject({ objectType: "agent_containment", userId: adminId, approverUserId: approverId });
+    expect((await chat(b.id)).json().error).toBe("builder_agent_halted"); // still halted while pending
+    expect((await request(adminId, c1.id)).statusCode).toBe(409); // one request at a time
 
-    const r2 = await as(adminId, releaseStep(c2.id), "POST", `/v1/containments/${c2.id}/release`, reason);
-    expect(r2.statusCode, r2.body).toBe(200);
-    expect(r2.json().haltLifted).toBe(true);
+    // the requester and the steward cannot approve it; no step-up is refused
+    expect((await decide(approvalId, "approved", adminId)).statusCode).toBe(403);
+    expect((await decide(approvalId, "approved", stewardId)).statusCode).toBe(403);
+    expect((await decide(approvalId, "approved", approverId, "none")).statusCode).toBe(403);
+    // the second containment still holds the agent: approved, but the halt stays
+    const ok = await decide(approvalId, "approved", approverId);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await containmentOf(first))!).toMatchObject({ status: "released", releasedByUserId: approverId });
+    expect((await chat(b.id)).json().error).toBe("builder_agent_halted");
+
+    // releasing the second lifts the containment's halt
+    const asked2 = await request(adminId, c2.id);
+    expect(asked2.statusCode, asked2.body).toBe(202);
+    await db.update(orgSettings).set({ executionMode: "halted", executionModeReason: `a366 halted ${RUN}` }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const dialAtDecide = await decide(asked2.json().approvalId, "approved", approverId);
+    expect(dialAtDecide.statusCode, dialAtDecide.body).toBe(409);
+    await db.update(orgSettings).set({ executionMode: "normal", executionModeReason: null }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const ok2 = await decide(asked2.json().approvalId, "approved", approverId);
+    expect(ok2.statusCode, ok2.body).toBe(200);
     const [row] = await db.select().from(builderAgents).where(eq(builderAgents.id, b.id));
     expect(row!.haltedAt).toBeNull();
     expect((await chat(b.id)).json().error).not.toBe("builder_agent_halted");
-    expect((await auditFor(c2.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.released);
+    expect((await auditFor(c2.id)).map((a) => a.ruleId)).toEqual(
+      expect.arrayContaining([CONTAINMENT_RULE_IDS.releaseRequested, CONTAINMENT_RULE_IDS.released]),
+    );
+  });
+
+  it("a refused release leaves the agent halted and the containment contained", async () => {
+    const b = await builderAgent("refused");
+    const alertId = await autonomyAlert(b.id, "assist", "autonomous");
+    await containAlerts(db, [alertId]);
+    const c = (await containmentOf(alertId))!;
+    const asked = await request(adminId, c.id);
+    expect(asked.statusCode, asked.body).toBe(202);
+    const d = await decide(asked.json().approvalId, "denied", approverId);
+    expect(d.statusCode, d.body).toBe(200);
+    expect((await containmentOf(alertId))!).toMatchObject({ status: "contained", releaseApprovalId: null, releaseReason: null });
+    expect((await chat(b.id)).json().error).toBe("builder_agent_halted");
+    expect((await auditFor(c.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.releaseDenied);
   });
 
   it("never lifts a halt a person threw by hand", async () => {
@@ -338,12 +419,14 @@ describe("ADR-0366: release", () => {
     await db.update(agents).set({ haltedAt: new Date(), haltedReason: `a366 manual incident halt ${RUN}`, haltedByUserId: adminId }).where(eq(agents.id, agentId));
     await setPolicy({ containmentAutoSeverity: "high" });
     const alertId = await alert("classical_model_drift", `model_card:${agentId}`, "high", { agentId });
-    expect(await containRaisedAlerts(db, [alertId])).toMatchObject({ autoContained: 1 });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 1 });
     const c = (await containmentOf(alertId))!;
     expect(c.haltApplied).toBe(false);
-    const r = await as(adminId, releaseStep(c.id), "POST", `/v1/containments/${c.id}/release`, { reason: `a366 reviewed ${RUN}` });
-    expect(r.statusCode, r.body).toBe(200);
-    expect(r.json().haltLifted).toBe(false);
+    const asked = await request(adminId, c.id);
+    expect(asked.statusCode, asked.body).toBe(202);
+    const ok = await decide(asked.json().approvalId, "approved", approverId);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await containmentOf(alertId))!.status).toBe("released");
     const [a] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
     expect(a!.haltedAt).not.toBeNull();
     await setPolicy({ containmentAutoSeverity: "critical" });

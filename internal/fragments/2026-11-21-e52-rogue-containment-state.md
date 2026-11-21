@@ -10,3 +10,6 @@
   containment's own halt; builder agents gain their own halt, enforced on every turn. Migration
   `pending/rogue_agent_containment.sql` (numbered at merge), `agent_containments` under forced RLS. Three API-only
   routes are known UI gaps.
+- **Owner decision 2026-11-21 (ADR-0366 addendum):** the automatic halt runs on its own fail-closed, audited path
+  (every open unfiled signal is retried each monitor pass); a release is a request a different admin approves with an
+  MFA step-up, falling back to the tenant's admins when no approver is named.

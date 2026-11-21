@@ -153,10 +153,16 @@ export const CONTAINMENT_SIGNAL_RULES = ["autonomy_declared_below_observed", "cl
 // The containment lifecycle (ADR-0348's defineMachine)
 // ---------------------------------------------------------------------------
 
-export const CONTAINMENT_STATES = ["proposed", "contained", "declined", "released"] as const;
+export const CONTAINMENT_STATES = ["proposed", "contained", "declined", "release_pending", "released"] as const;
 export type ContainmentState = (typeof CONTAINMENT_STATES)[number];
 
-/** `agent_containments.status`. One row per signal; a later signal for the same agent is a new row. */
+/**
+ * `agent_containments.status`. One row per signal; a later signal for the same agent is a new row.
+ *
+ * Owner decision 2026-11-21 (ADR-0366 addendum): containing narrows access, so an automatic containment is created
+ * `contained` with no approval; LIFTING one widens access, so a release is a request (`release_pending`) that a
+ * different administrator approves in the Approvals Queue with an MFA step-up.
+ */
 export const CONTAINMENT_MACHINE = defineMachine({
   id: "agent_containment",
   stored: "agent_containments.status",
@@ -168,20 +174,33 @@ export const CONTAINMENT_MACHINE = defineMachine({
       from: ["proposed"],
       to: "contained",
       by: ["approver"],
-      summary: "An administrator approved the proposal; the agent is halted through the one kill-switch halt (ADR-0124).",
+      summary: "An administrator approved the proposal with an MFA step-up; the agent is halted through the one kill-switch halt (ADR-0124).",
     },
     decline: {
       from: ["proposed"],
       to: "declined",
       by: ["approver"],
-      summary: "An administrator declined the proposal; the agent keeps running and the alert stays open.",
+      summary: "An administrator declined the proposal with an MFA step-up; the agent keeps running and the alert stays open.",
     },
-    release: {
+    request_release: {
       from: ["contained"],
-      to: "released",
+      to: "release_pending",
       by: ["admin"],
       summary:
-        "An administrator released the containment with a reason and a step-up; the halt is lifted unless another open containment still holds it.",
+        "An administrator asked to release the containment, with a reason and a step-up; a different administrator decides it in the Approvals Queue. The agent stays halted meanwhile.",
+    },
+    approve_release: {
+      from: ["release_pending"],
+      to: "released",
+      by: ["approver"],
+      summary:
+        "A different administrator approved the release with an MFA step-up while the execution dial is normal; the halt is lifted unless a person set it or another open containment still holds the agent.",
+    },
+    deny_release: {
+      from: ["release_pending"],
+      to: "contained",
+      by: ["approver"],
+      summary: "The approver refused the release with an MFA step-up; the agent stays halted.",
     },
   },
 });

@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS "agent_containments" (
   "contained_at" timestamp with time zone,
   "decided_by_user_id" uuid,
   "decided_at" timestamp with time zone,
+  "release_requested_by_user_id" uuid,
+  "release_requested_at" timestamp with time zone,
+  "release_approval_id" uuid,
   "released_by_user_id" uuid,
   "released_at" timestamp with time zone,
   "release_reason" text,
@@ -78,14 +81,19 @@ CREATE TABLE IF NOT EXISTS "agent_containments" (
   CONSTRAINT "agent_containments_signal_ref_check" CHECK (length("signal_ref_id") BETWEEN 1 AND 128),
   CONSTRAINT "agent_containments_severity_check" CHECK ("severity" IN ('low', 'medium', 'high', 'critical')),
   CONSTRAINT "agent_containments_threshold_check" CHECK ("threshold_at_decision" IN ('off', 'low', 'medium', 'high', 'critical')),
-  CONSTRAINT "agent_containments_status_check" CHECK ("status" IN ('proposed', 'contained', 'declined', 'released')),
+  CONSTRAINT "agent_containments_status_check" CHECK ("status" IN ('proposed', 'contained', 'declined', 'release_pending', 'released')),
   CONSTRAINT "agent_containments_explanation_check" CHECK (length("explanation") BETWEEN 1 AND 1000),
   CONSTRAINT "agent_containments_evidence_check" CHECK (jsonb_typeof("evidence") = 'object' AND pg_column_size("evidence") <= 16384),
   -- written with = / OR, not IN: the status CHECK above is the one place the states are listed (ADR-0348 test)
-  CONSTRAINT "agent_containments_contained_check" CHECK (("status" = 'contained' OR "status" = 'released') = ("contained_at" IS NOT NULL)),
-  CONSTRAINT "agent_containments_released_check" CHECK (
-    ("status" = 'released') = ("released_at" IS NOT NULL AND "release_reason" IS NOT NULL AND length(btrim("release_reason")) >= 10)
+  CONSTRAINT "agent_containments_contained_check" CHECK (
+    ("status" = 'contained' OR "status" = 'release_pending' OR "status" = 'released') = ("contained_at" IS NOT NULL)
   ),
+  -- owner decision 2026-11-21: a release is requested with a reason, then approved by another administrator
+  CONSTRAINT "agent_containments_release_request_check" CHECK (
+    ("status" = 'release_pending' OR "status" = 'released')
+      = ("release_requested_at" IS NOT NULL AND "release_reason" IS NOT NULL AND length(btrim("release_reason")) >= 10)
+  ),
+  CONSTRAINT "agent_containments_released_check" CHECK (("status" = 'released') = ("released_at" IS NOT NULL)),
   CONSTRAINT "agent_containments_release_reason_check" CHECK ("release_reason" IS NULL OR length("release_reason") <= 2000),
   CONSTRAINT "agent_containments_automatic_check" CHECK (NOT "automatic" OR "approval_id" IS NULL)
 );
@@ -116,6 +124,16 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 --> statement-breakpoint
 DO $$ BEGIN
+  ALTER TABLE "agent_containments" ADD CONSTRAINT "agent_containments_release_requested_by_user_id_users_id_fk"
+    FOREIGN KEY ("release_requested_by_user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "agent_containments" ADD CONSTRAINT "agent_containments_release_approval_id_approvals_id_fk"
+    FOREIGN KEY ("release_approval_id") REFERENCES "public"."approvals"("id") ON DELETE set null ON UPDATE no action;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+DO $$ BEGIN
   ALTER TABLE "agent_containments" ADD CONSTRAINT "agent_containments_released_by_user_id_users_id_fk"
     FOREIGN KEY ("released_by_user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -127,6 +145,8 @@ CREATE INDEX IF NOT EXISTS "agent_containments_agent_idx" ON "agent_containments
 CREATE INDEX IF NOT EXISTS "agent_containments_builder_agent_idx" ON "agent_containments" ("builder_agent_id", "status");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_containments_created_idx" ON "agent_containments" ("created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "agent_containments_release_approval_idx" ON "agent_containments" ("release_approval_id");
 --> statement-breakpoint
 ALTER TABLE "agent_containments" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint

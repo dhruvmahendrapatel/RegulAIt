@@ -100,7 +100,7 @@ pass files nothing twice.
 - **Automatic**: the row is created `contained`, the agent is halted in the same transaction (`haltAgentInTx`, or
   `haltBuilderAgentInTx` for a builder agent), with a reason prefixed `contained (ADR-0366): `, audited
   `containment-auto-contained` with the severity and the threshold in force.
-- **Proposal**: the row is created `proposed` with an `approvals` row (objectType `agent_containment`, stageId
+- **Proposal** (routing amended by the addendum: no unrouted proposal for want of a named approver): the row is created `proposed` with an `approvals` row (objectType `agent_containment`, stageId
   `agent-containment:<id>`) for the named administrator; the approval's requester is the agent's steward, the person
   whose work it gates. Audited `containment-proposed`. **Unrouted** (no approval row, audited
   `containment-proposal-unrouted`) when no approver is named, the approver is no longer an active admin, the agent has
@@ -114,7 +114,7 @@ pass files nothing twice.
 decision's transaction: approved halts the agent through the same halt and moves `proposed → contained`; denied
 moves `proposed → declined` and the agent keeps running.
 
-### 5. Release (admin only)
+### 5. Release (admin only) — superseded in part by the addendum below (a release is now a request a different administrator approves)
 
 `POST /v1/containments/:id/release` with a reason (at least ten characters) and a `settings_relax` step-up bound to the
 containment. A release widens access, so it is refused while the execution dial is not `normal` (ADR-0338 §7's shared
@@ -146,6 +146,43 @@ three halt columns with the same CHECK as `agents`; `release_reason` and the bui
 
 `GET /v1/containments` (keyset-paginated, `status` filter), `GET /v1/containments/:id`, `POST
 /v1/containments/:id/release`. Known UI gaps in `scripts/known-ui-gaps/adr-0366-e52-rogue-containment.json`.
+
+## Addendum: owner decision 2026-11-21 (halt path and release approval)
+
+The owner decided on 2026-11-21, relayed by the master to lane E52 while #1134 was in review:
+
+> 1. An automatic halt may run on its own separate, fail-closed, audited path. It does not wait for approval.
+> 2. Lifting a halt, or taking any wider containment action, needs approval. When no approver is named, approval
+>    falls back to tenant admins with MFA step-up.
+
+As built (#1134, second update):
+
+- **The automatic path is separate and fail-closed.** `containOpenSignals` runs on every monitor pass (not only for
+  newly raised episodes) and files every *open* episode of a containment-signal rule that has no containment yet. An
+  automatic containment is one transaction (row, halt, audit) with no approval. A signal whose filing fails is audited
+  `containment-failed` and stays unfiled, so the next pass files it again; a failed policy read fails the pass rather
+  than filing under a guessed threshold. A resolved episode is never filed late.
+- **Release is an approval.** `POST /v1/containments/:id/release` now *requests* a release (an admin, a reason of at
+  least ten characters, a `settings_relax` step-up, refused while the execution dial is not `normal`) and files an
+  `agent_containment` approval (stageId `agent-containment-release:<id>`). The containment moves `contained →
+  release_pending`; the agent stays halted. A different administrator approves (`release_pending → released`, the halt
+  lifted under §5's rules, the dial re-read under the decision's lock) or refuses (`release_pending → contained`). The
+  requester and the agent's steward never decide it.
+- **Every containment decision carries an MFA step-up**: an `approval_decide` step-up bound to {approval, decision,
+  arguments digest} (the digest covers the containment, the action and the subject), checked in the precheck and spent
+  inside the decision's transaction, as ADR-0338's vendor control does.
+- **Approver fallback.** A proposal or a release goes to the named containment approver when that is an active
+  administrator outside the excluded people (the steward; for a release also the requester). Otherwise it falls back
+  to the tenant's admins: the row is addressed to the longest-serving eligible active admin, and any other eligible
+  admin may decide it through the decide path's admin override (a recorded reason) plus the MFA step-up. A proposal is
+  unrouted only when the agent has no steward (the queue row needs a requester) or no eligible admin exists; a release
+  with no eligible approver is refused `no_eligible_approver`.
+- **"Any wider containment action".** In slice 1 the only widening action is a release; the threshold relaxation was
+  already a `settings_relax` step-up. Later slices that add a widening action (containing a key or project and
+  restoring it) take the same approval path.
+- Lifecycle: `CONTAINMENT_MACHINE` gains `release_pending` and the events `request_release`, `approve_release`,
+  `deny_release` (replacing the admin-only `release`). Schema: `release_requested_by_user_id`, `release_requested_at`,
+  `release_approval_id`; `released_by_user_id` is now the approving administrator.
 
 ## Consequences
 
