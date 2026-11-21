@@ -5108,6 +5108,9 @@ export * from "./vendor-agent-control.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits
+export * from "./resource-rules.js";
+
 // ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
 export * from "./browser-governance/index.js";
 export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
