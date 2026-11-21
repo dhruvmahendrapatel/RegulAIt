@@ -2271,7 +2271,13 @@ export const patchProjectMemberSchema = z.object({
 });
 
 export const contributeContextSchema = z.object({
-  key: z.string().min(1).max(128),
+  /** #905 security review [1]: a context key is an identifier, never free text. It is shown to workers inside the
+   * context frame, so quotes, newlines and spaces could forge a frame or its provenance. */
+  key: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9._:/-]+$/, "a context key uses letters, digits and . _ : / - only"),
   content: z.string().min(1).max(200_000),
   /** the accepted revision this write is based on; required once the key exists */
   baseRevision: z.number().int().positive().optional(),

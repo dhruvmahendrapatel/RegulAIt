@@ -375,6 +375,7 @@ async function toolViews(db: Db, agentId: string, viewer: Viewer) {
 
 async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
   const [summary] = await summaries(db, [agent], viewer);
+  const detailNow = await databaseNow(db);
   const [shares, tools, subs, skills, memory, schedules, channels, project, owner] = await Promise.all([
     db.select({ userId: builderAgentShares.userId }).from(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id)),
     toolViews(db, agent.id, viewer),
@@ -499,8 +500,9 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       content: m.content,
       createdByName: m.createdByUserId ? (names.get(m.createdByUserId) ?? null) : null,
       createdAt: m.createdAt.toISOString(),
-      // ADR-0347: when the runtime stops reading it
+      // ADR-0347: when the runtime stops reading it, and whether it already has (#905 security review [2])
       expiresAt: m.expiresAt.toISOString(),
+      expired: m.expiresAt <= detailNow,
     })),
     schedules: schedules.map((x) => scheduleView(x, agent.ownerUserId, names)),
     channels: channels.map((c) => {
@@ -1157,7 +1159,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "memory (add)")) return reply;
     // a ceiling, refused by name: memory is append-only, so nothing is ever
     // pruned behind the owner's back — they choose what to remove
-    const [held] = await db.select({ n: count() }).from(builderAgentMemory).where(eq(builderAgentMemory.agentId, agent.id));
+    // ADR-0347 (#905 code review [6]): only LIVE items count against the cap. An expired item is never read again,
+    // so it must not block a new one; the slice-2 sweep deletes it, which keeps storage bounded.
+    const [held] = await db
+      .select({ n: count() })
+      .from(builderAgentMemory)
+      .where(and(eq(builderAgentMemory.agentId, agent.id), sql`${builderAgentMemory.expiresAt} > now()`));
     if (Number(held?.n ?? 0) >= BUILDER_LIMITS.memoryPerAgent) {
       return reply.status(422).send({
         error: "memory_limit_reached",

@@ -101,7 +101,7 @@ recall is already pinned by the P25 baselines, and the ADR-0140 PII detector. No
 
 ## Owner questions (open; the secure default is built)
 
-1. **Owner question open:** is 24 hours the right org default for shared project context, which teams use for durable
+1. **Answered (owner via the master, 2026-11-21): keep 24 hours.** Under ADR-0180 the strict value is the default; an admin may lengthen it, audited. The question was: is 24 hours the right org default for shared project context, which teams use for durable
    decisions? The built default follows the brief ("default short") and is kept strict until the owner decides. With no
    grandfathering, every existing shared-context item stops being supplied to workers 24 hours after the first deploy
    of this migration (hidden, not deleted). A longer default is one setting (`agent_memory_ttl_hours`, step-up).
@@ -118,3 +118,9 @@ recall is already pinned by the P25 baselines, and the ADR-0140 PII detector. No
   context is supplied JSON-quoted inside its markers, as builder memory is, so stored text cannot close its own block.
   The migration is re-runnable. `log` mode stores flagged text unredacted by design (step-up, audited); slice 2's
   quarantine replaces it.
+- **Review round 2 on #905 (security S7, code R7):**
+  - Context keys are identifiers: `contributeContextSchema.key` allows letters, digits and `. _ : / -` only.
+  - Every key that reaches a worker prompt is JSON-quoted (in the manifest and in both frame lines), so neither a key nor content can forge a frame or its provenance.
+  - The context graph and builder agent detail mark expired items.
+  - Only live builder memory counts against the per-agent cap.
+  - Low-scoring items are filed as #1149, #1150 and #1151.
