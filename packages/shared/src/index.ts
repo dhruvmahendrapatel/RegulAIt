@@ -5130,6 +5130,8 @@ export * from "./endpoint-actions.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+// ADR-0357: governance configuration as code (the document schema and the dry-run plan)
+export * from "./governance-config.js";
 
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
