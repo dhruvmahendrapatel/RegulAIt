@@ -5067,6 +5067,7 @@ export * from "./shadow-catalog-v2.js";
 export * from "./shadow-catalog-v3.js";
 export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
+export * from "./agent-config-audit.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
 // ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
