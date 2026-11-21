@@ -26,7 +26,12 @@ export function hostPatterns(sites: readonly Pick<BrowserCatalogueSite, "host">[
   return sites.flatMap((s) => siteMatchPatterns(s));
 }
 
-export function buildManifest(version: string, sites: readonly BrowserCatalogueSite[] = BROWSER_SITE_CATALOGUE): Record<string, unknown> {
+/**
+ * The manifest. `gatewayOrigin` (#1029) is the one gateway this build reaches: its host permission lets the worker call
+ * it without CORS, and only the worker uses it (it is in neither the content-script nor the web-accessible matches).
+ * With none, the build reaches no gateway and stays closed.
+ */
+export function buildManifest(version: string, sites: readonly BrowserCatalogueSite[] = BROWSER_SITE_CATALOGUE, gatewayOrigin: string | null = null): Record<string, unknown> {
   const hosts = hostPatterns(sites);
   return {
     manifest_version: 3,
@@ -35,7 +40,7 @@ export function buildManifest(version: string, sites: readonly BrowserCatalogueS
     version,
     minimum_chrome_version: MIN_CHROMIUM_VERSION,
     permissions: [...PERMISSIONS],
-    host_permissions: hosts,
+    host_permissions: gatewayOrigin ? [...hosts, `${gatewayOrigin}/*`] : hosts,
     background: { service_worker: "background.js", type: "module" },
     content_scripts: [{ matches: hosts, js: ["content.js"], run_at: "document_start", all_frames: false }],
     declarative_net_request: { rule_resources: [{ id: FAIL_CLOSED_RULESET_ID, enabled: true, path: "rules/fail_closed.json" }] },

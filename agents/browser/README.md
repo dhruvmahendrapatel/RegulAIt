@@ -24,9 +24,14 @@ account.
 
 ```bash
 pnpm --filter @regulait/shared build
-pnpm --filter @regulait/browser-extension build    # typecheck, then dist/ (unpacked)
+pnpm --filter @regulait/browser-extension typecheck
+node agents/browser/scripts/build.mjs --gateway-origin https://gateway.example.com   # dist/ (unpacked), pinned to your gateway
 pnpm --filter @regulait/browser-extension test
 ```
+
+`--gateway-origin` is your gateway's public https origin (no path). It becomes the extension's only host permission
+outside the governed sites, and a managed `gatewayUrl` with any other origin is refused. A build without it reaches no
+gateway, so every governed site stays blocked.
 
 `dist/` is the unpacked extension. Sign it into a CRX with your own key and host it on your own update URL; it is
 never published to a store.
