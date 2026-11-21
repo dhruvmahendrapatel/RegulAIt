@@ -230,7 +230,7 @@ runtime [0125](decisions/0125-shared-enforcement-counters.md),
 | Store | Use |
 |---|---|
 | **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). The live context graph (ADR-0365) is plain node, edge and node-scope tables here, read through a recursive CTE under row-level security (no graph database). |
-| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
+| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283) and stage deadline timers (ADR-0340, queue `workflow-stage-deadline`). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
 | **Object Lock bucket** (compose `objectstore`, SeaweedFS) | Audit-chain anchors only; the gateway runs if it is down. |
 | **Nightly `pg_dump` to S3** | Backups (`infra/scripts/pg-backup.sh`). The data key is deliberately not in the backup. |
 | **Engine volumes** | Per-engine state, jobs and results. |

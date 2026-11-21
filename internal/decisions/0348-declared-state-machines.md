@@ -117,4 +117,18 @@ genuinely needs hierarchical or parallel states (then XState v5 is the candidate
   lease only while it still holds it (`lease_owner` and `last_run_at` fence), and says `leaseLost` on its own run row
   otherwise. Tests: `apps/gateway/src/adr0348-slice2-races.test.ts` and one case in `eval-harness.test.ts` (each race
   case fails on the code before slice 2); every registered machine's states are held equal to its column's CHECK.
+- **Slice 3:** `use_case`, `approval`, `redteam_library` and `shadow_ai_finding` declared (eight machines in all).
+  Use cases: the intake sync moves only along the table; a returned sign-off, a retire and a review re-open are
+  guarded on the status read, so none overwrites a retire or a decision committed meanwhile (a re-open of a retired
+  use case is refused up front). Approvals: a review round supersedes only rows still pending. Red-team libraries:
+  the dataset, its cases and the publish commit together under the library's row lock (a publish racing a retire is
+  a 409 and leaves no dataset). Shadow-AI findings: a disposition moves only from the value it read (409
+  `disposition_changed` otherwise). Infra: each proposal (finding remediation, certificate rotation, patch, restore)
+  claims its proposed state with a guarded update in the same transaction as its approval, so two proposals cannot
+  queue two approvals; these four tables are guarded but not declared yet, because their columns have no CHECK and
+  their decision and scan writers are many (the declaration rides the CHECK migration batch). Skill re-scan: guarded
+  on the admission state and digest it read. Billing close: the cut and the close commit under the period's row lock.
+  `GET /v1/state-machines` lists every machine, or one machine and `describe(state)`, to any signed-in caller
+  (definitions only; `machine` is looked up with `Object.hasOwn`). Route census: one KNOWN_UI_GAPS entry on #453.
+  Tests: `apps/gateway/src/adr0348-slice3-races.test.ts` (each race case fails on the code before slice 3).
 
