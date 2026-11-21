@@ -1,4 +1,6 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
+import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
+import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -49,6 +51,7 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpServedDefinitions,
+  type McpServerTransport,
   type McpUpstreamTransport,
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
@@ -73,6 +76,7 @@ import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-prin
 import {
   auditMcpUpstreamUnreachable,
   checkUpstreamDestination,
+  servedInProcess,
   guardedMcpConnect,
   McpEgressBlockedError,
   McpUpstreamRefusedError,
@@ -148,6 +152,8 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -235,6 +241,9 @@ export async function preflightUpstream(
   serverRow: McpUpstreamRow,
 ): Promise<void> {
   await assertAdmitted(db, serverRow.id);
+  // ADR-0364: a first-party server on the gateway's fixed list is served in-process — there is no destination to
+  // decide. Admission (above) and every per-call decision still apply; any other first-party row is refused below.
+  if (await servedInProcess(db, serverRow)) return;
   // ADR-0185 G4: the destination decision (today the URL egress check, audited
   // and thrown exactly as before) — the G4 slice branches it on transport
   await checkUpstreamDestination(db, serverRow);
@@ -798,7 +807,10 @@ export async function executeGovernedToolCall(
       // withhold, that is the marker, not the payload.
       // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
       inputText:
-        capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
+        capture && traceInput.value &&
+        !(outcome.kind === "denied" && (outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID ||
+          // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal
+          outcome.decision.ruleId === PRIVACY_RULE_IDS.dispatchRefused))
           ? toolPayloadPreview(traceInput.value, max)
           : null,
       outputText:
@@ -1500,6 +1512,17 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on the arguments that would reach the upstream (after any redaction). Still before the approval is
+    // consumed and before the upstream is contacted; answered as a policy denial so every caller reports it as one.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "mcp_tool", serverId, toolName },
+      projectId,
+      input: JSON.stringify(preparedPii?.effectiveArguments ?? args.arguments ?? null),
+    });
+    if (processingRefusal) return { kind: "denied", decision: processingRefusalDecision(processingRefusal) };
+
     // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
     // the other two for prompt-injection specifically: ADR-0034's amendment
     // showed a governed pipe can carry ATTACKER-CHOSEN BYTES back, so tool
@@ -2174,7 +2197,7 @@ async function observeServedDefinitions(
   client: Client,
   tools: readonly unknown[],
   /** the same `/metrics` labels the manifest read uses, so each list request is counted once (ADR-0185 G5) */
-  observe: { serverId: string; transport?: McpUpstreamTransport | null | undefined },
+  observe: { serverId: string; transport?: McpServerTransport | null | undefined },
 ): Promise<McpServedDefinitions> {
   const caps = client.getServerCapabilities() ?? {};
   const list = async <T>(fetch: (timeout: number) => Promise<T>): Promise<T | null> => {
@@ -2198,7 +2221,7 @@ export async function syncUpstreamTools(
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
   /** ADR-0185 G5: the row's transport, for the `/metrics` label only */
-  transport?: McpUpstreamTransport | null,
+  transport?: McpServerTransport | null,
   /** the on-demand sync's audit row (mcp-tool-sync.ts), written in the transaction that stores the manifest */
   onStored?: (tx: Db, tools: Tool[]) => Promise<void>,
 ): Promise<Tool[]> {
@@ -2444,13 +2467,20 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
   // server-to-client SSE stream with GET. This proxy is stateless (one
   // transport per POST, no session id), so it offers none, and the spec's
   // answer for that is 405 with `Allow: POST`. A 404 here made a conformant
-  // client report a transport error after every `initialize`. (No DELETE: a
-  // client sends it only to end a session, and no session id is ever issued.)
+  // client report a transport error after every `initialize`. DELETE ends a
+  // session, and none is ever issued, so it is 405 too (ADR-0311: the spec's
+  // answer for a server without sessions, where a 404 read as "session gone").
   // Auth still runs first (the app-level hook), so an anonymous probe gets 401.
-  app.get("/mcp/:serverId", async (_req, reply: FastifyReply) =>
-    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" }));
+  const postOnly = async (_req: unknown, reply: FastifyReply) =>
+    reply.status(405).header("allow", "POST").send({ error: "method_not_allowed", detail: "this MCP endpoint is POST-only (stateless Streamable HTTP)" });
+  app.get("/mcp/:serverId", postOnly);
+  app.delete("/mcp/:serverId", postOnly);
 
   app.post("/mcp/:serverId", async (req, reply) => {
+    // ADR-0311: the transport MUSTs the SDK does not enforce for us, before anything reaches an upstream
+    const originRefused = mcpOriginRefusal(req.headers.origin, resolvePublicUrl());
+    if (originRefused) return reply.status(originRefused.status).send({ error: originRefused.error, detail: originRefused.detail });
+    if (mcpBatchRefused(req.body, req.headers["mcp-protocol-version"])) return reply.status(400).send(MCP_BATCH_REFUSAL);
     const { serverId } = proxyParams.parse(req.params);
     const queryParse = proxyQuery.safeParse(req.query);
     if (!queryParse.success) {

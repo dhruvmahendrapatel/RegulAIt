@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // oneLineToken is the enrolment token's shape (the gateway's `rgea_` prefix and 64 hex characters).
@@ -26,7 +28,7 @@ func Enrol(ctx context.Context, o Options, in io.Reader) RedeemStatus {
 	st := func(outcome, code, ticketID string) RedeemStatus {
 		s := RedeemStatus{Schema: "regulait.endpoint-redeem-status/1", Outcome: outcome, Code: code, TicketID: ticketID, At: o.Now().UTC().Format(time.RFC3339)}
 		if b, err := json.MarshalIndent(s, "", "  "); err == nil {
-			if err := writeAtomic(o.Paths.StatusFile, append(b, '\n'), 0o644, -1); err != nil {
+			if err := fsutil.WriteAtomic(o.Paths.StatusFile, append(b, '\n'), 0o644, -1, true); err != nil {
 				o.Log.Error("enrol: could not write the status file", "err", err)
 			}
 		}

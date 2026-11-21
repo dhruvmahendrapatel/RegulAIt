@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/update"
 )
 
@@ -70,7 +71,7 @@ func readSpool(path string, max int64) ([]byte, error) {
 	if !st.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	f, err := openNoFollow(path)
+	f, err := fsutil.OpenNoFollow(path)
 	if err != nil {
 		return nil, err
 	}
@@ -87,12 +88,12 @@ func readSpool(path string, max int64) ([]byte, error) {
 
 // ticketDeviceID is the device id the ticket file names (an expired ticket still names its device).
 func ticketDeviceID(o Options, cfg *Config) (string, error) {
-	raw, err := readChecked(o.Paths.TicketFile, o.SystemOwner, GroupRead)
+	raw, err := readChecked(o.Paths.TicketFile, o.SystemOwner, fsutil.GroupRead)
 	if err != nil {
 		return "", err
 	}
 	var t TicketFile
-	if err := strictJSON(raw, &t); err != nil || t.Schema != contract.SchemaTicketFile || t.Issuer != cfg.Issuer || t.TicketID == "" {
+	if err := fsutil.StrictJSON(raw, &t); err != nil || t.Schema != contract.SchemaTicketFile || t.Issuer != cfg.Issuer || t.TicketID == "" {
 		return "", errors.New("the ticket file is malformed")
 	}
 	return t.TicketID, nil
@@ -113,7 +114,7 @@ func SelfUpdate(ctx context.Context, o Options, installed string) UpdateResult {
 		res.Outcome, res.Code, res.At = outcome, code, o.Now().UTC().Format(time.RFC3339)
 		if outcome != UpdateNothing && outcome != UpdateNotEnabled {
 			if b, err := json.MarshalIndent(res, "", "  "); err == nil {
-				if err := writeAtomic(filepath.Join(o.Paths.SpoolDir, SpoolResult), append(b, '\n'), 0o644, -1); err != nil {
+				if err := fsutil.WriteAtomic(filepath.Join(o.Paths.SpoolDir, SpoolResult), append(b, '\n'), 0o644, -1, true); err != nil {
 					o.Log.Error("update: could not write the result file", "err", err)
 				}
 			}
@@ -190,7 +191,7 @@ func stageFromSpool(src, dst string, t *update.Target) error {
 	if err != nil || !st.Mode().IsRegular() {
 		return &update.Error{Code: update.CodeBinaryMismatch, Detail: "no regular binary in the spool"}
 	}
-	f, err := openNoFollow(src)
+	f, err := fsutil.OpenNoFollow(src)
 	if err != nil {
 		return &update.Error{Code: update.CodeBinaryMismatch, Detail: fmt.Sprint(err)}
 	}

@@ -3,7 +3,7 @@
 - **Status**: Proposed (builder lane E41, 2026-11-17; owner decision 2026-11-17, competitor gap audit DarkControl row 21
   and Manifold row 14)
 - **Date**: 2026-11-17
-- **Index**: Endpoint fleet ops: device groups, off-by-default signed staged self-update, one-line enrolment, EDR adapters
+- **Index**: Endpoint fleet ops: staged rollouts over ADR-0350 groups, off-by-default signed staged self-update, one-line enrolment, EDR adapters
 - **Builds on**: ADR-0195 (SD4 endpoint agent), ADR-0197 (Q13 token expiry relaxation), ADR-0259 (endpoint MCP config
   discovery), ADR-0298 (on-device enforcement), ADR-0330 (hook adapters; B4 device-policy signer), and the open
   proposals of lane E16 (the device-policy signer as built, PR #867), lane E15 (the detection engine, PR #865) and lane
@@ -74,11 +74,19 @@ timing-safe compare and a replay window, the shape the PM webhooks already use.
 
 ## Decision
 
-### 1. Device groups (staging rings)
+### 1. Device groups: ADR-0350's, reused
 
-A device group belongs to one endpoint-agent discovery source. A device is in at most one group (the join table's
-primary key is the device), so a rollout stage selects a disjoint set of devices. Groups and memberships are
-admin-only, audited, and in third normal form (`endpoint_device_groups`, `endpoint_device_group_members`).
+The rollout stages are lane E31's device groups ([ADR-0350](0350-endpoint-command-file-package-rules.md):
+`endpoint_device_groups`, `endpoint_device_group_members` and the `/v1/endpoint-device-groups` routes). This lane
+adds no group concept of its own (first drafted as per-source rings; replaced on 2026-11-21 when ADR-0350 merged first).
+
+- ADR-0350 groups are org-wide and a device may be in several. A stage offers the update to the members of its group
+  that are devices of the rollout's source; a device in several staged groups is offered it by the first stage, in
+  ordinal order, that holds it.
+- An ADR-0350 group only narrows a device's policy (its rules are ask or deny), so placing a device in one, as the
+  one-line enrolment does, is never a relaxation. Leaving or deleting a group stays ADR-0350's step-up.
+- A rollout never blocks ADR-0350's group delete: the stage's and the token's foreign keys are `ON DELETE SET NULL`.
+  The stage keeps the group's name as evidence (a point-in-time snapshot) and then offers the update to no device.
 
 ### 2. Self-update: off by default, a relaxation
 
@@ -91,7 +99,7 @@ admin-only, audited, and in third normal form (`endpoint_device_groups`, `endpoi
 
 ### 3. Staged rollouts: a declared lifecycle
 
-A rollout names one target version and an ordered list of stages, each one device group. At most one rollout per
+A rollout names one target version and an ordered list of stages, each one ADR-0350 device group. At most one rollout per
 source is open (not `completed` or `aborted`; a partial unique index).
 
 Rollout lifecycle (`endpoint_update_rollouts.state`, declared once in `endpoint-fleet-lifecycle.ts`):
@@ -147,8 +155,7 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
 - **short-lived**: 15 minutes by default, at most 60 (a CHECK);
 - **single-use**: device cap 1 (a CHECK), consumed by the first redemption;
 - **scope-limited**: it redeems a device ticket for its own source only, and optionally places the device in one
-  device group of that source (a composite foreign key, so the group cannot belong to another source). It reaches no
-  other route;
+  ADR-0350 device group (which only narrows the device's policy). It reaches no other route;
 - **never logged**: only its SHA-256 is stored; the gateway logger redacts the Authorization header; the audit rows
   name the token id, never the secret. On the device, `regulait-agent enrol` reads the token from standard input, never
   from an argument (an argument is visible to every user in the process list), and never writes it to disk or a log.
@@ -188,7 +195,7 @@ process list). The token is consumed on use, so a copy left in shell history is 
 
 ## Slices
 
-1. **1a (gateway):** this ADR, device groups, the self-update setting, rollouts and their lifecycle, one-line
+1. **1a (gateway):** this ADR, the self-update setting, rollouts over ADR-0350 device groups and their lifecycle, one-line
    enrolment tokens.
 2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the root updater: directive and manifest
    verification, the downgrade refusal, staging, health check and rollback.

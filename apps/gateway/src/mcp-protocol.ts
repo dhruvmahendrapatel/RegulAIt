@@ -128,6 +128,7 @@ import { checkStdioClosure } from "./mcp-transports.js";
 import { classifyScannedContent, recordContentProvenance } from "./content-provenance.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -612,6 +613,14 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       return { kind: "pii_blocked", reason, pii: { mode: piiMode, action: "block", inputHits, outputHits: [], withheld: false } };
     }
   }
+  // ADR-0224 addendum (2026-11-20): the processing limit, the governed core's one check path, on the decided arguments
+  const processingRefusal = await governedProcessingLimit(db, {
+    userId,
+    target: { type: "mcp_tool", serverId, toolName: grant, method },
+    projectId,
+    input: inputText,
+  });
+  if (processingRefusal) return { kind: "denied", decision: processingRefusalDecision(processingRefusal) };
   const guardrails = await resolveGuardrailPolicy(db, { projectId, userId });
   if (guardrails.active) {
     const evaluation = await runGuardrailsAsync(guardrails, "input", inputText);
