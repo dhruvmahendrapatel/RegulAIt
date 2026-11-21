@@ -536,6 +536,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0350 (lane E31): per-device command-rule exceptions
     "endpoint_command_exceptions.reason",
     "endpoint_command_exceptions.decision_reason",
+    // ADR-0333 §5b (pending migration `agent_detection_suppressions`)
+    "detection_suppressions.reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",

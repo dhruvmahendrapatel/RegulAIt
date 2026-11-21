@@ -2085,6 +2085,8 @@ export const auditLog = pgTable(
         // null). Plain text column — no DDL.
         "detection_incident",
         "detection_rule_pack",
+        // ADR-0333 §5b: a per-rule detection suppression (objectId = the suppression). Plain text column — no DDL.
+        "detection_suppression",
         // ADR-0350 (lane E31): an endpoint device group (objectId = the group) and a per-device command-rule
         // exception (objectId = the exception). Plain text column — no DDL.
         "endpoint_device_group",
@@ -19678,6 +19680,52 @@ export const endpointDeviceQuarantines = pgTable(
   ],
 );
 export type EndpointDeviceQuarantineRow = typeof endpointDeviceQuarantines.$inferSelect;
+
+/** ADR-0333 §5b: `detection_suppressions.status`, the ADR-0348 machine DETECTION_SUPPRESSION_MACHINE (expiry derived) */
+export const DETECTION_SUPPRESSION_STATUSES = ["active", "revoked"] as const;
+
+/**
+ * One per-rule suppression (migration `agent_detection_suppressions`, pending): while `active` and before `expires_at`,
+ * matches of `rule_id` in exactly `group_key` raise no incident and are counted in a `detection-suppressed` audit row
+ * instead. Creating one is a relaxation (`settings_relax` step-up, method stored); revoking is a narrowing. One
+ * deployment is one tenant (ADR-0041), and RLS confines the table to admins and the sweep. `rule_id` names a rule of
+ * the signed pack (its configuration document), not a row, so it is text by design.
+ */
+export const detectionSuppressions = pgTable(
+  "detection_suppressions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: text("rule_id").notNull(),
+    groupKey: text("group_key").notNull(),
+    reason: text("reason").notNull(),
+    status: text("status", { enum: DETECTION_SUPPRESSION_STATUSES }).notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    /** the step-up method the creating admin used (a fixed code, never a secret) */
+    createStepUp: text("create_step_up").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("detection_suppressions_rule_id_check", sql`${t.ruleId} ~ '^[a-z0-9][a-z0-9-]{0,63}$'`),
+    check(
+      "detection_suppressions_group_key_check",
+      sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check("detection_suppressions_reason_check", sql`length(btrim(${t.reason})) BETWEEN 1 AND 500`),
+    check("detection_suppressions_status_check", sql`${t.status} IN ('active', 'revoked')`),
+    check("detection_suppressions_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`),
+    check("detection_suppressions_step_up_check", sql`${t.createStepUp} ~ '^[a-z_]{1,32}$'`),
+    check(
+      "detection_suppressions_revoked_check",
+      sql`(${t.status} = 'revoked') = (${t.revokedAt} IS NOT NULL) AND (${t.revokedBy} IS NULL OR ${t.status} = 'revoked') AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
+    ),
+    index("detection_suppressions_match_idx").on(t.groupKey, t.ruleId, t.expiresAt).where(sql`${t.status} = 'active'`),
+    index("detection_suppressions_created_idx").on(t.createdAt, t.id),
+  ],
+);
+export type DetectionSuppressionRow = typeof detectionSuppressions.$inferSelect;
 // ===== end ADR-0333 =================================================================================================
 
 // ===== ADR-0363 slice 2 (lane E44): customer classifiers — migration `custom_classifiers` (pending, numbered at merge) =====

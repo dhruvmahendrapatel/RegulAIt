@@ -202,6 +202,36 @@ match tool names only, so they are heuristics, and the admin can edit them.
   its `describe()` lifecycle), and the release route above. RLS is enabled and forced on the table, with the incident
   tables' admin and `system_task` policy.
 
+### 5b. Suppressions and the dry run (slice 4)
+
+- **A suppression covers one rule in one group, for a bounded time.** It names a rule of the active pack and exactly
+  one group key (`user:`, `grant:` or `endpoint:`; never a wildcard: silencing a rule for everyone is a pack edit,
+  which has its own step-up). It lasts 1 to 720 hours, and the database caps the row at 30 days. At most 200 are
+  active at once, and one per (rule, group).
+- **Creating one is a relaxation.** `POST /v1/detection/suppressions` takes a `settings_relax` step-up bound to the
+  exact terms (rule, group, hours and a digest of the reason). The method is stored on the row, and the creation is
+  audited (`detection-suppression-created`). The reason is free text, so it is registered with the prose scrub.
+- **A suppression never hides that the rule fired.** While it is active and unexpired, the sweep raises no incident for
+  that rule in that group. It writes one `detection-suppressed` audit row per suppression per batch, with the match
+  count and the trigger sequence numbers, in the batch's transaction, so it reaches the SIEM. Suppressions apply to
+  replayed history too, and those rows say `historical`.
+- **Lifecycle (ADR-0348).** `DETECTION_SUPPRESSION_MACHINE`, `active -> revoked`. Revoking early is a narrowing: any
+  admin, no step-up, audited (`detection-suppression-revoked`). Expiry is derived from `expires_at` and never stored,
+  as for the ADR-0350 exceptions. An expired row reads as `expired`, suppresses nothing, and `describe` shows revoke
+  refused for it.
+- **Tenant scope.** One deployment is one tenant (ADR-0041). RLS on the table, enabled and forced, keeps it to admin
+  principals and the sweep (`system_task`), like the incident tables.
+- **The dry run.** `POST /v1/detection/rule-pack/dry-run` evaluates the active pack, or a proposed one, over a past
+  window of at most 7 days. It reads at most 20,000 audit rows plus the look-back the pack's longest timespan needs, and
+  says `truncated` when it stopped early. It runs the same engine as the sweep inside one `READ ONLY` transaction, so it
+  writes no incident, episode, cursor or response. It returns per-rule `hits`, distinct `groups`, and `suppressedNow`
+  (the hits a suppression active today would hold back). Incidents already raised are ignored, so the counts answer
+  "what would this pack raise on this history". The run itself is audited (`detection-pack-dry-run`: who, which pack
+  digest, which window), because it reads the audit trail.
+- **Overlap with rogue-agent containment (#1134, ADR-0366).** Containment acts on governance-monitor alerts, not on
+  these incidents. A future link from detection incidents to containment would see only raised incidents, so a
+  suppressed match would contain nothing; that is the intended meaning of a suppression.
+
 ### 6. Reuse and open-source search (ADR-0176)
 
 **In the repo first:**
@@ -277,6 +307,6 @@ As built:
 - Tool classes match names, not behaviour. A tool named to evade a class is not caught by that class. The pack is
   editable so that each deployment can tune it, and the incident evidence makes false positives cheap to review.
 - The routes are API only. The screens are known UI gaps tracked on #453.
-- **Follow-ups:** endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); a per-rule suppression
-  list for known-good automations; a rule test harness in the admin API (dry-run a pack over a past window).
+- **Follow-ups:** endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); the incident,
+  rule-pack, suppression and dry-run screens (#453). The suppression list and the dry run are built (section 5b).
 
