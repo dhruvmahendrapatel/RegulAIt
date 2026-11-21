@@ -509,6 +509,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "mrm_retest_runs.reason",
     // ADR-0331: the admin's reason for removing an MCP server from endpoints
     "endpoint_addon_removals.reason",
+    // ADR-0338: the admin's reason for a vendor agent control action
+    "vendor_agent_actions.reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -582,6 +584,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "redteam_runs.gate_reason",
     "redteam_runs.note",
     "remediation_proposals.rationale",
+    // ADR-0327 slice 4a — a rule-step switch request's reason and revert reason
+    "rule_step_switches.reason",
+    "rule_step_switches.revert_reason",
     "shadow_ai_findings.disposition_reason",
     "shadow_ai_findings.replacement_note",
     "shadow_ai_imports.reason",

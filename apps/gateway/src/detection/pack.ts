@@ -20,13 +20,16 @@ export const DETECTION_LIMITS = {
   globLength: 64,
   maxTimespanSeconds: 3600,
   maxThreshold: 1000,
+  /** ADR-0333 §6: how long a `quarantine_device` response quarantines the device unless an admin releases it sooner */
+  quarantineHoursDefault: 72,
+  quarantineHoursMax: 720,
 } as const;
 
 const SEVERITIES = ["low", "medium", "high", "critical"] as const;
 export type DetectionSeverity = (typeof SEVERITIES)[number];
 
-/** slice 1 runs `alert` only; the stronger responses are carried by the schema so a pack round-trips (slice 2) */
-export const RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval"] as const;
+/** `alert` is the default; the others run after the incident commits (responses.ts), and need a step-up (ADR-0333 §5) */
+export const RESPONSES = ["alert", "suspend_grant", "revoke_credential", "require_approval", "quarantine_device"] as const;
 export type DetectionResponse = (typeof RESPONSES)[number];
 
 const ident = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
@@ -57,6 +60,8 @@ const base = {
   severity: z.enum(SEVERITIES),
   enabled: z.boolean(),
   response: z.enum(RESPONSES).default("alert"),
+  /** only with `response: quarantine_device`; absent means `DETECTION_LIMITS.quarantineHoursDefault` */
+  quarantineHours: z.number().int().min(1).max(DETECTION_LIMITS.quarantineHoursMax).optional(),
 };
 const timespan = z.number().int().min(1).max(DETECTION_LIMITS.maxTimespanSeconds);
 
@@ -99,6 +104,9 @@ export const packSchema = z
     const seen = new Set<string>();
     pack.rules.forEach((rule, i) => {
       if (seen.has(rule.id)) ctx.addIssue({ code: "custom", message: "duplicate rule id", path: ["rules", i, "id"] });
+      if (rule.quarantineHours !== undefined && rule.response !== "quarantine_device") {
+        ctx.addIssue({ code: "custom", message: "quarantineHours applies only to the quarantine_device response", path: ["rules", i, "quarantineHours"] });
+      }
       seen.add(rule.id);
       const selectors = rule.type === "temporal_ordered" ? rule.steps.map((s) => s.selector) : [rule.selector];
       for (const s of selectors) {

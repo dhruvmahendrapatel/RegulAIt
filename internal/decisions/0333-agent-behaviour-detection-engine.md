@@ -136,12 +136,71 @@ match tool names only, so they are heuristics, and the admin can edit them.
 ### 5. Responses (slice 2)
 
 - `alert` is the default for every rule.
-- An admin may set a rule's `response` to `suspend_grant` (revoke the agent session's delegation tree, ADR-0188),
-  `revoke_credential` (revoke the acting identity's short-lived credentials) or `require_approval` (the group's next
-  governed call needs approval through the existing Approvals Queue).
+- An admin may set a rule's `response` to one of three values. Each reuses an existing mechanism, so no new
+  enforcement path is added:
+  - `suspend_grant`: revoke the group's delegation tree at its root (`revokeDelegationGrant`, which cascades). Every
+    later use of a grant in the tree fails, because `loadLiveChain` re-reads the path. The revoke reason is `admin`,
+    and the actor is the pack author. A group that is not a delegation tree fails with `not_delegated`.
+  - `revoke_credential`: revoke the acting identity's live short-lived access tokens (`issued_tokens`). The identity
+    can mint new tokens through its own credential. For a lasting stop, use `suspend_grant`. A call with no actor
+    fails with `no_actor_identity`.
+  - `require_approval`: a user-scoped, all-servers approval rule for the sponsor, written through the one create
+    (`createApprovalRuleRow`) with the pack author as approver. The sponsor's MCP tool calls then meet the existing
+    Approvals Queue. This is stricter than "the next call": the rule stays until an admin removes it. If the
+    approver would be the sponsor, the response fails with `no_independent_approver`. A second detection reuses the
+    rule rather than adding another.
 - A pack whose rules carry any response stronger than `alert` is a relaxation of the default posture. It needs a
-  `settings_relax` step-up and is audited as one. Responses run after the incident commits, are recorded on the
-  incident, and their failure is recorded, never retried silently.
+  `settings_relax` step-up and is audited as one. Its author is the acting admin.
+- Responses run after the incident commits, in the same leased pass. A pass that ends between the commit and the
+  response leaves the response pending (`response_state = none`), and the next pass runs it. The outcome is recorded
+  on the incident (`done` or `failed`, with a fixed `response_error_code`) and in a `detection-response` audit row.
+  That row's effect is `deny` when the response took effect and `allow` when it did not. A failure is never retried
+  silently.
+- **One transaction per response (review of #1060).** The action, the guarded `response_state` move and the audit row
+  commit together; `revokeDelegationGrant` and the approval-rule create join it as savepoints. A crash or an error
+  between them rolls the action back, so a response is never applied without being recorded and audited. An
+  unexpected error is recorded as `response_error` in a fresh transaction with nothing applied. A run against an
+  incident whose response is already terminal changes nothing.
+- **`require_approval` reuses only an identical rule.** An existing rule counts only if it has exactly the shape the
+  response creates (user scope, all servers, no tool, not write-only, every deploy mode, per-action approval, the same
+  approver). A narrower rule an admin set up earlier does not satisfy it, so the full rule is still created.
+- **The pack author.** The acting admin and approver is the author of the pack version that raised the incident. Their
+  standing is not re-checked when a restricting response runs; for `require_approval`, a pool the author can no longer
+  satisfy is refused by the approval-rule create, so the response fails closed (`approval_rule_refused`).
+
+### 5a. Device quarantine (slice 3, GAP_ANALYSIS_DARKCONTROL gap 4)
+
+- **Endpoint decisions group by device.** An endpoint hook decision (ADR-0310 addendum) is audited with the nil user
+  and the device as its object. Its group key is now `endpoint:<deviceId>`, not `user:<nil>`; before this slice every
+  device's decisions fell into one group, so a burst on one device and a single deny on another counted together. The
+  look-back is narrowed to the fresh devices as well as the fresh users.
+- **`quarantine_device` is a fifth response.** It applies only to an `endpoint:` group (`not_endpoint` otherwise) and
+  to a live device (`device_not_found` for a revoked or unknown one). It opens one active row in
+  `endpoint_device_quarantines` for the rule's `quarantineHours` (1 to 720, default 72; the database caps the row at
+  30 days). A device with an active quarantine keeps it: at most one is active per device (partial unique index), and
+  the response reports `existing: true`. It runs in the response transaction of section 5, so it is never applied
+  unrecorded. Like every response stronger than `alert`, it exists only in a pack stored behind a `settings_relax`
+  step-up.
+- **The lifecycle is an ADR-0348 machine**, `ENDPOINT_DEVICE_QUARANTINE_MACHINE` (`active -> released | expired`),
+  held equal to the column's CHECK by the shared machine test. Every move is one conditional UPDATE from `whereFrom`.
+- **Release needs a human admin with a step-up.** `POST /v1/detection/quarantines/:id/release` takes a `settings_relax`
+  step-up bound to the quarantine. The method is stored on the row, and the release is audited
+  (`detection-quarantine-released`). A system or bootstrap principal without a user cannot release.
+- **Expiry** is run by the sweep, at most 100 rows per pass, one `detection-quarantine-expired` audit row each.
+- **The kill switch: narrowing only (ADR-0338 §7, reused, not rebuilt).** The generic guard ADR-0338 §5 specifies,
+  `killSwitchNarrowingOnly({ dial, direction })`, is in `@regulait/shared` (it had not been built when this slice
+  started; lane E19 imports it instead of writing it). Opening a quarantine is narrowing and runs under any execution
+  dial. Release and expiry are widening: while the dial is not `normal`, a release is refused
+  (`execution_dial_not_normal`) and nothing expires, so a halt keeps every quarantine in force.
+- **Enforcement on the device is not delivered yet (owner question open).** The hook decides on the device (ADR-0298),
+  and no gateway call is attributed to a device, so the gateway cannot refuse the device's AI tools alone. Delivering
+  "deny-all for AI tools while quarantined" needs the agent to learn of its quarantine through its signed channel: a
+  change to `agents/endpoint/` (lane E13). `activeQuarantineForDevice` is the read that delivery uses. Until it lands,
+  every quarantine view says `deviceEnforcement: "not_delivered"` (ADR-0180: an unknown is never shown as fine).
+- **Admin routes** (admin-only by the default gate, API only; the screens are known UI gaps on #453):
+  `GET /v1/detection/quarantines` (keyset-paginated, by status or device), `GET /v1/detection/quarantines/:id` (with
+  its `describe()` lifecycle), and the release route above. RLS is enabled and forced on the table, with the incident
+  tables' admin and `system_task` policy.
 
 ### 6. Reuse and open-source search (ADR-0176)
 

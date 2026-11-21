@@ -129,6 +129,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.connectorRevocations, ["reason"]],
   // ADR-0327 addendum — why the author proposed a decision-table version
   [s.decisionTableVersions, ["reason"]],
+  // ADR-0327 slice 4a — why an admin asked to switch a rule-like step, and why it was reverted
+  [s.ruleStepSwitches, ["reason", "revertReason"]],
   // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)
   [s.connectors, ["disabledReason"]],
   // ADR-0124 — the emergency-stop reasons. Operator free prose typed under
@@ -305,6 +307,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.mrmRetestRuns, ["reason"]],
   // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
   [s.endpointAddonRemovals, ["reason"]],
+  // ADR-0338: the admin's reason for a vendor agent control action
+  [s.vendorAgentActions, ["reason"]],
 ];
 
 /**

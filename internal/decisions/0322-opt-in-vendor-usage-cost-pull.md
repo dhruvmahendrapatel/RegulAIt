@@ -194,6 +194,24 @@ The routes are API only; screens are tracked on #453.
 - ADR-0069's "there is no vendor billing-API client in this repository" and ADR-0076's "Still no polling" are no
   longer true for tenants that opt in. Both ADRs' status lines point here.
 
+## Owner decisions for slice 4a, AWS Bedrock spend (2026-11-20, answered in lane E7)
+
+Asked by the lane E7 builder before building the `aws_cur` connector; the owner answered each question directly.
+
+1. **Credentials**: the federated role (the customer's role trusts RegulAIt's federation issuer,
+   `AssumeRoleWithWebIdentity`, audience `sts.amazonaws.com`) and a static access-key pair, the latter as an audited
+   relaxation with its own acknowledgement. The "RegulAIt principal plus external id" mode is left to a later PR.
+2. **Restatement**: a pull **replaces the connector's lines for each billing month it re-reads**. A line that is no
+   longer in AWS's restated file is withdrawn, not kept stale.
+3. **Money**: `line_item_unblended_cost`, matching the ADR-0069 CUR file import. Every line item type is kept (usage,
+   credits, refunds, tax), with the type recorded on the line.
+4. **Identity**: an IAM principal maps to a person only through an admin alias. An email-shaped role session name is
+   never resolved automatically, because the caller chooses it.
+
+Defaults the builder chose, recorded for review: the connector expects a dedicated Bedrock-only CUR 2.0 export (a
+whole-estate export at a large organisation exceeds the per-run bounds), and failures reuse the existing run error
+codes (`no_credential` when federation is off, `bad_response` for a Parquet export), so no migration is needed.
+
 ## As built — slice 2 (2026-11-15): foundation, Anthropic and OpenAI
 
 Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gateway/src/vendor-usage-pull.ts` and
@@ -262,3 +280,103 @@ Migration `pending/vendor_usage_pull.sql` (numbered at merge); code in `apps/gat
   the cost report, so pulling it as spend would double count; it needs an attribution-only design); Anthropic's newer
   Analytics API (`/v1/organizations/analytics/cost`, beta); the settings screen (#453); live-tenant tests (lane E11).
 
+## As built — slice 3 (2026-11-19): GitHub Copilot and Cursor
+
+Code in `packages/shared/src/vendor-usage.ts` (catalogue, config and response schemas, normalisers) and
+`apps/gateway/src/vendor-usage-pull.ts` (the two fetchers); proof in `zz-adr0322-vendor-usage-pull.test.ts` and
+`vendor-usage.test.ts` (fake vendors only). No new route, no migration: `vendor_usage_connectors_vendor_check` already
+allowed `github_copilot` and `cursor`, and the nine slice 2 routes take the new vendors through the same schemas.
+
+Endpoint shapes re-checked against docs.github.com (billing usage, Copilot user management) and cursor.com/docs (teams
+Admin API) on 2026-11-19.
+
+- **GitHub Copilot**: `GET /organizations/{org}/settings/billing/usage` or `/enterprises/{enterprise}/...` with `year`,
+  `month` and `day`, one request per day of the window (the report has no pagination and no range parameter), header
+  `X-GitHub-Api-Version: 2026-03-10`. Only items whose `product` names Copilot are kept; `netAmount` is the amount.
+  The configuration names the account kind and the organisation or enterprise slug, validated as a GitHub login so the
+  path segment cannot be steered.
+  - **Identity**: the report has no person dimension, so a line is billed to its organisation (the repository is in
+    the line's detail and in the fact identity) and resolves to a person only through an admin alias.
+  - **Currency**: GitHub does not state it; the lines are recorded as USD, the currency GitHub bills in, and the
+    catalogue says so.
+  - **Scope posture `unverified`**: GitHub documents read permissions for both reports, but a fine-grained token can
+    also carry write permissions and GitHub does not report them back, so RegulAIt cannot verify the scope.
+  - **Not built**: per-user premium-request usage (`/premium_request/usage?user=`, one request per user), cost-centre
+    names (only on the enterprise premium-request and AI-credit responses), and the Copilot seats list.
+- **Cursor**: `POST https://api.cursor.com/teams/filtered-usage-events` with `startDate` and `endDate` (epoch ms, both
+  inclusive), 1000 events a page, Basic auth with the key as the user name. Events are summed per UTC day, user email
+  (or service account), model, kind and product from each event's `chargedCents`, which Cursor names as the figure
+  that reconciles with team spend. Cents are summed as integer micro-cents. A user resolves to a person by email.
+  - **Difference from §6**: Cursor's docs now require an `admin:*` key for the Admin API, not a `read:*` key, so the
+    credential is `write_capable` and needs the slice 2 acknowledgement, like the Anthropic and OpenAI Admin keys.
+  - **Bounds**: a window of more than 40 pages (40,000 events) stops with `page_limit`; the admin lowers
+    `backfillDays` (at most 30, Cursor's stated range for its other usage endpoints). A page number other than the one
+    asked for is refused as `bad_response`.
+- **Review round (#1069)**:
+  - **An unverified scope needs an attestation** (S4 finding 1, ADR-0180): storing a credential whose posture is
+    `unverified` is refused (409 `unverified_scope_acknowledgement_required`) unless the admin sends
+    `acknowledgeUnverifiedScope: true`, attesting that the token carries read permissions only. The acknowledgement
+    time is recorded on the credential (the existing `write_capable_acknowledged_at` column now holds the
+    acknowledgement of any posture other than `read_only`; no migration). The attestation is in the audit row and on
+    the posture read (`scopeAcknowledgedAt`, `scopeAttestation`).
+  - **Same-key Copilot items are summed** (R4 finding 1): two items with the same day, product, SKU, organisation and
+    repository (for example around a price change) are one fact whose net amount, quantity, gross and discount are
+    summed in integer micro-units. Before this, the pull kept only the last one and dropped the rest of the spend.
+  - **Disclosure** (S4 finding 2): the Cursor catalogue limits state that the user's email is stored as each line's
+    account reference.
+  - **Tracked, not changed**: a Cursor window can reach 32 days after a long gap (R4 finding 2, triage-low #1083).
+- **No metered overlap**: the gateway meters neither Copilot nor Cursor, so neither connector declares gateway ids and
+  the posture read says so instead of the "nothing declared" warning.
+- **Open source first (ADR-0176)**: `@octokit/request` (MIT, maintained) was compared with the guarded fetch already
+  used for Anthropic. It was not added: it is a new dependency whose fetch would have to be replaced by the guarded one
+  anyway, for one unpaginated GET per day. Cursor publishes no SDK for its Admin API.
+
+## As built — slice 4a (2026-11-20): AWS Bedrock spend from CUR 2.0
+
+Built to the owner decisions above. Code: `packages/cloud-discovery/src/aws-cur.ts` (the S3 reader),
+`packages/shared/src/vendor-usage.ts` (catalogue, config and secret schemas, `normalizeAwsCurCsv`,
+`awsCurBillingPeriods`) and `apps/gateway/src/vendor-usage-pull.ts` (`fetchAwsCur`, month replacement). Proof:
+`aws-cur.test.ts` (fake S3 and STS behind the injected fetch), `vendor-usage.test.ts` and
+`zz-adr0322-vendor-usage-pull.test.ts`. No new route, no migration, no new dependency: `@aws-sdk/client-s3` is already
+pinned in `@regulait/cloud-discovery` (its THIRD_PARTY row now names this use).
+
+- **Credentials**:
+  - **Federated** (the default to offer): the connector's config names the customer's role; the pull presents a
+    RegulAIt federation token (`sub` = `regulait:vendor-usage-connector:<id>`, `aud` = `sts.amazonaws.com`) to
+    `AssumeRoleWithWebIdentity`, through `awsCredentialProvider`. The customer's trust policy pins both. The stored
+    credential is a marker (`{"mode":"federated"}`), so storing, attesting and revoking it is still the switch. While
+    federation is off or its issuer is unset the run is refused as `no_credential` and AWS is not called.
+  - **Static**: `{"mode":"static","accessKeyId","secretAccessKey"}`, stored only with `acknowledgeStaticAwsKey: true`,
+    recorded in the step-up facts and the audit row (`staticAwsKeyAcknowledged`).
+  - Both are `unverified` (RegulAIt cannot read the IAM policy without wider access) and need the
+    `acknowledgeUnverifiedScope` attestation; the catalogue names the minimal policy (`s3:ListBucket`, `s3:GetObject`
+    on the export prefix, `kms:Decrypt` for a KMS bucket). A secret that does not match the connector's mode is a 400.
+- **Transport**: STS and S3 run on one guarded fetch (`guardedAwsRequestHandler`, pinned endpoints, virtual-hosted
+  addressing, no accelerate or ARN-region endpoints), sized for CUR objects. The hosts the admin allow-lists are
+  `<bucket>.s3.<region>.amazonaws.com` and, for federated mode, `sts.<region>.amazonaws.com`. The bucket name may not
+  contain dots, so virtual-hosted TLS always works.
+- **Read path**: per billing period, the manifest at `<prefix>/<exportName>/metadata/BILLING_PERIOD=YYYY-MM/`
+  (`Manifest.json` or `<exportName>-Manifest.json`; the latest if AWS left several). Every data file it names must lie
+  under the period's `data/` folder in the same bucket, checked before the first read. Only `.csv.gz` is read; a
+  Parquet export fails as `bad_response` with "this export is Parquet; recreate it as gzip-compressed CSV". Bounds: 20
+  data files a period, 32 MB an object (declared length and a running cap), 128 MB inflated (a gzip bomb is refused),
+  one million rows a run (`page_limit`). A period with no manifest yet is skipped, not an error.
+- **Normalisation**: only the named `line_item_*` columns are read; tags, resource ids and the free-text description
+  are discarded at parse. Lines with a product code in `productCodes` (default `AmazonBedrock`; Marketplace model codes
+  unverified) are summed per UTC day, account, IAM principal, product code, usage type, line item type and currency.
+  The amount is `line_item_unblended_cost` in integer micro-units (a decimal string is never divided as a float); every
+  line item type is kept and recorded. A line dated outside its billing period, a malformed account id or a principal
+  that is not an ARN fails the run rather than being moved or guessed.
+- **Identity**: `line_item_iam_principal` when the export carries it (`accountKind` `iam_principal`), else
+  `aws account <id>`. Resolution is admin aliases only: the email and domain-rule paths are switched off for this
+  vendor, because a role session name is caller-chosen.
+- **Months, not days**: `awsCurBillingPeriods` replaces the daily window. The first pull reads the current month and
+  `backfillMonths - 1` before it (at most 3); later pulls resume at the month of `pulled_through`. The previous month
+  is re-read while the day of the month is at most 15 (AWS restates for about two weeks). At most four months a run.
+- **Month replacement**: after the upsert, in the same transaction, the connector's stored lines for each delivered
+  month whose fact key AWS no longer reports are withdrawn (deleted, as a batch revoke withdraws). The batch summary
+  records `replacedPeriods` and `withdrawnLines`. Revoking that batch afterwards withdraws what it introduced and
+  rewinds `pulled_through` as before; lines it withdrew come back on the next pull only if AWS still reports them.
+- **No metered overlap**: the gateway has no Bedrock provider, so no line is excluded as already metered.
+- **Not built**: the RegulAIt-principal mode with an external id; Parquet (hyparquet, MIT, to be compared under
+  ADR-0176 first); live-tenant tests (lane E11); the settings screen (#453); OpenAI Codex analytics (slice 4b).

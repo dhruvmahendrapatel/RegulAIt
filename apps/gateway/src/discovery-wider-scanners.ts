@@ -149,6 +149,8 @@ export async function getJson(fetchImpl: typeof fetch, url: string, headers: Rec
     res = await fetchImpl(url, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal });
   } catch (err) {
     if (signal.aborted) throw err;
+    // ADR-0336 decision 5: an adapter's endpoint allow-list refuses before sending, and says so
+    if (err instanceof ReadFailure) throw err;
     throw new ReadFailure("unreachable", "the request did not reach the service (is its host on the egress allow list?)");
   }
   if (res.status === 401 || res.status === 403) throw new ReadFailure("denied", `HTTP ${res.status}: the credential may not read this`);
@@ -344,6 +346,15 @@ interface EntraApp {
  * federation token. The token is registered for scrubbing before it is returned, with the write scope it carries.
  */
 export async function entraGraphToken(ctx: ScanContext, kind: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
+  return entraToken(ctx, kind, GRAPH_SCOPE);
+}
+
+/**
+ * The same Entra credential path for another resource (ADR-0336: a Dataverse org's `https://<org>/.default`). The
+ * write scope is read from the token's application roles, which only Graph carries; a caller for another resource
+ * checks the credential's permissions there (Dataverse: `RetrieveUserPrivileges`).
+ */
+export async function entraToken(ctx: ScanContext, kind: string, scope: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
   const c = ctx.credential;
   if (!c) throw new WiderSourceConfigError(`${kind}: a credential is required`);
   const tenantId = c.publicConfig.tenantId;
@@ -369,7 +380,7 @@ export async function entraGraphToken(ctx: ScanContext, kind: string): Promise<{
   await ctx.throttle();
   let accessToken: string;
   try {
-    const tok = await tokenSource.getToken(GRAPH_SCOPE, { abortSignal: ctx.signal });
+    const tok = await tokenSource.getToken(scope, { abortSignal: ctx.signal });
     if (!tok?.token) throw new Error("no token");
     accessToken = tok.token;
   } catch (err) {

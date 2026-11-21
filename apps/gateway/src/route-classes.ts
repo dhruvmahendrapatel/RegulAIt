@@ -33,6 +33,9 @@ import {
   FEDERATION_JWKS_PATH,
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  AGENT_CREDENTIAL_STATUS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -142,6 +145,14 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // in NON_ADMIN_ROUTES too, so `public`.
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  // ADR-0315 (G7) — the agent credential issuer's discovery document and JWKS: public by definition (a third-party
+  // enforcement point verifies offline, holding no RegulAIt credential). Public keys and metadata only. Listed in
+  // NON_ADMIN_ROUTES too, so `public`.
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  // ADR-0315 slice 2 — its signed Token Status List: public by definition (the same verifier fetches it to learn of a
+  // revocation or a kill). Bits and a signature only; no credential, grant or identity is named in it.
+  AGENT_CREDENTIAL_STATUS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -218,6 +229,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /mcp/:serverId",
   // the Streamable HTTP GET probe answers 405 to any authenticated caller
   "GET /mcp/:serverId",
+  // ADR-0311: DELETE (end a session) answers 405 too: no session is ever issued
+  "DELETE /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
   // ADR-0219 (P10): any person may ASK; executeGovernedA2aCall decides on their own grant (default-deny)
   "POST /v1/a2a/agents/:agentId/messages",
@@ -624,6 +637,12 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context",
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
+  // ADR-0365 (lane E46): the live context graph's reads. Any signed-in principal; every result is filtered in-route by
+  // the caller's own project memberships (and by row-level security), and a node they cannot read is a 404. The
+  // source binding and sync routes stay admin-only (absent here).
+  "GET /v1/context-graph/nodes",
+  "GET /v1/context-graph/nodes/:nodeId",
+  "GET /v1/context-graph/nodes/:nodeId/neighbours",
   "GET /v1/projects/:projectId/compliance",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",
@@ -946,6 +965,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
   `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
   `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
+  // ADR-0315 (G7) — the agent credential issuer's public metadata (auth-exempt above too)
+  `GET ${AGENT_CREDENTIAL_DISCOVERY_PATH}`,
+  `GET ${AGENT_CREDENTIAL_JWKS_PATH}`,
+  `GET ${AGENT_CREDENTIAL_STATUS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

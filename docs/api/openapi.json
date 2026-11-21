@@ -1136,8 +1136,10 @@
                 "custom_classifier",
                 "decision_table",
                 "agent_risk_proof",
+                "rule_step_switch",
                 "robot_version",
-                "endpoint_addon_removal"
+                "endpoint_addon_removal",
+                "vendor_agent_control"
               ]
             }
           },

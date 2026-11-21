@@ -53,24 +53,24 @@ export const ENTRA_OWNER_LOOKUPS_MAX = 200;
 type Attrs = NonNullable<RegistryAgentRecord["attributes"]>;
 
 /** drop absent values so a record carries only what the vendor said */
-function attrs(input: Record<string, string | string[] | boolean | null | undefined>): Attrs {
+export function attrs(input: Record<string, string | string[] | boolean | null | undefined>): Attrs {
   const out: Attrs = {};
   for (const [k, v] of Object.entries(input)) if (v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0)) out[k] = v;
   return out;
 }
 
-const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+export const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
 const strList = (v: unknown, max = 20): string[] => (Array.isArray(v) ? v.map((x) => str(x, 64)).filter((x): x is string => x !== null).slice(0, max) : []);
 
 /** the include list, lower-cased; null for an organisation-level scope */
-const includeSet = (ctx: ScanContext): Set<string> | null =>
+export const includeSet = (ctx: ScanContext): Set<string> | null =>
   ctx.source.scope.orgLevel ? null : new Set(ctx.source.scope.include.map((x) => x.trim().toLowerCase()));
 
 /** is this listing's outcome a full read (read, no cap note)? */
-const fullyRead = (outcomes: DiscoveryReadOutcome[], read: string): boolean => outcomes.some((o) => o.read === read && o.status === "read" && !o.detail);
+export const fullyRead = (outcomes: DiscoveryReadOutcome[], read: string): boolean => outcomes.some((o) => o.read === read && o.status === "read" && !o.detail);
 
 /** finish a registry run: problems first; a failure when nothing at all could be read */
-function finishRegistry(records: RegistryAgentRecord[], outcomes: DiscoveryReadOutcome[], complete: AgentRegistry[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
+export function finishRegistry(records: RegistryAgentRecord[], outcomes: DiscoveryReadOutcome[], complete: AgentRegistry[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
   const sorted = [...outcomes.filter((o) => o.status !== "read"), ...outcomes.filter((o) => o.status === "read")].slice(0, DISCOVERY_READ_OUTCOMES_MAX);
   if (!outcomes.some((o) => o.status === "read")) {
     throw new WiderSourceConfigError(`nothing could be read: ${sorted.map((o) => `${o.read} ${o.status}${o.detail ? ` (${o.detail})` : ""}`).join("; ").slice(0, 600)}`);

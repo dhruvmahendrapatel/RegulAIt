@@ -15,8 +15,17 @@
  *  4. EXPOSURE x REACH + TOXIC COMBINATIONS. score = min(100, round(exposure x reach multiplier) + toxic points).
  *     Exposure is the sum of the factor points (capped at 100). The reach multiplier is a published band over how
  *     many people and dependents the agent reaches (ADR-0059's blast radius applied to one agent). Toxic combinations
- *     are added after the multiplier, so a combination is never hidden by a small reach: an ADR-0091 SoD rule whose
- *     every side the agent itself holds, and the "untrusted input + data access + unconfirmed action" combination.
+ *     are added after the multiplier, so a combination is never hidden by a small reach, and each is weighted by the same
+ *     reach band (ADR-0059's blast radius): an ADR-0091 SoD rule whose every side the agent itself holds, and the
+ *     capability combinations of the ADR-0339 addendum (v3). Those are computed from the agent's own capabilities,
+ *     one row per tool, connector, inbound channel or computer use, so every leg names the members that make it up:
+ *       - LETHAL TRIFECTA: private data (a read) + untrusted content (an inbound channel, computer use, or a read from a
+ *         source not classified trusted or standard, ADR-0193) + external communication (a write without Ask-first,
+ *         or a read that can reach the open world, so a fetch can carry data out).
+ *       - UNTRUSTED INPUT + UNCONFIRMED DESTRUCTIVE ACTION: untrusted content + a dangerous or destructive write
+ *         without Ask-first.
+ *     Each combination carries ranked fix options, one per leg, that break it outright: fewest members to change
+ *     first; Ask-first (keeps the capability) before removal; then members held by fewer other agents (blast radius).
  *  5. RANKED FIXES BY COUNTERFACTUAL. Each present factor's fix carries the points the score would drop by if that
  *     factor alone were removed (the ADR-0214 counterfactual), largest first, ties by factor id.
  *  6. UNMEASURED IS RISK, NOT ZERO. No fresh red-team run is a factor (untested), never "no finding" (ADR-0180).
@@ -28,8 +37,13 @@ import type { GuardrailMode } from "./guardrails.js";
 import type { AutonomyClass } from "./assurance.js";
 import type { AutonomyAgenticTestClass as RedTeamAgenticAttackClass, AutonomyObservedFacts } from "./autonomy.js";
 
-/** v2 (slice 2): the ownership factor also scores an owner who has not been active within the window (`inactive`) */
-export const AGENT_RISK_METHOD_VERSION = "adr0339-v2" as const;
+/**
+ * v2 (slice 2): the ownership factor also scores an owner who has not been active within the window (`inactive`).
+ * v3 (addendum): capability combinations (lethal trifecta; untrusted input + unconfirmed destructive action) replace
+ * the coarse builder-only combination, apply to registry agents through their workload identity's grants, and every
+ * toxic combination's points are weighted by the reach band.
+ */
+export const AGENT_RISK_METHOD_VERSION = "adr0339-v3" as const;
 
 /** what is scored: a registry agent (`agents`, including vendor-imported ones) or a builder agent */
 export const AGENT_RISK_SUBJECT_KINDS = ["agent", "builder_agent"] as const;
@@ -109,7 +123,53 @@ export function agentOwnershipFlag(
   return "owned";
 }
 
-export type AgentRiskToxicId = "sod_rule_held_by_agent" | "untrusted_input_data_action";
+export type AgentRiskToxicId = "sod_rule_held_by_agent" | "lethal_trifecta" | "untrusted_input_unconfirmed_destructive";
+
+/** the content-trust tiers of ADR-0193 (a source nobody classified is `untrusted`) */
+export type AgentRiskSourceTier = "untrusted" | "standard" | "trusted";
+
+/**
+ * One capability the agent holds: a tool, a connector, an inbound channel, or computer use. The gateway resolves
+ * builder agents from their own bindings and registry agents from their workload identity's grants (direct and role).
+ */
+export interface AgentRiskCapability {
+  kind: "mcp_tool" | "connector" | "channel" | "computer_use";
+  id: string;
+  name: string;
+  reads: boolean;
+  writes: boolean;
+  /** Ask-first is on (true) or off (false); null where the agent has no Ask-first switch (registry agents) */
+  askFirst: boolean | null;
+  /** the ADR-0193 tier of the tool's source; null for a channel or computer use (always untrusted input) */
+  sourceTier: AgentRiskSourceTier | null;
+  /** the tool can reach the open world (MCP `openWorldHint`; true unless an admitted definition says false) */
+  openWorld: boolean;
+  /** a dangerous (ADR-0236) or destructive (MCP `destructiveHint`) write */
+  destructive: boolean;
+  /** how many OTHER agents hold the same capability (the blast radius of removing it) */
+  sharedWith: number;
+}
+
+export type AgentRiskLegId = "private_data" | "untrusted_content" | "external_communication" | "unconfirmed_destructive";
+
+export interface AgentRiskLeg {
+  id: AgentRiskLegId;
+  label: string;
+  members: Array<{ kind: AgentRiskCapability["kind"]; id: string; name: string; why: string }>;
+}
+
+/** one way to break a combination outright, ranked */
+export interface AgentRiskFixOption {
+  rank: number;
+  action: "ask_first" | "remove";
+  leg: AgentRiskLegId;
+  targets: Array<{ kind: AgentRiskCapability["kind"]; id: string; name: string }>;
+  /** members to change */
+  cost: number;
+  /** other agents holding the targets, summed (lower is a smaller blast radius) */
+  sharedWith: number;
+  title: string;
+}
 
 /** the facts the gateway gathers; every count is a count of rows that exist now */
 export interface AgentRiskInput {
@@ -145,6 +205,8 @@ export interface AgentRiskInput {
   reach: { people: number; dependents: number; detail: string };
   /** an enabled ADR-0091 rule whose every side the agent's own capability set holds (first match), or null */
   sodRule: { id: string; name: string } | null;
+  /** the agent's own capabilities (addendum); null where it has none of its own (a registry agent with no identity) */
+  capabilities: readonly AgentRiskCapability[] | null;
 }
 
 export interface AgentRiskFix {
@@ -172,6 +234,10 @@ export interface AgentRiskToxicCombination {
   points: number;
   evidence: string;
   fix: AgentRiskFix;
+  /** capability combinations: the members of each leg (always present, also when a leg is empty) */
+  legs?: AgentRiskLeg[];
+  /** capability combinations, when present: every way to break it, ranked (the first is `fix`) */
+  fixOptions?: AgentRiskFixOption[];
 }
 
 export interface AgentRiskRankedFix {
@@ -431,36 +497,108 @@ function factorsFor(input: AgentRiskInput): AgentRiskFactor[] {
   return out;
 }
 
-function toxicFor(input: AgentRiskInput): AgentRiskToxicCombination[] {
+const TOXIC_POINTS = 15;
+const LEG_ORDER: readonly AgentRiskLegId[] = ["private_data", "untrusted_content", "external_communication", "unconfirmed_destructive"];
+const LEG_LABEL: Readonly<Record<AgentRiskLegId, string>> = Object.freeze({
+  private_data: "Private data",
+  untrusted_content: "Untrusted content",
+  external_communication: "External communication",
+  unconfirmed_destructive: "Unconfirmed destructive action",
+});
+
+const isTool = (c: AgentRiskCapability) => c.kind === "mcp_tool" || c.kind === "connector";
+const unconfirmed = (c: AgentRiskCapability) => c.askFirst !== true;
+const untrustedTier = (c: AgentRiskCapability) => c.sourceTier !== "trusted" && c.sourceTier !== "standard";
+
+/** the members of each leg, with the reason each one is there */
+export function capabilityLegs(caps: readonly AgentRiskCapability[]): Record<AgentRiskLegId, AgentRiskLeg> {
+  const legs = Object.fromEntries(LEG_ORDER.map((id) => [id, { id, label: LEG_LABEL[id], members: [] as AgentRiskLeg["members"] }])) as Record<AgentRiskLegId, AgentRiskLeg>;
+  const add = (leg: AgentRiskLegId, c: AgentRiskCapability, why: string) => legs[leg].members.push({ kind: c.kind, id: c.id, name: c.name, why });
+  const sorted = [...caps].sort((a, b) => (a.kind + a.name + a.id < b.kind + b.name + b.id ? -1 : 1));
+  for (const c of sorted) {
+    if (c.kind === "channel") add("untrusted_content", c, "an inbound channel: anyone who can message it writes into the agent's context");
+    if (c.kind === "computer_use") add("untrusted_content", c, "computer use: every page and screen it reads is untrusted");
+    if (!isTool(c)) continue;
+    if (c.reads) add("private_data", c, "can read data");
+    if (c.reads && untrustedTier(c)) add("untrusted_content", c, `reads from a source classified ${c.sourceTier ?? "by nobody"} (ADR-0193: not trusted or standard)`);
+    if (c.writes && unconfirmed(c)) add("external_communication", c, c.askFirst === false ? "writes without Ask-first" : "writes, and no person confirms each call");
+    else if (c.reads && c.openWorld) add("external_communication", c, "can reach the open world, so a read can carry data out");
+    if (c.writes && c.destructive && unconfirmed(c)) add("unconfirmed_destructive", c, "a dangerous or destructive write with no person confirming it");
+  }
+  return legs;
+}
+
+function names(members: AgentRiskLeg["members"]): string {
+  if (!members.length) return "none";
+  const shown = members.slice(0, 5).map((m) => m.name);
+  return members.length > 5 ? `${shown.join(", ")} and ${members.length - 5} more` : shown.join(", ");
+}
+
+/** every way to break a combination by changing one leg, ranked */
+export function rankFixOptions(legs: AgentRiskLeg[], caps: readonly AgentRiskCapability[]): AgentRiskFixOption[] {
+  const byKey = new Map(caps.map((c) => [`${c.kind}:${c.id}`, c]));
+  const opts: Omit<AgentRiskFixOption, "rank">[] = [];
+  for (const leg of legs) {
+    const members = leg.members.map((m) => byKey.get(`${m.kind}:${m.id}`)!).filter(Boolean);
+    if (!members.length) continue;
+    const targets = members.map((c) => ({ kind: c.kind, id: c.id, name: c.name }));
+    const shared = members.reduce((s, c) => s + c.sharedWith, 0);
+    // Ask-first breaks a leg only when every member is a write the agent can ask about (builder agents)
+    if ((leg.id === "external_communication" || leg.id === "unconfirmed_destructive") && members.every((c) => c.writes && c.askFirst === false)) {
+      opts.push({ action: "ask_first", leg: leg.id, targets, cost: members.length, sharedWith: shared, title: `Turn Ask-first on for ${targets.length === 1 ? "" : `${targets.length} tools: `}${names(leg.members)}` });
+    }
+    opts.push({ action: "remove", leg: leg.id, targets, cost: members.length, sharedWith: shared, title: `Remove the ${LEG_LABEL[leg.id].toLowerCase()} leg: ${names(leg.members)}` });
+  }
+  opts.sort(
+    (a, b) =>
+      a.cost - b.cost ||
+      (a.action === b.action ? 0 : a.action === "ask_first" ? -1 : 1) ||
+      a.sharedWith - b.sharedWith ||
+      LEG_ORDER.indexOf(a.leg) - LEG_ORDER.indexOf(b.leg),
+  );
+  return opts.map((o, i) => ({ ...o, rank: i + 1 }));
+}
+
+function toxicFor(input: AgentRiskInput, multiplier: number): AgentRiskToxicCombination[] {
   const L = links(input);
-  const b = input.builder;
-  const untrusted = !!b && (b.facts.inboundChannels > 0 || b.facts.computerUse);
-  const data = !!b && b.facts.tools > 0;
-  const action = !!b && b.facts.writeToolsWithoutAskFirst > 0;
-  const trifecta = untrusted && data && action;
+  const points = Math.round(TOXIC_POINTS * multiplier);
+  const caps = input.capabilities;
+  const legs = caps ? capabilityLegs(caps) : null;
+  const combo = (id: AgentRiskToxicId, title: string, owasp: string[], legIds: AgentRiskLegId[]): AgentRiskToxicCombination => {
+    if (!caps || !legs) {
+      return {
+        id, title, owasp, present: false, points: 0,
+        evidence: "not applicable: the agent holds no tools of its own (a registry agent without a workload identity acts only with its caller's)",
+        fix: { title: "Nothing to fix", link: L.agent },
+        legs: [],
+      };
+    }
+    const these = legIds.map((l) => legs[l]);
+    const present = these.every((l) => l.members.length > 0);
+    const options = present ? rankFixOptions(these, caps) : [];
+    return {
+      id, title, owasp, present,
+      points: present ? points : 0,
+      evidence: these.map((l) => `${l.label.toLowerCase()}: ${names(l.members)}`).join("; ") + (present ? "" : " (a leg is empty, so the combination is broken)"),
+      fix: { title: options[0]?.title ?? "Nothing to fix", link: L.agent },
+      legs: these,
+      ...(present ? { fixOptions: options } : {}),
+    };
+  };
   return [
     {
       id: "sod_rule_held_by_agent",
       title: "The agent alone holds every side of a segregation-of-duties rule",
       owasp: [ASI(3)],
       present: !!input.sodRule,
-      points: input.sodRule ? 15 : 0,
+      points: input.sodRule ? points : 0,
       evidence: input.sodRule
         ? `the agent's own tools and model hold every side of the rule '${input.sodRule.name}'`
         : "no enabled rule has every side held by this agent",
       fix: { title: "Split the agent so no one agent holds every side of the rule", link: L.sod },
     },
-    {
-      id: "untrusted_input_data_action",
-      title: "Untrusted input, data access and unconfirmed actions together",
-      owasp: [LLM(1), LLM(2), LLM(3), ASI(1), ASI(2)],
-      present: trifecta,
-      points: trifecta ? 15 : 0,
-      evidence: !b
-        ? "not applicable to a registry agent (its tools are the caller's)"
-        : `untrusted input: ${untrusted ? "yes" : "no"} (inbound channels or computer use); data access: ${data ? "yes" : "no"} (connector or MCP tools); unconfirmed actions: ${action ? "yes" : "no"} (write tools without Ask-first)`,
-      fix: { title: "Break the combination: turn Ask-first on for write tools, or unbind the inbound channels", link: L.agent },
-    },
+    combo("lethal_trifecta", "Private data, untrusted content and external communication together (the lethal trifecta)", [LLM(1), LLM(2), ASI(1), ASI(2)], ["private_data", "untrusted_content", "external_communication"]),
+    combo("untrusted_input_unconfirmed_destructive", "Untrusted content and an unconfirmed destructive action together", [LLM(1), LLM(3), ASI(1), ASI(2)], ["untrusted_content", "unconfirmed_destructive"]),
   ];
 }
 
@@ -487,13 +625,15 @@ function combine(factorPoints: number, multiplier: number, toxicPoints: number) 
 export const AGENT_RISK_METHOD =
   "score = min(100, round(exposure x reach multiplier) + toxic-combination points). Exposure is the sum of the factor " +
   "points, capped at 100. The reach multiplier is 1, 1.15, 1.3 or 1.5 for 0-1, 2-10, 11-50 or more than 50 people " +
-  "and dependents. Each toxic combination adds 15. Bands: low below 25, medium from 25, high from 50, critical from " +
+  "and dependents. Each toxic combination adds 15 x the reach multiplier, rounded. The capability combinations are the " +
+  "lethal trifecta (private data + untrusted content + external communication) and untrusted content + an unconfirmed " +
+  "destructive action; each names the tools in every leg and ranks the ways to break it. Bands: low below 25, medium from 25, high from 50, critical from " +
   "75. Each fix shows how far the score would drop if that one thing were fixed.";
 
 export function scoreAgentRisk(input: AgentRiskInput): AgentRiskAssessment {
   const factors = factorsFor(input);
-  const toxicCombinations = toxicFor(input);
   const reach = reachBand(input.reach.people, input.reach.dependents);
+  const toxicCombinations = toxicFor(input, reach.multiplier);
   const sumFactors = factors.reduce((s, f) => s + f.points, 0);
   const sumToxic = toxicCombinations.reduce((s, t) => s + t.points, 0);
   const { exposure, score } = combine(sumFactors, reach.multiplier, sumToxic);

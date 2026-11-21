@@ -8,6 +8,7 @@ import { buildApp } from "./app.js";
 import {
   EXTERNAL_WRITE_OPERATIONS,
   ExternalEffectBlockedError,
+  NARROWING_WRITE_OPERATIONS,
   runExternalWrite,
 } from "./external-effects.js";
 
@@ -49,14 +50,21 @@ describe("external provider mutation admission", () => {
       expect(response.statusCode).toBe(200);
     };
     let calls = 0;
+    let narrowed = 0;
     try {
       for (const mode of ["halted", "read_only", "require_approval"] as const) {
         await setMode(mode);
         for (const operation of EXTERNAL_WRITE_OPERATIONS) {
+          if (NARROWING_WRITE_OPERATIONS.includes(operation)) continue;
           await expect(runExternalWrite(db, operation, async () => { calls++; })).rejects.toBeInstanceOf(ExternalEffectBlockedError);
+        }
+        // ADR-0338 §7: the one declared exemption narrows, so it runs under every dial
+        for (const operation of NARROWING_WRITE_OPERATIONS) {
+          await runExternalWrite(db, operation, async () => { narrowed++; });
         }
       }
       expect(calls).toBe(0);
+      expect(narrowed).toBe(3 * NARROWING_WRITE_OPERATIONS.length);
     } finally {
       await setMode("normal");
     }
@@ -106,6 +114,8 @@ describe("external provider mutation admission", () => {
     { adapter: "pm", module: "@regulait/pm-provider", source: path.join(PACKAGES, "pm-provider/src/index.ts"), iface: "PmProvider", reads: ["getWorkItem", "listWorkItems"] },
     // ADR-0331: the device-policy signer; a signature is what lets a directive act on a device
     { adapter: "device_policy", module: path.join(here, "directive-signer.ts"), source: path.join(here, "directive-signer.ts"), iface: "DirectiveSigner", reads: ["keyId"] },
+    // ADR-0338: a vendor adapter's control member; `apply` takes an agent out of service, `reverse` puts it back
+    { adapter: "vendor_agent_control", module: path.join(here, "vendor-agent-control-contract.ts"), source: path.join(here, "vendor-agent-control-contract.ts"), iface: "VendorAgentControl", reads: ["actions", "readState"] },
   ] as const;
   type Contract = (typeof CONTRACTS)[number];
 
