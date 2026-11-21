@@ -123,8 +123,14 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
   [s.approvalDelegations, ["reason"]],
+  // ADR-0350 (lane E31) — why a per-device command-rule exception is asked for, and the approver's note
+  [s.endpointCommandExceptions, ["reason", "decisionReason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0327 addendum — why the author proposed a decision-table version
+  [s.decisionTableVersions, ["reason"]],
+  // ADR-0327 slice 4a — why an admin asked to switch a rule-like step, and why it was reverted
+  [s.ruleStepSwitches, ["reason", "revertReason"]],
   // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)
   [s.connectors, ["disabledReason"]],
   // ADR-0124 — the emergency-stop reasons. Operator free prose typed under
@@ -220,6 +226,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
   [s.builderAgents, ["autonomyNote"]],
+  // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
+  // admin's note on the decision
+  [s.agentIdentityLinks, ["note", "decisionNote"]],
   [s.remediationProposals, ["rationale"]],
   // ADR-0182 (ADR-0175 batch D4, migration 0162) — accountability records.
   // Every new free-text column is registered, titles included: an incident
@@ -296,6 +305,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.engineRunners, ["revokeReason"]],
   // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
   [s.mrmRetestRuns, ["reason"]],
+  // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
+  [s.endpointAddonRemovals, ["reason"]],
+  // ADR-0338: the admin's reason for a vendor agent control action
+  [s.vendorAgentActions, ["reason"]],
 ];
 
 /**

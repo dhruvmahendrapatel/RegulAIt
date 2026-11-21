@@ -49,6 +49,43 @@ describe("security-gate: pnpm audit", () => {
     expect(r.lines.join("\n")).toMatch(/NOT ALLOWED[\s\S]*STALE/);
   });
 
+  // ADR-0184 addendum 2026-11-17: an advisory with no patched release is
+  // reported, not gated (shape copied from pnpm 10.34 output for picomatch).
+  const PICOMATCH = { id: 1, github_advisory_id: "GHSA-fc5q-39xc-vjpf", module_name: "picomatch", severity: "high", vulnerable_versions: "<=4.0.7", patched_versions: "<0.0.0", title: "picomatch ReDoS", url: "https://github.com/advisories/GHSA-fc5q-39xc-vjpf" };
+
+  it("a HIGH advisory with no patched release is reported as NO FIX YET and does not fail", () => {
+    const r = evaluate({ kind: "pnpm-audit", report: audit(PICOMATCH), allowlist: { entries: [] }, today: TODAY });
+    expect(r.exitCode).toBe(0);
+    expect(r.lines.join("\n")).toContain("NO FIX YET (reported, not gated; counts once a patched release exists): GHSA-fc5q-39xc-vjpf");
+    expect(r.lines.join("\n")).toContain("(+1 with no fix yet)");
+  });
+
+  it("RED: the same advisory fails again the moment a patched release exists", () => {
+    const r = evaluate({ kind: "pnpm-audit", report: audit({ ...PICOMATCH, patched_versions: ">=4.0.8" }), allowlist: { entries: [] }, today: TODAY });
+    expect(r.exitCode).toBe(1);
+    expect(r.lines.join("\n")).toContain("NOT ALLOWED: GHSA-fc5q-39xc-vjpf");
+  });
+
+  it("RED: a missing or unrecognised patched_versions stays gated (fail closed)", () => {
+    for (const patched_versions of [undefined, "", "unknown"]) {
+      const r = evaluate({ kind: "pnpm-audit", report: audit({ ...PICOMATCH, patched_versions }), allowlist: { entries: [] }, today: TODAY });
+      expect(r.exitCode).toBe(1);
+    }
+  });
+
+  it("RED: a no-fix advisory does not hide a fixable one in the same report", () => {
+    const r = evaluate({ kind: "pnpm-audit", report: audit(PICOMATCH, MINIMIST), allowlist: { entries: [] }, today: TODAY });
+    expect(r.exitCode).toBe(1);
+    expect(r.lines.join("\n")).toContain("NOT ALLOWED: GHSA-xvch-5gv4-984h");
+    expect(r.lines.join("\n")).not.toContain("NOT ALLOWED: GHSA-fc5q-39xc-vjpf");
+  });
+
+  it("RED: an allow-list entry for a no-fix advisory is stale (no exemption is needed or allowed)", () => {
+    const r = evaluate({ kind: "pnpm-audit", report: audit(PICOMATCH), allowlist: { entries: [entry({ id: "GHSA-fc5q-39xc-vjpf", package: "picomatch" })] }, today: TODAY });
+    expect(r.exitCode).toBe(1);
+    expect(r.lines.join("\n")).toContain("STALE allow-list entry GHSA-fc5q-39xc-vjpf");
+  });
+
   it("RED: an expired entry fails the gate, on its expiry day and after", () => {
     for (const today of ["2026-11-01", "2027-01-01"]) {
       const r = evaluate({ kind: "pnpm-audit", report: audit(MINIMIST), allowlist: { entries: [entry()] }, today });
