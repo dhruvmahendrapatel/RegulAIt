@@ -38,6 +38,41 @@ variable "writer_role_names" {
   default     = []
 }
 
+variable "writer_role_arns" {
+  description = <<-EOT
+    IAM role ARNs that write backups but attach `writer_policy_arn` themselves
+    (for example a role made by terraform-aws-modules/eks-pod-identity, which
+    attaches its own policies). They are named in the bucket policy's explicit
+    Deny of every destructive action, the same as `writer_role_names`; this
+    module attaches nothing to them.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "writer_profile" {
+  description = <<-EOT
+    Which writer the grant is shaped for.
+    - "host" (default): a machine that uploads with its instance role and
+      self-checks. PutObject and AbortMultipartUpload on the prefix,
+      prefix-limited ListBucket, the heartbeat metric, and encrypt-only KMS.
+    - "kubernetes_job": the RegulAIt operator's backup Job (ADR-0305 §2).
+      s3:PutObject on the prefix, and kms:GenerateDataKey and kms:Decrypt on
+      `kms_key_arn`, both only via S3 in this region and only for this bucket.
+      No ListBucket, no GetObject, no CloudWatch. Decrypt is required because
+      the AWS CLI switches to a multipart upload above 8 MiB, and completing
+      one needs the data key decrypted. Requires `kms_key_arn`. The Job
+      publishes no heartbeat, so set `enable_freshness_alarm = false` with it.
+  EOT
+  type        = string
+  default     = "host"
+
+  validation {
+    condition     = contains(["host", "kubernetes_job"], var.writer_profile)
+    error_message = "writer_profile must be \"host\" or \"kubernetes_job\"."
+  }
+}
+
 variable "retention_days" {
   description = <<-EOT
     How long a CURRENT backup object is kept before the lifecycle rule expires

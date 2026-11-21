@@ -249,6 +249,32 @@ audit row. That check is on by default. Confirm it under **Admin → Settings �
 endpoints: strict** (ADR-0062, ADR-0180), and add each allow-listed host there or through `/v1/egress/hosts` (step 7
 shows the call).
 
+**6.9 Scheduled database dumps to S3** (when you install with the operator, ADR-0305). RDS point-in-time recovery
+(below) is on in every install. If you run RegulAIt through the operator (`operator.enabled: true` and a
+`RegulaitInstallation`), its nightly `pg_dump` can also go to the backup bucket this stack created:
+
+- the bucket is versioned, encrypted with your stack key and never force-deleted;
+- dumps expire after `backup_retention_days` (30);
+- the backup Job's role can only add objects under `pg/`. It cannot read, list or delete a backup.
+
+```bash
+terraform output -raw backup_spec     # paste under spec.backup in the RegulaitInstallation
+```
+
+Add `uploaderImage` (an AWS CLI image, by digest, from your registry) and the `pg_dump` `image` to that block, and
+keep `metadata.name` equal to `backup_installation_name` (default `regulait`): the role is bound to the
+ServiceAccount `<name>-backup` in the `regulait` namespace and to no other. Then prove a real-size upload once, before
+go-live. A dump over 8 MiB is uploaded in parts, which is the path most likely to fail on permissions:
+
+```bash
+kubectl -n regulait create job --from=cronjob/regulait-backup backup-check
+kubectl -n regulait wait --for=condition=complete job/backup-check --timeout=30m
+aws s3api list-object-versions --bucket "$(terraform output -raw backup_bucket)" --prefix pg/ \
+  --query 'Versions[0].[Key,Size]'          # from your own admin credentials, not the Job's
+```
+
+The data key is not in these dumps' bucket and must not be: a dump is useless without it (ADR-0035).
+
 ## 7. Sign-in with Microsoft Entra ID
 
 1. In the **Entra admin center**, go to **App registrations → New registration**:
@@ -327,9 +353,13 @@ Do these in order. Each step keeps something on purpose; the list after them say
    `db_deletion_protection = false` and `firewall_delete_protection = false`.
 4. Empty the image repositories you mirrored (`aws ecr batch-delete-image`, or delete them in the console). They are
    never force-deleted, so `terraform destroy` stops on a repository that still has images in it.
-5. Run `terraform destroy -var-file=customer.tfvars`. RDS takes a final snapshot unless you set
+5. Decide about the database dumps in the backup bucket. To keep them, run
+   `terraform state rm 'module.byoc.module.backup_target[0]'` before destroying. To delete them, empty the bucket
+   first (every version: `aws s3api list-object-versions`, then `delete-objects`). The bucket is never
+   force-deleted, so `terraform destroy` stops on it while it holds anything.
+6. Run `terraform destroy -var-file=customer.tfvars`. RDS takes a final snapshot unless you set
    `db_skip_final_snapshot`.
-6. **The audit bucket cannot be deleted** until every anchor's lock has expired. That is what COMPLIANCE mode means.
+7. **The audit bucket cannot be deleted** until every anchor's lock has expired. That is what COMPLIANCE mode means.
    `terraform destroy` stops on it. Run `terraform state rm module.byoc.module.audit_anchors`, then destroy again.
 
 **What is left behind, on purpose:**
@@ -339,6 +369,7 @@ Do these in order. Each step keeps something on purpose; the list after them say
 | The final RDS snapshot | Your last copy of the database. | When you delete it (RDS console, Snapshots). |
 | The audit-anchor bucket and its objects | Evidence: COMPLIANCE-mode locks cannot be shortened by anyone. Costs cents a year. | When the last lock expires (`audit_retention_days` after its write); then delete the bucket. |
 | The KMS key | AWS keeps a deleted key for a 30-day waiting period, and the snapshot and anchors are encrypted with it. | 30 days after destroy, unless you cancel the deletion to keep reading the snapshot. Cancel it if you keep the snapshot. |
+| The backup bucket, if you kept it (step 5) | Your `pg_dump` history, encrypted with the stack key. | When you empty and delete it. Keep the KMS key while you keep it. |
 | The install-secrets EBS volume | Holds the receipt and identity keys (`Retain`). | When you delete it (step 2). |
 | Log groups the add-ons created themselves | Created outside Terraform by EKS. | Delete `/aws/eks/<prefix>*` in CloudWatch if you do not need them. |
 
