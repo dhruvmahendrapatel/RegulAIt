@@ -39,7 +39,6 @@ import {
   type EdrIsolationRequestRow,
 } from "@regulait/db";
 import { refuseConnectionEgressWrite, type ConnectionEgressDeps } from "../connection-egress.js";
-import { describe } from "../endpoint-fleet-lifecycle.js";
 import { encryptSecret, decryptSecret } from "../secrets.js";
 import { requireStepUp, type StepUpCheckArgs } from "../step-up.js";
 import { EDR_ADAPTERS, EDR_VENDORS } from "./adapters.js";
@@ -122,7 +121,7 @@ function isolationView(r: EdrIsolationRequestRow, viewer: string | null) {
     errorCode: r.errorCode,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
-    lifecycle: describe(ISOLATION_MACHINE, r.state as IsolationState, blocked),
+    lifecycle: ISOLATION_MACHINE.describe(r.state as IsolationState, blocked),
   };
 }
 
@@ -307,7 +306,8 @@ export function registerEdrRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     if (!r) return reply.status(404).send({ error: "not_found", detail: "no such isolation request" });
     const me = req.authCtx.userId ?? null;
     const view = isolationView(r, me).lifecycle.transitions.find((t) => t.event === event)!;
-    if (!view.allowed) return reply.status(ISOLATION_MACHINE.transitions[event].from.includes(r.state as IsolationState) ? 403 : 409).send({ error: ISOLATION_MACHINE.transitions[event].from.includes(r.state as IsolationState) ? "caller_cannot_decide" : "illegal_transition", detail: view.reason });
+    const legal = ISOLATION_MACHINE.can(r.state as IsolationState, event);
+    if (!view.allowed) return reply.status(legal ? 403 : 409).send({ error: legal ? "caller_cannot_decide" : "illegal_transition", detail: view.reason });
     // two people: a person's session is required to decide (the bootstrap credential has no person to compare)
     if ((event === "approve" || event === "reject" || event === "approve_release" || event === "reject_release") && !me) {
       return reply.status(403).send({ error: "caller_cannot_decide", detail: "a decision needs a signed-in admin other than the requester" });

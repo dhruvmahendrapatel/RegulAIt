@@ -33,12 +33,13 @@ import {
   eq,
   inArray,
   runMigrations,
+  runWithRlsSystem,
   sql,
   users,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { ROLLOUT_MACHINE, ROLLOUT_STAGE_MACHINE, describe as describeState, sourcesOf } from "./endpoint-fleet-lifecycle.js";
+import { ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE, STATE_MACHINES } from "@regulait/shared";
 import { selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
 import { hashToken } from "./token-hash.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -132,13 +133,14 @@ afterAll(async () => {
 
 describe("ADR-0360: the declared lifecycles", () => {
   it("guards every write with the event's source states and says why a step is not allowed", () => {
-    expect(sourcesOf(ROLLOUT_MACHINE, "start")).toEqual(["draft"]);
-    expect(sourcesOf(ROLLOUT_MACHINE, "resume")).toEqual(["paused", "halted"]);
-    expect(sourcesOf(ROLLOUT_MACHINE, "abort")).toEqual(["draft", "running", "paused", "halted"]);
-    expect(sourcesOf(ROLLOUT_STAGE_MACHINE, "finish")).toEqual(["active"]);
-    // no event leaves a terminal state
-    for (const t of Object.values(ROLLOUT_MACHINE.transitions)) for (const s of ROLLOUT_MACHINE.terminal) expect(t.from).not.toContain(s);
-    const d = describeState(ROLLOUT_MACHINE, "completed");
+    // ADR-0348: registered, so GET /v1/state-machines lists them and the CHECK-equality test covers both columns
+    expect(STATE_MACHINES[ROLLOUT_MACHINE.def.id]).toBe(ROLLOUT_MACHINE);
+    expect(STATE_MACHINES[ROLLOUT_STAGE_MACHINE.def.id]).toBe(ROLLOUT_STAGE_MACHINE);
+    expect(ROLLOUT_MACHINE.sourcesOf("start")).toEqual(["draft"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("resume")).toEqual(["paused", "halted"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("abort")).toEqual(["draft", "running", "paused", "halted"]);
+    expect(ROLLOUT_STAGE_MACHINE.sourcesOf("finish")).toEqual(["active"]);
+    const d = ROLLOUT_MACHINE.describe("completed");
     expect(d.terminal).toBe(true);
     expect(d.transitions.every((t) => !t.allowed && t.reason)).toBe(true);
   });
@@ -243,6 +245,27 @@ describe("ADR-0360: staged rollouts", () => {
     expect(r.json().error).toBe("illegal_transition");
   });
 
+  it("pages the rollout list with the list contract's cursor, so older rollouts stay reachable", async () => {
+    const s = await agentSource();
+    // twelve closed rollouts, a second apart (one open rollout per source, so they are stored aborted)
+    await db.insert(endpointUpdateRollouts).values(
+      Array.from({ length: 12 }, (_, i) => ({ sourceId: s, targetVersion: `0.${i}.0`, state: "aborted" as const, createdAt: new Date(Date.now() - (12 - i) * 1000) })),
+    );
+    const first = await inject("GET", `/v1/discovery/sources/${s}/update-rollouts?limit=10`, AUTH);
+    expect(first.statusCode, first.body).toBe(200);
+    const p1 = first.json() as { items: Array<{ targetVersion: string; lifecycle: { terminal: boolean } }>; nextCursor: string | null };
+    expect(p1.items.map((r) => r.targetVersion)).toEqual(Array.from({ length: 10 }, (_, i) => `0.${11 - i}.0`));
+    expect(p1.items.every((r) => r.lifecycle.terminal)).toBe(true);
+    expect(p1.nextCursor).toBeTruthy();
+    const second = await inject("GET", `/v1/discovery/sources/${s}/update-rollouts?limit=10&cursor=${encodeURIComponent(p1.nextCursor!)}`, AUTH);
+    const p2 = second.json() as { items: Array<{ targetVersion: string }>; nextCursor: string | null };
+    expect(p2.items.map((r) => r.targetVersion)).toEqual(["0.1.0", "0.0.0"]);
+    expect(p2.nextCursor).toBeNull();
+    // another source's rollouts are not in this list
+    const other = await inject("GET", `/v1/discovery/sources/${await agentSource()}/update-rollouts`, AUTH);
+    expect(other.json().items).toEqual([]);
+  });
+
   it("never blocks deleting an ADR-0350 group: the stage keeps its name as evidence and offers nothing", async () => {
     const s = await agentSource();
     const g = await group("gone");
@@ -280,6 +303,15 @@ describe("ADR-0360: one-line enrolment", () => {
     // the device joins the token's ADR-0350 group (which only narrows its policy)
     const m = await db.select().from(endpointDeviceGroupMembers).where(eq(endpointDeviceGroupMembers.deviceId, first.json().ticketId as string));
     expect(m.map((x) => x.groupId)).toEqual([g]);
+    // the redemption policy admits only that row: under public_ingest, the same device into another group is refused
+    const other = await group("not-the-token's");
+    const forged = await runWithRlsSystem("public_ingest", "test.e41-forged-membership", async () =>
+      db.insert(endpointDeviceGroupMembers).values({ deviceId: first.json().ticketId as string, groupId: other }).then(
+        () => "inserted",
+        (e: { message?: string; cause?: { message?: string } }) => e.cause?.message ?? e.message ?? String(e),
+      ),
+    );
+    expect(forged).toMatch(/row-level security/);
     const second = await ticket(enrolment.token, `e41-two-${RUN}`);
     expect(second.statusCode).toBe(409);
     expect(second.json().error).toBe("enrolment_cap_reached");

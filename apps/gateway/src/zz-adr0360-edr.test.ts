@@ -35,7 +35,7 @@ import { buildApp } from "./app.js";
 import { edrIsolationDecideStepUp, edrIsolationEnableStepUp, edrReleaseStepUp } from "./edr/routes.js";
 import { pollEdrIsolations } from "./edr/service.js";
 import { ISOLATION_MACHINE } from "./edr/lifecycle.js";
-import { sourcesOf } from "./endpoint-fleet-lifecycle.js";
+import { STATE_MACHINES } from "@regulait/shared";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -167,9 +167,10 @@ afterAll(async () => {
 
 describe("ADR-0360 EDR: the declared isolation lifecycle", () => {
   it("has no event out of a terminal state and two-step release", () => {
-    for (const t of Object.values(ISOLATION_MACHINE.transitions)) for (const s of ISOLATION_MACHINE.terminal) expect(t.from).not.toContain(s);
-    expect(sourcesOf(ISOLATION_MACHINE, "approve_release")).toEqual(["release_requested"]);
-    expect(ISOLATION_MACHINE.transitions.fail_release.to).toBe("isolated");
+    // ADR-0348: registered, so the CHECK-equality test covers edr_isolation_requests.state
+    expect(STATE_MACHINES[ISOLATION_MACHINE.def.id]).toBe(ISOLATION_MACHINE);
+    expect(ISOLATION_MACHINE.sourcesOf("approve_release")).toEqual(["release_requested"]);
+    expect(ISOLATION_MACHINE.next("releasing", "fail_release")).toBe("isolated");
   });
 });
 

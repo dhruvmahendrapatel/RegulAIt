@@ -8,6 +8,7 @@ import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
+import { EDR_ISOLATION_MACHINE, ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE } from "./endpoint-fleet.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
@@ -826,4 +827,9 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  // ADR-0360 §3 (lane E41): a staged endpoint agent update rollout and its stages
+  [ENDPOINT_ROLLOUT_MACHINE.def.id]: ENDPOINT_ROLLOUT_MACHINE,
+  [ENDPOINT_ROLLOUT_STAGE_MACHINE.def.id]: ENDPOINT_ROLLOUT_STAGE_MACHINE,
+  // ADR-0360 §6 (lane E41): a governed EDR isolation request and its release
+  [EDR_ISOLATION_MACHINE.def.id]: EDR_ISOLATION_MACHINE,
 } as Record<string, StateMachine<string, string>>);
