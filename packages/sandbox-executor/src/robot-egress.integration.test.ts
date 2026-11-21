@@ -18,6 +18,7 @@
  *   REGULAIT_TEST_ROBOT_SANDBOX_IMAGE  an image with /usr/local/bin/node (the stdio base, or node:22-trixie-slim), `sha256:<id>`
  *   REGULAIT_TEST_ROBOT_TARGET_IMAGE   a busybox image (its httpd is the allowed target), `sha256:<id>` or a local tag
  * and a Docker daemon (Engine 26 or later) is reachable with the `docker` CLI, as root (the ACL is chowned to the proxy).
+ * With REGULAIT_TEST_ROBOT_REQUIRED=1 a missing daemon or image FAILS the file instead (CI: .github/workflows/robot-egress.yml).
  *
  * WHAT IS NOT THE PRODUCT HERE, said plainly:
  *  - the sandbox runs under RUNC (the runc backend, L1), not gVisor: runsc is not installed where this was written.
@@ -26,7 +27,9 @@
  *    without userns-remap; this test is about the network, not the uid mapping);
  *  - the allowed target is a container on a private test subnet, so the test derives an image from the egress image
  *    whose Smokescreen config adds `allow_ranges` for THAT subnet only (a product run never has an allow range);
- *  - the reconciler runs at the first preflight: do not run this on a daemon that hosts a live executor's sandboxes.
+ *  - the reconciler runs at the first preflight. Since Security N-D it removes only resources labelled with this
+ *    backend's own executor tag (random here unless REGULAIT_EXECUTOR_IDENTIFIER is set), so another executor's live
+ *    sandboxes on the same daemon are left alone; still, prefer a daemon of its own.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes, randomInt } from "node:crypto";
@@ -49,6 +52,11 @@ const enabled = dockerUp && /^sha256:[0-9a-f]{64}$/.test(EGRESS_IMAGE) && /^sha2
 const why = enabled
   ? "on a real Docker daemon (runc, not gVisor)"
   : "SKIPPED: no Docker daemon or REGULAIT_TEST_ROBOT_{EGRESS,SANDBOX,TARGET}_IMAGE unset; the egress is UNVERIFIED on a real network until it runs";
+// R3 (non-blocking 3): where this suite is REQUIRED (the robot-egress CI job sets REGULAIT_TEST_ROBOT_REQUIRED=1) a
+// missing daemon or image fails the file instead of skipping it, so the job can never pass vacuously
+if (process.env.REGULAIT_TEST_ROBOT_REQUIRED === "1" && !enabled) {
+  throw new Error(`REGULAIT_TEST_ROBOT_REQUIRED=1 but the suite cannot run: ${why} (docker reachable: ${dockerUp})`);
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const INIT = path.resolve(HERE, "../sandbox-init/sandbox-init.mjs");
