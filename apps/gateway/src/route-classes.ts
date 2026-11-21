@@ -488,6 +488,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/approvals/:approvalId/claim",
   "GET /v1/approvals/workload",
   "GET /v1/approvals/views",
+  // lane E23: the queue kinds a filter offers (a fixed list from the shared enum; names kinds, never rows)
+  "GET /v1/approvals/kinds",
   "POST /v1/approvals/views",
   "DELETE /v1/approvals/views/:id",
   // ADR-0069 — a person may read THEIR OWN consolidated (metered + imported)

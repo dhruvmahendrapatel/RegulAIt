@@ -48,32 +48,13 @@ import v from "../../views.module.css";
 const labelOf = (r: Approval) => isIntakeSignoff(r) ? "AI use case sign-off" : r.objectType === "mcp_tool" ? r.toolName ?? "MCP action" : r.objectType === "connector_call" ? r.toolName ?? "Connector write" : approvalStageLabel(r) ?? r.stageId ?? r.objectType;
 
 /**
- * Mirrors `APPROVAL_OBJECT_TYPES` in @regulait/shared — the kinds THE ONE
- * QUEUE holds. The SPA deliberately does not import the shared package (the
- * convention used for every other mirrored enum here), and the gateway parses
- * this parameter with that exact enum, so a value drifting out of the shared
- * list fails LOUDLY with a 400.
- *
- * The other direction is quieter and worth naming: a kind added server-side and
- * forgotten here is simply missing from this select. It is still in the queue and
- * still decidable — only unfilterable — so the failure is a narrowing that cannot
- * be reached, not a row that cannot be seen.
+ * The kinds THE ONE QUEUE holds come from the gateway (`GET /v1/approvals/kinds`, the shared
+ * `APPROVAL_OBJECT_TYPES` and their labels), the same enum `GET /v1/approvals` parses `objectType` with. The SPA
+ * used to keep its own copy, and every kind added after it was written (`model_call` among them) was missing from
+ * this filter: still queued and decidable, but impossible to narrow to. Reading the list means it cannot fall
+ * behind again. It is the same for every caller and changes only with a release, so it is cached for the session.
  */
-const OBJECT_TYPES: Array<[string, string]> = [
-  ["mcp_tool", "MCP tool call"],
-  ["workflow", "workflow stage sign-off"],
-  ["run", "agent run escalation"],
-  ["project", "project budget overage"],
-  ["infra_operation", "infrastructure operation"],
-  ["model_card", "model-card sign-off (MRM)"],
-  ["copilot_proposal", "governance-copilot proposal"],
-  ["training_job", "regulAIt-LLM training run"],
-  ["grant_certification", "certification-campaign item"],
-  ["sod_override", "separation-of-duties override"],
-  ["remediation", "governance-alert remediation"],
-  ["prompt_promotion", "prompt promotion to prod"],
-  ["connector_call", "connector write (execution hold)"],
-];
+type ApprovalKind = { kind: string; label: string };
 
 export default function ApprovalsAdminPage() {
   const [searchParams] = useSearchParams();
@@ -109,6 +90,16 @@ export default function ApprovalsAdminPage() {
     const qs = p.toString();
     return qs ? `/v1/approvals?${qs}` : "/v1/approvals";
   };
+  const kinds = useQuery({
+    queryKey: ["approval-kinds"],
+    queryFn: () => api.get<{ kinds: ApprovalKind[] }>("/v1/approvals/kinds"),
+    staleTime: Infinity,
+  });
+  // a kind from a shared link stays selectable while the list loads (or if it is no longer a kind, so the 400 says so)
+  const kindOptions = useMemo(() => {
+    const list = kinds.data?.kinds ?? [];
+    return objectType && !list.some((k) => k.kind === objectType) ? [...list, { kind: objectType, label: "from the link" }] : list;
+  }, [kinds.data, objectType]);
   const q = useQuery({
     queryKey: ["approvals", status, objectType, approver],
     queryFn: () => api.get<{ approvals: Approval[] }>(queueUrl()),
@@ -182,12 +173,13 @@ export default function ApprovalsAdminPage() {
             <Field label="Kind">
               <Select value={objectType} onChange={(e) => setObjectType(e.target.value)}>
                 <option value="">— every kind —</option>
-                {OBJECT_TYPES.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {value} — {label}
+                {kindOptions.map(({ kind, label }) => (
+                  <option key={kind} value={kind}>
+                    {kind} — {label}
                   </option>
                 ))}
               </Select>
+              {kinds.isError ? <span className={v.faint}>The kind list did not load; every kind is still shown.</span> : null}
             </Field>
             <Field label="Approver">
               <Select value={approver} onChange={(e) => setApprover(e.target.value)}>

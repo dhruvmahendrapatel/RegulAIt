@@ -4,4 +4,4 @@
 an approval rule are now held as `model_call` approvals. `ApprovalsAdminPage.tsx` mirrors the approval kinds for its
 filter and does not list `model_call` (nor the other kinds added since the list was written). The rows are in the
 queue and decidable; only the kind filter cannot reach them. For the UI builder on #453: add the missing kinds, or read
-the list from the API.
+the list from the API. **Closed 2026-11-21 (lane E23):** the filter now reads `GET /v1/approvals/kinds` (the shared `APPROVAL_OBJECT_TYPES` with their labels), so `model_call` and every later kind are listed without an SPA edit.
