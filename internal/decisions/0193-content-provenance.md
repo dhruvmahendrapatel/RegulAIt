@@ -187,3 +187,37 @@ harness runs axe, perf, responsive and states on the new route with no baseline 
    external agents are gated too, and should declaring one be mandatory under a strict setting?
 3. **`standard` versus approval.** Under the default floor, standard content is refused like untrusted content. Should
    a write after standard content instead require an approval?
+
+## Addendum — 2026-11-21: the floor and the injection scan on memory and shared-context writes (lane E50)
+
+Owner request 2026-11-20 (the agentic-governance checklist, OWASP Agentic ASI06 memory poisoning): the P1 floor gated
+only write tool calls, so text from an untrusted source could still be persisted into the two stores an agent later
+reads as context. Both write routes are now gated. No migration, no new route and no new setting.
+
+- **What is gated.** `POST /v1/projects/:projectId/context` and `.../context/promote` (the one shared-context write path,
+  `writeContextRevision`), and `POST /v1/builder/agents/:id/memory` (memory is part of the agent's system prompt).
+- **The floor.** The same rule as P1, through the same code: the causal context's tiers (`contextContentTiers`), the
+  write floor (`contentTrustWriteFloor`) and `evaluateContentTrust`. A shared-context write's causal context is its
+  declared producing run (`producedByRunId`, as `run:<id>`). A memory write may name its context (`contextId`,
+  `run:<id>` or `builder_thread:<id>`); a person's own note names none. A refusal is the P1 deny row (rule
+  `content-trust-floor`, code `content_trust_refused`) on the project or the builder agent, with `surface`.
+- **The injection scan.** The guardrail input phase (`resolveGuardrailPolicy` + `runGuardrailsAsync`), narrowed to the
+  injection family (prompt injection and jailbreak). A `block` refuses the write with `guardrail_blocked`; every
+  finding is recorded through `recordGuardrailDecision`, counts only. The floor runs first, so a refused write is never
+  scanned.
+- **Secure by default (ADR-0180).** Both are on with the shipped defaults: the floor is `trusted` and both detectors
+  `block`. An admin relaxes them through the existing audited settings: the floor through `PUT
+  /v1/content-trust/settings` (a `settings_relax` step-up, never below `standard`), the detectors through `PUT
+  /v1/guardrails/config`. There is deliberately no memory-only switch: a memory write can never sit below the posture a
+  write tool call has, and there is one place to read it.
+- **Refused writes store nothing.** The gate runs before the revision transaction and before the memory insert; both
+  refusals answer 403.
+- **The proof.** `memory.untrusted_context_write` (ADR-0345) now asserts all three writes, and its probe calls
+  `evaluateMemoryWrite`, the decision both routes make, with the trained detectors detached so the probe makes no
+  third-party call. The risk also lists `guardrail_configs.prompt_injection_mode` as a control. The catalogue version is
+  3.
+- **Open.** A shared-context write made by an orchestration worker that does not declare its producing run is not tied
+  to a causal context, so only the scan applies to it. Making the declaration mandatory for agent-originated writes
+  belongs with open question 2 above.
+
+Code: `apps/gateway/src/memory-write-gate.ts`; tests: `apps/gateway/src/zz-adr0193-memory-write-gate.test.ts`.

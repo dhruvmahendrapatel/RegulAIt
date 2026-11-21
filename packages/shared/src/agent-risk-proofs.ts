@@ -31,7 +31,7 @@ import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
-export const AGENT_RISK_CATALOG_VERSION = 2;
+export const AGENT_RISK_CATALOG_VERSION = 3;
 
 /**
  * The origin tag on every proof's test traffic. It rides the same `purpose` slot the red-team tag does (ADR-0057 §2),
@@ -333,14 +333,17 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
     owaspAgentic: [asi("ASI06")],
     controls: [
       { kind: "setting", column: "content_trust_settings.write_floor", secure: { oneOf: ["standard", "trusted"] }, adr: "ADR-0193" },
+      { kind: "setting", column: "guardrail_configs.prompt_injection_mode", secure: BLOCK, adr: "ADR-0042" },
     ],
     proofs: [
       probeProof(
         "memory.untrusted_context_write",
         "untrusted_context_write",
-        // v2: worded to what the ADR-0193 floor enforces (a write tool call). The shared-context write route is not
-        // gated by the floor yet; until it is, this proof must not claim it.
-        "A write tool call whose causal context holds untrusted content is refused by the trust floor.",
+        // v3 (ADR-0193 addendum, E50): the floor now gates the shared-context and agent-memory write routes too, and
+        // those routes also run the injection scan, so the proof covers all three writes.
+        "A write tool call, a shared-context write or an agent-memory write whose causal context holds untrusted " +
+          "content is refused by the trust floor, and a shared-context or memory write carrying a hidden instruction " +
+          "is refused by the injection scan.",
       ),
     ],
   },

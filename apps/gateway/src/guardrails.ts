@@ -458,7 +458,7 @@ export async function recordGuardrailDecision(
   db: Pick<Db, "insert">,
   args: {
     userId: string;
-    objectType: "agent" | "connector" | "mcp_server" | "a2a_agent";
+    objectType: "agent" | "connector" | "mcp_server" | "a2a_agent" | "project" | "builder_agent";
     objectId: string | null;
     projectId?: string | null | undefined;
     evaluation: GuardrailEvaluation;

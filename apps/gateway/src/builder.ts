@@ -145,6 +145,7 @@ import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
 import { databaseNow } from "./db-clock.js";
+import { memoryWriteGate, memoryWriteRefusal } from "./memory-write-gate.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
@@ -1161,6 +1162,18 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         detail: `an agent keeps at most ${BUILDER_LIMITS.memoryPerAgent} memory items; remove some before adding more`,
         limit: BUILDER_LIMITS.memoryPerAgent,
       });
+    }
+    // ADR-0193 addendum (E50, ASI06): memory becomes part of the agent's system prompt, so it is held to the
+    // content-trust floor (when the write names its causal context) and to the injection scan, before it is stored
+    const trust = await memoryWriteGate(db, {
+      userId: viewer.userId,
+      contextId: body.contextId ?? null,
+      text: body.content,
+      target: { kind: "agent_memory", agentId: agent.id, projectId: agent.projectId ?? null },
+    });
+    if (!trust.ok) {
+      const refusal = memoryWriteRefusal(trust);
+      return reply.status(refusal.status).send(refusal.body);
     }
     const row = await withAgentEvidenceHold(db, req, reply, agent.id, "memory (add)", async (db) => {
       const [row] = await db

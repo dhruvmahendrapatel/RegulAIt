@@ -40,6 +40,7 @@ import {
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
 import { recordContextRevision } from "./lineage.js";
+import { memoryWriteGate, memoryWriteRefusal } from "./memory-write-gate.js";
 import {
   addProjectMemberSchema,
   addTeamMemberSchema,
@@ -61,6 +62,7 @@ import {
   type PiiHit,
   MODALITIES,
   type Modality,
+  runContextId,
 } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -1889,6 +1891,20 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(teamMembers)
         .where(and(eq(teamMembers.teamId, args.teamId), eq(teamMembers.userId, userId)));
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
+    }
+
+    // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so a write here is held to the
+    // same content-trust floor as a write tool call (its causal context is the producing run, when declared) and
+    // to the injection scan. Before the transaction: a refused write takes no revision number.
+    const trust = await memoryWriteGate(db, {
+      userId,
+      contextId: args.producedByRunId ? runContextId(args.producedByRunId) : null,
+      text: args.content,
+      target: { kind: "shared_context", projectId, key: args.key },
+    });
+    if (!trust.ok) {
+      const refusal = memoryWriteRefusal(trust);
+      return reply.status(refusal.status).send(refusal.body);
     }
 
     // The read (maxRevision/latestAccepted) + insert run inside ONE
