@@ -28,6 +28,8 @@ import {
   mcpServers,
   mcpTools,
   or,
+  robots,
+  robotVersions,
   userAgentPolicies,
   type BuilderAgentRow,
   type BuilderSkillRow,
@@ -44,6 +46,7 @@ import {
   loadRoleConnectorGrants,
 } from "./entitlements.js";
 import { admissionHidesTools } from "./mcp-admission.js";
+import { ROBOTS_SERVER_URL } from "./robots-mcp.js";
 
 export interface Viewer {
   userId: string;
@@ -243,6 +246,22 @@ export async function loadConnectorsById(db: Db, ids: string[]) {
     .where(inArray(connectors.id, ids));
 }
 
+/**
+ * ADR-0364: the Robots-server tools in `toolIds` that may not be put in a toolbox — a version that is not approved
+ * (retired), a retired robot, or a halted tool. The picker hides the same set (`toolboxOptionsFor`).
+ */
+export async function unavailableRobotToolIds(db: Db, toolIds: string[]): Promise<Set<string>> {
+  if (!toolIds.length) return new Set();
+  const rows = await db
+    .select({ id: mcpTools.id, haltedAt: mcpTools.haltedAt, versionStatus: robotVersions.status, robotStatus: robots.status })
+    .from(mcpTools)
+    .innerJoin(mcpServers, eq(mcpTools.serverId, mcpServers.id))
+    .leftJoin(robotVersions, eq(robotVersions.mcpToolId, mcpTools.id))
+    .leftJoin(robots, eq(robots.id, robotVersions.robotId))
+    .where(and(inArray(mcpTools.id, toolIds), eq(mcpServers.url, ROBOTS_SERVER_URL)));
+  return new Set(rows.filter((r) => r.haltedAt || r.versionStatus !== "approved" || r.robotStatus !== "active").map((r) => r.id));
+}
+
 /** one thing the caller may put in a toolbox (`GET /v1/builder/toolbox-options`) */
 export interface ToolboxOption {
   kind: "connector" | "mcp_tool";
@@ -254,6 +273,9 @@ export interface ToolboxOption {
   description?: string;
   /** MCP tools only: whether the tool can make changes */
   access?: "read" | "write";
+  /** ADR-0364: set when the tool is an approved robot version on the first-party Robots server */
+  source?: "robot";
+  robot?: { robotId: string; version: number; engine: string };
 }
 
 /**
@@ -274,17 +296,35 @@ export async function toolboxOptionsFor(db: Db, userId: string): Promise<Toolbox
         serverName: mcpServers.name,
         kind: mcpTools.kind,
         description: mcpTools.description,
+        serverUrl: mcpServers.url,
+        haltedAt: mcpTools.haltedAt,
       })
       .from(mcpTools)
       .innerJoin(mcpServers, eq(mcpTools.serverId, mcpServers.id))
       .orderBy(asc(mcpServers.name), asc(mcpTools.name)),
   ]);
   const okTools = await entitledMcpToolIds(db, userId, toolRows);
+  // ADR-0364: a Robots-server tool is offered only while its version is approved, its robot active and the tool not
+  // halted — a retired version disappears from the picker even before the next manifest sync
+  const robotToolIds = toolRows.filter((t) => t.serverUrl === ROBOTS_SERVER_URL && okTools.has(t.id)).map((t) => t.id);
+  const robotByTool = new Map(
+    robotToolIds.length
+      ? (
+          await db
+            .select({ toolId: robotVersions.mcpToolId, robotId: robots.id, version: robotVersions.version, engine: robots.engine })
+            .from(robotVersions)
+            .innerJoin(robots, eq(robots.id, robotVersions.robotId))
+            .where(and(inArray(robotVersions.mcpToolId, robotToolIds), eq(robotVersions.status, "approved"), eq(robots.status, "active")))
+        ).map((r) => [r.toolId!, r] as const)
+      : [],
+  );
   const out: ToolboxOption[] = connectorRows
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((c) => ({ kind: "connector" as const, refId: c.id, name: c.name, provider: c.providerKind ?? c.kind }));
   for (const t of toolRows) {
     if (!okTools.has(t.id)) continue;
+    const robot = t.serverUrl === ROBOTS_SERVER_URL ? robotByTool.get(t.id) : undefined;
+    if (t.serverUrl === ROBOTS_SERVER_URL && (!robot || t.haltedAt)) continue;
     out.push({
       kind: "mcp_tool",
       refId: t.id,
@@ -292,6 +332,7 @@ export async function toolboxOptionsFor(db: Db, userId: string): Promise<Toolbox
       provider: t.serverName,
       access: t.kind,
       ...(t.description ? { description: t.description } : {}),
+      ...(robot ? { source: "robot" as const, robot: { robotId: robot.robotId, version: robot.version, engine: robot.engine } } : {}),
     });
   }
   return out;

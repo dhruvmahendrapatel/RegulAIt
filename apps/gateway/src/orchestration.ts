@@ -63,6 +63,7 @@ import {
   readyNodes,
   transitionRun,
   validateGraph,
+  workerTurnCap,
   type NodeTokenEstimate,
   type RunEffect,
   type RunEvent,
@@ -815,10 +816,7 @@ async function dispatchRunNodeInner(
   // the absolute maximum — the org ceiling can only narrow below it.
   const orgForNode = await loadOrgSettings(db);
   const maxTurnsDecl = args.maxTurns ?? node.maxTurns;
-  const maxTurns = Math.min(
-    Math.max(maxTurnsDecl ?? orgForNode.defaultWorkerMaxTurns, 1),
-    orgForNode.maxWorkerTurns,
-  );
+  const maxTurns = workerTurnCap(maxTurnsDecl, orgForNode);
 
   const firstInput = args.input ?? nodeInstruction(node) ?? node.title;
   const messages: ModelChatMessage[] = [{ role: "user", content: firstInput }];

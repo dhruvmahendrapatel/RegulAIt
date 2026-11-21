@@ -26,7 +26,28 @@ func basePolicy() Policy {
 	return Policy{
 		Schema: PolicySchema, Subject: "u-0123456789abcdef", Mode: ModeEnforce,
 		IssuedAt: now.Add(-time.Hour), NotAfter: now.Add(72 * time.Hour),
-		MCP: MCPRules{AllowServers: []string{"regulait", "docs"}, DenyServers: []string{"docs"}, AllowSources: []string{"managed", "user"}},
+		MCP:      MCPRules{AllowServers: []string{"regulait", "docs"}, DenyServers: []string{"docs"}, AllowSources: []string{"managed", "user"}},
+		Commands: testCommands(),
+	}
+}
+
+// testCommands is the command section the fixtures are decided against (ADR-0350).
+func testCommands() CommandRules {
+	return CommandRules{
+		Default: RuleAllow, Unresolved: RuleAsk,
+		Exec: []ExecRule{
+			{ID: "git-status", Argv: []string{"git", "status"}, Verdict: RuleAllow},
+			{ID: "git-push", Argv: []string{"git", "push", "**"}, Verdict: RuleAsk},
+			{ID: "rm-rf", Argv: []string{"rm", "-rf", "**"}, Verdict: RuleDeny},
+			{ID: "curl", Argv: []string{"curl", "**"}, Verdict: RuleDeny},
+		},
+		Files: FileRules{OutsideRead: RuleAsk, OutsideWrite: RuleDeny, Rules: []FileRule{
+			{ID: "dotenv", Access: "any", Path: "**/.env", Verdict: RuleDeny},
+		}},
+		Packages: PkgRules{Default: RuleAsk, Rules: []PkgRule{
+			{ID: "left-pad", Ecosystem: "npm", Name: "left-pad", Verdict: RuleDeny},
+			{ID: "lodash", Ecosystem: "npm", Name: "lodash", Verdict: RuleAllow},
+		}},
 	}
 }
 
@@ -69,19 +90,20 @@ func TestLoadPolicyRefuses(t *testing.T) {
 		keys Keyring
 		env  []byte
 	}{
-		"the compiled keyring is empty": {CompiledKeyring, env},
-		"wrong key":                     {keys, sign(t, otherPriv, "regulait-policy-test", payload)},
-		"unpinned key id":               {keys, sign(t, otherPriv, "regulait-policy-other", payload)},
-		"tampered payload":              {keys, tampered},
-		"unknown envelope member":       {keys, bytes.Replace(env, []byte(`{`), []byte(`{"x":1,`), 1)},
-		"not JSON":                      {keys, []byte("nope")},
-		"expired":                       {keys, mutate(func(p *Policy) { p.NotAfter = now.Add(-time.Second) })},
-		"from the future":               {keys, mutate(func(p *Policy) { p.IssuedAt = now.Add(time.Hour); p.NotAfter = now.Add(2 * time.Hour) })},
-		"unknown mode":                  {keys, mutate(func(p *Policy) { p.Mode = "off" })},
-		"unknown schema":                {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/2" })},
-		"bad server name":               {keys, mutate(func(p *Policy) { p.MCP.AllowServers = []string{"a b"} })},
-		"empty source":                  {keys, mutate(func(p *Policy) { p.MCP.AllowSources = []string{""} })},
-		"too large":                     {keys, bytes.Repeat([]byte(" "), maxPolicyBytes+1)},
+		"the compiled keyring is empty":  {CompiledKeyring, env},
+		"wrong key":                      {keys, sign(t, otherPriv, "regulait-policy-test", payload)},
+		"unpinned key id":                {keys, sign(t, otherPriv, "regulait-policy-other", payload)},
+		"tampered payload":               {keys, tampered},
+		"unknown envelope member":        {keys, bytes.Replace(env, []byte(`{`), []byte(`{"x":1,`), 1)},
+		"not JSON":                       {keys, []byte("nope")},
+		"expired":                        {keys, mutate(func(p *Policy) { p.NotAfter = now.Add(-time.Second) })},
+		"from the future":                {keys, mutate(func(p *Policy) { p.IssuedAt = now.Add(time.Hour); p.NotAfter = now.Add(2 * time.Hour) })},
+		"unknown mode":                   {keys, mutate(func(p *Policy) { p.Mode = "off" })},
+		"schema 1 (no commands section)": {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/1" })},
+		"unknown schema":                 {keys, mutate(func(p *Policy) { p.Schema = "regulait.endpoint-enforcement/3" })},
+		"bad server name":                {keys, mutate(func(p *Policy) { p.MCP.AllowServers = []string{"a b"} })},
+		"empty source":                   {keys, mutate(func(p *Policy) { p.MCP.AllowSources = []string{""} })},
+		"too large":                      {keys, bytes.Repeat([]byte(" "), maxPolicyBytes+1)},
 	}
 	for name, c := range cases {
 		// testKey is deterministic, so every signed() case is signed by the key in keys
@@ -146,8 +168,12 @@ func TestClaudeCodeHook(t *testing.T) {
 	if _, _, code := claudeCodeAdapter.Hook(in(mcpIn), nil); code != ExitBlock {
 		t.Error("no policy does not fail closed")
 	}
-	if out, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}`), nil); code != 0 || out != nil {
-		t.Error("a non-MCP tool got a decision")
+	if out, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"WebFetch","tool_input":{}}`), nil); code != 0 || out != nil {
+		t.Error("a tool that is neither MCP nor governed got a decision")
+	}
+	// a governed built-in fails closed without a policy (ADR-0350)
+	if _, _, code := claudeCodeAdapter.Hook(in(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`), nil); code != ExitBlock {
+		t.Error("a shell command without a policy is not blocked")
 	}
 	noProvenance := `{"hook_event_name":"PreToolUse","tool_name":"mcp__regulait__search","tool_input":{}}`
 	if _, _, code := claudeCodeAdapter.Hook(in(noProvenance), &p); code != ExitBlock {

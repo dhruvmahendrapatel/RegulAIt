@@ -101,6 +101,14 @@ export const RLS_SYSTEM_REASONS = [
    * (all), pm_sync_events (read, append). Never the webhook delivery records or the import linkage.
    */
   "pm_sync",
+  /**
+   * ADR-0365 (lane E46): the live context graph's entitlement-filtered reads, entered as a principal step around the
+   * three node read routes only, so the joined facts of a node the principal may read (its source binding, the PM
+   * connection's project name and provider, the imported item's external id, URL, type and missing state) can be
+   * selected: context_graph_sources, pm_connections and pm_imported_work_items (read only). The nodes and edges stay
+   * filtered by the principal's own readable predicate, which the reason does not widen; nothing is written under it.
+   */
+  "context_graph_read",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
