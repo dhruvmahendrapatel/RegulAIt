@@ -285,6 +285,9 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   sapWriteRatePerHour: atMost(10),
   sapUnattributedWritesAllowed: notEqual(false),
   sapReadsApproveFirst: fromStored(false, (v, b) => b === true && v === false),
+  // ADR-0347: a longer memory lifetime and storing flagged memory writes are looser than the default
+  agentMemoryTtlHours: atMost(24),
+  agentMemoryScanMode: notEqual("block"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),
