@@ -306,13 +306,14 @@ describe("MCP 2026-07-28 on POST /mcp/:serverId (ADR-0311 decision 4, slice 1)",
   });
 
   it("a method outside every vocabulary is -32601 with an audit row", async () => {
-    const r = await modernPost(users.alice.auth, "regulait/unknown");
+    const method = "regulait/unknown";
+    const r = await modernPost(users.alice.auth, method);
     expect(r.json().error?.code, r.body).toBe(-32601);
     const rows = await db
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.userId, users.alice.id), eq(auditLog.ruleId, "mcp-method-unsupported")));
-    expect(rows.some((e) => (e.detail as { method?: string }).method === "regulait/unknown")).toBe(true);
+    expect(rows.some((e) => (e.detail as { method?: string }).method === method)).toBe(true);
   });
 
   it("the pre-hijack refusals still run first: no API key is 401 and an unknown server is 404", async () => {

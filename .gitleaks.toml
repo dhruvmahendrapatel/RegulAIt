@@ -35,6 +35,17 @@ regexes = [
 ]
 
 [[allowlists]]
+# ADR-0311 (slice 2): the first commit of mcp-modern.test.ts slice 2 (PR #1164) passed the MCP method name
+# "regulait/unknown" next to `users.alice.auth`, which the generic-api-key rule reads as a key. It is a JSON-RPC method
+# name, not a secret. The test now holds it in a constant, but that commit stays in the PR's scanned range, so its exact
+# value is listed here for that one file only.
+description = "An MCP method name the generic rule misreads in the 2026-07-28 path tests (ADR-0311)"
+condition = "AND"
+paths = ['''^apps/gateway/src/mcp-modern\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^regulait/unknown$''']
+
+[[allowlists]]
 # ADR-0343: the first commit of the replica readiness test (PR #887) used the same synthetic data-key fixture as
 # process-lifecycle.test.ts (allow-listed below). The test now generates its key at run time, but that commit stays in
 # the PR's scanned range, so its exact value is listed here for that one file only.
