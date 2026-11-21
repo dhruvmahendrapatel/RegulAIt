@@ -288,6 +288,33 @@ The security and code reviews at `4398879` asked for these; each is built and te
   decision B1, so it is the owner's call); CORS and the gateway origin; audit flooding from bad-token registrations;
   forged `block.html` events.
 
+## 13. Extension hardening (2026-11-21: issues #1029, #1030 and #1031)
+
+- **The gateway origin is pinned at build time (#1029).** The customer builds the extension they sign with
+  `scripts/build.mjs --gateway-origin https://…`. That origin becomes one more host permission. Only the worker uses
+  it: it is in neither the content-script nor the web-accessible matches. So the worker calls the gateway without CORS,
+  and the gateway needs no CORS handling. The same origin is compiled into the bundle (`src/guards.ts`), and a managed
+  `gatewayUrl` with any other origin is refused. A tampered managed configuration therefore cannot send the device's
+  key, enrolment token or reports anywhere else. A build with no pinned origin reaches no gateway and keeps every
+  governed site blocked (the strict default). Rule 9 compared two approaches:
+  - `@fastify/cors` (MIT, maintained), allowing `chrome-extension://<id>` on the four extension routes and the token
+    endpoint. Rejected: it adds a cross-origin surface and an extension-id setting to the gateway, and it would not stop
+    a changed `gatewayUrl`.
+  - `optional_host_permissions` with a runtime request. Rejected: it needs a user gesture, which a force-installed
+    extension cannot rely on, and it grants far more than one origin.
+- **Block-page records are checked (#1031).** The block page must be web-accessible for a redirect to reach it, so a
+  governed site could open it with any code. The worker now records a `blocked` event only when all of these hold:
+  - its own current verdict for that site is the same block with the same code;
+  - the message comes from a top-level frame;
+  - it is the first record for that site and code in a minute.
+  A site can no longer forge a block that the policy would not apply, or flood the queue.
+- **Unauthenticated refusals are coalesced (#1030).** A registration can be refused before any enrolment token is
+  known: no token, an unknown token, a malformed body, or governance off. For each code, the first such refusal in a
+  minute is audited, and the rest of that minute are counted. The count is written as one summary row
+  (`coalesced: true`, `suppressed: n`) when the minute ends. A refusal against a known token is still audited every
+  time. The counter is per process, and a count still open when the process exits is lost. That is accepted, because
+  the row bounds audit volume from unauthenticated callers and is not evidence of any one request.
+
 ## Consequences
 
 - The browser joins the gateway and the endpoint agent under one decision order, one audit chain and one set of

@@ -45,6 +45,7 @@ const DECISION_WRITERS = [
   "mcp-admission.ts", // ADR-0207 (G3-G6): a disabled MCP server refused at the connect gate (deny row)
   "mcp-high-risk.ts", // ADR-0246 addendum: a call to a high-risk MCP server refused (or passed on) by the target gate
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
+  "mcp-modern.ts", // ADR-0311 d4: a method the MCP 2026-07-28 path does not serve, refused (insert(auditLog) on the route's chained handle)
   "mcp-protocol.ts", // MCP protocol methods
   "mcp-sap-business.ts", // ADR-0230 A2: an SAP business write refused for want of a live, budgeted project
   "model-supply-chain.ts", // ADR-0216: a dispatch refused because a cited model file fails the supply-chain check
