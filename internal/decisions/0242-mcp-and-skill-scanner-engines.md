@@ -480,6 +480,35 @@ main, and the lock-update branch is merged by a person.
 - **Still open:** the first publish itself (CI), the §6.4 sandbox-limit proof, re-recording the report fixtures with
   the published image, and the Q5 tuning on the `anthropics/skills` corpus.
 
+### L4.6 Fixtures re-recorded, and the engine measured on the vulnerable MCP fixtures (2026-11-17)
+
+- **Re-recorded.** Both images were built locally from the committed Dockerfiles, with this sandbox's TLS-proxy CA
+  added to a scratch copy and host networking for the build only, as in §3. Their in-image smoke scans passed. The
+  seven report fixtures were re-recorded with `--network=none --read-only --cap-drop=ALL`, no new privileges,
+  uid 10001 and no `/tmp`. They are byte-for-byte the earlier reports plus the driver's `inputs` echo, which names
+  the engine's own fixture file and its real sha256 (a test checks this). The tests no longer add `inputs` to the
+  recordings; the interpretation cases still pin an expected input explicitly.
+- **The vulnerable MCP fixtures (ADR-0246; P23's scanners on the fixtures).** `scripts/mcp-vuln-scan-inputs.mjs`
+  writes the `tools.json` the gateway would hand the driver for each of the eight attack classes, plus rug-pull's
+  pulled phase. The image scanned each one under the same flags. The reports are committed under
+  `packages/shared/src/engines/fixtures/admission-scan/vuln/`, and `scripts/mcp-vuln-scan-inputs.test.mjs` proves
+  each one is about today's fixture bytes. Measured at the MCP hold line (`high`):
+
+  | Class | mcpscanner | The control that catches it (the fixture's `expected`) |
+  |---|---|---|
+  | tool-poisoning | **held** (high: aisubtech 1.1.1, 8.2.3) | admission scanning, the in-process scanner, and now this engine |
+  | tool-shadowing | **held** (high: aisubtech 1.1.1) | admission scanning, and the reserved-prefix name rule (ADR-0185 G3/G4) |
+  | param-exfiltration | not held | the in-process scanner's `mcp.exfil.*` rule; this engine adds nothing here |
+  | rug-pull (approved and pulled) | not held | ADR-0246 definition pinning, the change-since-approval block |
+  | excessive-permissions | not held | write-kind default-deny and approvals |
+  | secret-leak | not held | the output guardrail's `dlp.secret.*` (the secret is in a call result, which admission never sees) |
+  | indirect-injection | not held | the output guardrail's prompt-injection detector (also in a result) |
+  | offensive-tooling | not held | the ADR-0246 high-risk classification and its policy template |
+
+  So the engine is defence in depth for two classes and never the only control for any. Its one blind spot that the
+  fixture names as an admission catch, param-exfiltration, is covered by the in-process scanner. This is measured,
+  not a defect in our code, so no change follows from it.
+
 ## Owner decisions (2026-11-15)
 
 The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).

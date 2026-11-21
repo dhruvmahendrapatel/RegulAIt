@@ -330,6 +330,17 @@ describe("PF-14 the ticket: one PM work item per episode", () => {
   });
   const links = (alertId: string) => db.select().from(pmLinks).where(and(eq(pmLinks.objectType, "governance_alert" as never), eq(pmLinks.objectId, alertId)));
 
+  it("an owner who hands an episode on still sees its ticket in the reassign response (ADR-0234 PM follow-on)", async () => {
+    const a = await episode({ ruleId: "unregistered_ai_traffic", subjectKey: `caller:${u.owner.id}:handoff` });
+    subjects.push(`caller:${u.owner.id}:handoff`);
+    const filed = await inject("POST", `/v1/governance/alerts/${a.id}/ticket`, u.admin.auth, { connectionId });
+    expect(filed.statusCode, filed.body).toBe(201);
+    expect((await inject("PUT", `/v1/governance/alerts/${a.id}/owner`, u.admin.auth, { userId: u.owner.id })).statusCode).toBe(200);
+    const handed = await inject("PUT", `/v1/governance/alerts/${a.id}/owner`, u.owner.auth, { userId: u.member.id });
+    expect(handed.statusCode, handed.body).toBe(200);
+    expect(handed.json()).toMatchObject({ owner: { id: u.member.id }, ticket: { externalId: filed.json().ticket.externalId } });
+  });
+
   it("an admin files one; a second request returns the same item; a non-admin is refused", async () => {
     // a caller subject: the title names a person, so the ticket must not carry it
     const a = await episode({ ruleId: "unregistered_ai_traffic", subjectKey: `caller:${u.member.id}` });
