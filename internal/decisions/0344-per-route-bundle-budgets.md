@@ -98,12 +98,19 @@ Recorded from an owner decision of 2026-11-21, relayed to lane UI-C by the maste
 "owner decision 2026-11-21: the JS bundle gate counts first-load JS only". This addendum lands the step that "What is
 not done here" left open.
 
-- **Hard budget: first-load JS.** A new ceiling, `first-load JS`, is the gzip total of the entry chunk plus every chunk
-  it imports statically: the module script and each `modulepreload` link that Vite writes into `dist/index.html`. Its
-  limit is 139.5 kB, the same as `entry JS (index)`. That number was set when the whole first load was one file. On
-  2026-11-21 the first load is the entry chunk and 7 preloaded chunks, 134,006 B together. Raising this limit needs a
-  `CEILING_EXCEPTIONS` row and an owner decision, like any other ceiling. `entry JS (index)` and `entry CSS (index)`
-  stay as they are.
+- **Hard budgets: first-load JS and first-paint JS.** Two totals bound what a first visit loads. Both are read from
+  Vite's build manifest, and raising either limit needs a `CEILING_EXCEPTIONS` row and an owner decision.
+  - `first-load JS` is the entry chunk plus every chunk it imports statically. Its limit is 139.5 kB, the same as
+    `entry JS (index)`, which was set when the whole first load was one file. On 2026-11-21 it is 8 chunks,
+    134,006 B.
+  - `first-paint JS` adds the screen each first-visit path renders: `/login` (the sign-in screen) and `/` (home after
+    sign-in), as App.tsx's routes declare. It also adds every chunk those reach through static or dynamic imports. The
+    only thing left out is the entry's route table, its dynamic imports of the other screens App.tsx declares. Any
+    other dynamic import counts, whether the code awaits it at once or later. So moving code out of the entry or a
+    first screen into a new lazy chunk does not take it out of the total. That closes the gap the R3 review of #1185
+    found: the first screens are themselves lazy, and `first-load JS` alone did not count them. On 2026-11-21 it is
+    24 chunks, 177,320 B. Its limit is 182 kB, which leaves about the same room (4.7 kB) as `first-load JS` (5.5 kB).
+  - `entry JS (index)` and `entry CSS (index)` stay as they are.
 - **Lazy chunks: their own, looser cap.** Each lazily loaded chunk keeps its `chunk:` ceiling (gzip size plus 10%, at
   least 2 kB more). None of them counts toward a shared total.
 - **`all JS` is removed.** owner decision 2026-11-21: the JS bundle gate counts first-load JS only, so `all JS` leaves `apps/web/.size-limit.json`.
@@ -112,13 +119,14 @@ not done here" left open.
   - It allows removing an entry named by a dated `CEILING_REMOVALS` row whose decision a line of this ADR names
     together with the entry. That row is `all JS`.
   - It allows removing a `chunk:` ceiling, because the coverage check fails while that chunk is still built.
-  - It allows `first-load JS` to change its path list, but only to exact chunk paths that include the entry chunk. Its
-    limit and its other options stay guarded.
-- **Coverage check (`scripts/ui-chunk-budgets.mjs --check`).** It now also fails when `first-load JS` is missing, does
-  not measure gzip, or does not list exactly the JS files that `dist/index.html` loads. A new static import of the entry
-  therefore cannot leave the first-load total uncounted. `--write` sets that path list from the build and never changes
-  a limit.
-- **Open-source options (ADR-0176).** size-limit still does the measuring. Vite's `build.manifest` would also list the
-  entry's static imports, but it needs a build-config change, and `dist/index.html` is exactly what a browser loads on a
-  first visit. So the check reads the `<script type="module">` and `<link rel="modulepreload">` tags Vite writes there.
-  No library on npm checks that a ceiling covers exactly a page's first-load files (see the table above).
+  - It allows the two totals to change their path lists, but only to exact chunk paths that include the entry chunk.
+    Their limits and other options stay guarded.
+- **Coverage check (`scripts/ui-chunk-budgets.mjs --check`).** It reads `dist/.vite/manifest.json`, so the CI bundle
+  job builds with `--manifest`, and only that job's checks read the file. It fails when either total is missing, does
+  not measure gzip, or does not list exactly the chunks it adds up. It also fails closed when App.tsx renders no lazily
+  loaded screen at a first-visit path. `--write` sets both path lists from the build and never changes a limit.
+- **Open-source options (ADR-0176).** size-limit still does the measuring. The import graph comes from Vite's own
+  `build.manifest` (`--manifest`), not from parsing `index.html` or the bundle. Loading `/` and `/login` in the
+  Playwright harness and recording script requests would also work, but it would need a browser in the bundle job,
+  and it would see only what one run happens to fetch. No library on npm checks that a ceiling covers exactly a first
+  visit's chunks (see the table above).

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
-import { CEILING_EXCEPTIONS, CEILING_REMOVALS, ceilingExceptionProblems, ceilingRemovalProblems, FIRST_LOAD_NAME, growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
+import { CEILING_EXCEPTIONS, CEILING_REMOVALS, ceilingExceptionProblems, ceilingRemovalProblems, FIRST_LOAD_NAME, FIRST_PAINT_NAME, growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
 import { recordMode } from "../apps/web/e2e/enterprise/record-mode.ts";
 import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
@@ -248,6 +248,15 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
       expect(sizeLimitLoosened(before, [...base, fl(["dist/assets/*.js"])])).toEqual(['"first-load JS": path, gzip or another option changed']);
       expect(sizeLimitLoosened(before, [...base, fl(["dist/assets/react-????????.js"])])).toEqual(['"first-load JS": path, gzip or another option changed']);
       expect(sizeLimitLoosened(before, base)).toEqual(['"first-load JS": entry removed']);
+    });
+
+    it("treats first-paint JS the same way: its path list follows the build, its limit stays guarded", () => {
+      const fp = (path, limit = "182 kB") => ({ name: FIRST_PAINT_NAME, path, gzip: true, limit });
+      const before = [...base, fp(["dist/assets/index-????????.js"])];
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/index-????????.js", "dist/assets/HomePage-????????.js"])])).toEqual([]);
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/index-????????.js"], "190 kB")])).toEqual(['"first-paint JS": limit raised 182 kB -> 190 kB']);
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/*.js"])])).toEqual(['"first-paint JS": path, gzip or another option changed']);
+      expect(sizeLimitLoosened(before, base)).toEqual(['"first-paint JS": entry removed']);
     });
 
     it("records every real removal in ADR-0344", () => {

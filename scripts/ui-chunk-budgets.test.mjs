@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ceilingFor, chunkName, chunkPath, coverageProblems, FIRST_LOAD_NAME, firstLoadFiles, firstLoadProblems, SIZE_LIMIT_FILE, withChunkCeilings } from "./ui-chunk-budgets.mjs";
+import { appRoutes, ceilingFor, chunkName, chunkPath, coverageProblems, FIRST_LOAD_NAME, FIRST_PAINT_NAME, firstLoadFiles, firstPaintFiles, SIZE_LIMIT_FILE, totalProblems, withChunkCeilings } from "./ui-chunk-budgets.mjs";
 
 const entry = { name: "entry JS (index)", path: "dist/assets/index-*.js", gzip: true, limit: "139.5 kB" };
 const chunk = (n, limit = "10.0 kB") => ({ name: `chunk: ${n}`, path: chunkPath(n), gzip: true, limit });
@@ -31,10 +31,11 @@ describe("per-route bundle budgets (ADR-0344)", () => {
     ]);
   });
 
-  it("does not count the first-load total as a chunk's ceiling", () => {
+  it("does not count either total as a chunk's ceiling", () => {
     const firstLoad = { name: FIRST_LOAD_NAME, path: [chunkPath("builder"), chunkPath("index")], gzip: true, limit: "139.5 kB" };
-    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad])).toHaveLength(1);
-    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad, chunk("builder")])).toEqual([]);
+    const firstPaint = { ...firstLoad, name: FIRST_PAINT_NAME, limit: "182 kB" };
+    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad, firstPaint])).toHaveLength(1);
+    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad, firstPaint, chunk("builder")])).toEqual([]);
   });
 
   it("refuses a total over every JS chunk (the all-JS total is gone, ADR-0344 addendum)", () => {
@@ -71,39 +72,84 @@ describe("per-route bundle budgets (ADR-0344)", () => {
     expect(after).toEqual([entry, chunk("fresh", "6.7 kB"), chunk("kept", "1.0 kB")]);
   });
 
-  const html = `<!doctype html><head>
-    <script type="module" crossorigin src="/ui/assets/index-Dm8L3QSC.js"></script>
-    <link rel="modulepreload" crossorigin href="/ui/assets/react-BQ7o4F5D.js">
-    <link rel="modulepreload" crossorigin href="/ui/assets/views.module-C7hCG9NA.js">
-    <link rel="stylesheet" crossorigin href="/ui/assets/index-CndKyuc1.css">
-    <link rel="icon" href="/ui/assets/brand-favicon-BwQIX84i.svg">
-    <script src="/ui/assets/not-a-module-AAAAAAAA.js"></script>
-  </head>`;
-  const firstLoad = (paths) => ({ name: FIRST_LOAD_NAME, path: paths, gzip: true, limit: "139.5 kB" });
+  // a Vite build manifest in miniature: the entry, two first-visit screens, one other route, shared chunks
+  const app = `
+    const LoginPage = screen(() => import("./screens/auth"), "LoginPage");
+    const HomePage = lazy(() => import("./views/home/HomePage"));
+    const RunsPage = screen(() => import("./screens/runs"), "RunsPage");
+    <Route path="/login" element={<LoginPage />} />
+    <Route path="/" element={<HomePage />} />
+    <Route path="runs" element={<RunsPage />} />`;
+  const manifest = (extra = {}) => ({
+    "index.html": { file: "assets/index-AAAAAAAA.js", isEntry: true, imports: ["_react-BBBBBBBB.js"], dynamicImports: ["src/screens/auth.ts", "src/views/home/HomePage.tsx", "src/screens/runs.ts", "_palette-CCCCCCCC.js"], css: ["assets/index-DDDDDDDD.css"] },
+    "_react-BBBBBBBB.js": { file: "assets/react-BBBBBBBB.js" },
+    "_palette-CCCCCCCC.js": { file: "assets/palette-CCCCCCCC.js", isDynamicEntry: true },
+    "src/screens/auth.ts": { file: "assets/auth-EEEEEEEE.js", isDynamicEntry: true, imports: ["index.html", "_kit-FFFFFFFF.js"] },
+    "src/views/home/HomePage.tsx": { file: "assets/HomePage-GGGGGGGG.js", isDynamicEntry: true, imports: ["index.html", "_kit-FFFFFFFF.js"] },
+    "_kit-FFFFFFFF.js": { file: "assets/kit-FFFFFFFF.js", imports: ["index.html"] },
+    "src/screens/runs.ts": { file: "assets/runs-HHHHHHHH.js", isDynamicEntry: true, imports: ["index.html", "_kit-FFFFFFFF.js"] },
+    ...extra,
+  });
+  const total = (name, paths, limit = "139.5 kB") => ({ name, path: paths, gzip: true, limit });
 
-  it("reads the first-load JS from dist/index.html: the module entry and every modulepreload, nothing else", () => {
-    expect(firstLoadFiles(html)).toEqual(["index-Dm8L3QSC.js", "react-BQ7o4F5D.js", "views.module-C7hCG9NA.js"]);
-    expect(firstLoadFiles("<html></html>")).toEqual([]);
+  it("reads first-load JS from Vite's manifest: the entry and its static imports, no dynamic import", () => {
+    expect(firstLoadFiles(manifest())).toEqual(["index-AAAAAAAA.js", "react-BBBBBBBB.js"]);
   });
 
-  it("fails unless first-load JS lists exactly what a first visit loads", () => {
-    const files = firstLoadFiles(html);
-    const exact = [chunkPath("index"), chunkPath("react"), chunkPath("views.module")];
-    expect(firstLoadProblems(files, [entry, firstLoad(exact)])).toEqual([]);
-    expect(firstLoadProblems(files, [entry, firstLoad([...exact].reverse())])).toEqual([]);
-    // a new static import of the entry cannot stay out of the total
-    expect(firstLoadProblems(files, [entry, firstLoad(exact.slice(0, 2))])[0]).toMatch(/must be exactly what dist\/index.html loads/);
-    expect(firstLoadProblems(files, [entry, firstLoad([...exact, chunkPath("extra")])])[0]).toMatch(/must be exactly/);
-    expect(firstLoadProblems(files, [entry, { ...firstLoad(exact), gzip: false }])).toEqual(['"first-load JS": must measure gzip (`"gzip": true`)']);
-    expect(firstLoadProblems(files, [entry])[0]).toMatch(/no "first-load JS" ceiling/);
-    expect(firstLoadProblems([], [entry, firstLoad(exact)])[0]).toMatch(/loads no JS/);
+  it("reads which screen each route renders from App.tsx", () => {
+    const { modules, elements } = appRoutes(app);
+    expect(elements.get("/login")).toBe("LoginPage");
+    expect(modules.get("HomePage")).toBe("src/views/home/HomePage");
+    expect(modules.get(elements.get("runs"))).toBe("src/screens/runs");
   });
 
-  it("writes the first-load path list from the build and keeps its limit", () => {
-    const before = [entry, firstLoad([chunkPath("index")]), chunk("react"), chunk("views.module")];
-    const after = withChunkCeilings(before, { index: 39_000, react: 2_800, "views.module": 39_000 }, firstLoadFiles(html));
-    expect(after[1]).toEqual(firstLoad([chunkPath("index"), chunkPath("react"), chunkPath("views.module")]));
-    expect(after.slice(2)).toEqual([chunk("react"), chunk("views.module")]);
+  it("counts in first-paint JS the first-visit screens and every dynamic import but the entry's route table", () => {
+    // the other route stays out; the entry's non-route lazy import (palette) counts
+    expect(firstPaintFiles(manifest(), app)).toEqual(["HomePage-GGGGGGGG.js", "auth-EEEEEEEE.js", "index-AAAAAAAA.js", "kit-FFFFFFFF.js", "palette-CCCCCCCC.js", "react-BBBBBBBB.js"]);
+  });
+
+  it("still counts code moved out of the entry into a new lazy chunk the home screen imports (R3, #1185)", () => {
+    const moved = manifest({
+      "src/views/home/HomePage.tsx": { file: "assets/HomePage-GGGGGGGG.js", isDynamicEntry: true, imports: ["index.html"], dynamicImports: ["src/views/home/Moved.tsx"] },
+      "src/views/home/Moved.tsx": { file: "assets/Moved-JJJJJJJJ.js", isDynamicEntry: true, imports: ["index.html", "_heavy-KKKKKKKK.js"] },
+      "_heavy-KKKKKKKK.js": { file: "assets/heavy-KKKKKKKK.js" },
+    });
+    const files = firstPaintFiles(moved, app);
+    expect(files).toEqual(expect.arrayContaining(["Moved-JJJJJJJJ.js", "heavy-KKKKKKKK.js"]));
+    // the committed path list from before the move no longer matches, so the gate fails until the total counts them
+    const before = total(FIRST_PAINT_NAME, firstPaintFiles(manifest(), app).map((f) => chunkPath(chunkName(f))), "182 kB");
+    expect(totalProblems(FIRST_PAINT_NAME, files, [entry, before])[0]).toMatch(/its paths must be exactly the chunks it adds up/);
+  });
+
+  it("fails closed when App.tsx renders no lazy screen at a first-visit path, or the manifest lacks a module", () => {
+    expect(() => firstPaintFiles(manifest(), app.replace('path="/login"', 'path="/signin"'))).toThrow(/renders no lazily loaded screen at "\/login"/);
+    const { ["src/screens/runs.ts"]: _gone, ...noRuns } = manifest();
+    expect(() => firstPaintFiles({ ...noRuns, "index.html": { ...noRuns["index.html"], dynamicImports: [] } }, app)).toThrow(/no module for src\/screens\/runs/);
+  });
+
+  it("fails unless a total lists exactly the chunks it adds up, and measures gzip", () => {
+    const files = firstLoadFiles(manifest());
+    const exact = [chunkPath("index"), chunkPath("react")];
+    expect(totalProblems(FIRST_LOAD_NAME, files, [entry, total(FIRST_LOAD_NAME, exact)])).toEqual([]);
+    expect(totalProblems(FIRST_LOAD_NAME, files, [entry, total(FIRST_LOAD_NAME, [...exact].reverse())])).toEqual([]);
+    expect(totalProblems(FIRST_LOAD_NAME, files, [entry, total(FIRST_LOAD_NAME, exact.slice(0, 1))])[0]).toMatch(/must be exactly/);
+    expect(totalProblems(FIRST_LOAD_NAME, files, [entry, total(FIRST_LOAD_NAME, [...exact, chunkPath("extra")])])[0]).toMatch(/must be exactly/);
+    expect(totalProblems(FIRST_LOAD_NAME, files, [entry, { ...total(FIRST_LOAD_NAME, exact), gzip: false }])).toEqual(['"first-load JS": must measure gzip (`"gzip": true`)']);
+    expect(totalProblems(FIRST_PAINT_NAME, files, [entry])[0]).toMatch(/no "first-paint JS" ceiling/);
+    expect(totalProblems(FIRST_LOAD_NAME, [], [entry, total(FIRST_LOAD_NAME, exact)])[0]).toMatch(/loads no JS/);
+  });
+
+  it("writes each total's path list from the build and keeps its limit", () => {
+    const before = [entry, total(FIRST_LOAD_NAME, [chunkPath("index")]), chunk("react")];
+    const after = withChunkCeilings(before, { index: 39_000, react: 2_800 }, { [FIRST_LOAD_NAME]: firstLoadFiles(manifest()) });
+    expect(after[1]).toEqual(total(FIRST_LOAD_NAME, [chunkPath("index"), chunkPath("react")]));
+    expect(after.slice(2)).toEqual([chunk("react")]);
+  });
+
+  it("reads the real App.tsx: /login and / each render a lazily loaded screen", () => {
+    const { modules, elements } = appRoutes(readFileSync(new URL("../apps/web/src/App.tsx", import.meta.url), "utf8"));
+    expect(modules.get(elements.get("/login"))).toBe("src/screens/auth");
+    expect(modules.get(elements.get("/"))).toBe("src/views/home/HomePage");
   });
 
   it("covers every chunk of the committed .size-limit.json with the shape the check reads", () => {
@@ -114,9 +160,9 @@ describe("per-route bundle budgets (ADR-0344)", () => {
     // the entry ceilings stay; the hard first-load total joins them, and no total over every chunk remains
     expect(entries.find((e) => e.name === "entry JS (index)")).toEqual(entry);
     expect(entries.find((e) => e.name === "entry CSS (index)")?.limit).toBe("10.7 kB");
-    const total = entries.find((e) => e.name === FIRST_LOAD_NAME);
-    expect(total).toMatchObject({ gzip: true, limit: "139.5 kB" });
-    expect(total.path).toContain(chunkPath("index"));
+    expect(entries.find((e) => e.name === FIRST_LOAD_NAME)).toMatchObject({ gzip: true, limit: "139.5 kB" });
+    expect(entries.find((e) => e.name === FIRST_PAINT_NAME)).toMatchObject({ gzip: true, limit: "182 kB" });
+    for (const n of [FIRST_LOAD_NAME, FIRST_PAINT_NAME]) expect(entries.find((e) => e.name === n).path).toContain(chunkPath("index"));
     expect(entries.find((e) => e.name === "all JS")).toBeUndefined();
   });
 });

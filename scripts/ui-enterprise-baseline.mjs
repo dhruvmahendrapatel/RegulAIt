@@ -24,8 +24,8 @@
  *                       Two removals are allowed (ADR-0344 addendum, owner decision 2026-11-21: the JS gate counts
  *                       first-load JS only): a `chunk:` ceiling, because scripts/ui-chunk-budgets.mjs --check fails
  *                       while its chunk is still built; and an entry named by a dated row of CEILING_REMOVALS whose
- *                       decision ADR-0344 records. The `first-load JS` total may change its path list, because
- *                       --check pins that list to the files dist/index.html loads; its limit and options stay guarded.
+ *                       decision ADR-0344 records. The `first-load JS` and `first-paint JS` totals may change their
+ *                       path lists, because --check pins each to Vite's build manifest; limits and options stay guarded.
  *                       And it fails when the ceilings could be read from anywhere else: size-limit searches
  *                       package.json before .size-limit.json, so a `size-limit` key in apps/web/package.json, another
  *                       apps/web/.size-limit* file (.js, .cjs, …), or a `size` script that does not pin
@@ -79,8 +79,12 @@ export const CEILING_EXCEPTIONS = [
 ];
 /** ADR-0344: the per-route budgets, and the addendum that made the JS gate count first-load JS only */
 export const REMOVAL_ADR = "internal/decisions/0344-per-route-bundle-budgets.md";
-/** the hard first-load budget: the entry chunk plus every chunk it imports statically (what dist/index.html loads) */
+/** the hard first-load budget: the entry chunk plus every chunk it imports statically */
 export const FIRST_LOAD_NAME = "first-load JS";
+/** the hard first-paint budget: first load plus everything the first-visit screens can load */
+export const FIRST_PAINT_NAME = "first-paint JS";
+/** totals whose path list follows the build (ui-chunk-budgets.mjs --check pins it); limit and options stay guarded */
+const FOLLOWS_BUILD = [FIRST_LOAD_NAME, FIRST_PAINT_NAME];
 const CHUNK_PREFIX = "chunk: ";
 const EXACT_CHUNK_PATH = /^dist\/assets\/[^/*?]+-\?{8}\.js$/;
 const FIRST_LOAD_ENTRY_PATH = "dist/assets/index-????????.js";
@@ -109,7 +113,7 @@ export function ceilingRemovalProblems(removals, adrText) {
   return out;
 }
 
-/** whether `paths` is a first-load list the guard accepts: exact chunk paths only, the entry chunk among them */
+/** whether `paths` is a total's list the guard accepts: exact chunk paths only, the entry chunk among them */
 const firstLoadPathsOk = (paths) => paths.every((p) => EXACT_CHUNK_PATH.test(p)) && paths.includes(FIRST_LOAD_ENTRY_PATH);
 
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
@@ -266,9 +270,9 @@ export function sizeLimitLoosened(before, after, exceptions = [], adrText = "", 
       );
       if (!allowed) out.push(`"${name}": limit raised ${b.limit} -> ${a.limit}`);
     }
-    // the first-load list follows the build (--check pins it to dist/index.html); its other options do not change
-    const firstLoad = name === FIRST_LOAD_NAME && firstLoadPathsOk([a.path].flat());
-    const same = firstLoad ? options({ ...a, path: [] }) === options({ ...b, path: [] }) : options(a) === options(b);
+    // a total's path list follows the build (--check pins it to Vite's manifest); its other options do not change
+    const followsBuild = FOLLOWS_BUILD.includes(name) && firstLoadPathsOk([a.path].flat());
+    const same = followsBuild ? options({ ...a, path: [] }) === options({ ...b, path: [] }) : options(a) === options(b);
     if (!same) out.push(`"${name}": path, gzip or another option changed`);
   }
   return out;
