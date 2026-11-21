@@ -5,6 +5,8 @@
  * Each table's states equal the column's CHECK constraint; a gateway test holds the two equal.
  */
 import { defineMachine, type StateMachine } from "./state-machine.js";
+// ADR-0358 (lane E39): declared beside its contract, listed here so every machine is in one registry
+import { CMDB_SYNC_RUN_MACHINE } from "./cmdb-sync.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
@@ -970,4 +972,5 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
   [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
+  [CMDB_SYNC_RUN_MACHINE.def.id]: CMDB_SYNC_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);

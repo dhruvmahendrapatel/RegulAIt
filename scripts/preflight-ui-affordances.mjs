@@ -77,6 +77,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // (scripts/known-ui-gaps/adr-0251-l1-resource-rules.json holds the same routes).
   ["/v1/rules/resource/approval-rules/:x", "removing a governed-core approval rule (settings_relax step-up): API-only until the screen on #453"],
   ["/v1/rules/resource/rate-limits/:x", "removing a governed-core rate limit (settings_relax step-up): API-only until the screen on #453"],
+  // ADR-0358 (lane E39): the UI is built by the design builder; delete this entry when the CMDB connector screen lands
+  ["/v1/cmdb/connectors/:x/credential", "revoking a CMDB connector's credential (destroys the secret, disables the connector): API-only until the CMDB connector screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);
 
 /**

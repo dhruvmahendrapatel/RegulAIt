@@ -838,6 +838,9 @@ describe("every sweep is registered", () => {
         // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
         // in zz-adr0345-proof-runner.test.ts
         AGENT_RISK_PROOF_JOB_NAME,
+        // ADR-0358 (lane E39): pushes the AI asset inventory to enabled CMDB connectors; driven end to end in
+        // zz-adr0358-cmdb-sync.test.ts (with no connector enabled it sends nothing)
+        SCHEDULER_JOB_NAMES.cmdbSyncSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

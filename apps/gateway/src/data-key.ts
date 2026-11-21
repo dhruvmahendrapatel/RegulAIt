@@ -292,6 +292,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
+  // ADR-0358 (lane E39): the CMDB integration credential (ServiceNow first)
+  { table: "cmdb_credentials", column: "secret_ciphertext", what: "CMDB sync credentials" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
   // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
   { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },
