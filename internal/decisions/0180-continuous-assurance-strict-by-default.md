@@ -202,3 +202,47 @@ Branch `sec-defaults-1017`. No migration.
   409), ADR-0188 (the S9 spend ordering and connection, the revoke-first test, the `connector_policy_changed` audit
   row, and the `PATCH /v1/servers/:serverId` owner compare-and-set) and ADR-0189 (below).
 
+
+## Addendum — 2026-11-21: autonomy floors enforced at dispatch (lane E51)
+
+Closes the "oversight levels enforced at runtime" gap in the 2026-11-20 agentic-governance fragment (#1123). §5 said
+approval and the deploy gate check the floor and the monitor watches it. Nothing stopped the agent itself: an unmet
+floor was only an `autonomy_floor` use-case condition and an `autonomy_floor_unmet` monitor finding. This addendum adds
+the runtime half and leaves §5's text unchanged.
+
+- **The gate.** `autonomyDispatchGate` (`apps/gateway/src/autonomy.ts`) runs in the builder agent gate
+  (`withAgentGate`, `builder-runtime.ts`) before every chat turn, resume, scheduled run and channel run. It runs after
+  the project and model checks and before the spend lease, so it comes before the governed core (ADR-0251) is asked
+  about any model call. It reads the agent fresh and derives its effective class and floors with the same
+  `agentAutonomy` the GET view and the monitor use. The decision itself is pure: `autonomyDispatchVerdict` in
+  `@regulait/shared`.
+  - `delegated` or `autonomous` with any floor unmet: refused **403 `autonomy_floor_unmet`**. The reason names each
+    missing control. The refusal is audited (`builder-agent-autonomy-floor-unmet`, deny, with the unmet floor ids) and
+    nothing is dispatched.
+  - `assist` and `supervised`: never refused here. A person is in or on the loop, so an unmet floor stays a condition
+    and a monitor finding, as before.
+  - **Fail closed:** if the floors cannot be checked, the run is refused with **503 `autonomy_floor_unverifiable`**,
+    audited. An unknown stored enforcement value reads as `enforced`.
+- **Strict by default, admin may relax (§1).** The new column `builder_agents.autonomy_enforcement` (pending migration
+  `builder_agent_autonomy_enforcement`) defaults to `enforced` for every agent, existing ones included. There is no
+  grandfathering and no warn-only phase.
+  - `PUT /v1/builder/agents/:id/autonomy/enforcement` takes `{event: "relax" | "restore", reason}`. The route is
+    admin-only through the default gate. Relaxing takes a `settings_relax` step-up bound to the agent; restoring
+    tightens, so it needs none.
+  - The change is a guarded UPDATE from the machine's source states, committed with its audit row
+    (`builder-agent-autonomy-enforcement-changed`, old and new state, the scrubbed reason).
+  - While the gate is relaxed, each run that goes ahead with a floor unmet is audited as an allow
+    (`builder-agent-autonomy-floor-relaxed`, with the unmet floors).
+- **Declared states.** `AUTONOMY_ENFORCEMENT_MACHINE` (ADR-0348 pattern, in `STATE_MACHINES`) declares two states:
+  `enforced` (the initial state) and `relaxed`. `relax` goes from enforced to relaxed and `restore` from relaxed to
+  enforced, both by an admin. Neither state is final.
+  - The GET and PUT autonomy views carry `enforcement` with the state, `blocksDispatch`, who relaxed it and when, and
+    the machine's `describe()` output. A non-admin's view says why neither event is open to them.
+  - A transition the table lacks answers 409 `illegal_transition`.
+- **Scope note.** The gate covers builder agents, the only agents that carry an autonomy class. The floors are still
+  those of the agent's effective class (§5: the stricter of declared and observed). The brief's "floors for the agent's
+  risk tier" reads as that class's floors. No per-risk-tier floor set exists yet.
+- **Tests.** `zz-adr0180-autonomy-dispatch-gate.test.ts` is differential: each class is run with its floors unmet and
+  then met, and an observed class is checked as well as a declared one. It also covers the admin relax and restore
+  (owner refused, step-up required, audited, illegal transitions) and fail closed. A negative control with the gate
+  disabled fails four of its ten tests.

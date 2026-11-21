@@ -4213,6 +4213,10 @@ export const complianceProfiles = pgTable("compliance_profiles", {
   /** ADR-0346 decision 9 (migration fairness_evaluation): this framework REQUIRES the fairness promotion gate on the
    * model cards of projects it classifies. OR-composed like `mrmRequired`; NULL and false never relax the org setting. */
   fairnessGateRequired: boolean("fairness_gate_required"),
+  /** ADR-0347 (pending migration agent_memory_governance): the longest an agent memory or shared-context write on a
+   * project carrying this tag may live, in hours. Composed MIN across a project's profiles and with the org's
+   * `agentMemoryTtlHours`, so a tag can only shorten it. NULL = no opinion. Raising or clearing it is a loosening. */
+  memoryTtlHours: integer("memory_ttl_hours"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
@@ -4290,11 +4294,24 @@ export const projectContextItems = pgTable(
     contributedByTeamId: uuid("contributed_by_team_id"),
     /** §9.4 promotion provenance: the team-local artifact this came from */
     sourceArtifactId: uuid("source_artifact_id"),
+    /** ADR-0347 provenance: the orchestration run and task-graph node that produced this write, checked at write time
+     * (same project, the caller's own run). FK-free like the contributor ids: provenance is a governance record that
+     * must survive the run's deletion. */
+    producedByRunId: uuid("produced_by_run_id"),
+    producedByNodeId: text("produced_by_node_id"),
+    /** ADR-0347 provenance, point-in-time evidence (deliberately not joined): the agent that served that node when
+     * this was written, read from the run's own node_dispatched event, never from the caller. */
+    producedByAgentId: uuid("produced_by_agent_id"),
+    /** ADR-0347: mandatory expiry, set from the database clock at write time. Reads stop returning the row after it. */
+    expiresAt: timestamp("expires_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now() + interval '24 hours'`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("project_context_project_key_rev_uq").on(t.projectId, t.key, t.revision),
     index("project_context_project_key_idx").on(t.projectId, t.key),
+    index("project_context_expires_idx").on(t.expiresAt),
   ],
 );
 
@@ -5213,6 +5230,13 @@ export const orgSettings = pgTable(
     sapUnattributedWritesAllowed: boolean("sap_unattributed_writes_allowed").notNull().default(false),
     /** false (default) = the seeded approval rule covers writes only; true = it covers every tool on the server */
     sapReadsApproveFirst: boolean("sap_reads_approve_first").notNull().default(false),
+    /** ADR-0347 (pending migration agent_memory_governance): how long an agent memory or shared-context write lives,
+     * in hours, before reads stop returning it (default 24, CHECK 1..8760). A per-classification
+     * `compliance_profiles.memory_ttl_hours` can only shorten it. Longer is a settings_relax step-up, audited. */
+    agentMemoryTtlHours: integer("agent_memory_ttl_hours").notNull().default(24),
+    /** ADR-0347: 'block' (strict default) refuses a memory write the injection, jailbreak, secret or PII scan flags;
+     * 'log' stores it and audits the hits. 'log' is a settings_relax step-up, audited. */
+    agentMemoryScanMode: text("agent_memory_scan_mode", { enum: ["block", "log"] }).notNull().default("block"),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */
@@ -12162,9 +12186,24 @@ export const builderAgents = pgTable(
     autonomyDeclaredBy: uuid("autonomy_declared_by").references(() => users.id, { onDelete: "set null" }),
     autonomyDeclaredAt: timestamp("autonomy_declared_at", { withTimezone: true }),
     autonomyNote: text("autonomy_note"),
+    // --- ADR-0180 addendum (lane E51, pending migration builder_agent_autonomy_enforcement) --------------------
+    /** whether an unmet autonomy floor blocks a delegated or autonomous run (AUTONOMY_ENFORCEMENT_MACHINE in
+     * @regulait/shared). Strict by default for every agent, existing ones included; only an admin relaxes it */
+    autonomyEnforcement: text("autonomy_enforcement", { enum: ["enforced", "relaxed"] }).notNull().default("enforced"),
+    /** the admin who relaxed it, and when; both null while enforced */
+    autonomyRelaxedBy: uuid("autonomy_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    autonomyRelaxedAt: timestamp("autonomy_relaxed_at", { withTimezone: true }),
+    /** the admin's reason for the latest change (relax or restore), prose-scrubbed by the db handle */
+    autonomyEnforcementReason: text("autonomy_enforcement_reason"),
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
+    check("builder_agents_autonomy_enforcement_ck", sql`${t.autonomyEnforcement} IN ('enforced', 'relaxed')`),
+    check(
+      "builder_agents_autonomy_relaxed_ck",
+      sql`(${t.autonomyEnforcement} = 'relaxed') = (${t.autonomyRelaxedAt} IS NOT NULL)
+        AND (${t.autonomyEnforcementReason} IS NULL OR length(${t.autonomyEnforcementReason}) <= 2000)`,
+    ),
     check(
       "builder_agents_limit_ck",
       sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
@@ -12372,6 +12411,10 @@ export const builderAgentMemory = pgTable(
       .references(() => builderAgents.id, { onDelete: "cascade" }),
     content: text("content").notNull(),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0347: mandatory expiry, set from the database clock at write time. The runtime stops reading it after. */
+    expiresAt: timestamp("expires_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now() + interval '24 hours'`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("builder_agent_memory_agent_idx").on(t.agentId, t.createdAt)],
