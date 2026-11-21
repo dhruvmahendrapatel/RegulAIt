@@ -3,51 +3,51 @@
   "engines": {
     "promptfoo": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
-      "manifestDigest": "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
-      "imageId": "sha256:d500a7b03421aa96fd10126a7c6f75f2f8b76115781d65570dbdeb7dd27dbe30",
-      "publishGeneration": 9,
-      "sourceCommit": "fe5cfbb43a61f3ad975d260170f6c29beab03a44",
-      "publishedAt": "2026-10-24T23:15:26.890Z"
+      "manifestDigest": "sha256:523325823f049564ba7047ef1310b7643ddd5e671c1c28dc01739544cf12e801",
+      "imageId": "sha256:15e9ac5b1c688f2256b1129cd63ba600fe491a84a650612bc304118f48696108",
+      "publishGeneration": 10,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     },
     "modelscan": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan",
-      "manifestDigest": "sha256:2980529bf57d232760c9400f34a5e701411acc79b59a462f4e20d3a4dda60ac2",
-      "imageId": "sha256:334f94729d99b0b4ce333c6c48add3c14752ec1bcbb67628147b7002c1690480",
-      "publishGeneration": 8,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:1b547db1bf23143571a20919b676905c4fa531c54149eaa5d58703ce7cea74b7",
+      "imageId": "sha256:ba2f32bdbe02fac98714da3727b20dab357d97cd989e792035f198379e832389",
+      "publishGeneration": 9,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     },
     "garak": {
       "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-garak",
-      "manifestDigest": "sha256:70c59a0177cfba5063a587de5dc958e60bedae2487997e4d01b62a747b50cf52",
-      "imageId": "sha256:5c0ab003fe301804cd7f98653ca61017ea31886549f2fac1b2e25589cc40483a",
-      "publishGeneration": 9,
-      "sourceCommit": "4ae0eebcb170abf65840baafe9bec834ac4ea4a4",
-      "publishedAt": "2026-10-24T22:26:31.270Z"
+      "manifestDigest": "sha256:6f4fb889e24da2f66ab5d72e2a068e7e3a30cb18a3bb5981745f6d80b534c8f3",
+      "imageId": "sha256:ca1def4132c02892f8d340b90ef61eca1db1bf36b5b7f6ea4a05db4c830e3df3",
+      "publishGeneration": 10,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     },
     "spikee": {
-      "repository": null,
-      "manifestDigest": null,
-      "imageId": null,
-      "publishGeneration": 0,
-      "sourceCommit": null,
-      "publishedAt": null
+      "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-spikee",
+      "manifestDigest": "sha256:3d786cebe493fb92ea29491f1c7811c780a223498e6c0873b0b077c62f57ebfb",
+      "imageId": "sha256:532a8aaca730d5323ae4b647d38e3934940f5f7c17573f0f2a552d6fbac31247",
+      "publishGeneration": 1,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     },
     "mcpscanner": {
-      "repository": null,
-      "manifestDigest": null,
-      "imageId": null,
-      "publishGeneration": 0,
-      "sourceCommit": null,
-      "publishedAt": null
+      "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-mcpscanner",
+      "manifestDigest": "sha256:1db513069083ff542c5472c7c5b2d14134205bb38abaa0a108f42b4777ed69ff",
+      "imageId": "sha256:774a8e350134c478811b385df8c3347784e0bd1eb9a072c9d80cfcc32344da71",
+      "publishGeneration": 1,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     },
     "skillscanner": {
-      "repository": null,
-      "manifestDigest": null,
-      "imageId": null,
-      "publishGeneration": 0,
-      "sourceCommit": null,
-      "publishedAt": null
+      "repository": "ghcr.io/dhruvmahendrapatel/regulait-engine-skillscanner",
+      "manifestDigest": "sha256:c27c5d1b8337da59d470880572994b72a1a5e2d08094a69d9ec8d73a229af113",
+      "imageId": "sha256:0e2952c362cb087ff733fe043b5b16efaa55da82bf20a4bfa4a5522ad5f03b95",
+      "publishGeneration": 1,
+      "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+      "publishedAt": "2026-11-21T21:14:47.449Z"
     }
   }
 }
