@@ -47,6 +47,7 @@ import {
 } from "@regulait/shared";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { classifyAddressLan, createGuardedFetch, egressRefusal, type EgressResolver } from "./egress-guard.js";
+import { errMessage } from "./err-serializer.js";
 import { decryptSecret } from "./secrets.js";
 import type { NativeCacheConfig, NativeCacheRequest, SemanticCacheHit } from "./semantic-cache-shared.js";
 
@@ -292,7 +293,7 @@ export async function probeSimilar(
   try {
     embedded = await embedText(resolved.embedder, args.request.input);
   } catch (err) {
-    return { hit: null, probe: null, missReason: err instanceof Error ? err.message : "embed failed" };
+    return { hit: null, probe: null, missReason: errMessage(err) };
   }
   const probe: SimilarityProbe = {
     partitionKey: similarityPartitionKey(args.userId, args.request, args.config),
