@@ -46,12 +46,18 @@ import { ENGINE_IDS } from "./engine-images-lock.mjs";
  * no lock entry. `--plan` never publishes them, because it only walks ENGINE_IDS. Empty since ADR-0242 L4.5
  * (2026-11-17): mcpscanner and skillscanner moved into ENGINE_IDS with all-null lock entries, as spikee (§6.3).
  */
-export const UNPUBLISHED_ENGINE_IDS = [];
+// ADR-0362: contentextract stays unpublished until the owner decides its libpdfium licences (owner question 1)
+export const UNPUBLISHED_ENGINE_IDS = ["contentextract"];
 /**
  * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
  * admission-scan images share one runner and task shim.
  */
-export const ENGINE_PACKAGES = { mcpscanner: "@regulait/engine-admission-scan", skillscanner: "@regulait/engine-admission-scan" };
+export const ENGINE_PACKAGES = {
+  mcpscanner: "@regulait/engine-admission-scan",
+  skillscanner: "@regulait/engine-admission-scan",
+  // ADR-0362: the content extractor is the shim's third subject engine
+  contentextract: "@regulait/engine-admission-scan",
+};
 export const enginePackage = (engine) => ENGINE_PACKAGES[engine] ?? `@regulait/engine-${engine}`;
 /** every engine the reproducible-build check covers */
 export const REPRO_ENGINE_IDS = [...ENGINE_IDS, ...UNPUBLISHED_ENGINE_IDS];
