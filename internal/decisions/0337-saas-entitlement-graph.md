@@ -3,8 +3,10 @@
 - **Status**: Accepted (owner direction 2026-11-16, lane E18 brief: close the Obsidian gap analysis item "SaaS entitlement graph"; slice 1 built). Amended by the owner's decisions of 2026-11-17 on both slice 1 questions (§4 Google Directory opt-in, §6 agent links), built in slice 1
 - **Date**: 2026-11-16
 - **Index**: **SaaS entitlement graph: read-only `entitlement_*` discovery sources (M365 Graph, Google Workspace, Salesforce, Slack) store each agent's granted OAuth scopes and permissions in four 3NF tables, inside the run's fenced transaction with its audit row; a frozen, versioned scope classifier; usage comparison, unused-grant, excessive-scope, oversharing and public-exposure findings follow as recommendations through the approvals queue, never auto-revoked.**
-- **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1), `builder/e18-saas-entitlements-s2` (slice 2)
-- **Migration**: `pending/saas_entitlement_graph.sql`, numbered at merge (ADR-0252)
+- **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1), `builder/e18-saas-entitlements-s2` (slice 2),
+  `builder/e18-saas-entitlements-s3` (slice 3a: usage and findings)
+- **Migration**: `pending/saas_entitlement_graph.sql` and (slice 3) `pending/saas_entitlement_usage.sql`, numbered at merge
+  (ADR-0252)
 - **Related**: ADR-0195 (active discovery framework: sources, credentials, worker, pseudonyms), ADR-0235 (Entra consent
   discovery, the wider-source helpers reused here), ADR-0092 (access recommendations, the frozen rule-set discipline),
   ADR-0090 (certification campaigns), ADR-0255 (governed connector catalogue), ADR-0089 (agent ownership),
@@ -109,18 +111,47 @@ the window is not seen and is never removed for that reason.
 
 ### 5. Findings are recommendations, through the approvals queue (slice 3)
 
-Slice 3 compares grants with observed use (M365 service-principal sign-in activity, Google token `activity` events,
-Salesforce and Slack access logs), and emits:
+Slice 3 compares grants with observed use and emits four findings: `unused-grant`, `excessive-scope`, `oversharing`,
+`publicly-exposed-agent`. Nothing calls a vendor to revoke. Slice 3a (built) observes use and computes the findings;
+slice 3b raises a finding into the approvals queue (or an ADR-0090 campaign) for a recorded decision.
 
-- `unused-grant` (vendor side): a scope with no observed use in the window;
-- `excessive-scope`: a `write`, `admin` or `unknown` scope where only reads were observed;
-- `oversharing`: a tenant-wide consent of a `write` or `admin` scope, notably to an unverified publisher;
-- `publicly-exposed-agent`: an agent the platform exposes beyond the tenant.
+**Observed use, read-only only (slice 3a).** Each reader may return a usage block with a coverage that says how finely
+it could see use, and the worker stores it in the run's transaction (`saas_entitlement_usage_reads`, one row per
+source; `saas_entitlement_app_usage`, one row per app, times only move forward). A usage read that fails never makes
+the grant read partial; it only makes use unobservable. Researched per vendor (official docs, 2026-11-21):
 
-They are a new version of ADR-0092's frozen rule set (a stated rule, its evidence, no score), and each becomes an item
-in the existing approvals queue for a human decision, or feeds an ADR-0090 certification campaign. Nothing calls a
-vendor to revoke. Where lane E17's vendor agent adapters (Copilot Studio, Agentforce) expose publication state, the
-public-exposure rule reads it through their interface rather than a second adapter.
+| Platform | Source | Credential cost | Coverage |
+|---|---|---|---|
+| Microsoft 365 | Graph beta `reports/servicePrincipalSignInActivities`: each app's last sign-in | `AuditLog.Read.All` (read) and Entra ID P1 or P2 | `app`: per app, no read/write split |
+| Google Workspace | Reports `token` `activity` events: API method per user and app | the same read-only Reports scope | `verb`: method names classified by the frozen `classifyGoogleApiMethod` (get, list, search, query, batchGet, export read; anything else counts as a write). Recorded only on Enterprise and Education Standard or Plus and Cloud Identity Premium, so a tenant with no event at all is `none`, never "unused" |
+| Google (Directory opt-in) | none: the token listing carries no activity | n/a | `none` |
+| Salesforce | none yet: login history needs Monitor Login History, the free API event log files need View Event Log Files and keep one day | not held by the read-only integration user | `none` (follow-up) |
+| Slack | none: access and integration logs need the legacy `admin` scope, which includes a write method; audit logs carry app lifecycle events only | refused (write-capable) | `none` |
+
+Not used: Microsoft Graph activity logs (the only per-permission, per-verb Microsoft signal) live in a customer's Log
+Analytics workspace, not the Graph API; a follow-up can read them where the customer exports them. Salesforce
+`OauthToken.LastUsedDate` needs Customize Application (the open owner question 3).
+
+**The rules (slice 3a), `SAAS_FINDING_RULES_V1`.** A frozen, versioned set in the ADR-0092 discipline (id, severity
+class, a rationale rendered strictly from the evidence, a limits paragraph on every payload; no score). It is a sibling
+of ADR-0092's set rather than its V2: those rules judge RegulAIt's own grants and revoke through a campaign; these judge
+vendor grants RegulAIt cannot revoke. Computed at read time by `GET /v1/discovery/entitlements/findings` (admin-only,
+`windowDays` 7 to 365, default 90, at most 1,000 findings per rule with an exact count). Computing it writes nothing.
+
+- `unused-grant`: a grant first seen at least the window before the source's latest usage read, held by an app with no
+  observed use in that window. Use is per app: an app that uses one scope keeps all its grants out of the rule.
+- `excessive-scope`: a `write`, `admin` or `unknown` scope held by an app whose observed calls in the window were all
+  reads. Needs coverage `verb` (Google only today).
+- `oversharing`: a tenant-wide consent to a `write`, `admin` or `unknown` scope, with the publisher's verification in
+  the evidence. Every Salesforce connected-app grant is `unknown` and so appears here while its scopes are not readable.
+- `publicly-exposed-agent`: a published Copilot Studio agent with no authentication, or with the "any multi-tenant"
+  access policy, read from lane E17's registry records (no second adapter). Other registries record no audience and
+  are listed as not assessable.
+
+The window is anchored at the source's latest usage read, not at the request time, and every finding carries that
+read's time. A source whose read could not observe use, or covered less than the window, is listed under the rule's
+`notAssessable` with the reason, never as unused (the ADR-0082 disclosure). A grant younger than the window is not
+judged. The route is a census entry on #453 until a screen exists.
 
 ### 4a. Salesforce and Slack (slice 2)
 
@@ -187,7 +218,8 @@ Salesforce JWT bearer assertion.
   from one graph, with each read audited and every person pseudonymised.
 - Collision note: `discovery_sources_kind_check` and `discovery_runs_kind_check` are rewritten with the full kind list.
   A lane that adds discovery kinds and merges after this one must include these four kinds in its own list.
-- Follow-ups: slice 3 (usage and findings). The agent-link and app-listing routes came with
+- Follow-ups: slice 3b (raise a finding into the approvals queue for a recorded decision); Salesforce usage from
+  API event log files; Microsoft Graph activity logs where a customer exports them. The agent-link and app-listing routes came with
   the owner's 2026-11-17 decisions (§6), with route census and KNOWN_UI_GAPS entries pointing at #453. Keyless Google delegation (IAM Credentials `signJwt` under
   workload identity federation) would remove the static key.
 

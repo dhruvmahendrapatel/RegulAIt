@@ -43,6 +43,11 @@ Egress: `login.microsoftonline.com` and `graph.microsoft.com`.
 A run that could not read every listing to its end (a permission missing, a listing cut short) is kept as a partial
 read: it adds and refreshes what it saw and removes nothing. Only a complete read removes grants that were revoked.
 
+Optional, to observe use (the findings below): also grant `AuditLog.Read.All` (a read permission). The reader then
+reads each app's last sign-in (`reports/servicePrincipalSignInActivities`, a Graph beta report that needs Microsoft
+Entra ID P1 or P2). Without it, the usage read is denied, the grant read is unaffected, and use is reported as not
+observable.
+
 ## Google Workspace OAuth app grants — `entitlement_google_workspace`
 
 Reads the OAuth grants users made to apps, from the Admin SDK Reports API (`token` activity: the latest `authorize` or
@@ -132,3 +137,25 @@ that is not a `:read` scope refuses the credential before anything is read. The 
 workspace.
 
 Egress: `slack.com`.
+
+## Observed use and findings
+
+Each read also records how finely it could see the apps' use (the coverage, shown on the run's audit row):
+
+| Source | What is observed | Coverage |
+|---|---|---|
+| `entitlement_m365` | each app's last sign-in (needs `AuditLog.Read.All` and Entra ID P1 or P2) | per app |
+| `entitlement_google_workspace` | the token `activity` events: each app's latest read and latest write, by API method name, with the same read-only Reports scope (recorded only on Enterprise and Education Standard or Plus and Cloud Identity Premium) | reads and writes |
+| Google with the Directory opt-in, Salesforce, Slack | nothing yet: no read-only usage source the reader can use | none |
+
+`GET /v1/discovery/entitlements/findings?windowDays=90` (admin only; 7 to 365 days) computes four findings at read time,
+each with its evidence and the rule's limits:
+
+- **unused grant**: an app with no observed use in the window, for grants first seen at least the window ago;
+- **excessive scope**: a write, admin or unrecognised scope held by an app that only read in the window (Google only);
+- **oversharing**: a tenant-wide consent to a write, admin or unrecognised scope, with the publisher's verification;
+- **publicly exposed agent**: a published Copilot Studio agent with no authentication or the "any multi-tenant" policy.
+
+A source that could not observe use, or observed less than the window, is listed as not assessable, never as unused.
+Nothing is revoked: act on a finding in the vendor's own admin console, and the next read shows the change.
+

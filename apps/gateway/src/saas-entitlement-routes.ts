@@ -25,7 +25,15 @@ import {
   saasEntitlementApps,
   type Db,
 } from "@regulait/db";
-import { AGENT_VENDOR_IDENTIFIER_PATTERN, SAAS_APP_AGENT_LINK_MACHINE, SAAS_ENTITLEMENT_PLATFORMS } from "@regulait/shared";
+import {
+  AGENT_VENDOR_IDENTIFIER_PATTERN,
+  SAAS_APP_AGENT_LINK_MACHINE,
+  SAAS_ENTITLEMENT_PLATFORMS,
+  SAAS_FINDING_WINDOW_DAYS_MAX,
+  SAAS_FINDING_WINDOW_DAYS_MIN,
+  parseSaasFindingWindowDays,
+} from "@regulait/shared";
+import { SAAS_FINDINGS_PER_RULE_MAX, computeSaasFindings } from "./saas-entitlement-findings.js";
 import { GUID } from "./discovery-wider-scanners.js";
 import { autoLinkApps, changeAgentLink } from "./saas-entitlements.js";
 
@@ -41,6 +49,9 @@ const identifierParam = z.object({ identifierId: z.string().uuid() });
 const page = { after: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(50) };
 const appsQuery = z.object({ sourceId: z.string().uuid(), ...page }).strict();
 const identifiersQuery = z.object({ agentId: z.string().uuid().optional(), ...page }).strict();
+const findingsQuery = z
+  .object({ windowDays: z.string().optional(), limit: z.coerce.number().int().min(1).max(SAAS_FINDINGS_PER_RULE_MAX).default(200) })
+  .strict();
 const linkBody = z.object({ agentId: z.string().uuid() }).strict();
 const identifierBody = z
   .object({
@@ -69,6 +80,17 @@ export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): voi
     if (a.status === "retired") return { ok: false as const, status: 409 as const, error: "agent_retired", detail: "a retired agent cannot be linked to a vendor app" };
     return null;
   };
+
+  // ADR-0337 §5 (slice 3): the V1 findings, computed at read time; reads only (no row, no audit entry, no vendor call)
+  app.get("/v1/discovery/entitlements/findings", async (req, reply) => {
+    const q = findingsQuery.safeParse(req.query ?? {});
+    if (!q.success) return badRequest(reply, q.error);
+    const windowDays = parseSaasFindingWindowDays(q.data.windowDays);
+    if (windowDays === null) {
+      return reply.status(400).send({ error: "invalid_request", detail: `windowDays: a whole number of days from ${SAAS_FINDING_WINDOW_DAYS_MIN} to ${SAAS_FINDING_WINDOW_DAYS_MAX}` });
+    }
+    return computeSaasFindings(db, { windowDays, perRule: q.data.limit });
+  });
 
   // the apps one entitlement source holds, each with its link state and what can be done with it next
   app.get("/v1/discovery/entitlements/apps", async (req, reply) => {

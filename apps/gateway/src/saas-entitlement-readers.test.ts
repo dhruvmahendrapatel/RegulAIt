@@ -20,7 +20,7 @@ import {
 } from "@regulait/cloud-discovery";
 import { checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
 import { DISCOVERY_SCANNERS, type ScanContext } from "./discovery-scanners.js";
-import { M365_PERMISSION_RESOURCES, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
+import { M365_PERMISSION_RESOURCES, M365_USAGE_READ, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, USAGE_NOT_OBSERVED, WORKSPACE_USAGE_READ, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000e18";
 const CLIENT = "00000000-0000-4000-8000-000000000e19";
@@ -196,6 +196,34 @@ describe("ADR-0337 entitlement_m365", () => {
     expect(batch.apps.find((a) => a.externalId === AGENT_APP)!.grants.map((g) => g.scope).sort()).toEqual(["Files.Read.All", "Mail.ReadWrite"]);
   });
 
+  it("observes use from Entra sign-in activity (coverage app, held apps only); a failed usage read leaves the grant read complete", async () => {
+    const signIns = (url: URL) =>
+      url.pathname === "/beta/reports/servicePrincipalSignInActivities"
+        ? json({
+            value: [
+              { appId: AGENT_APP.toUpperCase(), lastSignInActivity: { lastSignInDateTime: "2026-11-15T08:00:00.1234567Z" } },
+              { appId: WIKI_APP, lastSignInActivity: { lastSignInDateTime: null } },
+              { appId: MS_APP, lastSignInActivity: { lastSignInDateTime: "2026-11-15T08:00:00Z" } },
+            ],
+          })
+        : null;
+    const v = fakeM365(["Application.Read.All", "AuditLog.Read.All"], signIns);
+    const res = await scanner("entitlement_m365").run(ctxFor({ fetch: v.f, source, credential }).ctx);
+    const batch = checkSaasEntitlementBatch(res.entitlements, "m365");
+    expect(batch.complete).toBe(true);
+    // a first-party app is not held, and an app with no sign-in time is simply not seen used
+    expect(batch.usage).toEqual({ coverage: "app", windowStart: null, note: expect.stringMatching(/per app/), apps: [{ externalId: AGENT_APP, lastUseAt: "2026-11-15T08:00:00.123Z", lastReadAt: null, lastWriteAt: null }] });
+    expect(res.readOutcomes!.find((o) => o.read === M365_USAGE_READ)!.status).toBe("read");
+
+    const denied = fakeM365(["Application.Read.All"], (url) => (url.pathname === "/beta/reports/servicePrincipalSignInActivities" ? json({ error: {} }, 403) : null));
+    const res2 = await scanner("entitlement_m365").run(ctxFor({ fetch: denied.f, source, credential }).ctx);
+    const b2 = checkSaasEntitlementBatch(res2.entitlements, "m365");
+    expect(b2.complete).toBe(true);
+    expect(b2.usage).toMatchObject({ coverage: "none", apps: [] });
+    expect(b2.usage!.note).toMatch(/AuditLog\.Read\.All/);
+    expect(res2.readOutcomes!.find((o) => o.read === M365_USAGE_READ)!.status).toBe("denied");
+  });
+
   it("the include list keeps only the named client applications", async () => {
     const v = fakeM365(["Application.Read.All"]);
     const { ctx } = ctxFor({ fetch: v.f, source: { ...source, scope: { orgLevel: false, include: [WIKI_APP.toUpperCase()] } }, credential });
@@ -227,7 +255,7 @@ describe("ADR-0337 entitlement_google_workspace", () => {
     events: [{ type: "auth", name, parameters: [{ name: "client_id", value: client }, { name: "app_name", value: app }, { name: "scope", multiValue: scopes }] }],
   });
 
-  function fakeGoogle() {
+  function fakeGoogle(activity: unknown[] = []) {
     const accessToken = `ya29.${randomBytes(16).toString("hex")}`;
     const assertions: string[] = [];
     const f = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -253,6 +281,7 @@ describe("ADR-0337 entitlement_google_workspace", () => {
           return json({ items: [event("authorize", "u3", "2026-11-03T10:00:00.000Z", MAILER, ["https://mail.google.com/"], "Mailer"), event("authorize", "u2", "2026-11-10T10:00:00.000Z", MAILER, ["https://www.googleapis.com/auth/gmail.readonly"], "Mailer")] });
         }
         if (name === "revoke") return json({ items: [event("revoke", "u2", "2026-11-05T10:00:00.000Z", NOTETAKER, [])] });
+        if (name === "activity") return json({ items: activity });
       }
       return json({}, 404);
     }) as typeof fetch;
@@ -292,6 +321,38 @@ describe("ADR-0337 entitlement_google_workspace", () => {
     expect(JSON.stringify(res)).not.toContain("acme.example");
   });
 
+  const call = (user: string, at: string, client: string, method: string) => ({
+    id: { time: at, applicationName: "token" },
+    actor: { profileId: user },
+    events: [{ type: "auth", name: "activity", parameters: [{ name: "client_id", value: client }, { name: "method_name", value: method }, { name: "api_name", value: method.split(".")[0] }] }],
+  });
+
+  it("observes use from token activity events: latest read and write per app, by method name (coverage verb)", async () => {
+    const g = fakeGoogle([
+      call("u1", "2026-11-12T10:00:00.000Z", NOTETAKER, "drive.files.list"),
+      call("u2", "2026-11-11T10:00:00.000Z", NOTETAKER, "drive.files.get"),
+      call("u1", "2026-11-10T10:00:00.000Z", MAILER, "gmail.users.messages.send"),
+      call("u1", "2026-11-09T10:00:00.000Z", MAILER, "gmail.users.messages.get"),
+    ]);
+    const res = await scanner("entitlement_google_workspace").run(ctxFor({ fetch: g.f, source, credential }).ctx);
+    const usage = checkSaasEntitlementBatch(res.entitlements, "google_workspace").usage!;
+    expect(usage.coverage).toBe("verb");
+    // the window is the configured 90-day look-back
+    expect(Math.round((Date.now() - Date.parse(usage.windowStart!)) / 86_400_000)).toBe(90);
+    expect([...usage.apps].sort((a, b) => a.externalId.localeCompare(b.externalId))).toEqual([
+      { externalId: NOTETAKER, lastUseAt: "2026-11-12T10:00:00.000Z", lastReadAt: "2026-11-12T10:00:00.000Z", lastWriteAt: null },
+      { externalId: MAILER, lastUseAt: "2026-11-10T10:00:00.000Z", lastReadAt: "2026-11-09T10:00:00.000Z", lastWriteAt: "2026-11-10T10:00:00.000Z" },
+    ].sort((a, b) => a.externalId.localeCompare(b.externalId)));
+  });
+
+  it("no activity event at all is coverage none (the edition may not record them), never 'nothing was used'", async () => {
+    const res = await scanner("entitlement_google_workspace").run(ctxFor({ fetch: fakeGoogle().f, source, credential }).ctx);
+    const usage = checkSaasEntitlementBatch(res.entitlements, "google_workspace").usage!;
+    expect(usage).toMatchObject({ coverage: "none", apps: [] });
+    expect(usage.note).toMatch(/Enterprise and Education/);
+    expect(res.readOutcomes!.find((o) => o.read === WORKSPACE_USAGE_READ)!.status).toBe("read");
+  });
+
   // ---- the admin opt-in Directory token listing (owner decision 2026-11-17) ----
   const dirSource = { ...source, target: { directoryTokens: "on" } };
   function fakeDirectory(opts: { deny?: string } = {}) {
@@ -317,6 +378,8 @@ describe("ADR-0337 entitlement_google_workspace", () => {
     const { ctx, calls } = ctxFor({ fetch: g.f, source: dirSource, credential });
     const res = await scanner("entitlement_google_workspace").run(ctx);
     const batch = checkSaasEntitlementBatch(res.entitlements, "google_workspace");
+    // no read-only usage source here: use is not observed, said so (ADR-0337 §5)
+    expect(batch.usage).toEqual({ coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.directory, apps: [] });
     expect(batch.complete).toBe(true);
     expect(res.credentialWriteScope).toBe("unverified");
     const claims = JSON.parse(Buffer.from(g.assertions[0]!.split(".")[1]!, "base64url").toString("utf8")) as { scope: string };
@@ -425,6 +488,8 @@ describe("ADR-0337 entitlement_slack", () => {
     const res = await scanner("entitlement_slack").run(ctx);
     expect(res.credentialWriteScope).toBe("read_only");
     const batch = checkSaasEntitlementBatch(res.entitlements, "slack");
+    // no read-only usage source here: use is not observed, said so (ADR-0337 §5)
+    expect(batch.usage).toEqual({ coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.slack, apps: [] });
     expect(batch).toMatchObject({ tenant: ORG, complete: true });
     const notes = batch.apps.find((a) => a.externalId === "A0NOTES001")!;
     expect(notes).toMatchObject({ appKind: "slack_app", displayName: "AI notes", publisherVerified: true });
@@ -511,6 +576,8 @@ describe("ADR-0337 entitlement_salesforce", () => {
     const res = await scanner("entitlement_salesforce").run(ctx);
     expect(res.credentialWriteScope).toBe("unverified");
     const batch = checkSaasEntitlementBatch(res.entitlements, "salesforce");
+    // no read-only usage source here: use is not observed, said so (ADR-0337 §5)
+    expect(batch.usage).toEqual({ coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.salesforce, apps: [] });
     expect(batch).toMatchObject({ tenant: ORG.slice(0, 15), complete: true });
     expect(batch.apps.map((a) => [a.externalId, a.grants.map((g) => `${g.resource} ${g.scope}`).sort()]).sort()).toEqual([
       ["0H4AGENT0000001", [" connected_app:self_authorize", "profile:System_Administrator connected_app:preauthorized"]],

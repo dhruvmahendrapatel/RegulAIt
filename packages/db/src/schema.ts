@@ -18262,6 +18262,52 @@ export const saasEntitlementGrantPrincipals = pgTable(
   ],
 );
 export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrincipals.$inferSelect;
+
+// ADR-0337 §5 (slice 3, pending migration `saas_entitlement_usage`): what the latest read of a source could observe of
+// use, and each app's latest observed use. Times only move forward (a later read never makes an app look less used).
+export const SAAS_ENTITLEMENT_USAGE_COVERAGES = ["none", "app", "verb"] as const;
+
+/** the usage coverage of a source's latest read (one row per source; replaced by each read) */
+export const saasEntitlementUsageReads = pgTable(
+  "saas_entitlement_usage_reads",
+  {
+    sourceId: uuid("source_id")
+      .primaryKey()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    coverage: text("coverage", { enum: SAAS_ENTITLEMENT_USAGE_COVERAGES }).notNull(),
+    /** the earliest moment the read could see use from; null when the vendor's last-use time is not window-bounded */
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    note: text("note").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    runId: uuid("run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("saas_entitlement_usage_reads_coverage_check", sql`${t.coverage} IN ('none', 'app', 'verb')`),
+    check("saas_entitlement_usage_reads_note_check", sql`length(${t.note}) BETWEEN 1 AND 300`),
+  ],
+);
+export type SaasEntitlementUsageReadRow = typeof saasEntitlementUsageReads.$inferSelect;
+
+/** an app's latest observed use (one row per app; reads and writes only where the coverage could tell them apart) */
+export const saasEntitlementAppUsage = pgTable(
+  "saas_entitlement_app_usage",
+  {
+    appId: uuid("app_id")
+      .primaryKey()
+      .references(() => saasEntitlementApps.id, { onDelete: "cascade" }),
+    lastUseAt: timestamp("last_use_at", { withTimezone: true }).notNull(),
+    lastReadAt: timestamp("last_read_at", { withTimezone: true }),
+    lastWriteAt: timestamp("last_write_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check(
+      "saas_entitlement_app_usage_last_use_check",
+      sql`${t.lastUseAt} >= coalesce(${t.lastReadAt}, ${t.lastUseAt}) AND ${t.lastUseAt} >= coalesce(${t.lastWriteAt}, ${t.lastUseAt})`,
+    ),
+  ],
+);
+export type SaasEntitlementAppUsageRow = typeof saasEntitlementAppUsage.$inferSelect;
 // ===== end ADR-0337 =====
 
 // ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====

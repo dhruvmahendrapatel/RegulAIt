@@ -100,6 +100,46 @@ export interface SaasEntitlementBatch {
    * every grant of that app. Applied to complete and partial batches alike. Optional; empty when absent.
    */
   revokedPrincipals?: SaasRevokedPrincipal[];
+  /**
+   * What the read observed of each app's USE (slice 3). Optional: a reader that has no usage source for its platform
+   * leaves it out, which the findings read as coverage `none` (not assessable, never "unused").
+   */
+  usage?: SaasUsageObservation;
+}
+
+/**
+ * How finely a read could observe use:
+ *  - `none`: no usage source (the platform has no read-only one, the tenant's edition or licence lacks it, or the read
+ *    of it failed). Nothing can be judged unused or excessive.
+ *  - `app`: when each app was last used, with no split between reads and writes (Entra service-principal sign-in
+ *    activity). An app with no use in the window can be judged; an excessive scope cannot.
+ *  - `verb`: when each app last read and last wrote (Google token `activity` events, whose API method names are
+ *    classified by `classifyGoogleApiMethod`). Both rules can be judged.
+ */
+export const SAAS_USAGE_COVERAGES = ["none", "app", "verb"] as const;
+export type SaasUsageCoverage = (typeof SAAS_USAGE_COVERAGES)[number];
+
+export interface SaasUsageObservation {
+  coverage: SaasUsageCoverage;
+  /**
+   * The earliest moment the read could see use from (ISO 8601): the start of a log window (Google keeps token events
+   * for 180 days). Null when the vendor reports a last-use time that is not bounded by a window (Entra keeps the last
+   * sign-in time per app). A finding is judged only over a window the read covered.
+   */
+  windowStart: string | null;
+  /** a plain-language note on what was and was not observed (for coverage `none`, why) */
+  note: string;
+  /** per app the read saw use of; an app the read lists among its grants but not here was not seen used */
+  apps: SaasAppUsage[];
+}
+
+export interface SaasAppUsage {
+  externalId: string;
+  /** the latest use of any kind (ISO 8601); for coverage `verb`, the later of the two below */
+  lastUseAt: string;
+  /** coverage `verb` only: the latest read, and the latest write (a call the classifier could not tell is a write) */
+  lastReadAt: string | null;
+  lastWriteAt: string | null;
 }
 
 export interface SaasRevokedPrincipal {
@@ -114,6 +154,7 @@ export const SAAS_ENTITLEMENT_LIMITS = Object.freeze({
   grantsPerApp: 500,
   principalsPerGrant: 1_000,
   revokedPrincipals: 50_000,
+  usageNote: 300,
   externalId: 255,
   displayName: 200,
   publisher: 200,
@@ -219,7 +260,60 @@ export function checkSaasEntitlementBatch(batch: unknown, expected: SaasEntitlem
       revokedPrincipals.push({ externalId: r.externalId, principal: r.principal });
     }
   }
-  return { platform: expected, tenant: b.tenant, complete: b.complete, apps, revokedPrincipals };
+  const usage = b.usage === undefined ? undefined : checkUsage(b.usage);
+  return { platform: expected, tenant: b.tenant, complete: b.complete, apps, revokedPrincipals, ...(usage ? { usage } : {}) };
+}
+
+// an ISO 8601 instant a reader produced, not more than a day in the future (a clock skew, never a forged "used later")
+const instant = (v: unknown): v is string => {
+  if (typeof v !== "string" || v.length > 40 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(v)) return false;
+  const t = Date.parse(v);
+  return Number.isFinite(t) && t <= Date.now() + 86_400_000;
+};
+const later = (a: string | null, b: string | null): string | null => (a === null ? b : b === null ? a : Date.parse(a) >= Date.parse(b) ? a : b);
+
+function checkUsage(raw: unknown): SaasUsageObservation {
+  if (!raw || typeof raw !== "object") throw new SaasEntitlementBatchRefused("the usage block is not an object");
+  const u = raw as Record<string, unknown>;
+  if (!(SAAS_USAGE_COVERAGES as readonly unknown[]).includes(u.coverage)) throw new SaasEntitlementBatchRefused("the usage block has an unknown coverage");
+  const coverage = u.coverage as SaasUsageCoverage;
+  if (u.windowStart !== null && !instant(u.windowStart)) throw new SaasEntitlementBatchRefused("the usage window start is not a valid time");
+  if (!label(u.note, SAAS_ENTITLEMENT_LIMITS.usageNote) || u.note === null) throw new SaasEntitlementBatchRefused("the usage block has no valid note");
+  if (!Array.isArray(u.apps) || u.apps.length > SAAS_ENTITLEMENT_LIMITS.apps) throw new SaasEntitlementBatchRefused(`the usage list is not a list, or holds more than ${SAAS_ENTITLEMENT_LIMITS.apps} apps`);
+  if (coverage === "none" && u.apps.length > 0) throw new SaasEntitlementBatchRefused("a usage block with coverage 'none' lists use");
+  const byApp = new Map<string, SaasAppUsage>();
+  for (const rawApp of u.apps as unknown[]) {
+    const a = (rawApp ?? {}) as Record<string, unknown>;
+    if (!printable(a.externalId, SAAS_ENTITLEMENT_LIMITS.externalId)) throw new SaasEntitlementBatchRefused("a usage entry has no valid app id");
+    const read = a.lastReadAt ?? null;
+    const write = a.lastWriteAt ?? null;
+    if (coverage === "app" && (read !== null || write !== null)) throw new SaasEntitlementBatchRefused("a usage entry splits reads from writes under coverage 'app'");
+    if ((read !== null && !instant(read)) || (write !== null && !instant(write))) throw new SaasEntitlementBatchRefused(`a usage entry of ${a.externalId.slice(0, 64)} has an invalid time`);
+    // for coverage verb the last use IS the later of the two; anything else would be a second, contradicting fact
+    const lastUseAt = coverage === "verb" ? later(read as string | null, write as string | null) : a.lastUseAt;
+    if (!instant(lastUseAt)) throw new SaasEntitlementBatchRefused(`a usage entry of ${a.externalId.slice(0, 64)} has no valid last use`);
+    const entry: SaasAppUsage = { externalId: a.externalId, lastUseAt, lastReadAt: read as string | null, lastWriteAt: write as string | null };
+    const prev = byApp.get(a.externalId);
+    byApp.set(
+      a.externalId,
+      prev
+        ? { externalId: a.externalId, lastUseAt: later(prev.lastUseAt, entry.lastUseAt)!, lastReadAt: later(prev.lastReadAt, entry.lastReadAt), lastWriteAt: later(prev.lastWriteAt, entry.lastWriteAt) }
+        : entry,
+    );
+  }
+  return { coverage, windowStart: u.windowStart as string | null, note: u.note, apps: [...byApp.values()] };
+}
+
+/**
+ * Whether one Google API method (the `method_name` of a token `activity` event, e.g. `gmail.users.messages.get`) only
+ * reads: its last segment starts with get, list, search, query, batchGet or export. Anything else (insert, send,
+ * modify, delete, watch, an unfamiliar verb) counts as a write: secure by default, a method nobody recognises is not
+ * assumed harmless. Frozen with the V1 finding rules; a better rule is a new version.
+ */
+export const GOOGLE_READ_METHOD = /^(?:get|list|search|query|batchGet|export)(?:[A-Z][A-Za-z0-9]*)?$/;
+export function classifyGoogleApiMethod(method: string): "read" | "write" {
+  const last = method.length > 256 ? "" : (method.split(".").pop() ?? "");
+  return GOOGLE_READ_METHOD.test(last) ? "read" : "write";
 }
 
 // ---------------------------------------------------------------------------
