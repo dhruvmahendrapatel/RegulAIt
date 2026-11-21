@@ -20,11 +20,13 @@ import { relaxStepUpAround } from "./testing/step-up-posture.js";
  *  3. Apply records linkage (id, url, type) and the connection→Initiative
  *     mapping; re-running is idempotent; an item gone from the tool is marked
  *     missing (never deleted) and re-appearing clears it.
- *  4. Refused whole, recorded and audited: an over-large project, a malformed
- *     or unsafe item, and an adapter that cannot list.
+ *  4. Refused whole, recorded and audited: an over-large project, and a
+ *     malformed or unsafe item. (Since slice 4b every shipped adapter lists, so
+ *     `pm_import_unsupported_provider` stays as the fail-closed guard for a new
+ *     adapter and has no route-level case.)
  *  5. Admin only.
- *  6. Through the routes, against a fake receiver: a generic-webhook listing imports, an adapter that cannot list is
- *     refused, and a failing tool is a 502 (#828 review).
+ *  6. Through the routes, against a fake receiver: a generic-webhook listing imports, a Jira connection lists through
+ *     its own adapter (slice 4b), and a failing tool is a 502 (#828 review).
  *
  * Shares one database with the other gateway suites; objects are prefixed pmi-.
  */
@@ -234,6 +236,19 @@ describe("through the routes against a fake receiver (#828 review)", () => {
         }
         lists.push({ url: req.url ?? "", event });
         res.setHeader("content-type", "application/json");
+        if (req.url?.startsWith("/jira/rest/api/")) {
+          // ADR-0289 slice 4b: Jira lists through its own adapter (search/jql), linkage only
+          res.end(
+            JSON.stringify({
+              issues: [
+                { id: "10001", key: "PMI-1", fields: { issuetype: { name: "Story" } } },
+                { id: "10002", key: "PMI-2", fields: { issuetype: { name: "Bug" } } },
+              ],
+              isLast: true,
+            }),
+          );
+          return;
+        }
         if (req.url?.startsWith("/fail")) {
           res.statusCode = 500;
           res.end(JSON.stringify({ error: "boom" }));
@@ -294,14 +309,14 @@ describe("through the routes against a fake receiver (#828 review)", () => {
     expect(items.json().items.map((i: { externalId: string }) => i.externalId).sort()).toEqual(["g-1", "g-2"]);
   });
 
-  it("an adapter that cannot list is refused whole and recorded", async () => {
-    const r = await importPm({ connectionName: JIRA, initiative: { name: `${JIRA}-initiative` } });
-    expect(r.statusCode, r.body).toBe(422);
-    expect(r.json().error).toBe("pm_import_unsupported_provider");
-    const [row] = await db.select().from(onboardingImports).where(eq(onboardingImports.id, r.json().importId));
-    expect(row?.status).toBe("refused");
-    const [a] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, r.json().importId), eq(auditLog.effect, "deny")));
-    expect(a).toBeDefined();
+  it("a Jira connection lists through its own adapter (slice 4b), with the project quoted in JQL", async () => {
+    const dry = await importPm({ connectionName: JIRA, initiative: { name: `${JIRA}-initiative` } });
+    expect(dry.statusCode, dry.body).toBe(200);
+    expect(dry.json().plan.counts).toMatchObject({ listed: 2, add: 2 });
+    const call = lists.find((l) => l.url.startsWith("/jira/rest/api/"));
+    expect(call).toBeDefined();
+    const jql = new URL(`http://x${call!.url}`).searchParams.get("jql");
+    expect(jql).toBe('project = "PMI" ORDER BY id ASC');
   });
 
   it("a failing PM tool is a 502, recorded and audited", async () => {
