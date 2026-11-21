@@ -253,6 +253,10 @@ jobs:
     # A blast-radius cap, not a target (see the arithmetic above). Without the
     # gateway suite this job is install + `pnpm -r build` + the package suites.
     timeout-minutes: 20
+    outputs:
+      gateway-artifact-id: ${{ steps.gateway-upload.outputs.artifact-id }}
+      gateway-archive-sha256: ${{ steps.gateway-build.outputs.sha256 }}
+      gateway-producer-attempt: ${{ steps.gateway-build.outputs.producer-attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,6 +278,44 @@ jobs:
       # vite parse the SPA's real TypeScript, so a UI typo can no longer ship
       # behind a green build.
       - run: pnpm -r build
+
+      # ADR-0350 (C1): this existing full build is the only gateway compiler in the build-and-test family.
+      # Hand off only built workspace outputs, never node_modules, credentials or a cross-run cache.
+      - name: Package the gateway build for this run
+        id: gateway-build
+        if: needs.scope.outputs.code == 'true'
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/gateway-build"
+          mkdir -p "$handoff"
+          # Every workspace package's built exports are needed by gateway imports and source-driven tests.
+          tar -czf "$handoff/dist.tar.gz" apps/gateway/dist packages/*/dist
+          node --input-type=module - "$handoff/manifest.json" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const manifest = {
+            runId: process.env.GITHUB_RUN_ID,
+            producerAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            source: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+            lockSha256: createHash('sha256').update(readFileSync('pnpm-lock.yaml')).digest('hex'),
+            node: process.version, platform: process.platform, arch: process.arch,
+          };
+          writeFileSync(process.argv[2], JSON.stringify(manifest));
+          NODE
+          echo "sha256=$(sha256sum "$handoff/dist.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "producer-attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload this run's gateway build
+        id: gateway-upload
+        if: needs.scope.outputs.code == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gateway-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-build/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
       # ADR-0186 decision 30 item 3 (B4I-03): @regulait/shared holds the wall-clock budget tests (its `timing`
       # Vitest project, serialized after its parallel `unit` project). It runs on its own first, so nothing on
@@ -420,7 +462,7 @@ jobs:
 
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
-    needs: scope
+    needs: [scope, build-and-test-base]
     # ADR-0262 (PR trim): skipped only on a docs-only PR. ADR-0323: on a web-only PR (`gateway` is 'false') the matrix
     # is ONE runner, `web-readers`, which runs only the gateway tests that read apps/web sources or walk the repository
     # (`node scripts/ci-scope.mjs --gateway-web-readers`; step-up-posture-guard walks every product source). Any other
@@ -552,12 +594,44 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:9000/) || code=000
           [ "$code" != 000 ] || { echo "object store not reachable on 127.0.0.1:9000 after init" >&2; docker compose ps -a; exit 1; }
 
-      # The gateway suite imports its workspace dependencies from their dist/
-      # (each package.json `main`) and some tests run the BUILT gateway
-      # (dist/seed.js), so the shard builds the gateway and its dependencies —
-      # not apps/web. Type-checking the whole repo is build-and-test-base's job.
-      - name: Build the gateway and its workspace dependencies
-        run: pnpm --filter "@regulait/gateway..." build
+      # ADR-0350: no rebuild/cache fallback. A failed producer skips the shards and fails the required aggregate.
+      # Validate the ID before download: an empty ID must never mean "download every artifact".
+      - name: Require the gateway build artifact from the successful producer
+        env:
+          BUILD_ARTIFACT_ID: ${{ needs.build-and-test-base.outputs.gateway-artifact-id }}
+        run: |
+          [[ "$BUILD_ARTIFACT_ID" =~ ^[0-9]+$ ]] || { echo "::error::gateway build artifact ID is missing"; exit 1; }
+
+      - name: Download this run's gateway build by exact artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-and-test-base.outputs.gateway-artifact-id }}
+          path: ${{ runner.temp }}/gateway-build
+
+      - name: Verify and restore the gateway build
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build-and-test-base.outputs.gateway-archive-sha256 }}
+          EXPECTED_PRODUCER_ATTEMPT: ${{ needs.build-and-test-base.outputs.gateway-producer-attempt }}
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/gateway-build"
+          [[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::gateway archive digest is missing"; exit 1; }
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "$handoff/dist.tar.gz" | sha256sum --check --status
+          node --input-type=module - "$handoff/manifest.json" <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import { strict as assert } from 'node:assert';
+          const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          assert.deepEqual(manifest, {
+            runId: process.env.GITHUB_RUN_ID,
+            producerAttempt: process.env.EXPECTED_PRODUCER_ATTEMPT,
+            source: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+            lockSha256: createHash('sha256').update(readFileSync('pnpm-lock.yaml')).digest('hex'),
+            node: process.version, platform: process.platform, arch: process.arch,
+          }, 'gateway build does not match this run, checkout, lockfile or runtime');
+          NODE
+          tar -xzf "$handoff/dist.tar.gz"
 
       - name: Gateway suite, shard ${{ matrix.shard }} of ${{ strategy.job-total }}
         if: matrix.shard != 'web-readers'
