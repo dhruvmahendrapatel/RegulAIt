@@ -246,7 +246,7 @@ export {
   APPROVAL_TASK_PRIORITY_ORDER,
   taskScheduleRelaxations,
   slaStateAt,
-  APPROVAL_SLA_TRANSITIONS,
+  APPROVAL_SLA_MACHINE,
   slaTransitionAllowed,
   type TaskPriority,
   type TaskSchedule,

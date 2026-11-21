@@ -30,7 +30,7 @@ import {
   workflowInstances,
   type Db,
 } from "@regulait/db";
-import { APPROVAL_SLA_TRANSITIONS, evaluateSla, slaTransitionAllowed } from "@regulait/shared";
+import { APPROVAL_SLA_MACHINE, STATE_MACHINES, evaluateSla, slaTransitionAllowed } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runApprovalSlaSweep, scheduleApprovalTask, scheduleStageApprovals } from "./workbench.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -256,7 +256,9 @@ describe("ADR-0342 slice 2: the declared SLA transition table (rule 12)", () => 
         if (v.state !== stored) expect([stored, v.state, slaTransitionAllowed("clock", stored, v.state)]).toEqual([stored, v.state, true]);
       }
     }
-    expect(APPROVAL_SLA_TRANSITIONS.reschedule.ok).toEqual([]);
+    expect(STATE_MACHINES[APPROVAL_SLA_MACHINE.def.id]).toBe(APPROVAL_SLA_MACHINE);
+    expect(slaTransitionAllowed("reschedule", "ok", "warning")).toBe(false);
+    expect(APPROVAL_SLA_MACHINE.sourcesOf("rearm_ok")).toEqual(["warning", "breached"]);
     expect(slaTransitionAllowed("reschedule", "breached", "ok")).toBe(true);
     expect(slaTransitionAllowed("reschedule", "ok", "breached")).toBe(false);
     expect(slaTransitionAllowed("clock", "breached", "ok")).toBe(false);

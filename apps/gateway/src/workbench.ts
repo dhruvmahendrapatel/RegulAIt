@@ -666,7 +666,7 @@ export async function scheduleApprovalTask(
     slaPolicyId: next.slaPolicyId,
     dueSource: timesChanged ? ctx.source : a.dueSource,
   };
-  // APPROVAL_SLA_TRANSITIONS.reschedule: moving the clock BACK re-arms it here; moving it forward into warning or breach
+  // APPROVAL_SLA_MACHINE reschedule events (rearm_ok, rearm_warning): moving the clock BACK re-arms it here; moving it forward into warning or breach
   // is the `clock` cause, left to the ADR-0046 evaluation below, so the audit and the escalation happen once
   const implied = slaStateAt(next, now);
   if (slaTransitionAllowed("reschedule", a.slaState, implied)) patch.slaState = implied;

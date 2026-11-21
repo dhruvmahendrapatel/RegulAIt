@@ -19,6 +19,7 @@
  *     principle forbids it. The type is the enforcement, alongside the DB CHECK.
  */
 import { z } from "zod";
+import { defineMachine } from "./state-machine.js";
 
 export const APPROVAL_ASSIGNEE_KINDS = ["user", "role", "team"] as const;
 export type ApprovalAssigneeKind = (typeof APPROVAL_ASSIGNEE_KINDS)[number];
@@ -348,20 +349,52 @@ export function slaStateAt(schedule: { warnAt: Date | null; dueAt: Date | null }
 }
 
 /**
- * ADR-0342 slice 2 (rule 12): the one declared table of SLA state transitions, by cause.
- *  - `clock`: the ADR-0046 evaluation (`evaluateSla`) only ever moves a clock forward.
- *  - `reschedule`: a moved due or warn time (`scheduleApprovalTask`) may re-arm it backward; moving forward is left to
- *    the clock, so a warning or breach is audited and escalated once, the usual way.
- * Staying in the same state is always allowed and is not listed.
+ * ADR-0342 slice 2 (rule 12, ADR-0348): the declared lifecycle of `approval_assignments.sla_state`, through the one
+ * shared `defineMachine` table, registered in `STATE_MACHINES` (so its states are held equal to the column's CHECK).
+ *  - the clock (`warn`, `breach`): the ADR-0046 evaluation (`evaluateSla`) only ever moves a task forward;
+ *  - a reschedule (`rearm_ok`, `rearm_warning`): a due or warn time moved later (`scheduleApprovalTask`) may re-arm it
+ *    backward. Moving a time EARLIER is left to the clock, so a warning or breach is audited and escalated once, the
+ *    usual way. A stage timer can never move a time later (it cannot relax), so a re-arm is an admin's.
+ * Staying in the same state is always allowed and is not an event.
  */
-export const APPROVAL_SLA_TRANSITIONS: Readonly<
-  Record<"clock" | "reschedule", Readonly<Record<"ok" | "warning" | "breached", readonly ("ok" | "warning" | "breached")[]>>>
-> = {
-  clock: { ok: ["warning", "breached"], warning: ["breached"], breached: [] },
-  reschedule: { ok: [], warning: ["ok"], breached: ["ok", "warning"] },
-};
+export const APPROVAL_SLA_MACHINE = defineMachine({
+  id: "approval_sla",
+  stored: "approval_assignments.sla_state",
+  states: APPROVAL_SLA_STATES,
+  initial: ["ok"],
+  terminal: [],
+  transitions: {
+    warn: { from: ["ok"], to: "warning", by: ["system"], summary: "The warn time passed; the SLA sweep warns the assignees." },
+    breach: {
+      from: ["ok", "warning"],
+      to: "breached",
+      by: ["system"],
+      summary: "The due time passed; the SLA sweep escalates the task by its policy (notify, reassign or add an assignee).",
+    },
+    rearm_ok: {
+      from: ["warning", "breached"],
+      to: "ok",
+      by: ["admin"],
+      summary: "An admin moved the due and warn times later (a settings_relax step-up); the clock re-arms.",
+    },
+    rearm_warning: {
+      from: ["breached"],
+      to: "warning",
+      by: ["admin"],
+      summary: "An admin moved the due time later but the warn time has passed; the task is back to a warning.",
+    },
+  },
+});
 
-export function slaTransitionAllowed(cause: keyof typeof APPROVAL_SLA_TRANSITIONS, from: string, to: string): boolean {
-  const row = APPROVAL_SLA_TRANSITIONS[cause][from as "ok" | "warning" | "breached"];
-  return row !== undefined && (row as readonly string[]).includes(to);
+/** which events each cause may take: the clock moves forward, a reschedule only re-arms */
+const SLA_EVENTS_BY_CAUSE = {
+  clock: ["warn", "breach"],
+  reschedule: ["rearm_ok", "rearm_warning"],
+} as const satisfies Record<string, readonly (typeof APPROVAL_SLA_MACHINE.events)[number][]>;
+
+/** may `cause` move a task's SLA state from `from` to `to` (a change of state; staying put is always allowed)? */
+export function slaTransitionAllowed(cause: keyof typeof SLA_EVENTS_BY_CAUSE, from: string, to: string): boolean {
+  const m = APPROVAL_SLA_MACHINE;
+  if (!m.isState(from) || !m.isState(to)) return false;
+  return SLA_EVENTS_BY_CAUSE[cause].some((e) => m.can(from, e) && m.def.transitions[e].to === to);
 }

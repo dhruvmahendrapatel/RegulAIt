@@ -143,11 +143,13 @@ else. No new dependency.
    The escalation target is always an admin-defined ADR-0046 SLA policy (`slaPolicyId`), never a free-form target,
    because creating a policy that hands a task to someone else already requires a step-up.
 
-   **Declared SLA transitions (owner rule: explicit state machines).** `APPROVAL_SLA_TRANSITIONS` in
-   `packages/shared/src/workbench.ts` names the two causes: the `clock` (the ADR-0046 evaluation only ever moves
-   `ok` to `warning` to `breached`) and the `reschedule` (a moved due time may re-arm `breached` or `warning` back).
-   `scheduleApprovalTask` applies only `reschedule` transitions; a test pins that `evaluateSla` makes only `clock`
-   ones. A re-armed breach keeps its `breached_at` on the record.
+   **Declared SLA transitions (owner rule: explicit state machines).** `APPROVAL_SLA_MACHINE` in
+   `packages/shared/src/workbench.ts` declares `approval_assignments.sla_state` with the shared ADR-0348
+   `defineMachine` and is registered in `STATE_MACHINES`, so its states are held equal to the column's CHECK. Its
+   events belong to two causes: the clock (`warn`, `breach`: the ADR-0046 evaluation only ever moves `ok` to
+   `warning` to `breached`) and a reschedule (`rearm_ok`, `rearm_warning`: a due time moved later re-arms `breached`
+   or `warning` back). `slaTransitionAllowed(cause, from, to)` reads the machine. `scheduleApprovalTask` applies
+   only reschedule events; a test pins that `evaluateSla` makes only clock ones. A re-armed breach keeps its `breached_at` on the record.
 
    **The contract with lane E21 (stage timers).** On a human-approval stage, E21 does not escalate the task itself:
    when the stage is entered, it sets each pending task's due and warn times (and optionally priority and policy)
