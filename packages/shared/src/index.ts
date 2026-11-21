@@ -3330,6 +3330,9 @@ export {
   type ShadowAiDisposition,
   type ShadowAiSeverity,
   type ShadowAiSubjectKind,
+  AGENT_CONFIG_SECRET_RULES_EXCLUDED,
+  agentConfigSecretRuleAllowed,
+  agentConfigSecretRuleIds,
 } from "./shadow-ai.js";
 
 // ADR-0071 — SHADOW-AI EVIDENCE FORMAT ADAPTERS, the pure half: the layer BELOW
