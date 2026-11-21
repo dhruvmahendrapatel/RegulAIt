@@ -59,6 +59,7 @@ import {
   a2aAgentRevocations,
   a2aAgentRoleGrants,
   a2aAgents,
+  a2aGatewayConnections,
   and,
   roleAssignments,
   roles,
@@ -144,6 +145,7 @@ export const A2A_RULE_IDS = Object.freeze({
   projectBudget: "project-budget-cap",
   piiBlocked: "pii-blocked",
   piiUnsupported: "a2a-pii-unsupported",
+  gatewayDisabled: "a2a-gateway-disabled",
   guardrailBlocked: "guardrail-blocked",
 });
 
@@ -236,6 +238,60 @@ function clientCard(stored: Record<string, unknown>, registeredUrl: string): Age
   const card = AgentCard.fromJSON(stored);
   const origin = originOf(registeredUrl);
   return { ...card, supportedInterfaces: spokenInterfaces(card).filter((i) => originOf(i.url) === origin && a2aProtocolVersionSupported(i.protocolVersion)) };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0231 B3: a refreshed card held for review (the diff, and the card a call may use meanwhile)
+// ---------------------------------------------------------------------------
+
+function interfaceKeyList(card: Record<string, unknown>): string[] {
+  try {
+    return AgentCard.fromJSON(card).supportedInterfaces.map((i) => `${i.protocolBinding} ${i.protocolVersion ?? ""} ${i.url}`);
+  } catch {
+    return [];
+  }
+}
+
+export interface CardDiff {
+  skillsAdded: string[];
+  skillsRemoved: string[];
+  interfacesAdded: string[];
+  interfacesRemoved: string[];
+  /** true when the new card can do something the stored one could not: accepting it is a relaxation */
+  widens: boolean;
+}
+
+export function cardDiff(stored: Record<string, unknown>, next: Record<string, unknown>): CardDiff {
+  const before = new Set(cardSkills(stored).map((s) => s.id));
+  const after = new Set(cardSkills(next).map((s) => s.id));
+  const ib = new Set(interfaceKeyList(stored));
+  const ia = new Set(interfaceKeyList(next));
+  const skillsAdded = [...after].filter((s) => !before.has(s));
+  const skillsRemoved = [...before].filter((s) => !after.has(s));
+  const interfacesAdded = [...ia].filter((s) => !ib.has(s));
+  const interfacesRemoved = [...ib].filter((s) => !ia.has(s));
+  return { skillsAdded, skillsRemoved, interfacesAdded, interfacesRemoved, widens: skillsAdded.length > 0 || interfacesAdded.length > 0 };
+}
+
+/**
+ * The card a call may use while a change is pending: only the skills and interfaces on BOTH cards (narrowing applies
+ * at once, widening waits for an admin). With nothing pending it is the stored card.
+ */
+export function effectiveCard(agent: { card: Record<string, unknown>; pendingCard: Record<string, unknown> | null }): Record<string, unknown> {
+  if (!agent.pendingCard) return agent.card;
+  const pendingSkills = new Set(cardSkills(agent.pendingCard).map((s) => s.id));
+  const pendingIfaces = new Set(interfaceKeyList(agent.pendingCard));
+  const skills = Array.isArray(agent.card.skills) ? agent.card.skills : [];
+  const ifaces = Array.isArray(agent.card.supportedInterfaces) ? agent.card.supportedInterfaces : [];
+  return {
+    ...agent.card,
+    skills: skills.filter((s) => s && typeof s === "object" && pendingSkills.has(String((s as Record<string, unknown>).id))),
+    supportedInterfaces: ifaces.filter((i) => {
+      if (!i || typeof i !== "object") return false;
+      const o = i as Record<string, unknown>;
+      return pendingIfaces.has(`${String(o.protocolBinding)} ${String(o.protocolVersion ?? "")} ${String(o.url)}`);
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +477,16 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   const [agent] = await db.select().from(a2aAgents).where(eq(a2aAgents.id, args.agentId));
   if (!agent || !agent.enabled) return deny(404, "unknown_agent", A2A_RULE_IDS.unknownAgent, agent ? "the remote agent is turned off" : "no such remote agent", "Remote agent call refused");
   const label = `Remote agent '${agent.name}'`;
-  if (skillId !== null && !cardSkills(agent.card).some((s) => s.id === skillId)) {
+  // ADR-0231 §5: an agent imported from an agent gateway is callable only while the org allows that gateway kind and
+  // the connection itself is on
+  if (agent.gatewayConnectionId) {
+    const [conn] = await db.select({ provider: a2aGatewayConnections.provider, enabled: a2aGatewayConnections.enabled }).from(a2aGatewayConnections).where(eq(a2aGatewayConnections.id, agent.gatewayConnectionId));
+    if (!conn || !conn.enabled) return deny(403, "gateway_disabled", A2A_RULE_IDS.gatewayDisabled, "the agent gateway it was imported from is turned off", label);
+    if (conn.provider === "sap_agent_gateway" && !org.sapAgentGatewayEnabled) return deny(403, "sap_agent_gateway_disabled", A2A_RULE_IDS.gatewayDisabled, "SAP Agent Gateway agents are turned off for this organisation", label);
+  }
+  // ADR-0231 B3: while a changed card waits for review, only what BOTH cards allow (narrowing applies at once)
+  const callCard = effectiveCard(agent);
+  if (skillId !== null && !cardSkills(callCard).some((s) => s.id === skillId)) {
     return deny(400, "unknown_skill", A2A_RULE_IDS.unknownSkill, `its card lists no skill '${skillId.slice(0, 128)}'`, label);
   }
 
@@ -519,7 +584,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     const client = await new ClientFactory({
       transports: [new JsonRpcTransportFactory({ fetchImpl, ...LEGACY_COMPAT }), new RestTransportFactory({ fetchImpl, ...LEGACY_COMPAT })],
       preferredTransports: [JSONRPC, HTTP_JSON],
-    }).createFromAgentCard(clientCard(agent.card, agent.url));
+    }).createFromAgentCard(clientCard(callCard, agent.url));
     result = await client.sendMessage(
       {
         tenant: "",
@@ -732,6 +797,10 @@ export function a2aAgentView(row: A2aAgentRow, credential: A2aAgentCredentialRow
     enabled: row.enabled,
     credential: a2aCredentialView(credential),
     createdAt: row.createdAt.toISOString(),
+    gatewayConnectionId: row.gatewayConnectionId,
+    ardIdentifier: row.ardIdentifier,
+    cardProtocolVersion: row.cardProtocolVersion,
+    pendingCard: row.pendingCard ? { fetchedAt: row.pendingCardFetchedAt?.toISOString() ?? null, diff: cardDiff(row.card, row.pendingCard) } : null,
   };
 }
 
@@ -782,7 +851,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const row = await db.transaction(async (tx) => {
       const [created] = await tx
         .insert(a2aAgents)
-        .values({ name: body.name, url: body.url, card, allowPrivateRanges, pricePerCallUsd: body.pricePerCallUsd ?? null, createdBy: req.authCtx.userId ?? null })
+        .values({ name: body.name, url: body.url, card, allowPrivateRanges, pricePerCallUsd: body.pricePerCallUsd ?? null, createdBy: req.authCtx.userId ?? null, cardProtocolVersion: cardBindings(card)[0]?.protocolVersion ?? null })
         .onConflictDoNothing()
         .returning();
       if (!created) return null;
@@ -806,6 +875,8 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const { agentId } = agentParam.parse(req.params);
     const agent = await loadAgent(agentId);
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    // ADR-0231 B3: an imported agent's card changes only through its gateway's refresh, which holds it for review
+    if (agent.gatewayConnectionId) return reply.status(409).send({ error: "use_gateway_refresh", detail: "this agent was imported from an agent gateway; refresh the gateway connection, which holds a changed card for review" });
     const got = await fetchCard(db, agent.url, agent.allowPrivateRanges, deps);
     if (!got.ok) {
       await audit(db, req, agentId, A2A_RULE_IDS.registrationRefused, "deny", `Remote agent '${agent.name}': card refresh refused (${got.code}): ${got.detail}. The stored card is unchanged.`, { phase: "card-refresh", code: got.code });

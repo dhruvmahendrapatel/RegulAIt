@@ -110,6 +110,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/mcp/authorised-targets/:x",
       "/v1/a2a/agents/:x/role-grants/:x",
       "/v1/a2a/agents/:x/revocations/:x",
+      // lane L2 (ADR-0231 B3): gateway connection removal and pending-card rejection, until the B5 panel on #453
+      "/v1/a2a/gateway-connections/:x",
+      "/v1/a2a/agents/:x/pending-card",
       "/v1/endpoint-device-groups/:x",
       "/v1/endpoint-device-groups/:x/members/:x",
       "/v1/endpoint-device-groups/:x/rules/:x",

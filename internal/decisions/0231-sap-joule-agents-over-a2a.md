@@ -349,3 +349,53 @@ ships it.
   origin only. Legacy cards whose `url` or `additionalInterfaces` point elsewhere are refused. gRPC-only cards,
   unsupported versions and empty versions are refused.
 - Not yet exercised against SAP itself (B0 and B6 are owner-blocked).
+
+## Amendment 2026-11-14: slice B3 built (gateway connections, the ARD import, pending cards)
+
+- **Built** in `apps/gateway/src/a2a-gateway.ts` (routes registered from `app.ts`) and `a2a.ts` (the call-time
+  checks), migration `pending/a2a_gateway_connections` (numbered at merge):
+  - `org_settings.sap_agent_gateway_enabled` is off by default. Turning it on is a `settings_relax` step-up, through the
+    strictness map. While it is off, nothing is connected, imported or refreshed, and gateway agents are not called.
+  - `a2a_gateway_connections` stores the base url, token endpoint, client id, encrypted client secret (in
+    `CIPHERTEXT_COLUMNS`, never returned), and the optional `resource` and `scope`.
+    - Creating one, rotating its secret, re-enabling it and deleting it are step-ups. Turning one off is not.
+    - The base url and token endpoint must be https unless the connection opts into private ranges, which is itself
+      a step-up.
+    - Deleting a connection turns its agents off and keeps them, with their grants and their audit trail.
+  - `a2a_agents` gains:
+    - `gateway_connection_id` and `ard_identifier`, unique together;
+    - `card_protocol_version` and `card_raw_sha256`, deferred here from B1;
+    - `pending_card`, `pending_card_raw_sha256` and `pending_card_fetched_at`.
+- **The catalogue** is the ARD v0.91 manifest at `/.well-known/ard.json`, an `entries` array (§5.1). The import:
+  - keeps the entries whose `type` names an A2A agent card and which give its `url`;
+  - lists inline (`data`) entries as skipped;
+  - ignores every other artifact type.
+- **The trust rule.** The manifest, every card and every agent interface must be on the connection's origin, through
+  the guarded fetch with response size bounds. The import never follows a card that moved to another url.
+- **The discovery token** comes from the client-credentials grant, through `oauth4webapi` with `client_secret_basic`
+  and our guarded fetch. It is:
+  - sent only with catalogue and card reads, never with a message;
+  - cached in process memory per connection until a minute before it expires;
+  - keyed on the connection's `updated_at`, so a secret rotation drops the cached token.
+- **Import and register.** Import lists candidates as new, registered, changed or refused, and writes no agent. A
+  separate admin call registers one entry. It re-reads the catalogue first, so it accepts only an entry the
+  catalogue lists at that moment. Nobody can call the agent until someone is granted access.
+- **Refresh.** A changed card (a different raw hash) is held as `pending_card`, with the diff audited. While it waits,
+  a call uses only what both cards allow (`effectiveCard`), so a removed skill or interface stops at once.
+  - Accepting the change re-runs every card check. When the change widens what the agent offers, accepting is a step-up.
+  - The review state (`none` or `pending`) and its four transitions (refresh changed, refresh reverted, accept,
+    reject) are one declared table, `PENDING_CARD_TRANSITIONS` in `a2a-gateway.ts` (build rule 12). Every write that
+    changes the state reads it, and a transition it does not list is refused (accept or reject with nothing held is a 409).
+  - Rejecting keeps the stored card. A later refresh that sees the same card holds it again.
+  - An agent gone from the catalogue is turned off, never deleted.
+  - The manual card refresh of an imported agent is refused, because the gateway refresh owns it.
+- **Deviations for the reviewer:**
+  - There is no `a2a_agents.provider` column. The provider belongs to the connection, so it is joined rather than
+    copied (3NF, ADR-0200 addendum).
+  - A whole-agent grant covers a skill accepted later. Skill-scoped grants do not. §2 says new skills need a grant
+    first. Here the stepped-up acceptance is the decision point, and it is audited as a relaxation.
+  - Client authentication is `client_secret_basic` only. mTLS and a jwt-bearer client assertion arrive with B2.
+- **Unverified until B0:** SAP's exact ARD path and the media type it gives its cards. The import accepts any `type`
+  that names `a2a` or `agent-card`.
+- **Tests.** `zz-adr0231-a2a-gateway.test.ts` (15 tests) runs a fake gateway with a token endpoint, an ACL-filtered
+  catalogue, 0.3 cards and the SDK's v0.3 REST server.

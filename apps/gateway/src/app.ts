@@ -449,6 +449,7 @@ import { clearUpstreamCredentialOnUrlMove, registerMcpUpstreamCredentialRoutes }
 import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration-lifecycle.js";
 import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
+import { registerA2aGatewayRoutes } from "./a2a-gateway.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
@@ -6264,6 +6265,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0238: RFC 8693 token exchange for down-scoped upstream credentials (admin, settings_relax step-up)
   registerUpstreamTokenExchangeRoutes(app, db, { dataKey: opts.dataKey });
   registerA2aRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0231 B3: agent gateway connections and the ARD import
+  registerA2aGatewayRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
   // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
   registerMcpBundleRoutes(app, db);

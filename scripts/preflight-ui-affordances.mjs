@@ -53,6 +53,9 @@ export const DELIBERATELY_API_ONLY = new Map([
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
   ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  // Lane L2 (ADR-0231 B3): the Connect SAP Agent Gateway panel is slice B5 on #453
+  ["/v1/a2a/gateway-connections/:x", "removing an agent gateway connection (step-up): API-only until the B5 panel on #453 (lane L2 brief)"],
+  ["/v1/a2a/agents/:x/pending-card", "rejecting a changed remote-agent card: API-only until the B5 panel on #453 (lane L2 brief)"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
   // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
   ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
