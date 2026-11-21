@@ -49,6 +49,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
+  // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
+  ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
   // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
   ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
@@ -69,6 +73,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // ADR-0365 (lane E46): the context graph is API-only in slice 1; delete this entry when the bindings screen on #453 lands
   ["/v1/context-graph/sources/:x", "unbinding a PM connection from the context graph (audited; removes its nodes): API-only until the context graph bindings screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
   ["/v1/robots/:x/secrets/:x/:x", "clearing a robot secret no submitted version is bound to (audited): API-only until the robot detail screen on #453 (route census KNOWN_UI_GAPS holds the same route)"],
+  // ADR-0251 (P-01, lane L1, orchestrator brief 2026-11-14): API-first until the design builder's screen on #453
+  // (scripts/known-ui-gaps/adr-0251-l1-resource-rules.json holds the same routes).
+  ["/v1/rules/resource/approval-rules/:x", "removing a governed-core approval rule (settings_relax step-up): API-only until the screen on #453"],
+  ["/v1/rules/resource/rate-limits/:x", "removing a governed-core rate limit (settings_relax step-up): API-only until the screen on #453"],
   // ADR-0356 (lane E37): the UI is built by the design builder; delete this entry when the screen lands
   ["/v1/pm/identity-links/:x", "removing a PM identity link (audited; hand-overs from that identity are then denied): API-only until the PM identity-link screen on #453 (route census KNOWN_UI_GAPS)"],
 ]);

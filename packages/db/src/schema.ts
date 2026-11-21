@@ -2097,6 +2097,10 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0358 (lane E39): the adoption-analytics privacy policy writes and each per-person ranking read; the CMDB
+        // sync connector (its policy, credential and enable writes, and each sync run). Plain text column — no DDL needed.
+        "adoption_analytics",
+        "cmdb_connector",
       ],
     })
       .notNull()
@@ -16996,7 +17000,8 @@ export const thirdPartyIngestRecordFindings = pgTable(
 );
 
 // ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
-export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+/** ADR-0351 slice 1 (migration pending/siem_syslog_tls): `syslog_tls` is RFC 5424 over TLS (RFC 5425) */
+export const SIEM_DESTINATION_KINDS = ["webhook", "syslog_tls"] as const;
 export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
 
 /**
@@ -17014,7 +17019,10 @@ export const siemDestinations = pgTable(
     url: text("url").notNull(),
     allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
     enabled: boolean("enabled").notNull().default(false),
-    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** the webhook's `whsec_` secret under REGULAIT_DATA_KEY; null exactly for a `syslog_tls` destination (CHECK) */
+    secretCiphertext: text("secret_ciphertext"),
+    /** ADR-0351: `syslog_tls` only, the PEM of the CA(s) that issued the receiver's certificate (public, not a secret) */
+    tlsCaPem: text("tls_ca_pem"),
     secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
     /** the highest `audit_log.seq` the receiver acknowledged */
     cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
@@ -18639,6 +18647,60 @@ export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferS
 // ===== end ADR-0341 =====
 
 // ---------------------------------------------------------------------------
+// Lane L2 (ADR-0219 follow-up, P10): A2A role grants and per-person revocations. Migration `pending/a2a_role_grants`.
+// ---------------------------------------------------------------------------
+
+/**
+ * A role's access to a remote agent: the same shape as a direct `a2a_agent_grants` row (whole agent, or one skill),
+ * so a role grant can never exceed a direct one. Additive with direct grants, and bounded by `a2a_agent_revocations`
+ * (ADR-0019's rule: a revocation subtracts role-derived access only, never a direct grant).
+ */
+export const a2aAgentRoleGrants = pgTable(
+  "a2a_agent_role_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    skillId: text("skill_id"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_role_grants_uq").on(t.agentId, t.roleId, sql`COALESCE(${t.skillId}, '')`),
+    index("a2a_agent_role_grants_role_idx").on(t.roleId, t.agentId),
+  ],
+);
+export type A2aAgentRoleGrantRow = typeof a2aAgentRoleGrants.$inferSelect;
+
+/** one person's role-derived access to one remote agent, taken away without unassigning the role (ADR-0019) */
+export const a2aAgentRevocations = pgTable(
+  "a2a_agent_revocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** why, in the admin's words: shown with the revocation, as `agent_revocations.reason` is (PR #810 review) */
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_revocations_uq").on(t.agentId, t.userId),
+    index("a2a_agent_revocations_user_idx").on(t.userId, t.agentId),
+    check("a2a_agent_revocations_reason_check", sql`${t.reason} IS NULL OR char_length(${t.reason}) BETWEEN 1 AND 500`),
+  ],
+);
+export type A2aAgentRevocationRow = typeof a2aAgentRevocations.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
 // AI step (agent + span name, the rule-step suggestion key) and compiles to the same exact-match rule
 // (`compileDecisionTable` → `InducedRule`). Versions are immutable; a version is published only when its named reviewer
@@ -20100,6 +20162,32 @@ export const vendorAgentActions = pgTable(
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
+
+// ===== ADR-0358 (lane E39): AI adoption analytics =====
+/**
+ * The adoption-analytics privacy policy: one row (id `singleton`), read before every adoption read. Strict by default
+ * (ADR-0180): per-person ranking OFF, and any count of people below `min_cohort_size` (default 5) is suppressed.
+ * Turning ranking on or lowering the cohort is a relaxation (admin-only, `settings_relax` step-up, a required reason,
+ * audited in the same transaction). A missing row reads as the strict defaults; the first write inserts it.
+ * Row-level security: an admin principal, `system_task` and `migration` only.
+ */
+export const ADOPTION_POLICY_ID = "singleton";
+export const adoptionAnalyticsPolicy = pgTable(
+  "adoption_analytics_policy",
+  {
+    id: text("id").primaryKey().default(ADOPTION_POLICY_ID),
+    perPersonRanking: boolean("per_person_ranking").notNull().default(false),
+    minCohortSize: integer("min_cohort_size").notNull().default(5),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("adoption_analytics_policy_singleton_check", sql`${t.id} = 'singleton'`),
+    check("adoption_analytics_policy_cohort_check", sql`${t.minCohortSize} BETWEEN 1 AND 50`),
+  ],
+);
+export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
+// ===== end ADR-0358 (lane E39) adoption analytics =====
 
 // ===== ADR-0356: work assigned from the PM tool (migration `pm_work_triggers`, numbered at merge) =====
 /**

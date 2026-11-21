@@ -6,7 +6,8 @@
  *   - every PM table has row-level security ENABLED and FORCED;
  *   - a non-admin principal reads, inserts, updates and deletes nothing in any PM table;
  *   - an admin principal reaches every PM table;
- *   - `pm_sync` (a principal step) reaches connections, links and the inbound log, never the webhook delivery
+ *   - `pm_sync` (a principal step) reaches connections, the links of objects the principal may see (narrowed by
+ *     `rls_pm_tables_followon`) and the inbound log, never the webhook delivery
  *     records or the import linkage;
  *   - the PM webhook's reason (`approval_maintenance`) records and releases deliveries and appends the inbound log;
  *   - `system_task` prunes deliveries; `public_ingest` and `credential_request` reach no PM table;
@@ -19,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import {
   createDb,
   eq,
+  governanceAlerts,
   initiatives,
   agents,
   pmConnections,
@@ -106,6 +108,9 @@ beforeAll(async () => {
     { id: ids.alice, email: `alice-${ids.alice}@rls.test`, displayName: "Alice" },
     { id: ids.root, email: `root-${ids.root}@rls.test`, displayName: "Root", isAdmin: true },
   ]);
+  // the alert the link points at is alice's: under pm_sync a non-admin reaches only the links of objects it may see
+  // (rls_pm_tables_followon), and a governance alert's owner may read its ticket
+  await db.insert(governanceAlerts).values({ id: ids.alert, ruleId: "rls0234pm", subjectKey: ids.alert, severity: "high", title: "t", ownerUserId: ids.alice });
   await db.insert(pmConnections).values({ id: ids.conn, name: `rlspm-${ids.conn}`, provider: "mock", project: "P", tokenCiphertext: "x" });
   await db.insert(pmLinks).values({
     id: ids.link,
@@ -190,8 +195,10 @@ describe("what each scope reaches, with no application filter", () => {
       });
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "commented", payload: {} }).returning({ id: pmSyncEvents.id });
       expect(ev?.id).toBeTruthy();
+      // an alert's ticket link is read-only to its owner (rls_pm_tables_followon: only an admin, a job or the decide
+      // path writes it); the per-row write rules are proved in zz-adr0234-rls-pm-followon.test.ts
       const upd = await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, ids.link)).returning({ id: pmLinks.id });
-      expect(upd).toEqual([{ id: ids.link }]);
+      expect(upd).toEqual([]);
       // the connection itself is admin-managed
       expect(await db.update(pmConnections).set({ project: "Q" }).where(eq(pmConnections.id, ids.conn)).returning({ id: pmConnections.id })).toEqual([]);
       expect(await pgError(db.insert(pmWebhookDeliveries).values({ connectionId: ids.conn, contentSha256: "d".repeat(64) }))).toMatch(/row-level security/);
