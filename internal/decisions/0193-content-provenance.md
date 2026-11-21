@@ -188,36 +188,42 @@ harness runs axe, perf, responsive and states on the new route with no baseline 
 3. **`standard` versus approval.** Under the default floor, standard content is refused like untrusted content. Should
    a write after standard content instead require an approval?
 
-## Addendum — 2026-11-21: the floor and the injection scan on memory and shared-context writes (lane E50)
+## Addendum — 2026-11-21: the floor on memory and shared-context writes (lane E50)
 
 Owner request 2026-11-20 (the agentic-governance checklist, OWASP Agentic ASI06 memory poisoning): the P1 floor gated
-only write tool calls, so text from an untrusted source could still be persisted into the two stores an agent later
-reads as context. Both write routes are now gated. No migration, no new route and no new setting.
+only write tool calls, so text drawn from an untrusted source could still be persisted into the two stores an agent
+later reads as context. Built on the ADR-0347 write path (master decision 2026-11-21: ADR-0347 lands first, this adds
+only the floor on top). No migration, no new route and no new setting.
 
-- **What is gated.** `POST /v1/projects/:projectId/context` and `.../context/promote` (the one shared-context write path,
-  `writeContextRevision`), and `POST /v1/builder/agents/:id/memory` (memory is part of the agent's system prompt).
+- **What is gated.** The two ADR-0347 write paths: `POST /v1/projects/:projectId/context` and `.../context/promote`
+  (`writeContextRevision`), and `POST /v1/builder/agents/:id/memory`.
 - **The floor.** The same rule as P1, through the same code: the causal context's tiers (`contextContentTiers`), the
-  write floor (`contentTrustWriteFloor`) and `evaluateContentTrust`. A shared-context write's causal context is its
-  declared producing run (`producedByRunId`, as `run:<id>`). A memory write may name its context (`contextId`,
-  `run:<id>` or `builder_thread:<id>`); a person's own note names none. A refusal is the P1 deny row (rule
-  `content-trust-floor`, code `content_trust_refused`) on the project or the builder agent, with `surface`.
-- **The injection scan.** The guardrail input phase (`resolveGuardrailPolicy` + `runGuardrailsAsync`), narrowed to the
-  injection family (prompt injection and jailbreak). A `block` refuses the write with `guardrail_blocked`; every
-  finding is recorded through `recordGuardrailDecision`, counts only. The floor runs first, so a refused write is never
-  scanned.
-- **Secure by default (ADR-0180).** Both are on with the shipped defaults: the floor is `trusted` and both detectors
-  `block`. An admin relaxes them through the existing audited settings: the floor through `PUT
-  /v1/content-trust/settings` (a `settings_relax` step-up, never below `standard`), the detectors through `PUT
-  /v1/guardrails/config`. There is deliberately no memory-only switch: a memory write can never sit below the posture a
-  write tool call has, and there is one place to read it.
-- **Refused writes store nothing.** The gate runs before the revision transaction and before the memory insert; both
-  refusals answer 403.
-- **The proof.** `memory.untrusted_context_write` (ADR-0345) now asserts all three writes, and its probe calls
-  `evaluateMemoryWrite`, the decision both routes make, with the trained detectors detached so the probe makes no
-  third-party call. The risk also lists `guardrail_configs.prompt_injection_mode` as a control. The catalogue version is
-  3.
-- **Open.** A shared-context write made by an orchestration worker that does not declare its producing run is not tied
-  to a causal context, so only the scan applies to it. Making the declaration mandatory for agent-originated writes
-  belongs with open question 2 above.
+  write floor (`contentTrustWriteFloor`) and `evaluateContentTrust`. A refusal is the P1 deny row (rule
+  `content-trust-floor`, code `content_trust_refused`, 403) on the project or the builder agent, with `surface`. The
+  floor is categorical, so it runs before the ADR-0347 scan and expiry, and before the revision transaction or the
+  memory insert: a refused write stores nothing.
+- **The causal context is checked, never asserted** (review R7 finding 1 on PR #1133).
+  - A shared-context write's context is its producing run, once ADR-0347's `resolveRunProvenance` has confirmed the run
+    is the caller's own, in this project.
+  - A memory write may name its context (`contextId`, `run:<id>` or `builder_thread:<id>`). A run must be the caller's
+    own (or the caller is an admin) and in the agent's project; a thread must be the caller's own thread on this agent.
+    Anything else is refused before the floor runs (`not_your_context`, `context_not_in_project`, `unknown_context`),
+    so a clean foreign context cannot be borrowed to dodge the floor.
+  - A write with no context is a person's own note: there is nothing for the floor to refuse on, and the ADR-0347 scan
+    still runs. No delegated or workload credential can reach these routes (`WORKLOAD_ROUTES` holds only the MCP and
+    model routes; a virtual key reaches only `VIRTUAL_KEY_ALLOWED_ROUTES`), so an agent acting under its own credential
+    cannot omit the context there.
+- **No second scanner.** ADR-0347's scan (prompt injection, jailbreak, secrets, PII, at `block` under
+  `agent_memory_scan_mode`) is the injection check on these routes. This addendum adds none of its own.
+- **Secure by default (ADR-0180).** The floor is `trusted`; an admin relaxes it only through `PUT
+  /v1/content-trust/settings` (a `settings_relax` step-up, never below `standard`), audited. There is deliberately no
+  memory-only switch: a memory write never sits below the posture a write tool call has.
+- **The proof.** `memory.untrusted_context_write` (ADR-0345) now asserts all three writes. Its probe calls
+  `memoryFloorVerdict` (the floor decision both routes make) and ADR-0347's `scanMemoryText` under the org's
+  `memoryPolicy` scan mode. The risk lists `org_settings.agent_memory_scan_mode` as a control. The catalogue version
+  is 3.
+- **Open.** A person's own API key used by a script or an external agent is indistinguishable from the person, so a
+  write it makes without a context gets the scan but not the floor. Requiring a context for such callers belongs with
+  open question 2 above.
 
 Code: `apps/gateway/src/memory-write-gate.ts`; tests: `apps/gateway/src/zz-adr0193-memory-write-gate.test.ts`.

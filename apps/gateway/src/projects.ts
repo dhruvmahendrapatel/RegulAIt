@@ -39,6 +39,9 @@ import {
   type CsvWindow,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { databaseNow } from "./db-clock.js";
+import { expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
@@ -441,6 +444,11 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         : null,
     // ADR-0045 amendment 2026-11-14: model risk management is required if ANY framework requires it (OR: strictest wins)
     mrmRequiredBy: profiles.filter((p) => p.mrmRequired === true).map((p) => p.tag).sort(),
+    // ADR-0347: the agent memory lifetime CEILING — MIN composes (the shortest framework lifetime wins)
+    memoryTtlHours: profiles.reduce<number | null>(
+      (m, p) => (p.memoryTtlHours == null ? m : m == null ? p.memoryTtlHours : Math.min(m, p.memoryTtlHours)),
+      null,
+    ),
   };
 }
 
@@ -454,6 +462,13 @@ export async function projectMrmRequiredBy(db: Db, projectId: string | null | un
   const tags = await projectClassifications(db, projectId);
   if (tags.length === 0) return [];
   return effectiveCompliancePolicy(await profilesForTags(db, tags)).mrmRequiredBy;
+}
+
+/** ADR-0347: the shortest agent memory lifetime any classification on the project sets (null = none sets one) */
+export async function projectMemoryTtlHours(db: Db, projectId: string): Promise<number | null> {
+  const tags = await projectClassifications(db, projectId);
+  if (tags.length === 0) return null;
+  return effectiveCompliancePolicy(await profilesForTags(db, tags)).memoryTtlHours;
 }
 
 /** Exported for the pillar-3 infra layer (§8.3 cascade consumption): the
@@ -1869,6 +1884,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       /** ADR-0050: the run/node that produced this write, when declared */
       producedByRunId?: string | undefined;
       producedByNodeId?: string | undefined;
+      /** ADR-0347: a shorter lifetime than the policy's, in hours */
+      expiresInHours?: number | undefined;
     },
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -1891,22 +1908,36 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(teamMembers.teamId, args.teamId), eq(teamMembers.userId, userId)));
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
     }
-
-    // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so a write here is held to the
-    // same content-trust floor as a write tool call (its causal context is the producing run, when declared) and
-    // to the injection scan. Before the transaction: a refused write takes no revision number. Imported lazily:
-    // the gate needs guardrails.js, which imports this module, so a static import would close a cycle.
-    const { memoryWriteGate, memoryWriteRefusal } = await import("./memory-write-gate.js");
-    const trust = await memoryWriteGate(db, {
+    // ADR-0347: provenance of the producing run (checked, never caller-asserted), then the memory scan and the
+    // mandatory expiry. Both run before the transaction: a refused write stores nothing but its deny audit row.
+    const provenance = await resolveRunProvenance(db, {
+      runId: args.producedByRunId,
+      nodeId: args.producedByNodeId,
+      projectId,
       userId,
-      contextId: args.producedByRunId ? runContextId(args.producedByRunId) : null,
-      text: args.content,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    if (!provenance.ok) return reply.status(provenance.status).send(provenance.body);
+    // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so it is held to the same
+    // content-trust floor as a write tool call. Its causal context is the producing run, and only once the check
+    // above has confirmed that run is the caller's, in this project. The floor is categorical, so it runs first.
+    const trust = await memoryTrustFloor(db, {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+      contextId: provenance.runId ? runContextId(provenance.runId) : null,
       target: { kind: "shared_context", projectId, key: args.key },
     });
-    if (!trust.ok) {
-      const refusal = memoryWriteRefusal(trust);
-      return reply.status(refusal.status).send(refusal.body);
-    }
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
+    const memoryGate = await governMemoryWrite(db, {
+      store: "project_context",
+      text: `${args.key}\n${args.content}`,
+      classificationTtlHours: await projectMemoryTtlHours(db, projectId),
+      requestedHours: args.expiresInHours,
+      userId,
+      objectType: "project",
+      objectId: projectId,
+    });
+    if (!memoryGate.ok) return reply.status(memoryGate.status).send(memoryGate.body);
 
     // The read (maxRevision/latestAccepted) + insert run inside ONE
     // transaction, and (project_id, key, revision) is UNIQUE (migration 0019).
@@ -1956,6 +1987,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             contributedByUserId: userId,
             contributedByTeamId: teamId,
             sourceArtifactId: args.sourceArtifactId ?? null,
+            producedByRunId: provenance.runId,
+            producedByNodeId: provenance.nodeId,
+            producedByAgentId: provenance.agentId,
+            expiresAt: expiresAtSql(memoryGate.ttlHours),
           })
           .returning();
 
@@ -1985,6 +2020,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             conflicting,
             teamId,
             ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
+            ...(provenance.runId
+              ? { producedByRunId: provenance.runId, producedByNodeId: provenance.nodeId, producedByAgentId: provenance.agentId }
+              : {}),
+            ttlHours: memoryGate.ttlHours,
+            expiresAt: item!.expiresAt,
+            ...(memoryGate.hits.length ? { memoryScanHits: memoryGate.hits } : {}),
           },
           effect: conflicting ? "require_approval" : "allow",
           ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
@@ -2000,6 +2041,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             key: args.key,
             revision,
             accepted: !conflicting,
+            expiresAt: item!.expiresAt,
             ...(conflicting ? { conflict: true, approvalId } : {}),
           },
         };
@@ -2101,6 +2143,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(projectContextItems)
         .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
         .orderBy(projectContextItems.revision);
+      const histNow = await databaseNow(db);
       const [names, pendingMap] = await Promise.all([
         nameMaps(
           rows.map((r) => r.contributedByUserId),
@@ -2117,6 +2160,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           byName: names.userName.get(r.contributedByUserId) ?? null,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           pendingApprovalId: pendingMap.get(r.id) ?? null,
+          // ADR-0347: history keeps expired revisions for inspection, marked so
+          expired: r.expiresAt <= histNow,
         })),
       };
     }
@@ -2149,6 +2194,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
+    // ADR-0347: a key whose accepted head has expired is absent. An older revision is never resurrected in its place.
+    const now = await databaseNow(db);
+    for (const [k, row] of latest) if (row.expiresAt <= now) latest.delete(k);
     const pendingMap = await pendingConflictApprovals(
       projectId,
       retained.map((r) => r.id),
@@ -2171,7 +2219,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           teamId: r.contributedByTeamId,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           sourceArtifactId: r.sourceArtifactId,
+          // ADR-0347: which run, node and agent produced it, and when it stops being read
+          producedByRunId: r.producedByRunId,
+          producedByNodeId: r.producedByNodeId,
+          producedByAgentId: r.producedByAgentId,
           at: r.createdAt,
+          expiresAt: r.expiresAt,
         },
       })),
       pending: pendingItems.map((r) => ({
@@ -2292,6 +2345,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       minIsolationClass: body.minIsolationClass ?? null,
       // ADR-0045 amendment 2026-11-14: the framework requires model risk management (OR-composed; null = no requirement)
       mrmRequired: body.mrmRequired ?? null,
+      // ADR-0347: the longest agent memory lifetime on this tag's projects (MIN-composed; null = no opinion)
+      memoryTtlHours: body.memoryTtlHours ?? null,
     };
     // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
     // silent no-op for enforcement.

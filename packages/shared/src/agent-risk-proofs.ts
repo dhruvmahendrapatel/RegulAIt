@@ -333,17 +333,17 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
     owaspAgentic: [asi("ASI06")],
     controls: [
       { kind: "setting", column: "content_trust_settings.write_floor", secure: { oneOf: ["standard", "trusted"] }, adr: "ADR-0193" },
-      { kind: "setting", column: "guardrail_configs.prompt_injection_mode", secure: BLOCK, adr: "ADR-0042" },
+      { kind: "setting", column: "org_settings.agent_memory_scan_mode", secure: BLOCK, adr: "ADR-0347" },
     ],
     proofs: [
       probeProof(
         "memory.untrusted_context_write",
         "untrusted_context_write",
-        // v3 (ADR-0193 addendum, E50): the floor now gates the shared-context and agent-memory write routes too, and
-        // those routes also run the injection scan, so the proof covers all three writes.
+        // v3 (ADR-0193 addendum, E50, on the ADR-0347 write path): the floor now gates the shared-context and
+        // agent-memory writes too, and ADR-0347's scan refuses a hidden instruction there, so the proof covers both.
         "A write tool call, a shared-context write or an agent-memory write whose causal context holds untrusted " +
           "content is refused by the trust floor, and a shared-context or memory write carrying a hidden instruction " +
-          "is refused by the injection scan.",
+          "is refused by the memory scan.",
       ),
     ],
   },

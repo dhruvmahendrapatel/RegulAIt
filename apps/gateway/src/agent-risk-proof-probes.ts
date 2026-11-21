@@ -12,9 +12,9 @@
  *   kill_switch_halted              the policy kernel `evaluate` (ADR-0124 gate)  none: the shipped kernel
  *   mcp_definition_drift            `definitionPinRefusal` (ADR-0246)              the org's pin mode
  *   untrusted_context_write         `contentTrustWriteFloor` +                    the org's write floor (ADR-0193)
- *                                   `evaluateContentTrust` (a write tool call) +  and guardrail policy (ADR-0042)
- *                                   `evaluateMemoryWrite` (shared context and
- *                                   agent memory, floor and injection scan)
+ *                                   `evaluateContentTrust` (a write tool call) +  and memory scan mode (ADR-0347)
+ *                                   `memoryFloorVerdict` (shared context and
+ *                                   agent memory) + `scanMemoryText` (ADR-0347)
  *
  * Read-only toward the tenant (ADR-0345 decision 4):
  *   - the guardrail probe runs the deterministic detectors only (`runGuardrails`, not the async path), so it makes
@@ -43,7 +43,6 @@ import { workerTurnCap } from "@regulait/orchestration-kernel";
 import { EXECUTION_RULE_IDS, evaluate, type EvaluationInput } from "@regulait/policy-kernel";
 import {
   AGENT_RISK_PROOF_ORIGIN_TAG,
-  CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
   evaluateContentTrust,
   type AgentRiskGatewayProbe,
@@ -52,7 +51,8 @@ import {
 import { contentTrustWriteFloor } from "./content-provenance.js";
 import { resolveGuardrailPolicy, runGuardrails } from "./guardrails.js";
 import { definitionPinRefusal } from "./mcp-definition-pins.js";
-import { evaluateMemoryWrite, MEMORY_GUARDRAIL_REFUSAL_CODE } from "./memory-write-gate.js";
+import { memoryPolicy, scanMemoryText } from "./memory-governance.js";
+import { memoryFloorVerdict } from "./memory-write-gate.js";
 import { consumeApprovalOrRetire } from "./mcp-proxy.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { oldestActiveAdmin } from "./system-attribution.js";
@@ -279,31 +279,29 @@ async function loopTurnCap(db: Db): Promise<EngineResult> {
 }
 
 /**
- * Three writes, each through the code its live path runs, on the tenant's floor and guardrail policy:
+ * Three writes, each through the code its live path runs, on the tenant's own settings:
  *   - a write tool call with untrusted content in its context (`evaluateContentTrust`, as `contentTrustGate` runs it);
- *   - a shared-context or memory write with untrusted content in its context (`evaluateMemoryWrite`, the decision
- *     `memoryWriteGate` makes on both routes), with a clean text, so only the floor can refuse it;
- *   - a shared-context or memory write from a clean context carrying a hidden instruction, so only the scan can.
- * The scan runs with the trained detectors detached: deterministic, no third-party call, nothing metered.
+ *   - a shared-context or memory write with untrusted content in its context (`memoryFloorVerdict`, the decision
+ *     `memoryTrustFloor` makes on both routes);
+ *   - a shared-context or memory write carrying a hidden instruction (ADR-0347's `scanMemoryText` under the org's
+ *     `memoryPolicy` scan mode, the two inputs `governMemoryWrite` refuses on). Deterministic detectors only: no
+ *     trained-detector call, nothing metered.
  */
 async function untrustedContextWrite(db: Db): Promise<EngineResult> {
-  const [floor, orgPolicy] = await Promise.all([contentTrustWriteFloor(db), resolveGuardrailPolicy(db, {})]);
-  const policy = { ...orgPolicy, trained: undefined };
+  const [floor, policy] = await Promise.all([contentTrustWriteFloor(db), memoryPolicy(db, null)]);
   const toolCall = evaluateContentTrust("write", ["untrusted"], floor);
-  const memoryFloor = await evaluateMemoryWrite({ floor, contextTiers: ["untrusted"], policy, text: CLEAN_MEMORY_TEXT, target: "risk-proof" });
-  const memoryScan = await evaluateMemoryWrite({ floor, contextTiers: [], policy, text: HIDDEN_INSTRUCTION_DOCUMENT, target: "risk-proof" });
+  const memoryFloor = memoryFloorVerdict(floor, ["untrusted"]);
+  const scanHits = scanMemoryText(HIDDEN_INSTRUCTION_DOCUMENT).filter((h) => h.detector === "prompt_injection");
   const detail = {
     floor,
     refused: !toolCall.ok,
     ruleId: toolCall.ok ? null : CONTENT_TRUST_RULE_ID,
-    memoryFloorRefused: !memoryFloor.ok && memoryFloor.code === CONTENT_TRUST_REFUSAL_CODE,
-    memoryScanRefused: !memoryScan.ok && memoryScan.code === MEMORY_GUARDRAIL_REFUSAL_CODE,
+    memoryFloorRefused: !memoryFloor.ok,
+    memoryScanMode: policy.scanMode,
+    memoryScanRefused: scanHits.length > 0 && policy.scanMode === "block",
   };
   return detail.refused && detail.memoryFloorRefused && detail.memoryScanRefused ? pass(detail) : fail(detail);
 }
-
-/** a memory text no injection detector matches: the floor alone must refuse it */
-export const CLEAN_MEMORY_TEXT = "The customer prefers invoices in euros.";
 
 /** run one gateway probe. Throws only on an unexpected error, which the runner records as `not_run`. */
 export async function runGatewayProbe(db: Db, probe: AgentRiskGatewayProbe): Promise<EngineResult> {

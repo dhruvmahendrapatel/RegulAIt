@@ -2155,6 +2155,9 @@ export const upsertComplianceProfileSchema = z.object({
    * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
    * existing profile is a loosening (step-up, rule-loosening.ts). */
   mrmRequired: z.boolean().nullable().optional(),
+  /** ADR-0347: the longest an agent memory write on a project carrying this tag may live, in hours. MIN-composed with
+   * the org's `agentMemoryTtlHours`, so it can only shorten it; raising or clearing it is a loosening (step-up). */
+  memoryTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -2284,6 +2287,8 @@ export const contributeContextSchema = z.object({
    */
   producedByRunId: z.string().uuid().optional(),
   producedByNodeId: z.string().min(1).max(64).optional(),
+  /** ADR-0347: ask for a SHORTER expiry than the policy's, in hours; longer than the policy is refused */
+  expiresInHours: z.number().int().min(1).max(8760).optional(),
 });
 
 export const promoteContextSchema = z.object({
@@ -2493,6 +2498,10 @@ export const updateOrgSettingsSchema = z
     sapUnattributedWritesAllowed: z.boolean().optional(),
     /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
     sapReadsApproveFirst: z.boolean().optional(),
+    /** ADR-0347: hours an agent memory or shared-context write lives (default 24); longer is a relaxation */
+    agentMemoryTtlHours: z.number().int().min(1).max(8760).optional(),
+    /** ADR-0347: 'block' (default) refuses a flagged memory write; 'log' stores it and audits the hits (a relaxation) */
+    agentMemoryScanMode: z.enum(["block", "log"]).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has

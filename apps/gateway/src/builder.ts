@@ -20,6 +20,7 @@
  *    content digest and version. A held skill cannot be attached; widening a
  *    skill's visibility beyond private waits for an admin.
  */
+import { expiresAtSql, governMemoryWrite } from "./memory-governance.js";
 import { ensureIdentityFor } from "./in-process-delegation.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -145,7 +146,7 @@ import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
 import { databaseNow } from "./db-clock.js";
-import { memoryWriteGate, memoryWriteRefusal } from "./memory-write-gate.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
@@ -499,6 +500,8 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       content: m.content,
       createdByName: m.createdByUserId ? (names.get(m.createdByUserId) ?? null) : null,
       createdAt: m.createdAt.toISOString(),
+      // ADR-0347: when the runtime stops reading it
+      expiresAt: m.expiresAt.toISOString(),
     })),
     schedules: schedules.map((x) => scheduleView(x, agent.ownerUserId, names)),
     channels: channels.map((c) => {
@@ -1163,24 +1166,38 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         limit: BUILDER_LIMITS.memoryPerAgent,
       });
     }
-    // ADR-0193 addendum (E50, ASI06): memory becomes part of the agent's system prompt, so it is held to the
-    // content-trust floor (when the write names its causal context) and to the injection scan, before it is stored
-    const trust = await memoryWriteGate(db, {
+    // ADR-0193 addendum (E50, ASI06): a memory drawn from a causal context is held to the content-trust floor. The
+    // context must be the caller's own run or thread (checked, never asserted); the floor is categorical, so it runs
+    // before the ADR-0347 scan below.
+    const trust = await memoryTrustFloor(db, {
       userId: viewer.userId,
+      isAdmin: viewer.isAdmin,
       contextId: body.contextId ?? null,
-      text: body.content,
       target: { kind: "agent_memory", agentId: agent.id, projectId: agent.projectId ?? null },
     });
-    if (!trust.ok) {
-      const refusal = memoryWriteRefusal(trust);
-      return reply.status(refusal.status).send(refusal.body);
-    }
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
+    // ADR-0347: the memory scan and the mandatory expiry, before anything is stored
+    const memoryGate = await governMemoryWrite(db, {
+      store: "builder_agent_memory",
+      text: body.content,
+      classificationTtlHours: null,
+      requestedHours: body.expiresInHours,
+      userId: viewer.userId,
+      objectType: "builder_agent",
+      objectId: agent.id,
+    });
+    if (!memoryGate.ok) return reply.status(memoryGate.status).send(memoryGate.body);
     const row = await withAgentEvidenceHold(db, req, reply, agent.id, "memory (add)", async (db) => {
       const [row] = await db
         .insert(builderAgentMemory)
-        .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
+        .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId, expiresAt: expiresAtSql(memoryGate.ttlHours) })
         .returning();
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, { memoryId: row!.id });
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, {
+        memoryId: row!.id,
+        ttlHours: memoryGate.ttlHours,
+        expiresAt: row!.expiresAt,
+        ...(memoryGate.hits.length ? { memoryScanHits: memoryGate.hits } : {}),
+      });
       return row!;
     });
     if (row === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1190,6 +1207,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       content: row.content,
       createdByName: names.get(viewer.userId) ?? null,
       createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
     });
   });
 
