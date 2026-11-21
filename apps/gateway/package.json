@@ -108,6 +108,7 @@
     "@types/js-yaml": "4.0.9",
     "@types/node": "26.6.6",
     "fflate": "0.8.3",
+    "hyparquet-writer": "0.18.0",
     "simple-statistics": "7.12.1",
     "vitest": "^4.1.11",
     "xml-crypto": "6.4.0"

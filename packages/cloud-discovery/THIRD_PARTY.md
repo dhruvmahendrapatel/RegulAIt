@@ -23,6 +23,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@aws-sdk/client-sagemaker` | `3.1160.0` | Apache-2.0 | SageMaker endpoints and models. |
 | `@aws-sdk/client-sts` | `3.1160.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
 | `@aws-sdk/credential-providers` | `3.1160.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |
+| `hyparquet` (github.com/hyparam/hyparquet) | `1.33.1` (released 2026-11-17) | MIT | ADR-0322 slice 4c: reads a CUR 2.0 Parquet data file (`aws-cur.ts`) from memory, decoding only the line-item columns RegulAIt uses; Snappy, which AWS Data Exports writes, is built in (bundled, no runtime download). No dependencies, pure JavaScript. Compared with `parquet-wasm` 0.9.0 (MIT or Apache-2.0; a 16 MB WASM file and Arrow output that needs `apache-arrow` too), `@dsnp/parquetjs` 1.9.4 (MIT; 13 dependencies including the AWS SDK and a filesystem shim) and `parquetjs-lite` (no release since 2020, fails the maintenance rule); `apache-arrow` cannot read Parquet. The footer is checked (rows, uncompressed size) before any page is decoded. |
 | `@smithy/fetch-http-handler` (github.com/smithy-lang/smithy-typescript) | `5.8.0` | Apache-2.0 | The AWS SDK's own fetch handler; its `customFetch` option is how every AWS call goes through the guarded fetch. |
 | `@smithy/types` | `4.19.0` | Apache-2.0 | AWS credential identity types. |
 | `@azure/identity` (github.com/Azure/azure-sdk-for-js) | `4.14.1` | MIT | `ClientAssertionCredential` (federated) and `ClientSecretCredential` (static relaxation), built with the guarded `HttpClient`. |
@@ -66,3 +67,10 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 - **The STS transporter fix** (`gcpAuthClient`, `src/gcp.ts`): `google-auth-library` 11.3.1 (and still 11.3.2, re-read 2026-11-06) builds the external
   account client's `StsCredentials` without the transporter it was given, so the token exchange would bypass the
   guard. We re-point it and fail closed if the internal shape changes. To be reported upstream.
+
+## Test-only
+
+| Component | Version | Licence | Used for |
+|---|---|---|---|
+| `hyparquet-writer` (github.com/hyparam/hyparquet-writer) | `0.18.0` (released 2026-10-29) | MIT | TEST-ONLY (devDependency): writes the Snappy Parquet fixtures `aws-cur.test.ts` reads. Its one dependency is `hyparquet`. Nothing at run time. |
+

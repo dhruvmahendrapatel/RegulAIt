@@ -70,6 +70,8 @@ import {
   FEDERATION_AUDIENCES,
   FEDERATION_AWS_PRINCIPAL_SUBJECT,
   normalizeAwsCurCsv,
+  normalizeAwsCurTable,
+  AWS_CUR_COLUMNS,
   vendorUsageConnectorSubject,
   vendorUsageSecretSchemas,
   factOverlapsMetered,
@@ -597,8 +599,9 @@ async function fetchAwsCur(key: string, config: AwsCurPublicConfig, ctx: AwsFetc
   let files = 0;
   for (const period of ctx.periods) {
     const groups = new Map<string, { fact: VendorUsageFact; micro: number; qty: number }>();
-    const read = await readAwsCurPeriod({ fetch: fetcher, credentials, parseManifest: (raw) => awsCurManifestSchema.parse(raw) }, target, period, (text) => {
-      const out = normalizeAwsCurCsv(text, period, config, groups);
+    const deps = { fetch: fetcher, credentials, parseManifest: (raw: unknown) => awsCurManifestSchema.parse(raw), parquetColumns: AWS_CUR_COLUMNS };
+    const read = await readAwsCurPeriod(deps, target, period, (file) => {
+      const out = file.format === "csv" ? normalizeAwsCurCsv(file.text, period, config, groups) : normalizeAwsCurTable(file, period, config, groups);
       rows += out.rows;
       if (rows > AWS_CUR_MAX_ROWS) throw new PullError("page_limit", `the export has more than ${AWS_CUR_MAX_ROWS} rows in this window; use an export limited to the configured product codes`);
     });

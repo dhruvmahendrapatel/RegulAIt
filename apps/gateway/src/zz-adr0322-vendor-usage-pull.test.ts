@@ -17,6 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { fileURLToPath } from "node:url";
 import {
   and,
@@ -880,12 +881,35 @@ describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines (static key path; federa
     expect(batch?.summary).toMatchObject({ replacedPeriods: ["2026-11"], withdrawnLines: 1 });
   });
 
-  it("refuses a Parquet export with a fixed code and RegulAIt's own sentence", async () => {
+  it("reads a Parquet export into the same lines as the CSV one (slice 4c): the same identity, restated in place", async () => {
     const c = connectorIds[connectorIds.length - 1]!;
-    files = { [`${META}Manifest.json`]: JSON.stringify({ dataFiles: [`${DATA}bedrock-00001.snappy.parquet`] }) };
+    const pq = new Uint8Array(
+      parquetWriteBuffer({
+        codec: "SNAPPY",
+        columnData: [
+          { name: "line_item_usage_start_date", data: [new Date("2026-11-17T01:00:00Z"), new Date("2026-11-17T05:00:00Z")], type: "TIMESTAMP" },
+          { name: "line_item_usage_account_id", data: ["123456789012", "123456789012"], type: "STRING" },
+          { name: "line_item_product_code", data: ["AmazonBedrock", "AmazonEC2"], type: "STRING" },
+          { name: "line_item_usage_type", data: ["USE1-input-tokens", "BoxUsage"], type: "STRING" },
+          { name: "line_item_line_item_type", data: ["Usage", "Usage"], type: "STRING" },
+          { name: "line_item_unblended_cost", data: [0.5, 9.99], type: "DOUBLE" },
+          { name: "line_item_currency_code", data: ["USD", "USD"], type: "STRING" },
+          { name: "line_item_usage_amount", data: [1200, 1], type: "DOUBLE" },
+          { name: "line_item_iam_principal", data: [principal, null], type: "STRING", nullable: true },
+        ],
+      }),
+    );
+    files = {
+      [`${META}bedrock-Manifest.json`]: JSON.stringify({ executionId: "exec-pq", dataFiles: [`s3://acme-cur/${DATA}bedrock-00001.snappy.parquet`] }),
+      [`${DATA}bedrock-00001.snappy.parquet`]: pq,
+    };
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
-    expect([run.status, run.errorCode, run.errorDetail]).toEqual(["failed", "bad_response", "this export is Parquet; recreate it as gzip-compressed CSV"]);
-    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(1);
+    expect(run, run.errorDetail ?? "").toMatchObject({ status: "succeeded", linesUpserted: 1 });
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(lines.map((l) => [l.accountRef, l.amount, l.quantity])).toEqual([[principal, 0.5, 1200]]);
+    // the Parquet line is the CSV line's fact restated, not a second copy
+    expect(lines[0]!.id).toBe(before[0]!.id);
   });
 
   it("refuses a federated connector while the federation issuer is not configured, without calling AWS", async () => {

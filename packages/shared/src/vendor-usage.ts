@@ -126,8 +126,8 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
       "limited this way; RegulAIt only lists and reads the export.",
     overlapMatchesOn: [],
     limits:
-      "Reads a CUR 2.0 export delivered as gzip-compressed CSV; a Parquet export is refused (recreate it as " +
-      "CSV). Use a dedicated export of Bedrock usage: a whole-estate export at a large organisation exceeds the " +
+      "Reads a CUR 2.0 export delivered as gzip-compressed CSV or as Parquet (Snappy, as AWS writes it); a " +
+      "DECIMAL or nested cost column is refused. Use a dedicated export of Bedrock usage: a whole-estate export at a large organisation exceeds the " +
       "per-run bounds. Only lines whose product code is in the configured list are kept (AmazonBedrock by default; " +
       "the product codes of Marketplace-billed models are not verified). The amount is line_item_unblended_cost, " +
       "for every line item type, so savings plans and discounts are not amortised. A line is billed to the IAM " +
@@ -946,6 +946,16 @@ const AWS_CUR_REQUIRED_COLUMNS = [
   "line_item_currency_code",
 ] as const;
 const AWS_CUR_OPTIONAL_COLUMNS = ["line_item_usage_amount", "line_item_iam_principal"] as const;
+/** the only CUR columns RegulAIt reads, in either format (a Parquet reader projects to exactly these) */
+export const AWS_CUR_COLUMNS: readonly string[] = [...AWS_CUR_REQUIRED_COLUMNS, ...AWS_CUR_OPTIONAL_COLUMNS];
+/** the columns a CUR file must carry; the rest are read when present */
+export const AWS_CUR_REQUIRED: readonly string[] = AWS_CUR_REQUIRED_COLUMNS;
+
+/** one CUR data file as a header and string cells, whatever its format (CSV text, or Parquet rows as strings) */
+export interface AwsCurTable {
+  header: readonly string[];
+  rows: Iterable<{ cells: readonly string[]; line: number }>;
+}
 
 /** rows one pull may read across all data files */
 export const AWS_CUR_MAX_ROWS = 1_000_000;
@@ -964,12 +974,25 @@ export function normalizeAwsCurCsv(
 ): { groups: Map<string, { fact: VendorUsageFact; micro: number; qty: number }>; rows: number; kept: number } {
   const records = parseCsvRecords(text);
   if (records.length === 0) return { groups: into, rows: 0, kept: 0 };
-  const header = records[0]!.cells.map((c) => c.trim());
-  const index = new Map(header.map((h, i) => [h, i] as const));
+  const body = records.slice(1).filter((rec) => !(rec.cells.length === 1 && rec.cells[0] === ""));
+  return normalizeAwsCurTable({ header: records[0]!.cells.map((c) => c.trim()), rows: body }, period, config, into);
+}
+
+/**
+ * One CUR data file's rows to summed groups (ADR-0322 slices 4a and 4c): the CSV and Parquet paths both end here, so a
+ * missing column, a line outside its period, a bad account or a principal that is not an ARN is refused the same way.
+ */
+export function normalizeAwsCurTable(
+  table: AwsCurTable,
+  period: string,
+  config: Pick<AwsCurPublicConfig, "productCodes">,
+  into: Map<string, { fact: VendorUsageFact; micro: number; qty: number }> = new Map(),
+): { groups: Map<string, { fact: VendorUsageFact; micro: number; qty: number }>; rows: number; kept: number } {
+  const index = new Map(table.header.map((h, i) => [h, i] as const));
   for (const col of AWS_CUR_REQUIRED_COLUMNS) {
     if (!index.has(col)) throw new VendorUsageResponseError(`the export has no ${col} column`);
   }
-  const at = (cells: string[], col: (typeof AWS_CUR_REQUIRED_COLUMNS)[number] | (typeof AWS_CUR_OPTIONAL_COLUMNS)[number]) => {
+  const at = (cells: readonly string[], col: (typeof AWS_CUR_REQUIRED_COLUMNS)[number] | (typeof AWS_CUR_OPTIONAL_COLUMNS)[number]) => {
     const i = index.get(col);
     return i === undefined ? "" : (cells[i] ?? "").trim();
   };
@@ -977,8 +1000,7 @@ export function normalizeAwsCurCsv(
   const bounds = awsCurPeriodBounds(period);
   let rows = 0;
   let kept = 0;
-  for (const rec of records.slice(1)) {
-    if (rec.cells.length === 1 && rec.cells[0] === "") continue;
+  for (const rec of table.rows) {
     rows += 1;
     const product = at(rec.cells, "line_item_product_code");
     if (!codes.has(product)) continue;

@@ -294,6 +294,9 @@ importers:
       fflate:
         specifier: 0.8.3
         version: 0.8.3
+      hyparquet-writer:
+        specifier: 0.18.0
+        version: 0.18.0
       simple-statistics:
         specifier: 7.12.1
         version: 7.12.1
@@ -454,6 +457,9 @@ importers:
       google-auth-library:
         specifier: 11.3.2
         version: 11.3.2
+      hyparquet:
+        specifier: 1.33.1
+        version: 1.33.1
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -461,6 +467,9 @@ importers:
       '@types/node':
         specifier: 26.6.6
         version: 26.6.6
+      hyparquet-writer:
+        specifier: 0.18.0
+        version: 0.18.0
       vitest:
         specifier: ^4.1.11
         version: 4.1.12(@opentelemetry/api@1.9.1)(@types/node@26.6.6)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(tsx@4.23.15))
@@ -3046,6 +3055,15 @@ packages:
   https-proxy-agent@7.0.6:
     resolution: {integrity: sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==}
     engines: {node: '>= 14'}
+
+  hyparquet-writer@0.18.0:
+    resolution: {integrity: sha512-1vDuEneasjp2yuk/OnLqli5aArzHQw8NYVbJD7ytpHZ3outmJaHHRcNbA7BiiFxonWGhwgPPWnVSsREv6LxE4A==}
+
+  hyparquet@1.32.0:
+    resolution: {integrity: sha512-SpkvdfgQjcdCJA+MTzo0WSreLLy/aLRYs3xetk1SsuFvq8vF+J/97OaRnZhf+p5Nx3J27i9FhSC0bJ5eQZG/7Q==}
+
+  hyparquet@1.33.1:
+    resolution: {integrity: sha512-D623q+KpogNTsmb0sdWXKsi1zrgQTFf2A6MX0vKZChuG7kjA/O+ps7DDfSgGf0rs8SfFP7UqrsDYypxVmmgqZA==}
 
   iconv-lite@0.7.3:
     resolution: {integrity: sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==}
@@ -6731,6 +6749,14 @@ snapshots:
       debug: 4.4.3
     transitivePeerDependencies:
       - supports-color
+
+  hyparquet-writer@0.18.0:
+    dependencies:
+      hyparquet: 1.32.0
+
+  hyparquet@1.32.0: {}
+
+  hyparquet@1.33.1: {}
 
   iconv-lite@0.7.3:
     dependencies:
