@@ -165,6 +165,12 @@
     "limit": "4.4 kB"
   },
   {
+    "name": "chunk: IssuedCredentialsPanel",
+    "path": "dist/assets/IssuedCredentialsPanel-????????.js",
+    "gzip": true,
+    "limit": "4.9 kB"
+  },
+  {
     "name": "chunk: ListPreview",
     "path": "dist/assets/ListPreview-????????.js",
     "gzip": true,

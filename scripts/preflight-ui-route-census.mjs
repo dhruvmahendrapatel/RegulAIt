@@ -348,6 +348,8 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/recommendations/access/export.xlsx", "apps/web/src/views/admin/governance/RecommendationsPage.tsx"],
     // the Inbox's "Recently decided" (owner decision, 2026-11-06)
     ["GET /v1/approvals/export.xlsx", "apps/web/src/views/inbox/InboxPage.tsx"],
+    // ADR-0315 slice 2: the issued agent credentials tab
+    ["GET /v1/agent-credentials/issued/export.xlsx", "apps/web/src/views/admin/identity/IssuedCredentialsPanel.tsx"],
   ].map(([r, page]) => [
     r,
     {
@@ -357,7 +359,11 @@ export const INDIRECT_UI_CALLS = new Map([
       reason: "the page passes the export path to DataList, whose Download Excel button fetches it",
     },
   ]),
-  ...[["GET /v1/governance/decision-regression/cases", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"]].map(([r, page]) => [
+  ...[
+    ["GET /v1/governance/decision-regression/cases", "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx"],
+    // ADR-0315 slice 2: the issued agent credentials tab
+    ["GET /v1/agent-credentials/issued", "apps/web/src/views/admin/identity/IssuedCredentialsPanel.tsx"],
+  ].map(([r, page]) => [
     r,
     {
       file: "apps/web/src/ui/DataList.tsx",

@@ -11,13 +11,13 @@
  *
  * The rules are in `agentCredentialAudiencesModel.ts`. Issuance is the token endpoint's; this page never mints.
  */
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Fieldset, Input, RowActions, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Fieldset, Input, RowActions, Select, SkeletonBlock, Table, TabPanel, Tabs } from "../../../ui/kit";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { useAction, useAgents, useConnectors, useServers } from "../adminKit";
 import { withRefusalCopy } from "../governance/refusalCopy";
@@ -43,7 +43,14 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+// ADR-0315 slice 2: the issued-credentials tab is its own chunk, loaded the first time the tab opens
+const IssuedCredentialsPanel = lazy(() => import("./IssuedCredentialsPanel"));
+
 const KEY = ["admin", "agent-credential-audiences"] as const;
+const TABS = [
+  { id: "audiences", label: "Audiences" },
+  { id: "issued", label: "Issued credentials" },
+];
 const DISCOVERY = "/agent-credentials/.well-known/openid-configuration";
 
 export default function AgentCredentialsPage() {
@@ -56,6 +63,7 @@ export default function AgentCredentialsPage() {
   const [tried, setTried] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [disableFor, setDisableFor] = useState<Audience | null>(null);
+  const [tab, setTab] = useState("audiences");
   const problems = draftProblems(draft);
   const shown = tried ? problems : { rows: [] as Array<string | null> };
   const refetch = () => list.refetch();
@@ -113,6 +121,15 @@ export default function AgentCredentialsPage() {
           </p>
         }
       />
+      <Tabs tabs={TABS} active={tab} onChange={setTab} idPrefix="agent-credentials" label="Agent credentials" />
+      <TabPanel idPrefix="agent-credentials" id="issued" active={tab} lazy>
+        <Card title="Issued credentials">
+          <Suspense fallback={<SkeletonBlock lines={4} />}>
+            <IssuedCredentialsPanel audiences={list.data?.audiences ?? []} />
+          </Suspense>
+        </Card>
+      </TabPanel>
+      <TabPanel idPrefix="agent-credentials" id="audiences" active={tab}>
       <div className={v.stack}>
         {act.error && (
           <div className={v.errLine} role="alert">
@@ -306,6 +323,7 @@ export default function AgentCredentialsPage() {
           </form>
         </Card>
       </div>
+      </TabPanel>
 
       <ConfirmModal
         open={confirming}
