@@ -135,10 +135,16 @@ public-exposure rule reads it through their interface rather than a second adapt
   `connected_app:self_authorize`, `tenant`) and which profiles and permission sets an admin pre-authorised (grant
   `connected_app:preauthorized`, resource `profile:<name>` or `permission_set:<name>`). The V1 classifier does not
   know these names, so they read as `unknown`, treated as `write`, which is right while the scopes behind them are not
-  visible. A run-as user holding Modify All Data, Customize Application, Manage Users, Author Apex or Modify Metadata
-  (its profile's permission set included) is refused before any app is read; object-level edit rights cannot all be
-  judged, so the credential stays `unverified`. The JWT assertion is signed with `jose` (already pinned); the token
-  query never selects a token field.
+  visible. The integration user is checked with the same code as the Agentforce adapter (`salesforce-org.ts`, #890
+  R4 [1]): any write or escalation system permission on its session (`WRITE_SYSTEM_PERMISSIONS`: Modify All Data,
+  Modify Metadata, Customize Application, Author Apex, Manage Users, Assign Permission Sets, Manage Profiles and
+  Permission Sets, Manage Internal Users, Manage Roles, Manage Sharing, Reset Passwords), else Create, Edit, Delete or
+  Modify All on any object across its permission sets, refuses the credential before any app is read. Both clear
+  records `read_only`; a check that cannot be read reads nothing else (`unverified`). The token comes from the shared
+  JWT bearer helper (`salesforceJwtToken`, #890 R4 [2]): an RSA key of at least 2048 bits, a 2-minute assertion with a
+  fresh `jti`, posted only to the source's validated My Domain (target `environment` + `myDomain`); the vendor's
+  `instance_url` is ignored, and the org named by the token must be the target's `orgId`. The token query never
+  selects a token field.
 
 ### 6. Linking a vendor app to a RegulAIt agent (owner decision 2026-11-17)
 

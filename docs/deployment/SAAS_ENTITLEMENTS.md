@@ -104,20 +104,22 @@ changes are allowed next. There is no screen yet.
 Reads every connected app, whether any user may authorise it themselves ("All users may self-authorize"), and which
 profiles and permission sets an admin pre-authorised for it.
 
-Target: `loginUrl` (`https://login.salesforce.com`, `https://test.salesforce.com` or your
-`https://<domain>.my.salesforce.com`), `orgId` (the org's `00D…` id). Scope: organisation level, or a list of connected
-app ids (`0H4…`).
+Target: `environment` (`production` or `sandbox`), `myDomain` (the org's My Domain URL,
+`https://<name>.my.salesforce.com`, or `https://<name>--<sandbox>.sandbox.my.salesforce.com`; the only host the reader
+calls) and `orgId` (the org's `00D…` id). Scope: organisation level, or a list of connected app ids (`0H4…`).
 
 Credential: static only (the OAuth 2.0 JWT bearer flow). Create a connected app with "Use digital signatures" and a
-certificate, pre-authorise a dedicated integration user, and store the matching private key (PKCS#8 PEM,
-`BEGIN PRIVATE KEY`) as the secret. Public config: `clientId` (the consumer key) and `username` (the integration user).
+certificate, pre-authorise a dedicated integration user, and store the matching private key (an RSA key of at least
+2048 bits, PKCS#8 PEM, `BEGIN PRIVATE KEY`) as the secret. Public config: `clientId` (the consumer key) and `username` (the integration user).
 
-Give the integration user View Setup and Configuration and API Enabled, and nothing that can change the org: a user
-holding Modify All Data, Customize Application, Manage Users, Author Apex or Modify Metadata is refused before anything
-is read. Because of that, connected apps' OAuth scopes (Metadata API) and every user's OAuth tokens (which need
+Give the integration user View Setup and Configuration and API Enabled, and nothing that can change the org. A user
+whose session holds Modify All Data, Modify Metadata, Customize Application, Author Apex, Manage Users, Assign
+Permission Sets, Manage Profiles and Permission Sets, Manage Internal Users, Manage Roles, Manage Sharing or Reset
+Passwords, or who may create, edit or delete records of any object, is refused before anything is read (the same check
+as the Agentforce source). Because of that, connected apps' OAuth scopes (Metadata API) and every user's OAuth tokens (which need
 Customize Application) are not read.
 
-Egress: your login host and your instance host (`<domain>.my.salesforce.com`).
+Egress: your My Domain host only.
 
 ## Slack approved apps — `entitlement_slack`
 

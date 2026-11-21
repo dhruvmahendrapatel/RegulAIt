@@ -25,9 +25,9 @@
  *
  * TARGETS (key=value fields on the source; documented in docs/deployment/SAAS_ENTITLEMENTS.md):
  *  - entitlement_m365              tenantId; scope: organisation-level = every app, include = client application ids
- *  - entitlement_salesforce        loginUrl (https://login.salesforce.com, https://test.salesforce.com or a
- *                                  https://<domain>.my.salesforce.com), orgId (00D…); scope: organisation-level =
- *                                  every connected app, include = connected app ids (0H4…)
+ *  - entitlement_salesforce        environment (production | sandbox), myDomain (the org's My Domain URL, the only
+ *                                  host the reader calls), orgId (00D…); scope: organisation-level = every connected
+ *                                  app, include = connected app ids (0H4…)
  *  - entitlement_slack             enterpriseId (E…, Enterprise Grid org) or teamId (T…); scope: organisation-level
  *                                  = every app, include = Slack app ids
  *  - entitlement_google_workspace  customerId? (default my_customer), lookbackDays? (1-180, default 180);
@@ -40,10 +40,12 @@ import {
   workspaceDelegatedClient,
 } from "@regulait/cloud-discovery";
 import { BodyTooLargeError, readBodyCapped } from "@regulait/cloud-discovery";
-import { SignJWT, importPKCS8 } from "jose";
 import type { DiscoveryReadOutcome, SaasAppEntitlement, SaasEntitlementBatch, SaasScopeGrant } from "@regulait/shared";
 import { SAAS_ENTITLEMENT_LIMITS } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
+import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
+import { salesforceJwtToken } from "./salesforce-jwt.js";
+import { salesforceMyDomain, salesforceMyDomainProblem, salesforceWritePermissions } from "./salesforce-org.js";
 import {
   GRAPH_ORIGIN,
   GUID,
@@ -582,108 +584,57 @@ async function runWorkspaceDirectory(ctx: ScanContext, fetchImpl: typeof fetch, 
 // ---------------------------------------------------------------------------
 
 export const SALESFORCE_API_VERSION = "v62.0";
-const SF_ID = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 const SF_ORG_ID = /^00D[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
 const SF_APP_ID = /^0H4[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
 /** a permission set or profile API name (letters, digits, underscores), bounded */
 const SF_NAME = /^[A-Za-z][A-Za-z0-9_]{0,79}$/;
-/**
- * The system permissions that can change the org (data, setup, users, code or metadata). A run-as user holding any of
- * them is refused before anything is read (ADR-0195 decision 7): the reader needs only View Setup and Configuration.
- */
-export const SALESFORCE_WRITE_PERMISSIONS = Object.freeze(["PermissionsModifyAllData", "PermissionsCustomizeApplication", "PermissionsManageUsers", "PermissionsAuthorApex", "PermissionsModifyMetadata"]);
+/** the only calls this reader makes against an org: the token exchange and read-only SOQL queries (and their pages) */
+export const SALESFORCE_ENTITLEMENT_ENDPOINTS: readonly EndpointRule[] = Object.freeze([
+  { method: "POST", path: /^\/services\/oauth2\/token$/ },
+  { method: "GET", path: /^\/services\/data\/v62\.0\/query$/ },
+  { method: "GET", path: /^\/services\/data\/v62\.0\/query\/[A-Za-z0-9]{15,18}-[0-9]{1,7}$/ },
+]);
 
 /** the 15-character form of a Salesforce id (ids are case-sensitive; 18-character ids add a case-safe suffix) */
 const sf15 = (id: string) => id.slice(0, 15);
 
-function salesforceLogin(raw: string | undefined): { origin: string; audience: string } | null {
-  if (!raw) return null;
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) return null;
-  const h = u.hostname.toLowerCase();
-  if (h === "login.salesforce.com") return { origin: u.origin, audience: "https://login.salesforce.com" };
-  if (h === "test.salesforce.com") return { origin: u.origin, audience: "https://test.salesforce.com" };
-  if (/^[a-z0-9-]{1,80}(?:\.sandbox)?\.my\.salesforce\.com$/.test(h)) return { origin: u.origin, audience: h.includes(".sandbox.") ? "https://test.salesforce.com" : "https://login.salesforce.com" };
-  return null;
-}
-
 function salesforceTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
-  if (!salesforceLogin(target.loginUrl)) return "'loginUrl' must be https://login.salesforce.com, https://test.salesforce.com or your https://<domain>.my.salesforce.com (no path or query)";
+  const domain = salesforceMyDomainProblem(target);
+  if (domain) return domain;
   if (!target.orgId || !SF_ORG_ID.test(target.orgId)) return "'orgId' must be the org's id (00D…)";
   if (!scope.orgLevel && scope.include.some((x) => !SF_APP_ID.test(x.trim()))) return "the scope names connected app ids (0H4…)";
   return null;
-}
-
-/** the instance the token response names, kept only when it is an https Salesforce host */
-function salesforceInstance(raw: unknown): string | null {
-  const s = str(raw, 256);
-  if (!s) return null;
-  try {
-    const u = new URL(s);
-    const h = u.hostname.toLowerCase();
-    return u.protocol === "https:" && !u.username && !u.password && /^[a-z0-9.-]{1,200}\.(?:my\.)?salesforce\.com$/.test(h) ? u.origin : null;
-  } catch {
-    return null;
-  }
 }
 
 async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> {
   const t = ctx.source.target;
   const problem = salesforceTargetProblem(t, ctx.source.scope);
   if (problem) throw new WiderSourceConfigError(`entitlement_salesforce: ${problem}`);
-  const login = salesforceLogin(t.loginUrl)!;
+  const domain = salesforceMyDomain(t)!;
   const c = ctx.credential;
   if (!c || c.mode !== "static" || !c.secret) throw new WiderSourceConfigError("entitlement_salesforce: a static credential holding the connected app's private key is required");
   const { clientId, username } = c.publicConfig;
   if (!clientId || !username) throw new WiderSourceConfigError("entitlement_salesforce: the credential names clientId (the consumer key) and username (the read-only integration user)");
 
-  // 1. the OAuth 2.0 JWT bearer flow: a short assertion signed with the connected app's key (jose, RS256)
-  let assertion: string;
-  try {
-    const key = await importPKCS8(c.secret, "RS256");
-    assertion = await new SignJWT({}).setProtectedHeader({ alg: "RS256" }).setIssuer(clientId).setSubject(username).setAudience(login.audience).setExpirationTime("3m").sign(key);
-  } catch {
-    throw new WiderSourceConfigError("entitlement_salesforce: the private key is not a PKCS#8 RSA key (BEGIN PRIVATE KEY)");
-  }
-  ctx.registerSecret(assertion);
-  const credentialFetch = scannerFetch(ctx, { digest: false });
-  let tokenBody: unknown;
-  try {
-    const res = await credentialFetch(`${login.origin}/services/oauth2/token`, {
-      method: "POST",
-      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }).toString(),
-      redirect: "manual",
-      signal: ctx.signal,
-    });
-    tokenBody = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readBodyCapped(res.body, 64 * 1024)));
-  } catch (err) {
-    if (ctx.signal.aborted) throw err;
-    throw new WiderSourceConfigError("entitlement_salesforce: the token request did not complete (is the login host on the egress allow list?)");
-  }
-  const accessToken = str(atPath(tokenBody, "access_token"), 4096);
-  if (!accessToken) {
-    // only Salesforce's OAuth error code is kept, never the description
-    const code = (str(atPath(tokenBody, "error"), 64) ?? "no_token").replace(/[^a-z_]/g, "");
-    throw new WiderSourceConfigError(`entitlement_salesforce: the token request failed (${code}); check the connected app's pre-authorisation of the integration user and its certificate`);
-  }
-  ctx.registerSecret(accessToken);
-  const instance = salesforceInstance(atPath(tokenBody, "instance_url"));
-  if (!instance) throw new WiderSourceConfigError("entitlement_salesforce: the token response named no Salesforce instance");
-  // the identity URL ends /id/<org id>/<user id>; the org must be the source's org
-  const idParts = (str(atPath(tokenBody, "id"), 512) ?? "").split("/");
-  const orgId = idParts.at(-2) ?? "";
-  const userId = idParts.at(-1) ?? "";
-  if (!SF_ORG_ID.test(orgId) || !SF_ID.test(userId)) throw new WiderSourceConfigError("entitlement_salesforce: the token response named no valid identity");
-  if (sf15(orgId) !== sf15(t.orgId!)) throw new WiderSourceConfigError("entitlement_salesforce: the token belongs to another org than the source's target");
+  // 1. the shared JWT bearer flow (#890 R4 [2]): a 2048-bit-or-more key, a 2-minute assertion with a fresh jti, posted
+  //    only to the source's validated My Domain; the vendor's instance_url is never used
+  await ctx.throttle();
+  const session = await salesforceJwtToken("entitlement_salesforce", {
+    // credential exchanges are never digested
+    fetch: allowListedFetch(scannerFetch(ctx, { digest: false }), new Set([domain.origin]), SALESFORCE_ENTITLEMENT_ENDPOINTS),
+    origin: domain.origin,
+    environment: domain.environment,
+    consumerKey: clientId,
+    username,
+    privateKeyPem: c.secret,
+    signal: ctx.signal,
+    onSecret: dedupedSecretSink(ctx.registerSecret),
+  });
+  if (!SF_ORG_ID.test(session.orgId) || sf15(session.orgId) !== sf15(t.orgId!)) throw new WiderSourceConfigError("entitlement_salesforce: the token belongs to another org than the source's target");
 
-  const fetchImpl = scannerFetch(ctx);
-  const headers = { authorization: `Bearer ${accessToken}` };
+  const instance = domain.origin;
+  const fetchImpl = allowListedFetch(scannerFetch(ctx), new Set([instance]), SALESFORCE_ENTITLEMENT_ENDPOINTS);
+  const headers = { authorization: `Bearer ${session.accessToken}` };
   const get = (url: string) => getJson(fetchImpl, url, headers, ctx.signal);
   const soql = (q: string) => `${instance}/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(q)}`;
   const nextRecords = (body: unknown) => {
@@ -696,24 +647,23 @@ async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> 
     return r;
   };
 
-  // 2. decision 7: the run-as user's system permissions (its profile's permission set included) must be read-only
+  // 2. decision 7, the shared check (#890 R4 [1]): any write system permission (escalation ones included), else any
+  //    object-level write, refuses the credential before anything is read; both clear = read_only
   const outcomes: DiscoveryReadOutcome[] = [];
-  const held = new Set<string>();
-  const permsRead = await readListing(
-    ctx,
-    "Salesforce run-as user permissions",
-    soql(`SELECT ${SALESFORCE_WRITE_PERMISSIONS.join(", ")} FROM PermissionSet WHERE Id IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}')`),
-    outcomes,
-    (body) => {
-      for (const r of records(body, "permission")) for (const p of SALESFORCE_WRITE_PERMISSIONS) if (atPath(r, p) === true) held.add(p);
-      return nextRecords(body);
-    },
-    get,
-  );
-  if (!permsRead) return finish([], outcomes, "unverified");
-  if (held.size > 0) {
-    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the integration user holds permissions that can change the org: ${[...held].join(", ")}` }] };
+  const PERMISSIONS = "Salesforce integration user permissions";
+  try {
+    const held = await salesforceWritePermissions(get, soql, session.userId, "entitlement_salesforce");
+    if (held.length > 0) {
+      return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the integration user holds write permissions: ${held.join(", ").slice(0, 400)}` }] };
+    }
+  } catch (err) {
+    if (err instanceof ReadFailure) {
+      outcomes.push({ read: PERMISSIONS, status: err.status, detail: `${err.message.slice(0, 200)}; nothing else was read` });
+      return finish([], outcomes, "unverified");
+    }
+    throw err;
   }
+  outcomes.push({ read: PERMISSIONS, status: "read" });
 
   // 3. the connected apps, and whether any user may authorise each one themselves
   const keep = includeSet(ctx);
@@ -768,11 +718,11 @@ async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> 
   // completeness is judged on the listings the graph depends on, before the by-design note below is added
   const complete = !truncated && !outcomes.some(cutShort);
   outcomes.push({ read: "Salesforce OAuth scopes and per-user tokens", status: "skipped", detail: "OAuth scopes are only in the Metadata API and org-wide tokens need Customize Application; both can change the org, so neither is read (ADR-0337 owner question)" });
-  // system permissions were checked; object-level edit rights of the user cannot all be judged, so unverified
-  const result = finish([], outcomes, "unverified");
+  // both checks passed: no write system permission and no object-level write, so read_only (as the Agentforce adapter)
+  const result = finish([], outcomes, "read_only");
   const entitlements: SaasEntitlementBatch = {
     platform: "salesforce",
-    tenant: sf15(orgId),
+    tenant: sf15(session.orgId),
     complete,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
   };
