@@ -1484,6 +1484,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "internal",
   "PUT /v1/builder/agents/:id/autonomy": "internal",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "internal",
   // --- A10
   "GET /v1/risk-tolerances": "internal",
   "PUT /v1/risk-tolerances": "internal",
@@ -2986,6 +2987,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "builder",
   "PUT /v1/builder/agents/:id/autonomy": "builder",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "builder",
   // --- A10
   "GET /v1/risk-tolerances": "risks",
   "PUT /v1/risk-tolerances": "risks",

@@ -81,7 +81,8 @@ const agentRow = async (id: string) => (await k.db.select().from(builderAgents).
 const usageFor = (userId: string) => k.db.select().from(usageEvents).where(eq(usageEvents.userId, userId));
 
 beforeAll(async () => {
-  k = await builderKit("bld-review");
+  // ADR-0180 addendum (E51): channel and schedule agents are autonomous; this suite is not about oversight
+  k = await builderKit("bld-review", { relaxAutonomyGate: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);
   owner = await k.person("owner");
