@@ -24,7 +24,8 @@ name: CI
 #  5. TIGHT `timeout-minutes`. The expensive failure mode is not a slow job, it
 #     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
 #     (The 2026-10-10 stopgap of 45 on the unsharded job is gone: every
-#     build-and-test job is back to 20 or less now that the gateway is sharded.)
+#     build-and-test job is back to 20 or less now that the gateway is sharded,
+#     except the gateway shards themselves at 30 since 2026-11-21; see "RE-MEASURED 2026-11-21".)
 #  6. PLAYWRIGHT BROWSERS ARE CACHED (#453, 2026-10-22). `playwright install
 #     --with-deps` took 10-12 min on some runners and pushed `spa-journeys` and
 #     the mocked-UI shards past their caps with no failing test. Every job that
@@ -131,6 +132,19 @@ name: CI
 #     ~16.5 at the slowest seen). Hence a fifth matrix entry, as this header prescribes; the cap
 #     stays at 20. Vitest 4.1 has no duration-based --shard; a custom sequencer would be our own code
 #     for a solved problem, so the count split stays (ADR-0176).
+#     RE-MEASURED 2026-11-21 (649 files): shard 5 of five was cancelled at the 20-min cap on two
+#     attempts of run 44850648843 (#970) with no failing test; locally it passes all 129 files in
+#     1133 s. The cause is now clustering, not count: the heaviest files (zz-adr0190-i3/i4/i5,
+#     zz-b5-promptfoo, redteam-depth, data-key-custody) sit next to each other in SHA-1 order, so
+#     the last slice keeps them however many shards there are. Summed per-file test time (CI reports
+#     for shards 1-4, a local JSON report for shard 5), last slice vs the rest:
+#       five   437 s vs 161-217 s      six    366 s vs 142-207 s
+#       seven  336 s vs 101-211 s      eight  296 s vs  84-201 s
+#     Wall time of that last slice, measured locally (vitest run --shard=N/N): 5/5 1133 s,
+#     6/6 1106 s, 7/7 947 s. No count brings it under ~12 min, so a sixth entry is added (it lightens
+#     the other shards) AND the cap is raised to 30 min (the slowest job is ~18.5 min of tests plus
+#     ~4 min of setup and build, ~22.5 min). The real fix is a duration-aware split; re-check when
+#     Vitest ships one (ADR-0176).
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
 # cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
@@ -424,13 +438,13 @@ jobs:
     # ADR-0262 (PR trim): skipped only on a docs-only PR. ADR-0323: on a web-only PR (`gateway` is 'false') the matrix
     # is ONE runner, `web-readers`, which runs only the gateway tests that read apps/web sources or walk the repository
     # (`node scripts/ci-scope.mjs --gateway-web-readers`; step-up-posture-guard walks every product source). Any other
-    # value of `gateway`, an empty one included, gives the five shards.
+    # value of `gateway`, an empty one included, gives the six shards.
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    # A blast-radius cap, not a target: the slowest shard plus setup is well
-    # under it (see the arithmetic above). If a shard nears it, add a shard to
-    # the matrix rather than raising this — the coverage job checks any layout.
-    timeout-minutes: 20
+    # A blast-radius cap, not a target. 30 since 2026-11-21 (see "RE-MEASURED 2026-11-21" at the top): the
+    # last count slice holds the heaviest files at any shard count, so adding a shard alone cannot keep it
+    # under 20. Prefer another shard to a higher cap when a shard other than the last nears this.
+    timeout-minutes: 30
     strategy:
       # one failing shard must not cancel the others: the coverage job needs
       # every report, and a cancelled shard hides which files it would have run
@@ -458,9 +472,10 @@ jobs:
         # deadline upper bounds (a timeout fires within N ms) and each shard
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
-        # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
-        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full five.
-        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5]') }}
+        # FIVE since 2026-11-08 (shard 4 of four reached the 20-min cap); SIX since 2026-11-21 (see
+        # "RE-MEASURED 2026-11-21" at the top: shard 5 of five reached it).
+        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full six.
+        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5, 6]') }}
 
 
     services:
