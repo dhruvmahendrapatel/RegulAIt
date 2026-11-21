@@ -4,7 +4,7 @@
 - **Date**: 2026-11-15
 - **Index**: **Managed browser extension, surface (a): AI assistant sites in browser tabs. MV3, force-installed by the customer's browser management only; host permissions limited to the governed site catalogue; fails closed (blocks every governed site) until a signed, unexpired per-user policy says otherwise; corporate-account rules from the profile identity; DLP on the shared `dlp.secret.*` rules before a prompt leaves the browser; breach events tied to user, device and conversation; prompt capture off unless an admin turns it on (step-up, audited, on-screen notice). Off by default.**
 - **Built in**: lane E16 (this ADR, `agents/browser/`, the gateway routes). Browser-driving agents (surface (b)) are
-  **superseded by [ADR-0364](0364-governed-rpa-robots.md)** (lane E45; owner decision 2026-11-21): no ADR-0335 is written for them.
+  **superseded by [ADR-0364](0364-governed-rpa-robots.md)** (lane E45; owner decision 2026-11-21): no separate ADR is written for them.
 - **Migration**: `pending/browser_governance.sql`, numbered at merge (ADR-0252)
 - **Related**: ADR-0055 and ADR-0195 (shadow-AI discovery, the endpoint agent's enrolment and pseudonyms), ADR-0298
   (on-device enforcement: signed policy, fail closed), ADR-0251 (one governed decision core), ADR-0176 (open source
@@ -314,5 +314,5 @@ The security and code reviews at `4398879` asked for these; each is built and te
   section 4, `device-policy-signer.ts`.)
 - **Surface (b), 2026-11-21:** browser-driving agents belong to ADR-0364 (Robots, lane E45), which already decides
   their policy (a high-risk, opt-in first-party `@playwright/mcp` server under the ADR-0251 gate, egress limited to the
-  authorised targets) and their timeline (per-call redacted screenshots as run evidence). E16 writes no ADR-0335 and
+  authorised targets) and their timeline (per-call redacted screenshots as run evidence). E16 writes no separate ADR and
   builds nothing for them; lane E16 continues with the extension's own follow-ups.
