@@ -102,6 +102,8 @@ export function recordedRepoReader(data: DemoShadowDiscoveryDataset): RepoReader
     },
     inspectCredential: async () => ({ status: "read_only", scopes: ["read_api", "read_repository"], detail: "recorded group access token (read only)" }),
     listCommits: async () => [],
+    // ADR-0365 slice 3: the recorded dataset has no pull requests
+    listPullRequests: async () => ({ pullRequests: [], truncated: false }),
   };
 }
 

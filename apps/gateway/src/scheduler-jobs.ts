@@ -908,7 +908,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
-    ...contextGraphJobDefinitions(), // ADR-0365 slice 2: context-graph-sync, context-graph-full-sync
+    ...contextGraphJobDefinitions({ dataKey: opts.dataKey }), // ADR-0365 slices 2-3: context-graph-sync, context-graph-full-sync
   ];
 }
 // ===== end ADR-0182 block ====================================================

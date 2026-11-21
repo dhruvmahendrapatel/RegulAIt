@@ -113,11 +113,42 @@ export interface ListCommitsOptions {
   maxCommits?: number;
 }
 
+/**
+ * ADR-0365 slice 3: one pull request (GitLab: merge request) as the context graph needs it. Deliberately minimal: no
+ * author, reviewer, body or diff is read into it (nothing identifying, nothing the graph does not show).
+ */
+export interface PullRequestSummary {
+  /** the provider's number within the repo: GitHub `number`, GitLab `iid`, Bitbucket `id`, Azure DevOps `pullRequestId` */
+  number: number;
+  /** bounded to `REPO_READ_DEFAULTS.maxPullRequestTitle` characters */
+  title: string;
+  /** normalised: open (GitLab `opened`/`locked`, Bitbucket `OPEN`, Azure DevOps `active`), merged (Azure DevOps
+   * `completed`), closed (declined, superseded, abandoned) */
+  state: "open" | "merged" | "closed";
+  /** the web page, only when it is an https URL (anything else is dropped, never stored or linked) */
+  url: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface PullRequestListResult {
+  pullRequests: PullRequestSummary[];
+  /** true when `maxPullRequests` or the page cap stopped the listing early (older PRs exist that were not read) */
+  truncated: boolean;
+}
+
+export interface ListPullRequestsOptions {
+  /** the most recent PRs to read, every state (default `REPO_READ_DEFAULTS.maxPullRequests`) */
+  maxPullRequests?: number;
+}
+
 export interface RepoReader {
   readonly kind: RepoReaderKind;
   /** true only when the source was granted the history relaxation */
   readonly historyEnabled: boolean;
   listRepos(opts?: ListReposOptions): Promise<RepoListResult>;
+  /** ADR-0365 slice 3: the most recent pull requests of a repo, every state, newest first (read only, GET) */
+  listPullRequests(repo: string, opts?: ListPullRequestsOptions): Promise<PullRequestListResult>;
   /** the default branch head: the only tree a scan reads unless history is enabled */
   getTree(repo: string, opts?: TreeOptions): Promise<RepoTree>;
   readFile(repo: string, path: string, opts: ReadFileOptions): Promise<ReadFileResult>;
@@ -172,6 +203,9 @@ export const REPO_READ_DEFAULTS = Object.freeze({
   /** no caller can raise a single read above this */
   maxFileBytesCeiling: 2 * 1024 * 1024,
   maxCommits: 500,
+  /** ADR-0365 slice 3: pull requests read per repo (most recent first), and the bound on a title */
+  maxPullRequests: 500,
+  maxPullRequestTitle: 500,
   /** cap on any metadata (listing, tree, ref) JSON body; past it the read fails with a bounded error */
   maxMetadataBytes: 16 * 1024 * 1024,
   maxRetries: 4,

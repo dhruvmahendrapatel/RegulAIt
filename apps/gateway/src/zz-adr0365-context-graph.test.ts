@@ -234,7 +234,7 @@ describe("ADR-0365 a user never sees a node they cannot access", () => {
     expect(await mine("carol")).toEqual(["PM-read", "R-1", "R-2"]);
     expect(await mine("bob")).toEqual([]);
     const r1 = (await nodesAs("alice", `&sourceId=${src}&kind=pm_work_item`))[0]!;
-    expect(Object.keys(r1).sort()).toEqual(["createdAt", "externalUrl", "id", "itemType", "kind", "label", "missing", "provider", "sourceId"]);
+    expect(Object.keys(r1).sort()).toEqual(["createdAt", "externalUrl", "id", "itemType", "kind", "label", "missing", "provider", "sourceId", "state"]);
     expect(r1).toMatchObject({ label: "R-1", externalUrl: "https://pm.example/R-1", missing: false });
     // an admin reads every node, the scope-less one included
     const adm = await app.inject({ method: "GET", url: `/v1/context-graph/nodes?sourceId=${src}&limit=200`, headers: AUTH });

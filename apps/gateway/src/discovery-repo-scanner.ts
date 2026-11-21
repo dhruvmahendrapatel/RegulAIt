@@ -125,7 +125,7 @@ export interface RepoScanner {
 }
 
 export const REPO_SCANNER_KINDS = ["repo_github", "repo_gitlab", "repo_bitbucket", "repo_azure_devops"] as const;
-type RepoScannerKind = (typeof REPO_SCANNER_KINDS)[number];
+export type RepoScannerKind = (typeof REPO_SCANNER_KINDS)[number];
 
 const PROVIDER_OF: Readonly<Record<RepoScannerKind, RepoReaderKind>> = {
   repo_github: "github",
@@ -265,7 +265,7 @@ export function toScanObservations(subject: string, analysis: RepoAnalysisResult
 }
 
 /** the injected transport: throttle every request, defer 429/503 waits to SD0's backoff */
-function scanFetch(ctx: RepoScanContext): ReadFetchLike {
+function scanFetch(ctx: Pick<RepoScanContext, "fetch" | "throttle" | "backoff" | "signal">): ReadFetchLike {
   return async (url, init) => {
     for (;;) {
       await ctx.throttle();
@@ -415,81 +415,108 @@ async function alive(ctx: RepoScanContext): Promise<void> {
 /** a federated token is exchanged again this long before it expires */
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
 
-export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeof resolveRepoReader; federation?: GitFederationDeps } = {}): RepoScanner {
+/** the parts of the scan context opening a reader uses (ADR-0365 slice 3 builds the same from a discovery source) */
+export type RepoReaderContext = Pick<RepoScanContext, "source" | "credential" | "fetch" | "throttle" | "backoff" | "registerSecret" | "signal" | "federation">;
+
+export type RepoReaderDeps = { resolveReader?: typeof resolveRepoReader; federation?: GitFederationDeps };
+
+/** a usable reader (`current()` re-exchanges a federated token before it expires), or the credential grants write */
+export type OpenedRepoReader =
+  | { writeScope: "write" }
+  | { writeScope: "read_only" | "unverified"; reader: RepoReader; current: () => Promise<RepoReader> };
+
+/**
+ * Open a read-only reader for a repo source: check the credential and target, exchange a federated credential (ADR-0195
+ * A5) or use the stored token, and ask the provider for a stored token's scopes. A credential that grants write is
+ * reported (`writeScope: "write"`) and no reader is returned: the caller refuses it (decision 7). Shared by the repo
+ * scanner and the context graph's git source (ADR-0365 slice 3), so both refuse the same credentials the same way.
+ */
+export async function openRepoReader(kind: RepoScannerKind, ctx: RepoReaderContext, deps: RepoReaderDeps = {}, opts: { allowHistory?: boolean } = {}): Promise<OpenedRepoReader> {
   const resolve = deps.resolveReader ?? resolveRepoReader;
   const now = deps.federation?.now ?? Date.now;
+  const cred = ctx.credential;
+  if (!cred || (cred.mode === "static" && !cred.secret)) {
+    throw new RepoScanError(
+      "credential_unusable",
+      "a repo source needs a credential: federated (Azure DevOps, or GitHub through this deployment's GitHub App) or a stored read-only token",
+    );
+  }
+  const target = ctx.source.target;
+  const problem = repoTargetProblem(kind, target) ?? repoScopeProblem(kind, ctx.source.scope);
+  if (problem) throw new RepoScanError("target_invalid", problem);
+
+  // ADR-0195 A5: a federated credential is exchanged for a short-lived token, again before it expires
+  const fed: { token: FederatedGitToken | null } = { token: null };
+  const exchange = async (): Promise<FederatedGitToken> => {
+    try {
+      fed.token = await federatedGitToken({ ...ctx, credential: cred }, deps.federation);
+    } catch (err) {
+      if (err instanceof GitFederationError) throw new RepoScanError("credential_unusable", err.message);
+      throw err;
+    }
+    return fed.token;
+  };
+  const build = (token: string, credentialKind: "token" | "github_app_installation" | "entra_access_token") => {
+    // the auth header forms derived from the token (Basic base64) are secrets too: scrub them from any stored text
+    ctx.registerSecret(token);
+    ctx.registerSecret(Buffer.from(token, "utf8").toString("base64"));
+    ctx.registerSecret(Buffer.from(`:${token}`, "utf8").toString("base64"));
+    return resolve(PROVIDER_OF[kind], {
+      token,
+      credentialKind,
+      ...(target.baseUrl ? { baseUrl: target.baseUrl } : {}),
+      fetchImpl: scanFetch(ctx),
+      allowHistory: opts.allowHistory === true,
+      // 429/503 waits are SD0's (ctx.backoff); a limit still hit after them fails the run
+      maxRetries: 0,
+    });
+  };
+  let reader: RepoReader;
+  if (cred.mode === "static") {
+    reader = build(cred.secret!, "token");
+  } else {
+    const t = await exchange();
+    if (t.writeScope === "write") return { writeScope: "write" };
+    reader = build(t.token, t.credentialKind);
+  }
+  /** the reader to use now: rebuilt with a fresh token when a federated one is about to expire */
+  const current = async (): Promise<RepoReader> => {
+    if (fed.token && now() >= fed.token.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
+      const t = await exchange();
+      if (t.writeScope === "write") throw new RepoScanError("credential_unusable", "the refreshed federated token grants write scope; the credential is refused");
+      reader = build(t.token, t.credentialKind);
+    }
+    return reader;
+  };
+  // a federated token's scope is what its exchange granted; a stored token is asked
+  const scope = fed.token
+    ? { status: fed.token.writeScope === "read_only" ? ("read_only" as const) : ("unverified" as const) }
+    : await reader.inspectCredential();
+  if (scope.status === "write_scope") return { writeScope: "write" };
+  // `reader` is the one just opened (use it first); `current()` is the one to use later
+  return { writeScope: scope.status === "read_only" ? "read_only" : "unverified", reader, current };
+}
+
+export function repoScanner(kind: RepoScannerKind, deps: RepoReaderDeps = {}): RepoScanner {
   return {
     kind,
     requiresCredential: true,
     validateTarget: (target, scope) => repoTargetProblem(kind, target) ?? repoScopeProblem(kind, scope),
     run: async (ctx) => {
-      const cred = ctx.credential;
-      if (!cred || (cred.mode === "static" && !cred.secret)) {
-        throw new RepoScanError(
-          "credential_unusable",
-          "a repo source needs a credential: federated (Azure DevOps, or GitHub through this deployment's GitHub App) or a stored read-only token",
-        );
-      }
       const target = ctx.source.target;
-      const problem = repoTargetProblem(kind, target) ?? repoScopeProblem(kind, ctx.source.scope);
-      if (problem) throw new RepoScanError("target_invalid", problem);
       const history = target.history === "true";
       const depth = history ? historyDepth(target) : 0;
-
-      // ADR-0195 A5: a federated credential is exchanged for a short-lived token, again before it expires
-      const fed: { token: FederatedGitToken | null } = { token: null };
-      const exchange = async (): Promise<FederatedGitToken> => {
-        try {
-          fed.token = await federatedGitToken({ ...ctx, credential: cred }, deps.federation);
-        } catch (err) {
-          if (err instanceof GitFederationError) throw new RepoScanError("credential_unusable", err.message);
-          throw err;
-        }
-        return fed.token;
-      };
-      const build = (token: string, credentialKind: "token" | "github_app_installation" | "entra_access_token") => {
-        // the auth header forms derived from the token (Basic base64) are secrets too: scrub them from any stored text
-        ctx.registerSecret(token);
-        ctx.registerSecret(Buffer.from(token, "utf8").toString("base64"));
-        ctx.registerSecret(Buffer.from(`:${token}`, "utf8").toString("base64"));
-        return resolve(PROVIDER_OF[kind], {
-          token,
-          credentialKind,
-          ...(target.baseUrl ? { baseUrl: target.baseUrl } : {}),
-          fetchImpl: scanFetch(ctx),
-          allowHistory: history,
-          // 429/503 waits are SD0's (ctx.backoff); a limit still hit after them fails the run
-          maxRetries: 0,
-        });
-      };
-      let reader: RepoReader;
-      if (cred.mode === "static") {
-        reader = build(cred.secret!, "token");
-      } else {
-        const t = await exchange();
-        if (t.writeScope === "write") return { observations: [], credentialWriteScope: "write" };
-        reader = build(t.token, t.credentialKind);
-      }
-      /** the reader to use now: rebuilt with a fresh token when a federated one is about to expire */
-      const current = async (): Promise<RepoReader> => {
-        if (fed.token && now() >= fed.token.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
-          const t = await exchange();
-          if (t.writeScope === "write") throw new RepoScanError("credential_unusable", "the refreshed federated token grants write scope; the credential is refused");
-          reader = build(t.token, t.credentialKind);
-        }
-        return reader;
-      };
       const outcomes: DiscoveryReadOutcome[] = [];
       const outcome = (o: DiscoveryReadOutcome) => {
         if (outcomes.length < REPO_SCAN_LIMITS.readOutcomesMax) outcomes.push(o);
       };
 
       try {
-        // a federated token's scope is what its exchange granted; a stored token is asked
-        const scope = fed.token
-          ? { status: fed.token.writeScope === "read_only" ? ("read_only" as const) : ("unverified" as const) }
-          : await reader.inspectCredential();
-        if (scope.status === "write_scope") return { observations: [], credentialWriteScope: "write" };
+        const opened = await openRepoReader(kind, ctx, deps, { allowHistory: history });
+        if (opened.writeScope === "write") return { observations: [], credentialWriteScope: "write" };
+        const current = opened.current;
+        let reader = opened.reader;
+        const scope = { status: opened.writeScope };
 
         let repos: string[];
         if (ctx.source.scope.orgLevel) {

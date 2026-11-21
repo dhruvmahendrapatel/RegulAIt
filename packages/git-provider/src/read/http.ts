@@ -329,3 +329,35 @@ export function splitRawAuthor(raw: string | null | undefined): { name: string |
   }
   return { name: raw.trim() || null, email: null };
 }
+
+/** ADR-0365 slice 3: a provider's web URL, kept only when it is an https URL of bounded length (else null) */
+export function httpsUrlOrNull(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" && u.username === "" && u.password === "" ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ADR-0365 slice 3: a pull request title, bounded, control characters replaced by spaces; null when empty */
+export function boundedTitle(raw: unknown, max: number): string | null {
+  if (typeof raw !== "string") return null;
+  let out = "";
+  for (const c of raw) {
+    const code = c.codePointAt(0)!;
+    out += code < 0x20 || code === 0x7f ? " " : c;
+    if (out.length >= max) break;
+  }
+  out = out.trim().slice(0, max);
+  return out.length > 0 ? out : null;
+}
+
+/** ADR-0365 slice 3: a positive whole PR number that fits a Postgres integer, or null */
+export const prNumber = (raw: unknown): number | null =>
+  typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0 && raw <= 2_147_483_647 ? raw : null;
+
+/** ADR-0365 slice 3: a provider timestamp as ISO 8601 when it parses; else null */
+export const isoOrNull = (raw: unknown): string | null =>
+  typeof raw === "string" && raw.length <= 64 && !Number.isNaN(Date.parse(raw)) ? new Date(raw).toISOString() : null;

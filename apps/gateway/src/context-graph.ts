@@ -16,6 +16,7 @@ import {
   and,
   auditLog,
   contextGraphEdges,
+  contextGraphGitSources,
   contextGraphNodeScopes,
   contextGraphNodes,
   contextGraphSources,
@@ -28,6 +29,7 @@ import {
   type SQL,
 } from "@regulait/db";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { syncContextGraphGitSource, type ContextGraphGitDeps } from "./context-graph-git.js";
 
 /** the re-read window behind the cursor (ADR-0365 §2) */
 export const CONTEXT_GRAPH_SYNC_OVERLAP_MS = 10 * 60_000;
@@ -289,27 +291,52 @@ export async function rescopeContextGraphSource(tx: Db, sourceId: string, projec
 
 export interface GraphNodeView {
   id: string;
-  kind: "pm_project" | "pm_work_item" | "orchestration_run";
+  kind: "pm_project" | "pm_work_item" | "orchestration_run" | "git_repository" | "git_pull_request";
+  /** the PM source, or for a git node (slice 3) its git source */
   sourceId: string;
+  /** the PM project, work item id or run name; a git repository's full name, or a pull request's title */
   label: string;
   provider: string;
   externalUrl: string | null;
   itemType: string | null;
+  /** slice 3: a pull request's state (open, merged, closed); null for every other kind */
+  state: string | null;
   missing: boolean;
   createdAt: string;
 }
 
+// The git facts (slice 3) are joined like the PM ones: under `context_graph_read` the fact tables open only the rows a
+// readable node refers to, so a LEFT JOIN never reaches an unreadable repository or pull request.
 const NODE_SELECT = sql`
-  SELECT n.id, n.kind, n.source_id, n.created_at,
-         CASE n.kind WHEN 'pm_project' THEN c.project WHEN 'orchestration_run' THEN coalesce(o.name, 'run') ELSE w.external_id END AS label,
-         c.provider, w.external_url, w.item_type, (w.missing_since IS NOT NULL) AS missing
+  SELECT n.id, n.kind, coalesce(n.source_id, gr.git_source_id) AS source_id, n.created_at,
+         CASE n.kind WHEN 'pm_project' THEN c.project WHEN 'orchestration_run' THEN coalesce(o.name, 'run')
+           WHEN 'git_repository' THEN gr.full_name WHEN 'git_pull_request' THEN gp.title ELSE w.external_id END AS label,
+         coalesce(c.provider, CASE ds.kind WHEN 'repo_github' THEN 'github' WHEN 'repo_gitlab' THEN 'gitlab'
+           WHEN 'repo_bitbucket' THEN 'bitbucket' WHEN 'repo_azure_devops' THEN 'azure_devops' END, 'git') AS provider,
+         coalesce(w.external_url, gp.url) AS external_url, w.item_type, gp.state,
+         (coalesce(w.missing_since, CASE n.kind WHEN 'git_pull_request' THEN gp.missing_since ELSE gr.missing_since END) IS NOT NULL) AS missing
   FROM context_graph_nodes n
-  JOIN context_graph_sources s ON s.id = n.source_id
-  JOIN pm_connections c ON c.id = s.pm_connection_id
+  LEFT JOIN context_graph_sources s ON s.id = n.source_id
+  LEFT JOIN pm_connections c ON c.id = s.pm_connection_id
   LEFT JOIN pm_imported_work_items w ON w.id = n.pm_imported_work_item_id
-  LEFT JOIN orchestration_runs o ON o.id = n.orchestration_run_id`;
+  LEFT JOIN orchestration_runs o ON o.id = n.orchestration_run_id
+  LEFT JOIN context_graph_git_pull_requests gp ON gp.id = n.git_pull_request_id
+  LEFT JOIN context_graph_git_repositories gr ON gr.id = coalesce(n.git_repository_id, gp.repository_id)
+  LEFT JOIN context_graph_git_sources gs ON gs.id = gr.git_source_id
+  LEFT JOIN discovery_sources ds ON ds.id = gs.discovery_source_id`;
 
-type NodeRow = { id: string; kind: GraphNodeView["kind"]; source_id: string; created_at: Date | string; label: string; provider: string; external_url: string | null; item_type: string | null; missing: boolean };
+type NodeRow = {
+  id: string;
+  kind: GraphNodeView["kind"];
+  source_id: string;
+  created_at: Date | string;
+  label: string;
+  provider: string;
+  external_url: string | null;
+  item_type: string | null;
+  state: string | null;
+  missing: boolean;
+};
 const toView = (r: NodeRow): GraphNodeView => ({
   id: r.id,
   kind: r.kind,
@@ -318,6 +345,7 @@ const toView = (r: NodeRow): GraphNodeView => ({
   provider: r.provider,
   externalUrl: r.external_url,
   itemType: r.item_type,
+  state: r.state,
   missing: r.missing,
   createdAt: new Date(r.created_at).toISOString(),
 });
@@ -342,7 +370,7 @@ export async function listReadableNodes(
     WHERE ${nodeReadable(caller, sql.raw("n.id"))}
       ${candidateNodes(caller)}
       ${q.kind ? sql`AND n.kind = ${q.kind}` : sql``}
-      ${q.sourceId ? sql`AND n.source_id = ${q.sourceId}::uuid` : sql``}
+      ${q.sourceId ? sql`AND coalesce(n.source_id, gr.git_source_id) = ${q.sourceId}::uuid` : sql``}
       ${q.after ? sql`AND n.id > ${q.after}::uuid` : sql``}
     ORDER BY n.id
     LIMIT ${q.limit + 1}`);
@@ -414,6 +442,8 @@ export interface ContextGraphSweepResult {
   failed: { sourceId: string; error: string }[];
   scanned: number;
   more: number;
+  /** slice 3: the bound git sources (each read from its provider, then written in one transaction) */
+  git: { sources: number; synced: number; failed: { gitSourceId: string; error: string }[]; pullRequests: number };
 }
 
 /**
@@ -423,14 +453,14 @@ export interface ContextGraphSweepResult {
  */
 export async function runContextGraphSyncSweep(
   db: Db,
-  opts: { full: boolean; actorUserId?: string | null; maxSources?: number },
+  opts: { full: boolean; actorUserId?: string | null; maxSources?: number; git?: ContextGraphGitDeps },
 ): Promise<ContextGraphSweepResult> {
   const sources = await db
     .select({ id: contextGraphSources.id })
     .from(contextGraphSources)
     .orderBy(sql`${contextGraphSources.lastSyncedAt} ASC NULLS FIRST`, contextGraphSources.id)
     .limit(opts.maxSources ?? CONTEXT_GRAPH_SYNC_MAX_SOURCES);
-  const out: ContextGraphSweepResult = { sources: sources.length, synced: 0, failed: [], scanned: 0, more: 0 };
+  const out: ContextGraphSweepResult = { sources: sources.length, synced: 0, failed: [], scanned: 0, more: 0, git: { sources: 0, synced: 0, failed: [], pullRequests: 0 } };
   for (const { id } of sources) {
     try {
       const r = await db.transaction((tx) =>
@@ -444,20 +474,43 @@ export async function runContextGraphSyncSweep(
       out.failed.push({ sourceId: id, error: e instanceof Error ? e.message.slice(0, 300) : "sync failed" });
     }
   }
+  // slice 3: every bound git source, least recently synced first. A git sync is always a full listing (bounded), so the
+  // hourly and the daily pass do the same; each source reads its provider first, then writes in its own transaction.
+  const gitSources = await db
+    .select({ id: contextGraphGitSources.id })
+    .from(contextGraphGitSources)
+    .orderBy(sql`${contextGraphGitSources.lastSyncedAt} ASC NULLS FIRST`, contextGraphGitSources.id)
+    .limit(opts.maxSources ?? CONTEXT_GRAPH_SYNC_MAX_SOURCES);
+  out.git.sources = gitSources.length;
+  for (const { id } of gitSources) {
+    try {
+      const r = await syncContextGraphGitSource(db, { gitSourceId: id, actorUserId: opts.actorUserId ?? NO_IDENTITY, ...(opts.git ? { deps: opts.git } : {}) });
+      if (r.ok) {
+        out.git.synced += 1;
+        out.git.pullRequests += r.pullRequests.read;
+      } else if (r.status !== 404) {
+        out.git.failed.push({ gitSourceId: id, error: `${r.error}: ${r.detail}`.slice(0, 300) });
+      }
+    } catch (e) {
+      out.git.failed.push({ gitSourceId: id, error: e instanceof Error ? e.message.slice(0, 300) : "sync failed" });
+    }
+  }
   return out;
 }
 
 /** The two jobs: hourly incremental and daily full (the full pass also removes stale run edges). */
-export function contextGraphJobDefinitions(): SchedulerJobDefinition[] {
+export function contextGraphJobDefinitions(opts: { dataKey?: string | undefined; git?: Omit<ContextGraphGitDeps, "dataKey"> } = {}): SchedulerJobDefinition[] {
+  const git: ContextGraphGitDeps = { ...opts.git, dataKey: opts.dataKey };
   const job = (name: string, full: boolean, every: number, what: string): SchedulerJobDefinition => ({
     name,
     description: what,
     adr: "ADR-0365",
     defaultIntervalSeconds: every,
     run: async (ctx) => {
-      const r = await runContextGraphSyncSweep(ctx.db, { full, actorUserId: ctx.actorUserId });
-      if (r.failed.length) throw new Error(`context graph sync failed for ${r.failed.length} source(s): ${r.failed.map((f) => f.sourceId).join(", ")}`);
-      return { itemsProcessed: r.scanned, detail: { ...r } };
+      const r = await runContextGraphSyncSweep(ctx.db, { full, actorUserId: ctx.actorUserId, git });
+      const failed = [...r.failed.map((f) => f.sourceId), ...r.git.failed.map((f) => f.gitSourceId)];
+      if (failed.length) throw new Error(`context graph sync failed for ${failed.length} source(s): ${failed.join(", ")}`);
+      return { itemsProcessed: r.scanned + r.git.pullRequests, detail: { ...r } };
     },
   });
   return [
@@ -466,14 +519,16 @@ export function contextGraphJobDefinitions(): SchedulerJobDefinition[] {
       false,
       3600,
       "Incrementally sync every bound context graph source (ADR-0365): new PM work items and new work-item-to-run links " +
-        "since the last pass, re-read with a 10-minute overlap. With no source bound it does nothing.",
+        "since the last pass, re-read with a 10-minute overlap, and the mapped repositories and pull requests of every " +
+        "bound git source (read only). With no source bound it does nothing.",
     ),
     job(
       CONTEXT_GRAPH_FULL_SYNC_JOB_NAME,
       true,
       24 * 3600,
-      "Fully re-sync every bound context graph source (ADR-0365): every work item and run link, and remove run edges " +
-        "whose PM link is gone or orphaned. With no source bound it does nothing.",
+      "Fully re-sync every bound context graph source (ADR-0365): every work item and run link, remove run edges " +
+        "whose PM link is gone or orphaned, and the mapped repositories and pull requests of every bound git source " +
+        "(read only). With no source bound it does nothing.",
     ),
   ];
 }

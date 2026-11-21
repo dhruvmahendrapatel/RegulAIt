@@ -115,6 +115,8 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/users/:x/spend-budget",
       "/v1/vendor-usage/connectors/:x/credential",
       "/v1/context-graph/sources/:x",
+      "/v1/context-graph/git-sources/:x",
+      "/v1/context-graph/git-sources/:x/repositories",
       "/v1/robots/:x/secrets/:x/:x",
     ]);
   });

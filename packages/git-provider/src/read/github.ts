@@ -12,12 +12,19 @@ import {
   nextLinkFromHeader,
   ReadClient,
   encodeRepo,
+  boundedTitle,
+  httpsUrlOrNull,
+  isoOrNull,
+  prNumber,
 } from "./http.js";
 import {
   REPO_READ_DEFAULTS,
   type CommitSummary,
   type CredentialScopeReport,
   type ListCommitsOptions,
+  type ListPullRequestsOptions,
+  type PullRequestListResult,
+  type PullRequestSummary,
   type ListReposOptions,
   type ReadFileOptions,
   type ReadFileResult,
@@ -63,6 +70,16 @@ interface GhRepo {
   full_name?: string;
   default_branch?: string | null;
   archived?: boolean;
+}
+/** the pull request fields read (no user, body or head/base is taken) */
+interface GhPull {
+  number?: number;
+  title?: string;
+  state?: string;
+  merged_at?: string | null;
+  html_url?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 interface GhCommit {
   sha?: string;
@@ -192,6 +209,33 @@ export class GitHubRepoReader implements RepoReader {
       scopes,
       detail: "GitHub did not report a read-only scope set for this token (fine-grained and app tokens report none); write scope unverified",
     };
+  }
+
+  async listPullRequests(repo: string, opts: ListPullRequestsOptions = {}): Promise<PullRequestListResult> {
+    const r = encodeRepo(repo, 2);
+    const max = clampLimit(opts.maxPullRequests, REPO_READ_DEFAULTS.maxPullRequests);
+    let next: string | null = `/repos/${r}/pulls?state=all&sort=updated&direction=desc&per_page=100`;
+    const out: PullRequestSummary[] = [];
+    let pages = 0;
+    while (next) {
+      if (pages++ >= this.http.maxPages || out.length >= max) return { pullRequests: out.slice(0, max), truncated: true };
+      const { body, res } = await this.http.getJson<GhPull[]>(next, hint);
+      for (const p of Array.isArray(body) ? body : []) {
+        const number = prNumber(p.number);
+        const title = boundedTitle(p.title, REPO_READ_DEFAULTS.maxPullRequestTitle);
+        if (number === null || title === null) continue;
+        out.push({
+          number,
+          title,
+          state: p.merged_at ? "merged" : p.state === "open" ? "open" : "closed",
+          url: httpsUrlOrNull(p.html_url),
+          createdAt: isoOrNull(p.created_at),
+          updatedAt: isoOrNull(p.updated_at),
+        });
+      }
+      next = nextLinkFromHeader(this.http.header(res, "link"));
+    }
+    return { pullRequests: out.slice(0, max), truncated: out.length > max };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {

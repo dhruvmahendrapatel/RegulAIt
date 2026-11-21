@@ -198,7 +198,7 @@ export function spacingRateLimiter(minSpacingMs = DISCOVERY_DEFAULT_MIN_SPACING_
   };
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason ?? new Error("aborted"));
     const t = setTimeout(() => {
@@ -599,7 +599,7 @@ export type RunVerdict = "succeeded" | "failed" | "lease_lost";
  * mints, and each call reads the active key), each for this source's subject and only for the audience its
  * credential names; RegulAIt's own AWS principal token only for AWS STS.
  */
-function scanFederation(db: Db, dataKey: string | undefined, sourceId: string, kind: DiscoverySourceKind, publicConfig: Readonly<Record<string, string>>): ScanFederation {
+export function scanFederation(db: Db, dataKey: string | undefined, sourceId: string, kind: DiscoverySourceKind, publicConfig: Readonly<Record<string, string>>): ScanFederation {
   const roleArn = awsPrincipalRoleArn();
   return {
     sourceToken: federationTokenMinter(db, { dataKey, subject: federationSourceSubject(sourceId), allowedAudiences: federationAudiences(kind, publicConfig) }),

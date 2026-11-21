@@ -17,7 +17,12 @@ import { randomUUID } from "node:crypto";
 import {
   RLS_SYSTEM_REASONS,
   contextGraphEdges,
+  contextGraphGitPullRequests,
+  contextGraphGitRepoMappings,
+  contextGraphGitRepositories,
+  contextGraphGitSources,
   contextGraphNodeUserScopes,
+  discoverySources,
   orchestrationRuns,
   contextGraphNodeScopes,
   contextGraphNodes,
@@ -271,5 +276,122 @@ describe("ADR-0365 slice 2: run nodes, user scopes and the scheduler's system_ta
     await runWithRlsPrincipalStep({ userId: id.alice }, "context_graph_read", "test/context-graph", async () => {
       expect(await pgError(db.insert(contextGraphNodeUserScopes).values({ nodeId: id.n1, userId: id.alice }))).toMatch(/row-level security/);
     });
+  });
+});
+
+describe("ADR-0365 slice 3: the git source tables under forced row-level security", () => {
+  const g = {
+    disc: randomUUID(),
+    src: randomUUID(),
+    repoA: randomUUID(), // acme/a, mapped to project A
+    repoB: randomUUID(), // acme/b, mapped to project B
+    prA: randomUUID(),
+    prB: randomUUID(),
+    nRepoA: randomUUID(),
+    nRepoB: randomUUID(),
+    nPrA: randomUUID(),
+    nPrB: randomUUID(),
+  };
+  const GIT_TABLES = ["context_graph_git_pull_requests", "context_graph_git_repo_mappings", "context_graph_git_repositories", "context_graph_git_sources"] as const;
+  const step = <T>(who: string, fn: () => Promise<T>) => runWithRlsPrincipalStep({ userId: who }, "context_graph_read", "test/context-graph", fn);
+  const rows = async (t: string, col = "id") => (await db.execute<{ v: string }>(sql.raw(`select ${col}::text as v from ${t} order by 1`))).rows.map((r) => r.v);
+
+  beforeAll(async () => {
+    // seeded outside any scope (the scratch login is the owner/superuser, as the migrator is)
+    await db.insert(discoverySources).values({ id: g.disc, name: `cg-git-${g.disc}`, kind: "repo_github", target: {}, scope: { orgLevel: true, include: [] }, createdBy: id.root });
+    await db.insert(contextGraphGitSources).values({ id: g.src, discoverySourceId: g.disc });
+    await db.insert(contextGraphGitRepoMappings).values([
+      { gitSourceId: g.src, fullName: "acme/a", projectId: id.projA },
+      { gitSourceId: g.src, fullName: "acme/b", projectId: id.projB },
+    ]);
+    await db.insert(contextGraphGitRepositories).values([
+      { id: g.repoA, gitSourceId: g.src, fullName: "acme/a" },
+      { id: g.repoB, gitSourceId: g.src, fullName: "acme/b" },
+    ]);
+    await db.insert(contextGraphGitPullRequests).values([
+      { id: g.prA, repositoryId: g.repoA, number: 1, title: "A change", state: "open" },
+      { id: g.prB, repositoryId: g.repoB, number: 1, title: "B change", state: "merged" },
+    ]);
+    await db.insert(contextGraphNodes).values([
+      { id: g.nRepoA, kind: "git_repository", gitRepositoryId: g.repoA },
+      { id: g.nRepoB, kind: "git_repository", gitRepositoryId: g.repoB },
+      { id: g.nPrA, kind: "git_pull_request", gitPullRequestId: g.prA },
+      { id: g.nPrB, kind: "git_pull_request", gitPullRequestId: g.prB },
+    ]);
+    await db.insert(contextGraphNodeScopes).values([
+      { nodeId: g.nRepoA, projectId: id.projA },
+      { nodeId: g.nPrA, projectId: id.projA },
+      { nodeId: g.nRepoB, projectId: id.projB },
+      { nodeId: g.nPrB, projectId: id.projB },
+    ]);
+    await db.insert(contextGraphEdges).values([
+      { fromNodeId: g.nRepoA, toNodeId: g.nPrA, kind: "contains" },
+      { fromNodeId: g.nRepoB, toNodeId: g.nPrB, kind: "contains" },
+    ]);
+  });
+
+  it("the four git tables have row-level security ENABLED and FORCED", async () => {
+    const r = await db.execute<{ relname: string; on: boolean; forced: boolean }>(sql`
+      select relname, relrowsecurity as on, relforcerowsecurity as forced from pg_class
+      where relname in ('context_graph_git_sources', 'context_graph_git_repo_mappings', 'context_graph_git_repositories', 'context_graph_git_pull_requests') order by relname`);
+    expect(r.rows).toEqual([...GIT_TABLES].map((relname) => ({ relname, on: true, forced: true })));
+  });
+
+  it("the node kind CHECK ties each git kind to its own fact reference and no PM source", async () => {
+    expect(await pgError(db.insert(contextGraphNodes).values({ kind: "git_repository", gitPullRequestId: g.prA }))).toMatch(/context_graph_nodes_kind_check/);
+    expect(await pgError(db.insert(contextGraphNodes).values({ kind: "git_pull_request", sourceId: id.src, gitPullRequestId: g.prA }))).toMatch(/context_graph_nodes_kind_check/);
+    expect(await pgError(db.insert(contextGraphNodes).values({ kind: "pm_project" }))).toMatch(/context_graph_nodes_kind_check/);
+  });
+
+  it("with no application filter, a principal reads only the git nodes of its own projects, and no git fact without the read step", async () => {
+    const gitNodes = async () => (await ids("context_graph_nodes")).filter((n) => (Object.values(g) as string[]).includes(n));
+    expect(await as(id.alice, gitNodes)).toEqual([g.nRepoA, g.nPrA].sort());
+    expect(await as(id.carol, gitNodes)).toEqual([g.nRepoA, g.nRepoB, g.nPrA, g.nPrB].sort());
+    expect(await as(id.bob, gitNodes)).toEqual([]);
+    expect(await as(id.dave, gitNodes)).toEqual([]);
+    for (const t of GIT_TABLES) expect([t, await as(id.carol, () => count(t))]).toEqual([t, 0]);
+  });
+
+  it("context_graph_read opens, for READ only, just the git facts a readable node refers to, and never the mappings", async () => {
+    expect(await step(id.alice, () => rows("context_graph_git_repositories"))).toEqual([g.repoA]);
+    expect(await step(id.alice, () => rows("context_graph_git_pull_requests"))).toEqual([g.prA]);
+    expect(await step(id.alice, () => rows("context_graph_git_sources"))).toEqual([g.src]);
+    expect(await step(id.carol, () => rows("context_graph_git_repositories"))).toEqual([g.repoA, g.repoB].sort());
+    for (const who of [id.alice, id.carol, id.bob, id.dave]) expect(await step(who, () => count("context_graph_git_repo_mappings"))).toBe(0);
+    for (const t of GIT_TABLES) {
+      expect([t, await step(id.bob, () => count(t))]).toEqual([t, 0]);
+      expect([t, await step(id.dave, () => count(t))]).toEqual([t, 0]);
+    }
+    // read only: an update matches nothing, an insert is refused
+    const upd = await step(id.alice, () => db.update(contextGraphGitPullRequests).set({ title: "changed" }).where(eq(contextGraphGitPullRequests.id, g.prA)).returning());
+    expect(upd).toEqual([]);
+    expect(await step(id.alice, () => pgError(db.insert(contextGraphGitRepoMappings).values({ gitSourceId: g.src, fullName: "acme/c", projectId: id.projA })))).toMatch(/row-level security/);
+    expect(await step(id.alice, () => pgError(db.insert(contextGraphGitRepositories).values({ gitSourceId: g.src, fullName: "acme/a" })))).toMatch(/row-level security/);
+  });
+
+  it("a non-admin principal writes nothing in any git table", async () => {
+    const tries: [string, () => Promise<unknown>][] = [
+      ["source", () => db.insert(contextGraphGitSources).values({ discoverySourceId: g.disc })],
+      ["mapping", () => db.insert(contextGraphGitRepoMappings).values({ gitSourceId: g.src, fullName: "acme/c", projectId: id.projA })],
+      ["repository", () => db.insert(contextGraphGitRepositories).values({ gitSourceId: g.src, fullName: "acme/a" })],
+      ["pull request", () => db.insert(contextGraphGitPullRequests).values({ repositoryId: g.repoA, number: 2, title: "x", state: "open" })],
+    ];
+    for (const [label, run] of tries) expect([label, await as(id.carol, () => pgError(run()))]).toEqual([label, expect.stringMatching(/row-level security/)]);
+    expect(await as(id.carol, () => db.delete(contextGraphGitRepoMappings).returning())).toEqual([]);
+  });
+
+  it("system_task (the scheduled sync) writes the facts and reads the mappings, but never writes a mapping", async () => {
+    await runWithRlsSystem("system_task", "test.context-graph-sync", async () => {
+      expect(await count("context_graph_git_repo_mappings")).toBe(2);
+      const [pr] = await db.insert(contextGraphGitPullRequests).values({ repositoryId: g.repoA, number: 2, title: "Synced", state: "open" }).returning({ id: contextGraphGitPullRequests.id });
+      await db.delete(contextGraphGitPullRequests).where(eq(contextGraphGitPullRequests.id, pr!.id));
+      expect(await pgError(db.insert(contextGraphGitRepoMappings).values({ gitSourceId: g.src, fullName: "acme/c", projectId: id.projA }))).toMatch(/row-level security/);
+      const upd = await db.update(contextGraphGitRepoMappings).set({ projectId: id.projA }).where(eq(contextGraphGitRepoMappings.fullName, "acme/b")).returning();
+      expect(upd).toEqual([]);
+    });
+  });
+
+  it("an admin principal reaches every git table", async () => {
+    for (const t of GIT_TABLES) expect([t, await as(id.root, () => count(t))]).toEqual([t, { context_graph_git_sources: 1, context_graph_git_repo_mappings: 2, context_graph_git_repositories: 2, context_graph_git_pull_requests: 2 }[t]]);
   });
 });

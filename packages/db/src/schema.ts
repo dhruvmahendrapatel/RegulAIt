@@ -2037,6 +2037,9 @@ export const auditLog = pgTable(
         "agent_vendor_identifier",
         // ADR-0365: a context graph source (bound, rebound, unbound, synced). Plain text column — no DDL.
         "context_graph_source",
+        // ADR-0365 slice 3: a git source of the context graph (bound, unbound, synced) and a repository's project mapping
+        // (mapped, remapped, unmapped). Plain text column — no DDL.
+        "context_graph_git_source",
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
@@ -19801,7 +19804,7 @@ export const contextGraphSources = pgTable(
   ],
 );
 
-export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item", "orchestration_run"] as const;
+export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item", "orchestration_run", "git_repository", "git_pull_request"] as const;
 export const CONTEXT_GRAPH_EDGE_KINDS = ["contains", "tracks"] as const;
 
 /** A graph node: a bound connection's PM project (one per source) or one imported work item. */
@@ -19809,13 +19812,16 @@ export const contextGraphNodes = pgTable(
   "context_graph_nodes",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    sourceId: uuid("source_id")
-      .notNull()
-      .references(() => contextGraphSources.id, { onDelete: "cascade" }),
+    /** the PM source of a PM or run node; NULL for a git node (slice 3), whose source is reached through its fact row */
+    sourceId: uuid("source_id").references(() => contextGraphSources.id, { onDelete: "cascade" }),
     kind: text("kind", { enum: CONTEXT_GRAPH_NODE_KINDS }).notNull(),
     pmImportedWorkItemId: uuid("pm_imported_work_item_id").references(() => pmImportedWorkItems.id, { onDelete: "cascade" }),
     /** slice 2 (migration `shared_context_graph_runs`): the run an `orchestration_run` node stands for */
     orchestrationRunId: uuid("orchestration_run_id").references(() => orchestrationRuns.id, { onDelete: "cascade" }),
+    /** slice 3 (migration `shared_context_graph_slice3_git`): the repository a `git_repository` node stands for */
+    gitRepositoryId: uuid("git_repository_id").references((): AnyPgColumn => contextGraphGitRepositories.id, { onDelete: "cascade" }),
+    /** slice 3: the pull request a `git_pull_request` node stands for */
+    gitPullRequestId: uuid("git_pull_request_id").references((): AnyPgColumn => contextGraphGitPullRequests.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -19824,9 +19830,11 @@ export const contextGraphNodes = pgTable(
     index("context_graph_nodes_source_kind_idx").on(t.sourceId, t.kind, t.id),
     uniqueIndex("context_graph_nodes_source_run_uq").on(t.sourceId, t.orchestrationRunId).where(sql`${t.orchestrationRunId} IS NOT NULL`),
     index("context_graph_nodes_run_idx").on(t.orchestrationRunId).where(sql`${t.orchestrationRunId} IS NOT NULL`),
+    uniqueIndex("context_graph_nodes_git_repository_uq").on(t.gitRepositoryId).where(sql`${t.gitRepositoryId} IS NOT NULL`),
+    uniqueIndex("context_graph_nodes_git_pull_request_uq").on(t.gitPullRequestId).where(sql`${t.gitPullRequestId} IS NOT NULL`),
     check(
       "context_graph_nodes_kind_check",
-      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.pmImportedWorkItemId} IS NULL AND ${t.orchestrationRunId} IS NULL WHEN 'pm_work_item' THEN ${t.pmImportedWorkItemId} IS NOT NULL AND ${t.orchestrationRunId} IS NULL WHEN 'orchestration_run' THEN ${t.orchestrationRunId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL ELSE false END`,
+      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.sourceId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL AND ${t.orchestrationRunId} IS NULL AND ${t.gitRepositoryId} IS NULL AND ${t.gitPullRequestId} IS NULL WHEN 'pm_work_item' THEN ${t.sourceId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NOT NULL AND ${t.orchestrationRunId} IS NULL AND ${t.gitRepositoryId} IS NULL AND ${t.gitPullRequestId} IS NULL WHEN 'orchestration_run' THEN ${t.sourceId} IS NOT NULL AND ${t.orchestrationRunId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL AND ${t.gitRepositoryId} IS NULL AND ${t.gitPullRequestId} IS NULL WHEN 'git_repository' THEN ${t.sourceId} IS NULL AND ${t.gitRepositoryId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL AND ${t.orchestrationRunId} IS NULL AND ${t.gitPullRequestId} IS NULL WHEN 'git_pull_request' THEN ${t.sourceId} IS NULL AND ${t.gitPullRequestId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL AND ${t.orchestrationRunId} IS NULL AND ${t.gitRepositoryId} IS NULL ELSE false END`,
     ),
   ],
 );
@@ -19889,6 +19897,115 @@ export const contextGraphNodeUserScopes = pgTable(
   (t) => [
     primaryKey({ name: "context_graph_node_user_scopes_pk", columns: [t.nodeId, t.userId] }),
     index("context_graph_node_user_scopes_user_idx").on(t.userId, t.nodeId),
+  ],
+);
+
+// ===== ADR-0365 slice 3 (lane E46): a git source (repositories and pull requests) ===================================
+// Migration `pending/shared_context_graph_slice3_git.sql` (numbered at merge). Forced row-level security on all four
+// tables. The credential, egress-guarded fetch and write-scope refusal are the bound discovery repo source's (ADR-0195);
+// no token is stored here. Strict default: a repository with no mapping row is never projected (no fact, no node).
+
+export const CONTEXT_GRAPH_GIT_PR_STATES = ["open", "merged", "closed"] as const;
+
+/** A discovery repo source an admin bound into the graph. */
+export const contextGraphGitSources = pgTable(
+  "context_graph_git_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    discoverySourceId: uuid("discovery_source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    boundByUserId: uuid("bound_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("context_graph_git_sources_discovery_uq").on(t.discoverySourceId)],
+);
+
+/**
+ * The per-repository scope: which project's members may read a repository of a git source (and its pull requests).
+ * A repository with no row here is never projected. Removing the row removes its facts and nodes (cascade).
+ */
+export const contextGraphGitRepoMappings = pgTable(
+  "context_graph_git_repo_mappings",
+  {
+    gitSourceId: uuid("git_source_id")
+      .notNull()
+      .references(() => contextGraphGitSources.id, { onDelete: "cascade" }),
+    /** the provider's repository address (`owner/name`, `group/sub/project`, `project/repo`), as the admin mapped it */
+    fullName: text("full_name").notNull(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    mappedByUserId: uuid("mapped_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    mappedAt: timestamp("mapped_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "context_graph_git_repo_mappings_pk", columns: [t.gitSourceId, t.fullName] }),
+    index("context_graph_git_repo_mappings_project_idx").on(t.projectId),
+    // providers treat repository names case-insensitively: one mapping per name whatever its case
+    uniqueIndex("context_graph_git_repo_mappings_name_ci_uq").on(t.gitSourceId, sql`lower(${t.fullName})`),
+    check("context_graph_git_repo_mappings_name_check", sql`char_length(${t.fullName}) BETWEEN 3 AND 1024`),
+  ],
+);
+
+/** A mapped repository as the provider last listed it (verbatim external facts; one row per git source and repo). */
+export const contextGraphGitRepositories = pgTable(
+  "context_graph_git_repositories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    gitSourceId: uuid("git_source_id").notNull(),
+    fullName: text("full_name").notNull(),
+    // ADR-0200 exception: a verbatim external payload (the provider's default branch as last listed), refreshed each sync
+    defaultBranch: text("default_branch"),
+    // ADR-0200 exception: a verbatim external payload (the provider's archived/disabled flag as last listed)
+    archived: boolean("archived").notNull().default(false),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a sync no longer lists the repository; cleared when it reappears */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("context_graph_git_repositories_source_name_uq").on(t.gitSourceId, t.fullName),
+    // a fact exists only while its mapping does: unmapping cascades to the repository, its PRs and their nodes
+    foreignKey({
+      name: "context_graph_git_repositories_mapping_fk",
+      columns: [t.gitSourceId, t.fullName],
+      foreignColumns: [contextGraphGitRepoMappings.gitSourceId, contextGraphGitRepoMappings.fullName],
+    }).onDelete("cascade"),
+  ],
+);
+
+/** A pull request (GitLab: merge request) of a mapped repository, as the provider last listed it. No author is kept. */
+export const contextGraphGitPullRequests = pgTable(
+  "context_graph_git_pull_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    repositoryId: uuid("repository_id")
+      .notNull()
+      .references(() => contextGraphGitRepositories.id, { onDelete: "cascade" }),
+    /** the provider's number within the repository (GitHub number, GitLab iid, Bitbucket id, Azure DevOps id) */
+    number: integer("number").notNull(),
+    // ADR-0200 exception: a verbatim external payload (the PR title as last listed, bounded to 500 characters)
+    title: text("title").notNull(),
+    // ADR-0200 exception: a verbatim external payload (the provider's state, normalised to open / merged / closed)
+    state: text("state", { enum: CONTEXT_GRAPH_GIT_PR_STATES }).notNull(),
+    // ADR-0200 exception: a verbatim external payload (the PR's web URL; https only, else NULL)
+    url: text("url"),
+    // ADR-0200 exception: verbatim external payloads (the provider's created / updated times)
+    providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    providerUpdatedAt: timestamp("provider_updated_at", { withTimezone: true }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set when a complete (untruncated) listing no longer has the PR; cleared when it reappears */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("context_graph_git_pull_requests_repo_number_uq").on(t.repositoryId, t.number),
+    check("context_graph_git_pull_requests_number_check", sql`${t.number} > 0`),
+    check("context_graph_git_pull_requests_state_check", sql`${t.state} IN ('open', 'merged', 'closed')`),
+    check("context_graph_git_pull_requests_title_check", sql`char_length(${t.title}) BETWEEN 1 AND 500`),
+    check("context_graph_git_pull_requests_url_check", sql`${t.url} IS NULL OR (${t.url} LIKE 'https://%' AND char_length(${t.url}) <= 2048)`),
   ],
 );
 // ===== end ADR-0365 =====

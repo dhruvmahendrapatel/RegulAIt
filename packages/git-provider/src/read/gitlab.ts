@@ -12,12 +12,19 @@ import {
   HistoryScanDisabledError,
   ReadClient,
   repoSegments,
+  boundedTitle,
+  httpsUrlOrNull,
+  isoOrNull,
+  prNumber,
 } from "./http.js";
 import {
   REPO_READ_DEFAULTS,
   type CommitSummary,
   type CredentialScopeReport,
   type ListCommitsOptions,
+  type ListPullRequestsOptions,
+  type PullRequestListResult,
+  type PullRequestSummary,
   type ListReposOptions,
   type ReadFileOptions,
   type ReadFileResult,
@@ -187,6 +194,31 @@ export class GitLabRepoReader implements RepoReader {
     // no scopes array, or an empty one, proves nothing: it must not clear the "write scope unverified" posture row
     if (scopes.length === 0) return { status: "unverified", scopes, detail: "GitLab reported no scopes for this token; write scope unverified" };
     return { status: "read_only", scopes, detail: "token scopes are read-only" };
+  }
+
+  async listPullRequests(repo: string, opts: ListPullRequestsOptions = {}): Promise<PullRequestListResult> {
+    const max = clampLimit(opts.maxPullRequests, REPO_READ_DEFAULTS.maxPullRequests);
+    const out: PullRequestSummary[] = [];
+    // merge requests: every state, most recently updated first (only iid, title, state, web_url and dates are taken)
+    const truncated = await this.paged<{ iid?: number; title?: string; state?: string; web_url?: string; created_at?: string; updated_at?: string }>(
+      `/projects/${this.project(repo)}/merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100`,
+      max,
+      (m) => {
+        const number = prNumber(m.iid);
+        const title = boundedTitle(m.title, REPO_READ_DEFAULTS.maxPullRequestTitle);
+        if (number === null || title === null) return;
+        out.push({
+          number,
+          title,
+          state: m.state === "merged" ? "merged" : m.state === "opened" || m.state === "locked" ? "open" : "closed",
+          url: httpsUrlOrNull(m.web_url),
+          createdAt: isoOrNull(m.created_at),
+          updatedAt: isoOrNull(m.updated_at),
+        });
+      },
+      () => out.length,
+    );
+    return { pullRequests: out.slice(0, max), truncated };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {

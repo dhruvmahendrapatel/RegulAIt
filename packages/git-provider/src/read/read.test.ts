@@ -531,4 +531,138 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect(() => build("bitbucket", "entra_access_token")).toThrow(/does not take/);
     });
   });
+
+  // ADR-0365 slice 3: the context graph's pull request listing (read only, every state, newest first, bounded)
+  describe("listPullRequests (ADR-0365 slice 3)", () => {
+    const T1 = "2026-11-01T10:00:00Z";
+    const T2 = "2026-11-02T10:00:00Z";
+    const iso = (t: string) => new Date(t).toISOString();
+
+    it("GitHub: every state across Link pages, merged told apart from closed, only https URLs, bounded by maxPullRequests", async () => {
+      upstream.route("GET", "/repos/acme/one/pulls?state=all&sort=updated&direction=desc&per_page=100", {
+        status: 200,
+        body: [
+          { number: 3, title: "Open one", state: "open", merged_at: null, html_url: "https://github.example/acme/one/pull/3", created_at: T1, updated_at: T2, user: { login: "someone" } },
+          { number: 2, title: "Merged\none", state: "closed", merged_at: T2, html_url: "javascript:alert(1)", created_at: T1, updated_at: T2 },
+        ],
+        headers: { link: `<${upstream.baseUrl}/repos/acme/one/pulls?page=2>; rel="next"` },
+      });
+      upstream.route("GET", "/repos/acme/one/pulls?page=2", {
+        status: 200,
+        body: [{ number: 1, title: "Closed", state: "closed", merged_at: null, html_url: "https://github.example/acme/one/pull/1" }, { number: -1, title: "bad" }],
+      });
+      const out = await reader("github").listPullRequests("acme/one");
+      expect(out).toEqual({
+        pullRequests: [
+          { number: 3, title: "Open one", state: "open", url: "https://github.example/acme/one/pull/3", createdAt: iso(T1), updatedAt: iso(T2) },
+          { number: 2, title: "Merged one", state: "merged", url: null, createdAt: iso(T1), updatedAt: iso(T2) },
+          { number: 1, title: "Closed", state: "closed", url: "https://github.example/acme/one/pull/1", createdAt: null, updatedAt: null },
+        ],
+        truncated: false,
+      });
+      // nothing identifying is returned (the author login is never read into the summary)
+      expect(JSON.stringify(out)).not.toContain("someone");
+      upstream.reset();
+      upstream.route("GET", "/repos/acme/one/pulls?state=all&sort=updated&direction=desc&per_page=100", {
+        status: 200,
+        body: [{ number: 5, title: "a", state: "open" }, { number: 4, title: "b", state: "open" }],
+        headers: { link: `<${upstream.baseUrl}/repos/acme/one/pulls?page=2>; rel="next"` },
+      });
+      expect(await reader("github").listPullRequests("acme/one", { maxPullRequests: 1 })).toMatchObject({ pullRequests: [{ number: 5 }], truncated: true });
+      expect(upstream.requests).toHaveLength(1);
+      onlyGets();
+    });
+
+    it("GitLab: merge requests of every state through x-next-page, opened/locked as open", async () => {
+      upstream.route("GET", "/api/v4/projects/grp%2Fsub%2Fapp/merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=1", {
+        status: 200,
+        body: [
+          { iid: 7, title: "MR seven", state: "opened", web_url: "https://gitlab.example/grp/sub/app/-/merge_requests/7", created_at: T1, updated_at: T2, author: { username: "someone" } },
+          { iid: 6, title: "MR six", state: "merged", web_url: "https://gitlab.example/grp/sub/app/-/merge_requests/6" },
+        ],
+        headers: { "x-next-page": "2" },
+      });
+      upstream.route("GET", "/api/v4/projects/grp%2Fsub%2Fapp/merge_requests?state=all&order_by=updated_at&sort=desc&per_page=100&page=2", {
+        status: 200,
+        body: [{ iid: 5, title: "MR five", state: "closed" }, { iid: 4, title: "MR four", state: "locked" }],
+        headers: { "x-next-page": "" },
+      });
+      const out = await reader("gitlab").listPullRequests("grp/sub/app");
+      expect(out.truncated).toBe(false);
+      expect(out.pullRequests.map((p) => [p.number, p.state, p.url])).toEqual([
+        [7, "open", "https://gitlab.example/grp/sub/app/-/merge_requests/7"],
+        [6, "merged", "https://gitlab.example/grp/sub/app/-/merge_requests/6"],
+        [5, "closed", null],
+        [4, "open", null],
+      ]);
+      expect(upstream.requests[0]!.headers["private-token"]).toBe(token);
+      expect(JSON.stringify(out)).not.toContain("someone");
+      onlyGets();
+    });
+
+    it("Bitbucket: asks for every state, follows the body next link on the API origin, declined/superseded as closed", async () => {
+      upstream.route("GET", "/repositories/ws/app/pullrequests?state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on&pagelen=50", {
+        status: 200,
+        body: {
+          values: [
+            { id: 12, title: "PR twelve", state: "OPEN", created_on: T1, updated_on: T2, links: { html: { href: "https://bitbucket.example/ws/app/pull-requests/12" } }, author: { nickname: "someone" } },
+            { id: 11, title: "PR eleven", state: "MERGED" },
+          ],
+          next: `${upstream.baseUrl}/repositories/ws/app/pullrequests?page=2`,
+        },
+      });
+      upstream.route("GET", "/repositories/ws/app/pullrequests?page=2", {
+        status: 200,
+        body: { values: [{ id: 10, title: "PR ten", state: "DECLINED" }, { id: 9, title: "PR nine", state: "SUPERSEDED" }] },
+      });
+      const out = await reader("bitbucket").listPullRequests("ws/app");
+      expect(out.pullRequests.map((p) => [p.number, p.state])).toEqual([
+        [12, "open"],
+        [11, "merged"],
+        [10, "closed"],
+        [9, "closed"],
+      ]);
+      expect(out.pullRequests[0]).toEqual({ number: 12, title: "PR twelve", state: "open", url: "https://bitbucket.example/ws/app/pull-requests/12", createdAt: iso(T1), updatedAt: iso(T2) });
+      expect(JSON.stringify(out)).not.toContain("someone");
+      onlyGets();
+    });
+
+    it("Azure DevOps: every status by $top/$skip pages, completed as merged, abandoned as closed, the web URL built from the organisation URL", async () => {
+      const base = "/org/Proj%20A/_apis/git/repositories/svc/pullrequests?searchCriteria.status=all";
+      const page = (n: number, from: number) =>
+        Array.from({ length: n }, (_, i) => ({ pullRequestId: from - i, title: `PR ${from - i}`, status: i === 0 ? "completed" : i === 1 ? "abandoned" : "active", creationDate: T1, createdBy: { uniqueName: "someone" } }));
+      upstream.route("GET", `${base}&$top=100&$skip=0&api-version=7.1`, { status: 200, body: { value: page(100, 300) } });
+      upstream.route("GET", `${base}&$top=100&$skip=100&api-version=7.1`, { status: 200, body: { value: [{ pullRequestId: 50, title: "Last", status: "completed", creationDate: T1, closedDate: T2 }] } });
+      const out = await reader("azure_devops", { baseUrl: `${upstream.baseUrl}/org` }).listPullRequests("Proj A/svc");
+      expect(out.truncated).toBe(false);
+      expect(out.pullRequests).toHaveLength(101);
+      expect(out.pullRequests.slice(0, 3).map((p) => [p.number, p.state])).toEqual([
+        [300, "merged"],
+        [299, "closed"],
+        [298, "open"],
+      ]);
+      // the fake upstream is plain http, so the URL built from it is not https and is dropped (https only)
+      expect(out.pullRequests[100]).toEqual({ number: 50, title: "Last", state: "merged", url: null, createdAt: iso(T1), updatedAt: iso(T2) });
+      expect(JSON.stringify(out)).not.toContain("someone");
+      const capped = await reader("azure_devops", { baseUrl: `${upstream.baseUrl}/org` }).listPullRequests("Proj A/svc", { maxPullRequests: 100 });
+      expect(capped).toMatchObject({ truncated: true });
+      expect(capped.pullRequests).toHaveLength(100);
+      onlyGets();
+    });
+
+    it("an https organisation URL gives Azure DevOps PRs their web URL", async () => {
+      const calls: string[] = [];
+      const r = resolveRepoReader("azure_devops", {
+        token,
+        baseUrl: "https://dev.azure.example/org",
+        fetchImpl: async (url) => {
+          calls.push(url);
+          return new Response(JSON.stringify({ value: [{ pullRequestId: 8, title: "Eight", status: "active" }] }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+      const out = await r.listPullRequests("Proj A/svc");
+      expect(out.pullRequests[0]!.url).toBe("https://dev.azure.example/org/Proj%20A/_git/svc/pullrequest/8");
+      expect(calls).toHaveLength(1);
+    });
+  });
 });

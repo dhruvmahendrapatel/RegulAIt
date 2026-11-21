@@ -11,12 +11,19 @@ import {
   ReadClient,
   readJsonCapped,
   repoSegments,
+  boundedTitle,
+  httpsUrlOrNull,
+  isoOrNull,
+  prNumber,
 } from "./http.js";
 import {
   REPO_READ_DEFAULTS,
   type CommitSummary,
   type CredentialScopeReport,
   type ListCommitsOptions,
+  type ListPullRequestsOptions,
+  type PullRequestListResult,
+  type PullRequestSummary,
   type ListReposOptions,
   type ReadFileOptions,
   type ReadFileResult,
@@ -186,6 +193,41 @@ export class AzureDevOpsRepoReader implements RepoReader {
       scopes: [],
       detail: "Azure DevOps does not let a PAT read its own scopes; write scope unverified (issue the PAT with 'Code (Read)' only)",
     };
+  }
+
+  async listPullRequests(repo: string, opts: ListPullRequestsOptions = {}): Promise<PullRequestListResult> {
+    const max = clampLimit(opts.maxPullRequests, REPO_READ_DEFAULTS.maxPullRequests);
+    const [project, ...rest] = repoSegments(repo, 2);
+    // the web page of a PR (the API returns only its REST url): <organization>/<project>/_git/<repo>/pullrequest/<id>
+    const web = `${this.http.base}/${encodeURIComponent(project!)}/_git/${encodeURIComponent(rest.join("/"))}/pullrequest/`;
+    const out: PullRequestSummary[] = [];
+    const top = 100;
+    let skip = 0;
+    let pages = 0;
+    for (;;) {
+      if (pages++ >= this.http.maxPages || out.length >= max) return { pullRequests: out.slice(0, max), truncated: true };
+      // every status, newest first (Azure DevOps orders by creation); creator and reviewers are not taken
+      const { body } = await this.json<{ value?: { pullRequestId?: number; title?: string; status?: string; creationDate?: string; closedDate?: string }[] }>(
+        `${this.repoPath(repo)}/pullrequests?searchCriteria.status=all&$top=${top}&$skip=${skip}&${API}`,
+      );
+      const page = body.value ?? [];
+      for (const p of page) {
+        const number = prNumber(p.pullRequestId);
+        const title = boundedTitle(p.title, REPO_READ_DEFAULTS.maxPullRequestTitle);
+        if (number === null || title === null) continue;
+        out.push({
+          number,
+          title,
+          state: p.status === "completed" ? "merged" : p.status === "active" ? "open" : "closed",
+          url: httpsUrlOrNull(`${web}${number}`),
+          createdAt: isoOrNull(p.creationDate),
+          updatedAt: isoOrNull(p.closedDate) ?? isoOrNull(p.creationDate),
+        });
+      }
+      if (page.length < top) break;
+      skip += top;
+    }
+    return { pullRequests: out.slice(0, max), truncated: out.length > max };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {

@@ -184,3 +184,56 @@ Owner-approved backlog slice (master, 2026-11-21), from the slice 1 follow-ups.
 4. **Boundary with ADR-0234 PM follow-on (#1144).** The sync reads `pm_links` under `system_task`. #1144 narrows
    `pm_sync`, not `system_task`, so the two compose. The graph does not reuse #1144's object-visibility helper: its
    own scope rows decide, and its rule for a run (initiator only) is no wider than that helper's write rule.
+
+## Slice 3 (2026-11-21): a git source, with a project scope per repository
+
+Owner-approved backlog slice (master, 2026-11-21), from the slice 1 follow-ups.
+
+1. **The source is an existing discovery repo source (ADR-0195).** An admin binds a `repo_github`, `repo_gitlab`,
+   `repo_bitbucket` or `repo_azure_devops` discovery source (`context_graph_git_sources`, one row per source).
+   - No token is stored. The sync uses the discovery source's credential (stored read-only token, or federated), the
+     egress-guarded fetch over the egress allow list, and the same reader-opening helper as the repo scanner
+     (`openRepoReader`, now exported from `discovery-repo-scanner.ts`).
+   - A credential that grants write is refused as a scan refuses it: the discovery credential moves to `refused`
+     along the ADR-0336 transitions, the refusal is audited, and the source is never read again until replaced.
+   - The discovery source's own gates apply: it must be enabled, and its family switch on.
+2. **Per-repository scope rows, strict by default.** `context_graph_git_repo_mappings` maps (git source, repository
+   full name) to a project.
+   - A repository with no mapping is never projected: no fact row and no node exist for it. With nothing mapped a
+     sync does not even list the repositories.
+   - Names match case-insensitively (one mapping per name). A repo-level discovery source maps only the repositories
+     its scope names.
+   - Remapping re-scopes that repository's nodes in the same transaction, so the old project's members lose sight
+     at once. Unmapping removes the facts and nodes (cascade from the mapping).
+   - Binding and mapping are `settings_relax` step-ups; every change is audited (`context_graph_git_source`).
+3. **Facts and nodes.** Two fact tables hold verbatim provider payloads, each column with its ADR-0200 exception
+   comment: `context_graph_git_repositories` (default branch, archived, first/last seen, `missing_since`) and
+   `context_graph_git_pull_requests` (number, title, state normalised to open / merged / closed, https URL only,
+   provider times, first/last seen, `missing_since`).
+   - **No author or other identity is stored or read into the summary** (secure and minimal).
+   - Node kinds `git_repository` and `git_pull_request` reference their fact row by foreign key. Their `source_id`
+     (the PM source) is NULL; the kind CHECK says which reference each kind carries.
+   - A repository `contains` its pull requests. Every git node gets one project scope, its repository's mapping.
+4. **Sync.** `RepoReader.listPullRequests` (GET only, every state, most recent first, at most 500 per repository) is
+   added for all four providers. A sync lists the source's repositories (its namespace), keeps the mapped ones (at
+   most 200 a sync), reads their pull requests, and only then writes everything in one transaction: no network call
+   happens inside it.
+   - A mapped repository or a pull request that a complete listing no longer has gets `missing_since`, cleared when
+     it reappears. A capped listing marks nothing.
+   - The two scheduler jobs also sync every bound git source (always a full, bounded listing) under `system_task`.
+     An admin route syncs one source.
+5. **Reads and row-level security.** The node read routes return git nodes with the joined facts (label: the
+   repository name or pull request title; URL; state), filtered by the same readable predicate.
+   - The readable function is unchanged and still reads only the scope tables.
+   - Under `context_graph_read` the fact tables and the git source table open, for SELECT only, just the rows a
+     readable node refers to. The mappings never open under it.
+   - `system_task` writes the facts and reads, but never writes, the mappings. No new system reason.
+6. **Routes and UI.** Seven admin routes, all API-only, listed as known UI gaps
+   (`scripts/known-ui-gaps/adr-0365-e46-context-graph-git.json`); the two DELETE routes are in the affordance
+   preflight's API-only list until the screen lands.
+
+**As built.** The migration is `pending/shared_context_graph_slice3_git.sql`, named to sort after
+`shared_context_graph_runs.sql` in byte order (a name `shared_context_graph_git.sql` would sort before it and have
+its node kind CHECK replaced by slice 2's). The node read joins `discovery_sources` for the provider name; that table
+has no row-level security today, and if a later ADR-0234 batch forces it, a git node's provider reads `git` until a
+matching read policy is added.

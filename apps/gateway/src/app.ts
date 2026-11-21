@@ -436,6 +436,9 @@ export interface BuildAppOptions {
   artifactStore?: ArtifactStore | null;
   /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
   discoveryScanners?: ScannerRegistry;
+  /** ADR-0365 slice 3 TEST SEAM: the context graph's provider reader and guarded-fetch seams (the credential, target and
+   * write-scope checks stay real). Code-only: never env or admin input. */
+  contextGraphGit?: Omit<ContextGraphGitDeps, "dataKey">;
   /** ADR-0331 TEST SEAM: the directive signer. Absent = the shared ADR-0334 device-policy key (owner decision B4),
    * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
    * Code-only: never env or admin input. */
@@ -645,6 +648,7 @@ import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
 import { registerContextGraphRoutes } from "./context-graph-routes.js";
+import type { ContextGraphGitDeps } from "./context-graph-git.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
@@ -6360,7 +6364,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
   // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
   registerSaasEntitlementRoutes(app, db);
-  registerContextGraphRoutes(app, db);
+  // ADR-0365 slice 3: the git source reads with the discovery repo source's credential, so it needs the data key
+  registerContextGraphRoutes(app, db, { git: { ...opts.contextGraphGit, dataKey: opts.dataKey } });
   // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
   // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
   registerAgentRegistryRoutes(app, db);

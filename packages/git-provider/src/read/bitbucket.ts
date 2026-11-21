@@ -12,12 +12,19 @@ import {
   ReadClient,
   readCapped,
   splitRawAuthor,
+  boundedTitle,
+  httpsUrlOrNull,
+  isoOrNull,
+  prNumber,
 } from "./http.js";
 import {
   REPO_READ_DEFAULTS,
   type CommitSummary,
   type CredentialScopeReport,
   type ListCommitsOptions,
+  type ListPullRequestsOptions,
+  type PullRequestListResult,
+  type PullRequestSummary,
   type ListReposOptions,
   type ReadFileOptions,
   type ReadFileResult,
@@ -172,6 +179,31 @@ export class BitbucketRepoReader implements RepoReader {
     // an empty scope list proves nothing: it must not clear the "write scope unverified" posture row
     if (scopes.length === 0) return { status: "unverified", scopes, detail: "Bitbucket reported no scopes for this credential; write scope unverified" };
     return { status: "read_only", scopes, detail: "credential scopes are read-only" };
+  }
+
+  async listPullRequests(repo: string, opts: ListPullRequestsOptions = {}): Promise<PullRequestListResult> {
+    const max = clampLimit(opts.maxPullRequests, REPO_READ_DEFAULTS.maxPullRequests);
+    const out: PullRequestSummary[] = [];
+    // every state (Bitbucket lists only OPEN unless asked), most recently updated first; author and body are not taken
+    const truncated = await this.paged<{ id?: number; title?: string; state?: string; created_on?: string; updated_on?: string; links?: { html?: { href?: string } } }>(
+      `/repositories/${encodeRepo(repo, 2)}/pullrequests?state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on&pagelen=50`,
+      max,
+      (p) => {
+        const number = prNumber(p.id);
+        const title = boundedTitle(p.title, REPO_READ_DEFAULTS.maxPullRequestTitle);
+        if (number === null || title === null) return;
+        out.push({
+          number,
+          title,
+          state: p.state === "MERGED" ? "merged" : p.state === "OPEN" ? "open" : "closed",
+          url: httpsUrlOrNull(p.links?.html?.href),
+          createdAt: isoOrNull(p.created_on),
+          updatedAt: isoOrNull(p.updated_on),
+        });
+      },
+      () => out.length,
+    );
+    return { pullRequests: out.slice(0, max), truncated };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {
