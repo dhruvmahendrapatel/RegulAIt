@@ -53,8 +53,12 @@ import {
   type ReviewPolicyTierKey,
   type ReviewPolicyView,
   type UseCaseReviewView,
+  IllegalTransitionError,
+  USE_CASE_MACHINE,
+  APPROVAL_MACHINE,
 } from "@regulait/shared";
 import { errMessage } from "./err-serializer.js";
+import { whereFrom } from "./state-transition.js";
 import type { ApprovalPostCommit } from "./orchestration.js";
 import { reopenWorkflowInstance } from "./workflows.js";
 import {
@@ -181,7 +185,14 @@ async function replaceWithReviewRound(
       )
   ).map((a) => a.id);
   if (supersededIds.length > 0) {
-    await tx.update(approvals).set({ status: "superseded" }).where(inArray(approvals.id, supersededIds));
+    // ADR-0348: only rows still pending are superseded. A decision that committed after the read above stands, and
+    // the superseded list names exactly the rows this write moved
+    const moved = await tx
+      .update(approvals)
+      .set({ status: "superseded" })
+      .where(and(inArray(approvals.id, supersededIds), whereFrom(approvals.status, APPROVAL_MACHINE, "supersede")))
+      .returning({ id: approvals.id });
+    supersededIds.splice(0, supersededIds.length, ...moved.map((m) => m.id));
   }
   const { round, ids } = await insertReviewRows(tx, instance, stageId, roles, proposerIds);
   return { round, ids, supersededIds };
@@ -346,6 +357,8 @@ export async function reopenUseCaseReview(
   },
 ): Promise<ReopenUseCaseReviewResult> {
   if (!uc.workflowInstanceId) return { ok: false, reason: "no_intake_instance" };
+  // ADR-0348: only a declared move re-opens a review (a retired use case stays retired)
+  if (!USE_CASE_MACHINE.canMove(uc.status, "under_review")) return { ok: false, reason: `use_case_${uc.status}` };
   const [inst] = await tx
     .select()
     .from(workflowInstances)
@@ -393,10 +406,17 @@ export async function reopenUseCaseReview(
         .where(and(eq(approvals.instanceId, inst.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
     ).map((a) => a.id);
   }
-  await tx
+  // ADR-0348: from the status the caller read, and only along a declared move, so a use case retired meanwhile stays
+  // retired; the re-open's other writes roll back with the caller's transaction
+  const statusMoved = await tx
     .update(aiUseCases)
     .set({ status: "under_review", recertification: actor.recertification, updatedAt: new Date() })
-    .where(eq(aiUseCases.id, uc.id));
+    .where(and(eq(aiUseCases.id, uc.id), eq(aiUseCases.status, uc.status)))
+    .returning({ id: aiUseCases.id });
+  if (statusMoved.length === 0) {
+    // changed by someone else since the caller read it: throwing rolls the kernel re-open back with it
+    throw new IllegalTransitionError(USE_CASE_MACHINE.def.id, "reopen_review", uc.status, USE_CASE_MACHINE.sourcesOf("reopen_review"));
+  }
   return {
     ok: true,
     postCommit: reopened.postCommit,

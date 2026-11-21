@@ -1490,13 +1490,37 @@ export const updateInitiativeSchema = z
     message: "nothing to update — provide at least one field",
   });
 
+/** ADR-0352: every VENDOR kind with a shipped adapter, i.e. the kinds a per-kind
+ * credential row (platform or user) may name. Mirrors the vendor subset of
+ * `MODEL_PROVIDER_KINDS` in @regulait/model-provider (a gateway test pins the two
+ * together; this package cannot import that one). */
+export const VENDOR_MODEL_PROVIDERS = [
+  "anthropic",
+  "openai",
+  "google",
+  "xai",
+  "bedrock",
+  "vertex",
+  "mistral",
+  "cohere",
+  "qwen",
+] as const;
+
+/** ADR-0352: the vendor kinds whose platform key can come from a conventional
+ * environment variable (the ADR-0021/0181 fallback, off by default). Bedrock and
+ * Vertex are absent: their credentials are structured and need an explicit,
+ * egress-checked baseUrl, so they only ever come from the encrypted store. */
+export const ENV_FALLBACK_MODEL_PROVIDERS = ["anthropic", "openai", "google", "xai", "mistral", "cohere", "qwen"] as const;
+
 export const createModelCredentialSchema = z.object({
-  // deliberately still the four SHIPPED vendor adapters. A custom provider's
+  // the SHIPPED vendor adapters (ADR-0352 added five). A custom provider's
   // key lives on its own custom_model_providers row (ADR-0034) — one endpoint,
   // one key — not in this per-provider-kind singleton table, which could only
   // ever hold ONE key for all custom endpoints.
-  provider: z.enum(["anthropic", "openai", "google", "xai"]),
-  apiKey: z.string().min(1),
+  provider: z.enum(VENDOR_MODEL_PROVIDERS),
+  // a Bedrock SigV4 or Vertex service-account credential is a JSON document, so
+  // the bound is generous; the gateway validates its shape per kind (ADR-0352)
+  apiKey: z.string().min(1).max(16_384),
   baseUrl: z.string().url().nullable().optional(),
 });
 
@@ -2446,8 +2470,8 @@ export const updateOrgSettingsSchema = z
       .optional(),
     envKeyFallbackEnabled: z.boolean().optional(),
     envFallbackProviders: z
-      .array(z.enum(["anthropic", "openai", "google", "xai"]))
-      .max(4)
+      .array(z.enum(ENV_FALLBACK_MODEL_PROVIDERS))
+      .max(ENV_FALLBACK_MODEL_PROVIDERS.length)
       .optional(),
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
@@ -3306,6 +3330,9 @@ export {
   type ShadowAiDisposition,
   type ShadowAiSeverity,
   type ShadowAiSubjectKind,
+  AGENT_CONFIG_SECRET_RULES_EXCLUDED,
+  agentConfigSecretRuleAllowed,
+  agentConfigSecretRuleIds,
 } from "./shadow-ai.js";
 
 // ADR-0071 — SHADOW-AI EVIDENCE FORMAT ADAPTERS, the pure half: the layer BELOW
@@ -5081,6 +5108,9 @@ export * from "./vendor-agent-control.js";
 export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits
+export * from "./resource-rules.js";
+
 // ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
 export * from "./browser-governance/index.js";
 export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
@@ -5098,6 +5128,9 @@ export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-actions.js";
 
+// ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
+export * from "./adoption-analytics.js";
+
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 
@@ -5110,5 +5143,7 @@ export * from "./fairness-evaluation.js";
 // ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
 export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
+// ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
+export * from "./content-inspection.js";
 // ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
 export * from "./ai-app-risk.js";
