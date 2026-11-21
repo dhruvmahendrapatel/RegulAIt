@@ -10,6 +10,7 @@ import {
   type ResourceApprovalRule,
   type ResourceRateLimit,
 } from "./index.js";
+import { cedarResourceApprovalRuleEvaluator } from "./resource-approval-rule-cedar.js";
 
 const C1 = "11111111-1111-4111-8111-111111111111";
 const C2 = "22222222-2222-4222-8222-222222222222";
@@ -25,6 +26,8 @@ const input = (over: Partial<ComposeResourceInput> = {}): ComposeResourceInput =
   projectId: "p1",
   attributionRequired: true,
   canQueue: true,
+  // P8b: the engine the gateway injects (the hand-written default is gone; a case may pass its own, or null)
+  approvalRuleEvaluator: cedarResourceApprovalRuleEvaluator,
   ...over,
 });
 const limit = (over: Partial<ResourceRateLimit> = {}): ResourceRateLimit => ({
