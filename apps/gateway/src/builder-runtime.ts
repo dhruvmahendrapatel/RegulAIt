@@ -80,6 +80,7 @@ import {
 import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provider";
 import { BUILDER_LIMITS, builderThreadContextId, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import { autonomyDispatchGate } from "./autonomy.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
 import { ensureSkillScanned, ensureSnapshotScanned, pinnedBodyWithheld } from "./skill-admission.js";
@@ -538,6 +539,11 @@ async function withAgentGate(
       };
     }
   }
+
+  // ADR-0180 addendum (lane E51): oversight levels at runtime. A delegated or autonomous agent whose autonomy floors
+  // are not in place is refused before anything is dispatched, unless an admin relaxed its gate (fail closed)
+  const oversight = await autonomyDispatchGate(db, agent, userId, source);
+  if (oversight) return oversight;
 
   if (agent.monthlyLimitUsd == null) return body(model, null);
 

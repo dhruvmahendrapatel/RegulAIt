@@ -6,7 +6,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LightMyRequestResponse } from "fastify";
-import { createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { builderAgents, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "../app.js";
 import { enrolAdminTotpForTest } from "./identity-posture.js";
 import { forgetStepUpMethodsForTest } from "./step-up-posture.js";
@@ -43,7 +43,10 @@ export interface BuilderKit {
  * `close()` — for a file that writes append-only rows (an approval decision)
  * which must not outlive the run in the shared database.
  */
-export async function builderKit(prefix: string, opts: { scratch?: boolean; ownGrants?: boolean } = {}): Promise<BuilderKit> {
+export async function builderKit(
+  prefix: string,
+  opts: { scratch?: boolean; ownGrants?: boolean; relaxAutonomyGate?: boolean } = {},
+): Promise<BuilderKit> {
   const DATABASE_URL = process.env.DATABASE_URL;
   if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
   const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../packages/db/migrations");
@@ -88,6 +91,18 @@ export async function builderKit(prefix: string, opts: { scratch?: boolean; ownG
           }
         }
         if (id) await grantBuilderAgentConfiguredForTest(db, id);
+      }
+    }
+    // ADR-0180 addendum (E51): a suite about channels or schedules, whose agents are autonomous by setup, opens the kit
+    // with `relaxAutonomyGate: true`. Each agent it creates is then relaxed the way an admin relaxes one (state,
+    // when, reason), so the suite tests its own subject. The gate itself is tested in zz-adr0180-autonomy-dispatch-gate.
+    if (opts.relaxAutonomyGate && method === "POST" && url.split("?")[0] === "/v1/builder/agents" && res.statusCode < 300) {
+      const id = (res.json() as { agent?: { id?: string } }).agent?.id;
+      if (id) {
+        await db
+          .update(builderAgents)
+          .set({ autonomyEnforcement: "relaxed", autonomyRelaxedAt: new Date(), autonomyEnforcementReason: `test suite ${prefix}: not about oversight` })
+          .where(eq(builderAgents.id, id));
       }
     }
     return res;
