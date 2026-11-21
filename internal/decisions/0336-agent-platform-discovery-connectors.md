@@ -283,8 +283,9 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 ## Slice 4 as built
 
 - **Finding path:** the existing discovery observation path, with no new table, matcher or ADR.
-  - **Evidence kind:** the new `agent_config` (`DISCOVERY_EVIDENCE_KINDS`). The four E17 kinds now declare
-    `evidenceKinds: ["agent_config"]` and `subjectKinds: ["system"]`; the #855 registry kinds still report none.
+  - **Evidence kind:** the new `agent_config` (`DISCOVERY_EVIDENCE_KINDS`). The OpenAI and n8n kinds declare
+    `evidenceKinds: ["agent_config"]` and `subjectKinds: ["system"]`. Copilot Studio, Agentforce and the #855 registry
+    kinds declare none until they scan (#1130 R9 [3]).
   - **Observation:** `{ evidenceKind: "agent_config", subjectKind: "system", subject: <staged record external id>,
     location: { path: <field path> }, secretRule: <vendored rule id> }` and nothing else.
   - **Worker checks** (`checkConfigSecret`):
@@ -297,7 +298,12 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
   - **Storage:** the finding is a `shadow_ai_findings` row like any other discovery finding.
   - **Migration:** `pending/vendor_agent_platform_config_secrets.sql` widens `shadow_ai_imports_kind_ck`.
 - **Matcher:** `vendoredSecretSpans` over `VENDORED_SECRET_RULES`, filtered by `AGENT_CONFIG_SECRET_RULES_EXCLUDED`
-  (the social-security-number and public OAuth client id rules: not credentials). `ConfigSecretCollector` drops each
+  (social security number, public OAuth client id, and, for a future pack refresh, credit card number, IBAN and
+  Ethereum address: not credentials). The allowed set is pinned in a test, so a refresh that adds a rule fails until
+  the rule is classified (#1130 R9 [1], S9 [2]).
+- **Paths:** a path segment taken from vendor text is kept only when it is a plain identifier with no credential
+  shape; otherwise it becomes its position, so a credential planted as a key cannot fail the run (#1130 S9 [1]). A
+  field whose path would still be refused (longer than 512 characters) is skipped and counted (#1130 R9 [2]). `ConfigSecretCollector` drops each
   span at once and keeps the path and the rule only, at most 20 per agent and 1,000 per run (a count-only read outcome
   beyond that); a field is scanned up to 256 KiB.
 - **Fields scanned (in memory, then dropped):** decision 4 says "each content field the adapter selects for hashing";

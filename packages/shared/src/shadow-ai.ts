@@ -514,17 +514,26 @@ export interface Observation {
 }
 
 /**
- * ADR-0336 slice 4: vendored secret rules that are not credentials (personal data or a public identifier), so a hit
- * in an agent's configuration is not reported as a plaintext credential. A filter over the existing rules, not a
- * matcher of its own.
+ * ADR-0336 slice 4: vendored secret rules that are not credentials (personal or financial data, or a public
+ * identifier), so a hit in an agent's configuration is not reported as a plaintext credential. A filter over the
+ * existing rules, not a matcher of its own. `credit_card_number`, `iban` and `ethereum_address` are not in the
+ * vendored set today (the pack's manifest excludes them); they are listed so a pack refresh that adds them stays out.
+ * The allowed set is pinned in a test, so any new rule from a refresh fails it until someone classifies the rule.
  */
 export const AGENT_CONFIG_SECRET_RULES_EXCLUDED: readonly string[] = Object.freeze([
   "pipelock.secrets.social_security_number",
   "pipelock.secrets.google_oauth_client_id",
+  "pipelock.secrets.credit_card_number",
+  "pipelock.secrets.iban",
+  "pipelock.secrets.ethereum_address",
 ]);
 const AGENT_CONFIG_SECRET_RULE_IDS: ReadonlySet<string> = new Set(
   VENDORED_SECRET_RULES.map((r) => r.id).filter((id) => !AGENT_CONFIG_SECRET_RULES_EXCLUDED.includes(id)),
 );
+/** the vendored rule ids reported as plaintext credentials in an agent's configuration (pinned in a test) */
+export function agentConfigSecretRuleIds(): string[] {
+  return [...AGENT_CONFIG_SECRET_RULE_IDS].sort();
+}
 /** whether a vendored rule id may be reported as a plaintext credential in an agent's configuration */
 export function agentConfigSecretRuleAllowed(rule: unknown): rule is string {
   return typeof rule === "string" && AGENT_CONFIG_SECRET_RULE_IDS.has(rule);
