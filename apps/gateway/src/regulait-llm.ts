@@ -155,6 +155,7 @@ import {
 } from "./compiled-egress.js";
 import { ensureLineageEdge, ensureLineageNode } from "./lineage.js";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit } from "./governed-core.js";
 
 /** the audit actor when the caller is the identity-less bootstrap token — the
  * same sentinel every other admin surface in this gateway uses */
@@ -1328,6 +1329,17 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     }));
 
     const scan = await scanAndDecide(db, rows, body.piiMode, body.projectId ?? null);
+    // ADR-0224 addendum (2026-11-21): the records-of-processing limit on the corpus, through the governed core, after
+    // the scan's PII floor and before anything is stored. The gate writes the one audit row for the refusal.
+    if (scan.verdict !== "blocked") {
+      const processingRefusal = await governedProcessingLimit(db, {
+        userId: actor(req) ?? NO_IDENTITY,
+        target: { type: "training_dataset", datasetId: null, datasetName: body.name, phase: "ingest" },
+        projectId: body.projectId ?? null,
+        input: JSON.stringify(rows.map((r) => ({ input: r.input, output: r.output }))),
+      });
+      if (processingRefusal) return reply.status(processingRefusal.status).send({ error: processingRefusal.error, detail: processingRefusal.detail });
+    }
     if (scan.verdict === "blocked") {
       await audit(db, {
         userId: actor(req),
@@ -1444,6 +1456,16 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     // THE SCAN RUNS ON THE ADDED ROWS TOO. A dataset that passed at ingest must
     // not become a laundering route for a second upload.
     const scan = await scanAndDecide(db, added, dataset.piiMode, dataset.projectId);
+    // ADR-0224 addendum (2026-11-21): the same limit on appended rows, so a second upload is no way around it
+    if (scan.verdict !== "blocked") {
+      const processingRefusal = await governedProcessingLimit(db, {
+        userId: actor(req) ?? NO_IDENTITY,
+        target: { type: "training_dataset", datasetId: dataset.id, datasetName: dataset.name, phase: "append" },
+        projectId: dataset.projectId,
+        input: JSON.stringify(added.map((r) => ({ input: r.input, output: r.output }))),
+      });
+      if (processingRefusal) return reply.status(processingRefusal.status).send({ error: processingRefusal.error, detail: processingRefusal.detail });
+    }
     if (scan.verdict === "blocked") {
       await audit(db, {
         userId: actor(req),
