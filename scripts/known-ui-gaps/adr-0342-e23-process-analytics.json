@@ -1,0 +1,12 @@
+{
+  "adr": "ADR-0342",
+  "lane": "E23",
+  "tracking": "ADR-0342 (lane E23): API-only by the lane brief (no screens); the process analytics dashboard is posted on #453 for the design builder",
+  "gaps": {
+    "GET /v1/process-analytics/templates": "per workflow template: instances started and ended by status, cycle time percentiles, rework rate and open instances in a window",
+    "GET /v1/process-analytics/stages": "per workflow stage, ranked by total wait time (the bottleneck ranking): visits, duration percentiles, wait vs work, rework and open visits",
+    "GET /v1/process-analytics/heatmap": "stage x period heatmap cells (visits, median duration, wait) for the stages with the most wait",
+    "GET /v1/process-analytics/throughput": "per period: workflow instances started and ended by terminal status",
+    "POST /v1/process-analytics/refresh": "runs one process analytics projection pass from the workflow history now (admin, audited)"
+  }
+}

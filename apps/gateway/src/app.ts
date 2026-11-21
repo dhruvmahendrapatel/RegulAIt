@@ -191,7 +191,9 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
-import { registerRuleStepRoutes } from "./rule-steps.js";
+import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
+import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
+import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -199,6 +201,8 @@ import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerAssetScoreRoutes } from "./asset-score.js";
+import { registerAgentRiskRoutes } from "./agent-risk.js";
+import { registerAgentIdentityRoutes } from "./agent-identity.js";
 import { registerTrustDashboardRoutes } from "./trust-dashboard.js";
 import { registerUseCaseOverviewRoutes } from "./use-case-overview.js";
 import { registerUseCaseDraftRoutes } from "./use-case-drafts.js";
@@ -384,6 +388,9 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
+  vendorUsageFetch?: typeof fetch;
+  vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
   /** ADR-0361 test seams: the transport the AI SaaS monitor's guarded fetch sends through, its pinned DNS, and the
    * connector registry (production: `AI_SAAS_CONNECTORS`) */
   aiSaasMonitorFetch?: typeof fetch;
@@ -434,6 +441,12 @@ export interface BuildAppOptions {
   artifactStore?: ArtifactStore | null;
   /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
   discoveryScanners?: ScannerRegistry;
+  /** ADR-0331 TEST SEAM: the directive signer. Absent = the shared ADR-0334 device-policy key (owner decision B4),
+   * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
+   * Code-only: never env or admin input. */
+  directiveSigner?: DirectiveSigner | null;
+  /** ADR-0338 TEST SEAM ONLY (code, never env or admin input): vendor control members and the credential resolver */
+  vendorAgentControl?: VendorAgentControlDeps;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -520,6 +533,7 @@ import {
   registerComplianceProfileLifecycleRoutes,
 } from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
+import { applyRobotVersionDecision, precheckRobotVersionDecision, registerRobotRoutes } from "./robots.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
@@ -528,6 +542,7 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
+import { registerPipelineRoutes } from "./pipelines.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
   acceptUseCaseRisks,
@@ -633,20 +648,45 @@ import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
+import { registerContextGraphRoutes } from "./context-graph-routes.js";
+import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
+import { registerAgentCredentialRoutes } from "./agent-credential-routes.js";
 import { registerMcpIdentityOidcRoutes } from "./mcp-identity-oidc-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
+import { registerBrowserGovernanceRoutes } from "./browser-governance-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
+import { registerDetectionRoutes } from "./detection/routes.js";
+import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
+import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
+import {
+  applyEndpointAddonRemovalDecision,
+  endpointAddonRemovalApprovalLabels,
+  precheckEndpointAddonRemovalDecision,
+  registerEndpointAddonRemovalRoutes,
+  type DirectiveSigner,
+} from "./endpoint-addon-removal.js";
+import {
+  applyVendorAgentControlDecision,
+  precheckVendorAgentControlDecision,
+  registerVendorAgentControlRoutes,
+  vendorAgentControlApprovalLabels,
+  type VendorAgentControlDeps,
+} from "./vendor-agent-control.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
+import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
+import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
@@ -656,6 +696,13 @@ import { registerCopilotRedteamGateRoutes } from "./copilot-redteam-gate.js";
 import { registerBuilderRoutes } from "./builder.js";
 // ADR-0180 (D3) — continuous assurance: P0's gate-mode setting and each item owner's routes
 import { registerAssuranceSettingsRoutes } from "./assurance-settings.js";
+import {
+  applyCustomClassifierDecision,
+  precheckCustomClassifierDecision,
+  registerClassifierDataKey,
+  registerCustomClassifierRoutes,
+} from "./custom-classifiers.js";
+import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -884,6 +931,8 @@ class StepUpRefusedInTx extends Error {
 }
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
+  // ADR-0363 slice 2: the EDM classifier key is opened with the deployment data key wherever a guardrail policy resolves
+  registerClassifierDataKey(opts.dataKey);
   // ADR-0167 amendment (S-02): resolved once, so every credential path agrees
   const bootstrapAfterAdmin = opts.bootstrapAfterAdmin ?? bootstrapAfterAdminRelaxed(process.env);
   // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
@@ -4640,6 +4689,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     const complianceVersionLabelFor = (stageId: string | null): string | null =>
       stageId?.startsWith(COMPLIANCE_VERSION_PREFIX) ? (complianceVersionById.get(stageId.slice(COMPLIANCE_VERSION_PREFIX.length)) ?? null) : null;
+    // ADR-0331: what an MCP server removal from endpoints asks the approver to approve
+    const endpointAddonRemovalLabel = await endpointAddonRemovalApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
+    );
+    // ADR-0338: what a vendor agent control action asks the approver to approve
+    const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4720,6 +4779,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
         (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
+        (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5216,6 +5277,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckRemediationDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0331 — an MCP server removal from endpoints: never the requester, only an admin in the pool (no override),
+    // the dial `normal` to approve, and an `approval_decide` step-up bound to {approvalId, decision, argumentsDigest}
+    if (row.objectType === "endpoint_addon_removal") {
+      const refusal = await precheckEndpointAddonRemovalDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0338 — a vendor agent control action: never the requester, only an admin in the pool (no override), and an
+    // `approval_decide` step-up bound to {approvalId, decision, argumentsDigest}
+    if (row.objectType === "vendor_agent_control") {
+      const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5227,6 +5300,27 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // profile change cannot reach its review through delegation or the admin override above.
     if (row.objectType === "compliance_profile") {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0363 slice 2 — `cannot_approve_own_classifier`, keyed on the DECIDER like the profile check above.
+    if (row.objectType === "custom_classifier") {
+      const refusal = await precheckCustomClassifierDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0364 — `cannot_approve_own_robot_version`, keyed on the DECIDER so a robot version's author cannot reach
+    // its review through delegation or the admin override above.
+    if (row.objectType === "robot_version") {
+      const refusal = await precheckRobotVersionDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0327 addendum — `cannot_approve_own_decision_table`, keyed on the DECIDER (same reasoning as above).
+    if (row.objectType === "decision_table") {
+      const refusal = await precheckDecisionTableDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0327 slice 4a — `cannot_approve_own_rule_step_switch`, keyed on the DECIDER (same reasoning as above).
+    if (row.objectType === "rule_step_switch") {
+      const refusal = await precheckRuleStepSwitchDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // Separation-of-duties guard: the person deciding IS the person who
@@ -5496,9 +5590,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
+      // ADR-0364: a reviewed robot version — approved = it becomes a tool on the first-party Robots MCP server (and
+      // its definition pin is approved by this decision) only if its content still hashes to the approved digest and
+      // its robot is active, else it is recorded rejected; denied = rejected.
+      if (updated.objectType === "robot_version") {
+        await applyRobotVersionDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
       // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      // ADR-0363 slice 2: a reviewed customer-classifier version is published (or rejected) inside the decision
+      if (updated.objectType === "custom_classifier") {
+        await applyCustomClassifierDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
       if (updated.objectType === "compliance_profile") {
         await applyComplianceProfileDecision(
           tx as unknown as Db,
@@ -5508,6 +5612,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (d, projectId, oldRequired, by) => reapplyReclassificationToInFlight(d, projectId, [], by, oldRequired),
           requiredTemplateIdsFor,
         );
+      }
+      // ADR-0327 addendum: a reviewed decision-table version — approved = published, inside the decision's transaction,
+      // only if the version it was proposed against is still the published one (else recorded stale). Denied = rejected.
+      if (updated.objectType === "decision_table") {
+        await applyDecisionTableDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0327 slice 4a: a reviewed switch of a rule-like step — approved = switched, inside the decision's transaction,
+      // only while the suggestion is in shadow and its rule still matches the bound digest (else stale). Denied = rejected.
+      if (updated.objectType === "rule_step_switch") {
+        await applyRuleStepSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+        // slice 4d: the same queue item may switch a published decision table instead (each hook ignores the other's)
+        await applyDecisionTableSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5569,6 +5685,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ADR-0159 remediation: approved = the STORED kind+params execute HERE,
       // inside the decision's transaction; the monitor re-evaluates after
       // commit so a cleared condition resolves its alert straight away.
+      // ADR-0331: approved = the targets are resolved again and written only if they still give the approved digest;
+      // the approver's step-up is spent here, with those writes. Denied = nothing is ever sent.
+      if (updated.objectType === "endpoint_addon_removal") {
+        await applyEndpointAddonRemovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0338: approved = the action may be executed once by its requester; denied = nothing is ever sent. The
+      // approver's step-up is spent here, with the move.
+      if (updated.objectType === "vendor_agent_control") {
+        await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {
@@ -5856,6 +5982,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerClassicalDriftRoutes(app, db);
   // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
   registerRuleStepRoutes(app, db);
+  registerDecisionTableRoutes(app, db);
+  registerDecisionTableSwitchRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -5911,6 +6039,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const anchorSink: AnchorSink | null = opts.auditAnchorSink !== undefined ? opts.auditAnchorSink : resolveAnchorSink();
   registerPostureRoutes(app, db, { sink: anchorSink });
   registerAssetScoreRoutes(app, db);
+  // ADR-0339 (lane E20) — the agent risk score, recomputed on every change
+  registerAgentRiskRoutes(app, db);
+  // ADR-0339 slice 2 — author vs runner, non-human identity links, ownership findings
+  registerAgentIdentityRoutes(app, db);
   // ADR-0148 — the six-dimension trust dashboard (demo task C1)
   registerTrustDashboardRoutes(app, db);
   // ADR-0082 — the standing agent dependency inventory: per registered agent,
@@ -6048,6 +6180,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerProjectRoutes(app, db);
   // ADR-0208 (G7): reviewed compliance-profile versions and retire
   registerComplianceProfileLifecycleRoutes(app, db);
+  // ADR-0363 slice 2: customer classifiers (admin API; the UI is a #453 gap)
+  registerCustomClassifierRoutes(app, db, { dataKey: opts.dataKey });
   registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
@@ -6228,6 +6362,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
+  // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
+  registerSaasEntitlementRoutes(app, db);
+  registerContextGraphRoutes(app, db);
+  // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
+  // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
+  registerAgentRegistryRoutes(app, db);
   // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
   // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
   registerContentTrustRoutes(app, db);
@@ -6237,6 +6378,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerFederationRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0210: the OIDC-profile identity assertion issuer's public discovery document and ES256 JWKS
   registerMcpIdentityOidcRoutes(app, db);
+  // ADR-0315 (G7) — the agent credential issuer's public metadata and JWKS, and the admin registry of audiences
+  registerAgentCredentialRoutes(app, db);
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
@@ -6247,23 +6390,45 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // lifecycle (admin-only by default; enabling and issuing the write-only credential are step-ups, audited) and the
   // exporter's route, authenticated in-route by the source's `rgti_` token. Records are attributed third-party evidence.
   registerThirdPartyIngestRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0334 (lane E16): the managed browser extension (in-route enrolment token or device proof) and its admin routes;
+  // off until an admin turns it on (a step-up, audited)
+  registerBrowserGovernanceRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
+  registerDetectionRoutes(app, db); // ADR-0333 (E15): agent behaviour detection
+  // ADR-0312: cost per outcome (the list is self-scoped and in NON_ADMIN_ROUTES; the roll-up and refresh are admin-only)
+  registerCostOutcomeRoutes(app, db);
+  // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)
+  registerBudgetAlertRoutes(app, db);
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
   registerEndpointAgentRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+    directiveSigner: opts.directiveSigner,
   });
   // ADR-0259 (P35) — the MCP servers enrolled devices' host configs name, with the registry diff, and the admin's
   // links to approved servers. Admin-only by default; reads what the agent reports, contacts nothing.
   registerEndpointMcpConfigRoutes(app, db);
+  // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
+  // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
+  registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
+  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
+  // production until slice 1b; both come only through the code-only test seam below
+  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
   registerManagedSettingsRoutes(app, db);
+  // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
+  registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  registerEndpointCommandExceptionRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);
+  // ADR-0364 (lane E45 S2): governed RPA robots — versions, review, secrets (the Robots MCP server is first-party)
+  registerRobotRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
+  registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -6274,6 +6439,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
   // be read back as metered.
   registerCostImportRoutes(app, db);
+  // ADR-0322 — opt-in vendor usage/cost pull (off by default, refused when air-gapped). Admin-only by default (none of
+  // these routes is in NON_ADMIN_ROUTES); credentials are never returned.
+  registerVendorUsagePullRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.vendorUsageFetch ? { fetchImpl: opts.vendorUsageFetch } : {}),
+      ...(opts.vendorUsageResolve ? { resolve: opts.vendorUsageResolve } : {}),
+    },
+  });
   // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
   // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
   registerAiSaasMonitorRoutes(app, db, {
@@ -6384,6 +6558,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // A8 autonomy, A10 risk tolerance and acceptance (stubs answer 501 until
   // their owner lands).
   registerAssuranceSettingsRoutes(app, db);
+  // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
+  registerSensitivityLabelRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);

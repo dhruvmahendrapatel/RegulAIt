@@ -34,6 +34,7 @@ import {
 } from "./scheduler.js";
 import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
 import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
+import { AGENT_RISK_PROOF_JOB_NAME } from "./agent-risk-proof-runner.js"; // ADR-0345 slice 2a
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -812,12 +813,31 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows; driven end-to-end in
+        // zz-adr0333-detection.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.agentDetectionSweep,
+        // ADR-0312: records cost-per-outcome evidence; driven end to end in zz-adr0312-cost-per-outcome.test.ts
+        SCHEDULER_JOB_NAMES.costOutcomeRecorder,
+        // ADR-0312 (pilot addendum): the spend-budget pass; driven end to end in zz-adr0312-cost-per-outcome.test.ts
+        SCHEDULER_JOB_NAMES.spendBudgetAlerts,
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
+        // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
+        SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,
+        // ADR-0322: vendor usage/cost pull from enabled connectors; driven end to end in
+        // zz-adr0322-vendor-usage-pull.test.ts (with the org policy off, the default, it pulls nothing)
+        SCHEDULER_JOB_NAMES.vendorUsagePullSweep,
+        // ADR-0339: scores every agent a change marked. Driven end-to-end in zz-adr0339-agent-risk.test.ts.
+        SCHEDULER_JOB_NAMES.agentRiskRecomputeSweep,
+        SCHEDULER_JOB_NAMES.agentRiskDailyMark,
         // ADR-0342 (lane E23): rebuilds the process analytics read model from the workflow history; driven end to end
         // in zz-adr0342-process-analytics.test.ts (reads workflow state only)
         SCHEDULER_JOB_NAMES.processAnalyticsProjector,
+        // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
+        // in zz-adr0345-proof-runner.test.ts
+        AGENT_RISK_PROOF_JOB_NAME,
         // ADR-0361: AI SaaS compliance-export reads (nothing while the org policy is off, the default) and their
         // evidence retention (nothing with no floor); driven end to end in zz-adr0361-ai-saas-monitoring.test.ts
         SCHEDULER_JOB_NAMES.aiSaasMonitorSweep,

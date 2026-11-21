@@ -268,3 +268,21 @@ so at most about a week). From then on the gate stays red until the base or pack
     can change the gate.
   - `security/image-allowlist.json`, which stays empty. Under ADR-0200 a fixable finding is patched, not
     allow-listed. The file remains only as the gate's fail-closed input format.
+
+## Addendum (2026-11-17): npm advisories with no patched release (owner decision)
+
+**Context.** On 2026-11-17, GHSA-fc5q-39xc-vjpf (HIGH, a ReDoS in `picomatch` <=4.0.7) turned `Dependency audit (pnpm)`
+red on every PR and on `main`. No patched release exists: 4.0.7 is the latest version, and `pnpm audit` reports
+`patched_versions: "<0.0.0"`. The only path is `.>dependency-cruiser>picomatch`, a dev-only architecture check, and
+`pnpm audit --prod` is clean. Nothing could be patched, and the security checklist forbids an allow-list entry.
+
+**Decision (owner, 2026-11-17).** The `pnpm-audit` gate takes the rule the `trivy` gate already uses. A HIGH or CRITICAL
+advisory whose `patched_versions` is exactly `<0.0.0` is printed as `NO FIX YET` in the gate output and does not fail
+the gate. The match is exact: a missing or unrecognised value stays gated (fail closed). It is not an exemption. No ID
+is allow-listed, and an allow-list entry for such an advisory fails as STALE. When a patched release is published, the
+next scan (the next PR or push, or at the latest the weekly scheduled run) counts it, and the gate stays red until the
+dependency is bumped.
+
+- **Re-check by 2026-12-17.** Owner: the master session. It reads the `NO FIX YET` lines of the latest scheduled run.
+  A no-fix CRITICAL, or a no-fix HIGH reachable at run time (in `pnpm audit --prod`), does not roll forward: it gets a
+  mitigation or its own ADR. The other findings follow the roll-forward cap in the 2026-11-06 addendum.

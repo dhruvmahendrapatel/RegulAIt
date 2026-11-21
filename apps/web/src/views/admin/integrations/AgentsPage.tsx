@@ -30,6 +30,8 @@ import { StewardshipPreview } from "./AgentStewardship";
 // ADR-0205: part of this lazy route chunk (screens/admin-integrations), so the entry bundle carries none of it
 import AgentSetupAssistant from "./AgentSetupAssistant";
 import { ExpectedServedModelCard } from "./ExpectedServedModelCard";
+// ADR-0241 (P21): part of this lazy route chunk too
+import { UsageMappingCard } from "./UsageMappingCard";
 import { ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
@@ -120,6 +122,7 @@ export default function AgentsPage(props: { slot?: AgentsTabSlot }) {
             [
               "pricing",
               <>
+                <UsageMappingCard agents={agents.data?.agents ?? []} />
                 <ModelPricingCard agents={agents.data?.agents ?? []} />
                 <ExpectedServedModelCard agents={agents.data?.agents ?? []} />
                 <SystemPromptCard agents={agents.data?.agents ?? []} />
