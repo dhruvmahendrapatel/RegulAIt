@@ -214,3 +214,56 @@ The release after slice 1, as decision 4 scheduled:
   (filtered and unfiltered evaluators), 2,000 full kernel `Decision` comparisons, 10 runs past the cache size, the
   pre-filter's zero-wasm case, fail-closed on error and on throw, and schema validation with no stored value in policy
   text.
+
+## As built: slice 2b, the decision core's approval-rule match on Cedar (2026-11-20, lane E48)
+
+Slice 2 moved the MCP match. The other three call types in the ADR-0251 decision core (model, connector, A2A) still
+matched `resource_approval_rules` with the hand-written `matchingResourceApprovalRules` in `resource.ts`. This slice
+moves that match onto Cedar. Behaviour does not change.
+
+- **Engine.** `packages/policy-kernel/src/resource-approval-rule-cedar.ts` (`@regulait/policy-kernel/resource-approval-rule-cedar`)
+  follows the shape of the slice-2 engine. Each rule is a `RegulAIt::ResourceApprovalRule` entity. Each rule gets one
+  `forbid` policy that names it only by position, so no stored value reaches policy text. The policy is the old
+  predicate, conjunct for conjunct: the same resource type, then every resource (`resourceId` null) or this one, then
+  `writeOnly` applies only on a write. An absent `resourceId` binds no resource, as before. The policies are
+  validated against a schema, and the set is preparsed for each size up to 256 rules.
+- **One batched Cedar request per governed call.** All of a call's rules go to Cedar in one `isAuthorized` request.
+  A call reads the matched set up to three times: the gateway's consent binding (model gate, connector write
+  binding), the kernel's `composeResourceDecision`, and a second compose on the hard-window path. Before this slice
+  each read ran the predicate again. `loadResourceRestrictions` now attaches `perCallResourceApprovalRuleEvaluator()`
+  to `ResourceRestrictions.approvalRuleEvaluator`. That field is required, so no path can fall back to the
+  hand-written predicate by leaving it out. The evaluator caches Cedar's answer for that call's rules array, keyed
+  on the array's identity and length and on the call's type, id and write flag. Every later read shares the answer,
+  and a different call or a changed rule set asks again. An error is never cached. Measured in the gateway: exactly
+  one wasm call per governed call. A pre-filter drops rules of another type or bound to another resource. The gateway
+  already loads only the caller's rules for this resource, so the pre-filter is a guard. A call with no rule makes no
+  wasm call.
+- **Ordering stays TypeScript.** Cedar answers only WHICH rules bind the call. The specificity order that names the
+  approver (one resource before type-wide, then by id) stays in `matchingResourceApprovalRulesWith`.
+- **Error is deny.** An engine error, a throw, or an answer naming a rule it was not given is an error verdict.
+  `composeResourceDecision` refuses the call with `approval-rule-engine-error`. That is the same rule id as the MCP
+  path, and it refuses even when a consent is in hand. The model gate and the connector write path bind no consent
+  on an error, and the kernel refuses the same call. An error never reads as "no rule binds".
+- **Kernel default for one release.** With no evaluator, `composeResourceDecision` keeps the hand-written predicate,
+  as slice 2 did. Every existing `resource.test.ts` case runs unchanged. Its removal joins PENDING P8a.
+- **Proof of agreement.** `resource-approval-rule-cedar.test.ts` runs these checks:
+  - 5,000 generated matched-set comparisons in specificity order, for the filtered, unfiltered and per-call
+    evaluators;
+  - 2,000 full `composeResourceDecision` comparisons, with generated entitlement bases, ABAC verdicts, rate limits,
+    consents and queueability;
+  - 10 runs past the cache size;
+  - a check that a call whose rules cannot bind makes no wasm call;
+  - a check of one request per call, with no reuse across calls or rule sets;
+  - fail-closed checks for error, throw and a foreign answer, and a check that the per-call evaluator does not keep
+    an error;
+  - schema validation, with no stored value in policy text.
+
+  A probe that dropped the `writeOnly` conjunct failed four of these tests.
+- **Latency.** The no-rule path is unchanged, because it makes no wasm call. With five approval rules and five limits
+  (`zz-adr0251-core-latency`, `REGULAIT_BENCH=1`), an A/B in one process on the builder's container gave these p50
+  figures: hand-written 3.46–3.68 ms, Cedar 3.87–4.13 ms, so about +0.4 ms. The p95 figures were noise-dominated,
+  4.9–6.6 ms on both sides. The engine alone takes 0.19 ms p50 and 0.32 ms p95. The bench's ten-rule p95 bound of
+  6 ms was already marginal on that container before this change (5.66–6.03 ms). The bench is skipped in CI.
+- **Not in this slice.** Resource rate limits stay on the `resource.ts` predicate. That predicate is reached only
+  when a limit binds, and it has no wasm cost today. Moving it into the same request is the next step if a third
+  rule type joins. No migration.

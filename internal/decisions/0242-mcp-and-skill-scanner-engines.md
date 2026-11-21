@@ -103,7 +103,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 
 - Every base image is pinned by digest: `python:3.12-slim-trixie@sha256:4840d514…`, `node:22-trixie-slim@sha256:be1e2a3d…`
   for the licence gate, `python:3.12-trixie@sha256:cad37dd2…` to build yara-python (all CPython 3.12.16), and
-  `golang:1.27-trixie@sha256:af1bfc26…` (Go 1.27.3) to rebuild skill-scanner's CEL helper.
+  `golang:1.27-trixie@sha256:f18c3d73…` (Go 1.27.4; was `af1bfc26…`, Go 1.27.3, until CVE-2026-97054) to rebuild skill-scanner's CEL helper.
 - The closure comes from our lockfile (`requirements.txt`): every wheel is pinned by sha256 and installed with
   `--require-hashes --no-deps --only-binary :all:`. That is 110 wheels for mcp-scanner and 99 for skill-scanner,
   resolved for cp312 manylinux x86_64. pip is removed from the image.
@@ -119,7 +119,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
     lockfiles override filelock to 4.2.9. garak already ships filelock 4.x with litellm; the smoke scans prove both
     engines still run.
   - skill-scanner's wheel bundles a Go CEL helper built with Go 1.27.1, whose standard library carries four advisories.
-    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.3 (`golang:1.27-trixie`, pinned
+    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.4 (`golang:1.27-trixie`, pinned
     by digest) and the flags of its packaging script. `cel-helper.py` swaps it in and rewrites the four
     build-describing fields of its manifest, which skill-scanner checks at every start. The module downloads are
     checked against the sdist's `go.sum` and happen at build time only.

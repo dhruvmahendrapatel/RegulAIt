@@ -238,7 +238,7 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     expect(readFileSync(path.join(root, "engines/mcpscanner/requirements-sdist.txt"), "utf8")).toMatch(/^yara-python==4\.5\.4 \\\n    --hash=sha256:[0-9a-f]{64}$/m);
   });
 
-  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.3", () => {
+  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.4", () => {
     for (const id of ["mcpscanner", "skillscanner"]) {
       const req = readFileSync(path.join(root, "engines", id, "requirements.txt"), "utf8");
       expect(req).toMatch(/^litellm==1\.108\.2 \\$/m);
@@ -246,8 +246,8 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     }
     const docker = readFileSync(path.join(root, "engines/skillscanner/Dockerfile"), "utf8");
     expect(docker).toMatch(/^FROM --platform=linux\/amd64 golang:1\.27-trixie@sha256:[0-9a-f]{64} AS cel$/m);
-    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.3"');
-    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3");
+    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.4"');
+    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.4");
   });
 
   it("#727 review: the skill driver fails closed on analyzers_failed, a failed or missing rule contract, an unexpected analyzer set and no to_dict (its own self-test, also run in the image build)", () => {
