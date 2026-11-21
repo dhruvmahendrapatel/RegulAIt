@@ -76,6 +76,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
 import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { governedEvaluateResource } from "./governed-core.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
@@ -313,6 +314,8 @@ export interface GovernedA2aCallArgs {
   ceilingAgentIds?: readonly string[] | null;
   /** an admin may attribute to any project; anyone else must be a member of a project that has members (absent = not an admin) */
   callerIsAdmin?: boolean;
+  /** ADR-0251 slice 4b: the request's session facts (`abacPrincipalFromRequest`) for the ABAC v5 request; absent = strict values */
+  principal?: AbacPrincipalContext | null;
 }
 
 export type GovernedA2aCallOutcome =
@@ -402,7 +405,15 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
       ceilingAgentIds: args.ceilingAgentIds ?? null,
     });
     if (entitlement.effect === "allow") grantId = entitlement.ruleId;
-    core = await governedEvaluateResource(db, { userId: args.userId, resource, projectId, base: entitlement, canQueue: false });
+    core = await governedEvaluateResource(db, {
+      userId: args.userId,
+      resource,
+      projectId,
+      base: entitlement,
+      canQueue: false,
+      // A2A has no delegated path yet (no grant id reaches it), so the actor is the person: an empty chain
+      facts: { principal: args.principal ?? null, actor: null },
+    });
   } catch (err) {
     core = governedCoreErrorDecision(resource, err);
   }
@@ -862,7 +873,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: `expected { text (1 to ${A2A_MESSAGE_MAX_CHARS} characters), skillId?, projectId? }` });
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "forbidden", detail: "a remote agent is called as a person; this credential has none" });
-    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
+    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true, principal: abacPrincipalFromRequest(req) }, deps);
     if (out.kind === "allowed")
       return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId, withheld: out.withheld, ...(out.pii ? { pii: out.pii } : {}), ...(out.guardrails ? { guardrails: out.guardrails } : {}) };
     return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
