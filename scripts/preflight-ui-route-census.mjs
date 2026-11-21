@@ -195,6 +195,7 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/LinkRequestsPage.tsx"],
     ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatIdentityLinksPage.tsx"],
     ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentCatalogPage.tsx"],
+    ["GET /v1/agent-identity/ownership-findings/export.xlsx", "apps/web/src/views/admin/governance/AgentRiskPage.tsx"],
     ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicenceVerificationsPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
@@ -317,6 +318,7 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/llm/jobs", "apps/web/src/views/admin/llm/RegulAItLlmPage.tsx"],
     ["GET /v1/mcp-registries/:registryId/entries", "apps/web/src/views/admin/integrations/McpRegistriesPanel.tsx"],
     ["GET /v1/model-artifacts", "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx"],
+    ["GET /v1/agent-identity/ownership-findings", "apps/web/src/views/admin/governance/AgentRiskPage.tsx"],
     ["GET /v1/onboarding/imports", "apps/web/src/views/admin/settings/OnboardingImportsCards.tsx"],
     ["GET /v1/scheduler/jobs/:name/runs", "apps/web/src/views/admin/settings/SchedulerJobHistory.tsx"],
     ["GET /v1/security/data-key/attestations", "apps/web/src/views/admin/settings/DataKeyPage.tsx"],

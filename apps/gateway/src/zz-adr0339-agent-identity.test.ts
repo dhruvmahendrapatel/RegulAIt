@@ -193,6 +193,13 @@ describe("ADR-0339 slice 2: ownership", () => {
     expect((await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?limit=200" })).statusCode).toBe(400);
     expect((await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings?flag=owned" })).statusCode).toBe(400);
     expect((await app.inject({ method: "GET", headers: plain.auth, url: "/v1/agent-identity/ownership-findings" })).statusCode).toBe(403);
+    // the same list as an Excel download (ADR-0226), admin only
+    const xlsx = await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings/export.xlsx?kind=agent&flag=orphaned&columns=name,flag,owner,lastActive" });
+    expect(xlsx.statusCode).toBe(200);
+    expect(xlsx.headers["content-type"]).toContain("spreadsheetml");
+    expect(xlsx.rawPayload.subarray(0, 2).toString()).toBe("PK");
+    expect((await app.inject({ method: "GET", headers: adminA.auth, url: "/v1/agent-identity/ownership-findings/export.xlsx?kind=user&columns=name" })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", headers: plain.auth, url: "/v1/agent-identity/ownership-findings/export.xlsx" })).statusCode).toBe(403);
   });
 });
 
