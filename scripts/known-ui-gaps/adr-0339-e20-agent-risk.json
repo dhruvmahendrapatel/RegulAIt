@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0339",
+  "lane": "E20",
+  "tracking": "ADR-0339 (lane E20): API-only, master brief for lane E20 2026-11-16; the screen goes to the UI builder on #453",
+  "gaps": {
+    "GET /v1/agent-risk": "ranks agents (registry or builder) by their newest stored risk score, with the count not yet scored (admin)",
+    "GET /v1/agent-risk/:kind/:subjectId": "one agent's live risk score: every factor with its OWASP ids, reach, toxic combinations and ranked fixes, plus the newest stored assessment",
+    "GET /v1/agent-risk/:kind/:subjectId/history": "pages one agent's stored risk assessments, newest first, each with what triggered it",
+    "POST /v1/agent-risk/recompute": "runs the risk recompute sweep now, optionally for one agent (admin, audited per assessment)"
+  }
+}

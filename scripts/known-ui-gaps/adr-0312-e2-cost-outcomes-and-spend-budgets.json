@@ -1,0 +1,14 @@
+{
+  "adr": "ADR-0312",
+  "lane": "E2",
+  "tracking": "ADR-0312 (lane E2, G3): API-only cost-per-outcome and spend-budget routes; the dashboard cards are posted on #453",
+  "gaps": {
+    "GET /v1/cost-outcomes": "pages recorded outcomes (merged PR, workflow run, accepted change, completed work item) with each one's metered spend; a non-admin sees only their own",
+    "GET /v1/cost-outcomes/summary": "per-project or per-cost-centre cost per outcome, metered by kind, with imported spend beside it (never combined)",
+    "POST /v1/cost-outcomes/refresh": "runs the outcome recorder now (admin, audited); the scheduler runs it every five minutes",
+    "GET /v1/user-spend-budgets": "lists every person's spend budget (alert only): amount, window and alert threshold",
+    "GET /v1/users/:userId/spend-budget": "a person's spend budget with their metered spend in the window and imported spend beside it (self or admin)",
+    "PUT /v1/users/:userId/spend-budget": "sets a person's spend budget; crossing its threshold raises a governance alert (audited)",
+    "DELETE /v1/users/:userId/spend-budget": "removes a person's spend budget, a relaxation (settings_relax step-up, audited)"
+  }
+}
