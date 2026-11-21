@@ -105,3 +105,30 @@ genuinely needs hierarchical or parallel states (then XState v5 is the candidate
   under the row lock, the admin clear's guard from the table). `lifecycle` on `GET /v1/llm/jobs/:id` and on each
   server of `GET /v1/mcp/admission`. Tests: `packages/shared/src/state-machine.test.ts`,
   `apps/gateway/src/adr0348-state-machines.test.ts` (the three race tests fail on the code before this change).
+- **Slice 2:** `incident` declared. The edit, close, containment and corrective-action writes re-read the incident
+  under a row lock inside their transaction. An edit built from a read someone else's change has since overtaken is
+  refused with 409 `incident_changed` (it used to undo the other change). A close re-checks its clocks and actions
+  under the lock, a containment moves from the locked status and never re-opens a resolved or closed incident, and an
+  action cannot be added or re-opened beside a close that is committing. The incident detail carries `lifecycle`, with
+  this reader's refusals (who may act, what still blocks a close). `eval_run` declared: a runner that throws after the
+  run row exists records `error` with the message (it used to stay `running` and block its red-team library's
+  retirement for good); the completion write is guarded. The orchestration overage approval merges its flag into the
+  stored budget in one statement (it used to overwrite a concurrent measured-spend charge). The scheduler releases a
+  lease only while it still holds it (`lease_owner` and `last_run_at` fence), and says `leaseLost` on its own run row
+  otherwise. Tests: `apps/gateway/src/adr0348-slice2-races.test.ts` and one case in `eval-harness.test.ts` (each race
+  case fails on the code before slice 2); every registered machine's states are held equal to its column's CHECK.
+- **Slice 3:** `use_case`, `approval`, `redteam_library` and `shadow_ai_finding` declared (eight machines in all).
+  Use cases: the intake sync moves only along the table; a returned sign-off, a retire and a review re-open are
+  guarded on the status read, so none overwrites a retire or a decision committed meanwhile (a re-open of a retired
+  use case is refused up front). Approvals: a review round supersedes only rows still pending. Red-team libraries:
+  the dataset, its cases and the publish commit together under the library's row lock (a publish racing a retire is
+  a 409 and leaves no dataset). Shadow-AI findings: a disposition moves only from the value it read (409
+  `disposition_changed` otherwise). Infra: each proposal (finding remediation, certificate rotation, patch, restore)
+  claims its proposed state with a guarded update in the same transaction as its approval, so two proposals cannot
+  queue two approvals; these four tables are guarded but not declared yet, because their columns have no CHECK and
+  their decision and scan writers are many (the declaration rides the CHECK migration batch). Skill re-scan: guarded
+  on the admission state and digest it read. Billing close: the cut and the close commit under the period's row lock.
+  `GET /v1/state-machines` lists every machine, or one machine and `describe(state)`, to any signed-in caller
+  (definitions only; `machine` is looked up with `Object.hasOwn`). Route census: one KNOWN_UI_GAPS entry on #453.
+  Tests: `apps/gateway/src/adr0348-slice3-races.test.ts` (each race case fails on the code before slice 3).
+

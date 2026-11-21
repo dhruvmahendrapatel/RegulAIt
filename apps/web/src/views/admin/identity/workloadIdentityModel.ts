@@ -17,7 +17,7 @@
 // mirrored contract constants
 // ---------------------------------------------------------------------------
 
-export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp", "endpoint_agent"] as const;
+export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp", "endpoint_agent", "browser_extension"] as const;
 export type WorkloadIdentityKind = (typeof WORKLOAD_IDENTITY_KINDS)[number];
 export const WORKLOAD_IDENTITY_STATUSES = ["active", "suspended", "revoked"] as const;
 export type WorkloadIdentityStatus = (typeof WORKLOAD_IDENTITY_STATUSES)[number];
@@ -287,6 +287,7 @@ export const workloadKindLabels: Record<WorkloadIdentityKind, string> = {
   worker_runtime: "External worker",
   pdp: "Policy client",
   endpoint_agent: "Endpoint agent",
+  browser_extension: "Browser extension",
 };
 
 /** micro-dollars as dollars; anything that is not a safe whole number reads "Unmeasured", never $0 */
@@ -526,6 +527,7 @@ export const SUBJECT_COLUMN: Record<WorkloadIdentityKind, "agentId" | "builderAg
   worker_runtime: null,
   pdp: null,
   endpoint_agent: null,
+  browser_extension: null,
 };
 
 export function isSpiffeId(value: string): boolean {
