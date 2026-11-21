@@ -1,6 +1,7 @@
 /**
- * ADR-0239 slice 2b — the Cedar approval-rule MATCH for model, connector and A2A calls against the hand-written one
- * (`matchingResourceApprovalRules`).
+ * ADR-0239 slice 2b — the Cedar approval-rule MATCH for model, connector and A2A calls against the hand-written one.
+ * P8b (2026-11-21) removed the hand-written `matchingResourceApprovalRules` from the kernel; it lives on below,
+ * transcribed independently, as the differential oracle (`referenceMatchingResourceApprovalRules`).
  *
  * The differential properties generate rules and calls from small pools (so matches, near-misses, every resource
  * binding and both write kinds occur often) and require the two to agree: on the matched set in specificity order, and
@@ -11,7 +12,6 @@ import fc from "fast-check";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import {
   composeResourceDecision,
-  matchingResourceApprovalRules,
   matchingResourceApprovalRulesWith,
   RESOURCE_RULE_IDS,
   type AbacDecision,
@@ -30,6 +30,25 @@ import {
   resourceApprovalRuleCedarCallCount,
   resourceApprovalRulePolicySet,
 } from "./resource-approval-rule-cedar.js";
+
+/**
+ * THE ORACLE: the pre-Cedar kernel predicate, transcribed conjunct for conjunct (same resource type; `resourceId`
+ * null = every resource of the type, so an absent one binds no resource; `writeOnly` read for truthiness, only on a
+ * write, where a connector write and every A2A message are writes and a model call never is), sorted one resource
+ * before type-wide, then by id.
+ */
+function referenceMatchingResourceApprovalRules<R extends ResourceApprovalRule>(resource: GovernedResource, rules: readonly R[]): R[] {
+  const write = resource.type === "connector" ? resource.operation === "write" : resource.type === "a2a";
+  const wide = (r: ResourceApprovalRule) => (r.resourceId === null ? 1 : 0);
+  return rules
+    .filter((r) => r.resourceType === resource.type && (r.resourceId === null || r.resourceId === resource.id) && (!r.writeOnly || write))
+    .sort((a, b) => wide(a) - wide(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+/** the oracle as an engine, for whole-decision comparisons now that "no engine" refuses */
+const referenceResourceApprovalRuleEvaluator: ResourceApprovalRuleEvaluator = {
+  engine: "reference",
+  matching: (rules, resource) => ({ kind: "matched", rules: referenceMatchingResourceApprovalRules(resource, rules) }),
+};
 
 const TYPES = ["model", "connector", "a2a"] as const;
 const IDS = ["r-1", "r-2", 'x") || true || ("'];
@@ -86,6 +105,7 @@ const arbCompose: fc.Arbitrary<ComposeResourceInput> = arbResource.chain((resour
     abacDecision: arbAbac,
     approvedApprovalId: fc.option(fc.constant("appr-1"), { nil: null }),
     canQueue: fc.boolean(),
+    approvalRuleEvaluator: fc.constant(referenceResourceApprovalRuleEvaluator),
   }),
 );
 
@@ -96,7 +116,7 @@ describe("ADR-0239 slice 2b — Cedar resource approval-rule matching agrees wit
   it("returns the same matched rules, in the same specificity order", () => {
     fc.assert(
       fc.property(arbResource, fc.array(arbRule, { maxLength: 12 }), (resource, rules) => {
-        const legacy = ids(matchingResourceApprovalRules(resource, rules));
+        const legacy = ids(referenceMatchingResourceApprovalRules(resource, rules));
         for (const ev of [cedarResourceApprovalRuleEvaluator, cedarResourceApprovalRuleEvaluatorUnfiltered, perCallResourceApprovalRuleEvaluator()]) {
           const v = matchingResourceApprovalRulesWith(ev, resource, rules);
           expect(v.kind).toBe("matched");
@@ -122,7 +142,7 @@ describe("ADR-0239 slice 2b — Cedar resource approval-rule matching agrees wit
     fc.assert(
       fc.property(arbResource, fc.array(arbRule, { minLength: 257, maxLength: 300 }), (resource, rules) => {
         const v = matchingResourceApprovalRulesWith(cedarResourceApprovalRuleEvaluatorUnfiltered, resource, rules);
-        expect(v.kind === "matched" ? ids(v.rules) : v).toEqual(ids(matchingResourceApprovalRules(resource, rules)));
+        expect(v.kind === "matched" ? ids(v.rules) : v).toEqual(ids(referenceMatchingResourceApprovalRules(resource, rules)));
       }),
       { numRuns: 10 },
     );
@@ -202,6 +222,19 @@ describe("ADR-0239 slice 2b — fail closed", () => {
     expect(d).toMatchObject({ effect: "deny", ruleId: RESOURCE_RULE_IDS.approvalEngineError, matchedApprovalRuleIds: [] });
     expect(d.reason).toContain("engine down");
     expect(d.ruleChain.at(-1)).toEqual({ rule: RESOURCE_RULE_IDS.approvalRule, outcome: "deny", grantId: RESOURCE_RULE_IDS.approvalEngineError });
+  });
+
+  it("P8b: no evaluator with an approval rule present refuses the call (the hand-written default is gone)", () => {
+    const d = composeResourceDecision({ ...input(cedarResourceApprovalRuleEvaluator), approvalRuleEvaluator: null });
+    expect(d).toMatchObject({ effect: "deny", ruleId: RESOURCE_RULE_IDS.approvalEngineError, matchedApprovalRuleIds: [] });
+    expect(d.reason).toContain("no approval-rule evaluator is configured");
+    expect(matchingResourceApprovalRulesWith(undefined, resource, [rule])).toEqual({ kind: "error", message: "no approval-rule evaluator is configured" });
+  });
+
+  it("P8b: no evaluator and no approval rules is not a refusal (nothing to match, no engine needed)", () => {
+    const d = composeResourceDecision({ ...input(cedarResourceApprovalRuleEvaluator), approvalRules: [], approvalRuleEvaluator: null });
+    expect(d).toMatchObject({ effect: "allow", ruleId: "g-1" });
+    expect(matchingResourceApprovalRulesWith(null, resource, [])).toEqual({ kind: "matched", rules: [] });
   });
 
   it("an evaluator that throws refuses the call", () => {
