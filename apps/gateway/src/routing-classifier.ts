@@ -11,15 +11,24 @@
  * own register → test → enable gate). It is bounded at ROUTING_CLASSIFIER_TIMEOUT_MS because it sits on the dispatch
  * path. Every failure falls back to the heuristic with its reason; nothing here ever refuses a dispatch.
  *
+ * PII NEVER REACHES THE CLASSIFIER (S3 B1). The classifier runs before the dispatch's own §8.4 input PII gate, and
+ * that gate's mode is only final once the call's sensitivity labels have been read (`stricterPiiMode` with the label
+ * floor). So the check here does not depend on any mode: if the text carries ANY PII hit (the base detectors plus the
+ * org's enabled national identifiers, exactly what the dispatch gate detects), it is not sent and the heuristic
+ * decides. A text the dispatch gate could block or redact under any mode, project or label, is therefore never sent;
+ * a text with no hits is one no mode acts on. This is stricter than the dispatch gate itself (a `log` or `warn`
+ * project would still send it to the provider), on purpose: the scorer is a second, optional recipient.
+ *
  * Every dispatch that ran with a classifier configured writes one `routing-classified` audit row (the scorer, the
  * score, the complexity, the source and the routing decision), so "why was this request served by that model" is
  * answerable from the audit trail and not only from the cost ledger.
  */
 import { auditLog, eq, externalScorers, type Db } from "@regulait/db";
-import { ROUTING_SCORER_KIND, routingClassifierProblem } from "@regulait/shared";
+import { detectPII, ROUTING_SCORER_KIND, routingClassifierProblem } from "@regulait/shared";
 import { classifyComplexity, complexityFromScore, type Complexity, type RoutingDecision } from "@regulait/optimizer-kernel";
 import { callExternalScorer, resolveExternalScorersByName } from "./external-scorers.js";
 import { errMessage } from "./err-serializer.js";
+import { piiInternationalCategories } from "./org-settings.js";
 import type { EgressResolver } from "./egress-guard.js";
 
 /** the bound on one classifier call: it is on the dispatch path, so a slow scorer falls back rather than stalls */
@@ -77,6 +86,11 @@ export async function classifyForRouting(
   // re-checked per dispatch: a scorer disabled or re-pointed after it was configured is not used
   const problem = routingClassifierProblem(row ? { ...row, scorerKinds: row.scorerKinds ?? [] } : null);
   if (problem) return fallback(row?.name ?? null, problem.detail);
+  // S3 B1: checked on the WHOLE text (a cut at the input cap must not send half an identifier), before any egress
+  const piiHits = detectPII(text ?? "", await piiInternationalCategories(db));
+  if (piiHits.length > 0) {
+    return fallback(row!.name, `the input contains PII (${piiHits.map((h) => h.category).join(", ")}); it is never sent to the classifier`);
+  }
   const { facts, resolved } = await resolveExternalScorersByName(db, dataKey, [row!.name], deps);
   const scorer = resolved.get(row!.name);
   if (!scorer) return fallback(row!.name, facts[0]?.detail ?? "the scorer is not reachable");

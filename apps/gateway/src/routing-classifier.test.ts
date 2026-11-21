@@ -12,7 +12,9 @@
  *  3. THE SCORE DECIDES THE COMPLEXITY, over the exact ADR-0088 wire shape.
  *  4. FAIL SAFE: an HTTP 500, a non-conforming reply, a hang past the bound and a scorer disabled after it was
  *     configured each fall back to the heuristic with a reason, and a non-2xx body never reaches the reason.
- *  5. THE AUDIT ROW: a classified dispatch writes one `routing-classified` row with the scorer, score and decision.
+ *  5. PII NEVER LEAVES (S3 B1): a text with any PII hit is not sent, whatever the project's or a label's PII mode,
+ *     because the check is mode-independent and sits in the one function both surfaces (invoke, compat) call.
+ *  6. THE AUDIT ROW: a classified dispatch writes one `routing-classified` row with the scorer, score and decision.
  *
  * SHARED-STATE DISCIPLINE: every object is `rc-` prefixed; the org setting is restored in afterAll.
  */
@@ -207,6 +209,33 @@ describe("ADR-0353 part 2: the pluggable routing classifier", () => {
       expect(hits.length).toBe(before);
     } finally {
       await db.update(externalScorers).set({ enabled: true }).where(eq(externalScorers.id, classifierId));
+    }
+  });
+
+  it("never sends text with PII to the classifier, under any PII mode, and falls back to the heuristic", async () => {
+    mode = "ok";
+    const org = { routingClassifierScorerId: classifierId };
+    for (const text of ["<<rc-hard>> my SSN is 123-45-6789", "<<rc-hard>> write to someone@example.com", `${"a".repeat(15_990)} 123-45-6789`]) {
+      const before = hits.length;
+      const c = await classifyForRouting(db, DATA_KEY, org, text);
+      expect(c).toMatchObject({ source: "heuristic-fallback", score: null, scorerName: "rc-classifier" });
+      expect(c.fallbackReason).toContain("contains PII");
+      expect(c.fallbackReason).not.toContain("123-45-6789");
+      expect(c.fallbackReason).not.toContain("someone@example.com");
+      expect(hits.length).toBe(before);
+    }
+    // the same prompt without the identifier is classified as before
+    expect((await classifyForRouting(db, DATA_KEY, org, "<<rc-hard>> my SSN is withheld")).source).toBe("external");
+  });
+
+  it("is the only route to the scorer on both dispatch surfaces", async () => {
+    const fs = await import("node:fs/promises");
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const file of ["agents-connectors.ts", "compat-core.ts"]) {
+      const src = await fs.readFile(path.join(here, file), "utf8");
+      expect(src).toContain("classifyForRouting(");
+      // the routing path never calls the scorer directly, so the PII check above cannot be stepped around
+      expect(src).not.toContain("callExternalScorer");
     }
   });
 

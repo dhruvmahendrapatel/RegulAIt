@@ -144,6 +144,12 @@ definition pinning run on exactly what a model will see, and the governed call p
 - **It only chooses a complexity.** Score below 1/3 is `low`, below 2/3 `medium`, otherwise `high`. `routeModel` still
   decides among entitlement-filtered candidates, never above the tier ceiling and never above the requested model's
   tier. A classifier cannot widen a grant or raise a cost ceiling.
+- **PII never reaches the classifier (security review S3 B1, 2026-11-21).** The classifier runs before the dispatch's
+  §8.4 input PII gate, whose mode is only final once the call's sensitivity labels are read. So the check does not
+  depend on a mode: a prompt with any PII hit (the base detectors plus the org's enabled national identifiers, as the
+  dispatch gate detects) is not sent, and the heuristic decides. This is stricter than the dispatch gate itself (a `log`
+  or `warn` project still sends such text to the provider) because the scorer is a second, optional recipient. The
+  check sits in `classifyForRouting`, the only route to the scorer from both surfaces.
 - **Fail safe, not fail open:** a disabled or unreachable scorer, a timeout (a 1.5 s bound on this hop), or a
   non-conforming reply falls back to the heuristic, and the reason is recorded.
 - **Recorded in the audit.** Every routed dispatch that used a configured classifier writes one `routing-classified`
@@ -209,7 +215,11 @@ not part of the OpenAPI slice. The binding conditions for that lane, recorded he
   ADR-0238 token exchange is the follow-up for per-user credentials.
 - Multipart and binary request bodies are refused at import (the operation is skipped with a reason).
 - The routing classifier sends the prompt text to the scorer the admin registered. That is the admin's decision, made
-  by registering the scorer behind the egress allow-list; an air-gapped deployment can only reach a local one.
+  by registering the scorer behind the egress allow-list; an air-gapped deployment can only reach a local one. A
+  prompt with any PII hit is never sent, whatever the project's or a label's PII mode.
+- The classifier still runs before the ADR-0042 input guardrail (secrets, prompt injection), so text the guardrail
+  would refuse can reach the scorer when it has no PII hit. Filed as `triage-low` #1168 (F1×S3 = 3). The audit volume
+  during a scorer outage and the free-text fallback reason are `triage-low` #1170.
 
 ## Owner questions (open; built with the secure default)
 
