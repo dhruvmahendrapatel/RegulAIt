@@ -49,6 +49,10 @@ export const DELIBERATELY_API_ONLY = new Map([
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
+  // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
+  ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
+  ["/v1/a2a/agents/:x/revocations/:x", "lifting a person's revocation on a remote agent: API-only until the controls on #453 (lane L2 brief)"],
   // ADR-0230 A2 (P19, Lane L3): the UI is built by the design builder; delete this entry when the screen lands
   // ADR-0350 (lane E31): each removal relaxes a device's policy and is a settings_relax step-up, audited
   ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
