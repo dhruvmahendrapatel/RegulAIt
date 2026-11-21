@@ -21,6 +21,11 @@
  *                       recorded in an ADR, landed by the owner (ADR-0196): one row of CEILING_EXCEPTIONS below, which
  *                       allows exactly one raise (that entry, from that limit, to that limit), names a dated owner
  *                       decision, and fails unless ADR-0196 records that decision's link. Any other raise still fails.
+ *                       Two removals are allowed (ADR-0344 addendum, owner decision 2026-11-21: the JS gate counts
+ *                       first-load JS only): a `chunk:` ceiling, because scripts/ui-chunk-budgets.mjs --check fails
+ *                       while its chunk is still built; and an entry named by a dated row of CEILING_REMOVALS whose
+ *                       decision ADR-0344 records. The `first-load JS` total may change its path list, because
+ *                       --check pins that list to the files dist/index.html loads; its limit and options stay guarded.
  *                       And it fails when the ceilings could be read from anywhere else: size-limit searches
  *                       package.json before .size-limit.json, so a `size-limit` key in apps/web/package.json, another
  *                       apps/web/.size-limit* file (.js, .cjs, …), or a `size` script that does not pin
@@ -72,6 +77,41 @@ export const CEILING_EXCEPTIONS = [
   { name: "all JS", from: "1150 kB", to: "1160 kB", date: "2026-11-15", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-6903109405" },
   { name: "all JS", from: "1160 kB", to: "1170 kB", date: "2026-11-20", decision: "https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7029051527" },
 ];
+/** ADR-0344: the per-route budgets, and the addendum that made the JS gate count first-load JS only */
+export const REMOVAL_ADR = "internal/decisions/0344-per-route-bundle-budgets.md";
+/** the hard first-load budget: the entry chunk plus every chunk it imports statically (what dist/index.html loads) */
+export const FIRST_LOAD_NAME = "first-load JS";
+const CHUNK_PREFIX = "chunk: ";
+const EXACT_CHUNK_PATH = /^dist\/assets\/[^/*?]+-\?{8}\.js$/;
+const FIRST_LOAD_ENTRY_PATH = "dist/assets/index-????????.js";
+
+/**
+ * Owner-approved removals of a `.size-limit.json` entry (ADR-0344). Each row allows `name` to leave the file and
+ * nothing else; `decision` names the dated owner decision, and ADR-0344 must have a line that names both the decision
+ * and `` `name` ``. A `chunk:` ceiling needs no row (see the file header).
+ */
+export const CEILING_REMOVALS = [
+  // the one total over every JS chunk; lazy chunks keep their own `chunk:` ceilings, first load keeps `first-load JS`
+  { name: "all JS", date: "2026-11-21", decision: "owner decision 2026-11-21: the JS bundle gate counts first-load JS only" },
+];
+
+/** problems with the removal rows themselves, as lines: no date, no decision, or no line of `adrText` naming both */
+export function ceilingRemovalProblems(removals, adrText) {
+  const out = [];
+  for (const r of removals) {
+    const label = `removal "${r.name}"`;
+    if (!ISO_DATE.test(r.date ?? "")) out.push(`${label}: no dated owner decision (date "${r.date}")`);
+    if (!r.decision) out.push(`${label}: no owner decision`);
+    else if (!adrText.split("\n").some((line) => line.includes(r.decision) && line.includes(`\`${r.name}\``))) {
+      out.push(`${label}: no line of ${REMOVAL_ADR} names "${r.decision}" and \`${r.name}\``);
+    }
+  }
+  return out;
+}
+
+/** whether `paths` is a first-load list the guard accepts: exact chunk paths only, the entry chunk among them */
+const firstLoadPathsOk = (paths) => paths.every((p) => EXACT_CHUNK_PATH.test(p)) && paths.includes(FIRST_LOAD_ENTRY_PATH);
+
 const DECISION_LINK = /^https:\/\/github\.com\/dhruvmahendrapatel\/RegulAIt\/issues\/\d+#issuecomment-\d+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -195,7 +235,7 @@ export function parseBytes(value) {
  * A raise that matches one of `exceptions` exactly (entry name, from and to in bytes), and that `adrText` records (see
  * ceilingExceptionProblems), is not a line.
  */
-export function sizeLimitLoosened(before, after, exceptions = [], adrText = "") {
+export function sizeLimitLoosened(before, after, exceptions = [], adrText = "", removals = [], removalAdrText = "") {
   const byName = (checks, side) => {
     const out = new Map();
     for (const c of checks) {
@@ -211,7 +251,10 @@ export function sizeLimitLoosened(before, after, exceptions = [], adrText = "") 
   for (const [name, b] of was) {
     const a = now.get(name);
     if (!a) {
-      out.push(`"${name}": entry removed`);
+      const allowed =
+        name.startsWith(CHUNK_PREFIX) ||
+        removals.some((r) => r.name === name && ceilingRemovalProblems([r], removalAdrText).length === 0);
+      if (!allowed) out.push(`"${name}": entry removed`);
       continue;
     }
     const lb = parseBytes(b.limit);
@@ -223,7 +266,10 @@ export function sizeLimitLoosened(before, after, exceptions = [], adrText = "") 
       );
       if (!allowed) out.push(`"${name}": limit raised ${b.limit} -> ${a.limit}`);
     }
-    if (options(a) !== options(b)) out.push(`"${name}": path, gzip or another option changed`);
+    // the first-load list follows the build (--check pins it to dist/index.html); its other options do not change
+    const firstLoad = name === FIRST_LOAD_NAME && firstLoadPathsOk([a.path].flat());
+    const same = firstLoad ? options({ ...a, path: [] }) === options({ ...b, path: [] }) : options(a) === options(b);
+    if (!same) out.push(`"${name}": path, gzip or another option changed`);
   }
   return out;
 }
@@ -284,6 +330,8 @@ function main(argv) {
     let failed = 0;
     const adr = path.join(root, SIZE_LIMIT_ADR);
     const adrText = existsSync(adr) ? readFileSync(adr, "utf8") : "";
+    const removalAdr = path.join(root, REMOVAL_ADR);
+    const removalAdrText = existsSync(removalAdr) ? readFileSync(removalAdr, "utf8") : "";
     for (const file of files) {
       const before = atRef(arg, file)?.entries ?? null;
       if (before === null) {
@@ -300,7 +348,7 @@ function main(argv) {
     else {
       const file = path.join(root, SIZE_LIMIT_FILE);
       const limitsAfter = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
-      const loosened = sizeLimitLoosened(limitsBefore, limitsAfter, CEILING_EXCEPTIONS, adrText);
+      const loosened = sizeLimitLoosened(limitsBefore, limitsAfter, CEILING_EXCEPTIONS, adrText, CEILING_REMOVALS, removalAdrText);
       for (const line of loosened) {
         console.log(`::error file=${SIZE_LIMIT_FILE}::a bundle ceiling loosened (a ceiling rises only through an ADR-recorded exception): ${line}`);
       }
@@ -309,6 +357,9 @@ function main(argv) {
     const unrecorded = ceilingExceptionProblems(CEILING_EXCEPTIONS, adrText);
     for (const line of unrecorded) console.log(`::error file=scripts/ui-enterprise-baseline.mjs::a ceiling exception is not an owner decision recorded in ADR-0196: ${line}`);
     failed += unrecorded.length;
+    const unrecordedRemovals = ceilingRemovalProblems(CEILING_REMOVALS, removalAdrText);
+    for (const line of unrecordedRemovals) console.log(`::error file=scripts/ui-enterprise-baseline.mjs::a ceiling removal is not an owner decision recorded in ADR-0344: ${line}`);
+    failed += unrecordedRemovals.length;
     const bypass = sizeLimitBypass(JSON.parse(readFileSync(path.join(WEB_DIR, "package.json"), "utf8")), readdirSync(WEB_DIR));
     for (const line of bypass) console.log(`::error file=apps/web/package.json::the bundle ceilings could bypass ${SIZE_LIMIT_FILE}: ${line}`);
     failed += bypass.length;

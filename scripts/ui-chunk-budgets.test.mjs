@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ALL_JS_PATH, ceilingFor, chunkName, chunkPath, coverageProblems, SIZE_LIMIT_FILE, withChunkCeilings } from "./ui-chunk-budgets.mjs";
+import { ceilingFor, chunkName, chunkPath, coverageProblems, FIRST_LOAD_NAME, firstLoadFiles, firstLoadProblems, SIZE_LIMIT_FILE, withChunkCeilings } from "./ui-chunk-budgets.mjs";
 
 const entry = { name: "entry JS (index)", path: "dist/assets/index-*.js", gzip: true, limit: "139.5 kB" };
 const chunk = (n, limit = "10.0 kB") => ({ name: `chunk: ${n}`, path: chunkPath(n), gzip: true, limit });
@@ -31,9 +31,15 @@ describe("per-route bundle budgets (ADR-0344)", () => {
     ]);
   });
 
-  it("does not count a total over every chunk as a chunk's ceiling", () => {
-    const allJs = { name: "all JS", path: ALL_JS_PATH, gzip: true, limit: "1150 kB" };
-    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, allJs])).toHaveLength(1);
+  it("does not count the first-load total as a chunk's ceiling", () => {
+    const firstLoad = { name: FIRST_LOAD_NAME, path: [chunkPath("builder"), chunkPath("index")], gzip: true, limit: "139.5 kB" };
+    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad])).toHaveLength(1);
+    expect(coverageProblems(["index-AAAAAAAA.js", "builder-BBBBBBBB.js"], [entry, firstLoad, chunk("builder")])).toEqual([]);
+  });
+
+  it("refuses a total over every JS chunk (the all-JS total is gone, ADR-0344 addendum)", () => {
+    const allJs = { name: "all JS", path: "dist/assets/*.js", gzip: true, limit: "1170 kB" };
+    expect(coverageProblems(["index-AAAAAAAA.js"], [entry, allJs])[0]).toMatch(/"all JS": path "dist\/assets\/\*\.js" is not/);
   });
 
   it("fails for a ceiling whose chunk the build no longer emits", () => {
@@ -65,13 +71,52 @@ describe("per-route bundle budgets (ADR-0344)", () => {
     expect(after).toEqual([entry, chunk("fresh", "6.7 kB"), chunk("kept", "1.0 kB")]);
   });
 
+  const html = `<!doctype html><head>
+    <script type="module" crossorigin src="/ui/assets/index-Dm8L3QSC.js"></script>
+    <link rel="modulepreload" crossorigin href="/ui/assets/react-BQ7o4F5D.js">
+    <link rel="modulepreload" crossorigin href="/ui/assets/views.module-C7hCG9NA.js">
+    <link rel="stylesheet" crossorigin href="/ui/assets/index-CndKyuc1.css">
+    <link rel="icon" href="/ui/assets/brand-favicon-BwQIX84i.svg">
+    <script src="/ui/assets/not-a-module-AAAAAAAA.js"></script>
+  </head>`;
+  const firstLoad = (paths) => ({ name: FIRST_LOAD_NAME, path: paths, gzip: true, limit: "139.5 kB" });
+
+  it("reads the first-load JS from dist/index.html: the module entry and every modulepreload, nothing else", () => {
+    expect(firstLoadFiles(html)).toEqual(["index-Dm8L3QSC.js", "react-BQ7o4F5D.js", "views.module-C7hCG9NA.js"]);
+    expect(firstLoadFiles("<html></html>")).toEqual([]);
+  });
+
+  it("fails unless first-load JS lists exactly what a first visit loads", () => {
+    const files = firstLoadFiles(html);
+    const exact = [chunkPath("index"), chunkPath("react"), chunkPath("views.module")];
+    expect(firstLoadProblems(files, [entry, firstLoad(exact)])).toEqual([]);
+    expect(firstLoadProblems(files, [entry, firstLoad([...exact].reverse())])).toEqual([]);
+    // a new static import of the entry cannot stay out of the total
+    expect(firstLoadProblems(files, [entry, firstLoad(exact.slice(0, 2))])[0]).toMatch(/must be exactly what dist\/index.html loads/);
+    expect(firstLoadProblems(files, [entry, firstLoad([...exact, chunkPath("extra")])])[0]).toMatch(/must be exactly/);
+    expect(firstLoadProblems(files, [entry, { ...firstLoad(exact), gzip: false }])).toEqual(['"first-load JS": must measure gzip (`"gzip": true`)']);
+    expect(firstLoadProblems(files, [entry])[0]).toMatch(/no "first-load JS" ceiling/);
+    expect(firstLoadProblems([], [entry, firstLoad(exact)])[0]).toMatch(/loads no JS/);
+  });
+
+  it("writes the first-load path list from the build and keeps its limit", () => {
+    const before = [entry, firstLoad([chunkPath("index")]), chunk("react"), chunk("views.module")];
+    const after = withChunkCeilings(before, { index: 39_000, react: 2_800, "views.module": 39_000 }, firstLoadFiles(html));
+    expect(after[1]).toEqual(firstLoad([chunkPath("index"), chunkPath("react"), chunkPath("views.module")]));
+    expect(after.slice(2)).toEqual([chunk("react"), chunk("views.module")]);
+  });
+
   it("covers every chunk of the committed .size-limit.json with the shape the check reads", () => {
     const entries = JSON.parse(readFileSync(SIZE_LIMIT_FILE, "utf8"));
     const chunks = entries.filter((e) => e.name.startsWith("chunk: "));
     expect(chunks.length).toBeGreaterThan(0);
     for (const c of chunks) expect(c).toEqual({ ...chunk(c.name.slice("chunk: ".length)), limit: c.limit });
-    // the first-load budget stays the two entry ceilings, unchanged by ADR-0344
+    // the entry ceilings stay; the hard first-load total joins them, and no total over every chunk remains
     expect(entries.find((e) => e.name === "entry JS (index)")).toEqual(entry);
     expect(entries.find((e) => e.name === "entry CSS (index)")?.limit).toBe("10.7 kB");
+    const total = entries.find((e) => e.name === FIRST_LOAD_NAME);
+    expect(total).toMatchObject({ gzip: true, limit: "139.5 kB" });
+    expect(total.path).toContain(chunkPath("index"));
+    expect(entries.find((e) => e.name === "all JS")).toBeUndefined();
   });
 });

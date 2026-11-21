@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 /**
- * ADR-0344: per-route bundle budgets. The first-load budget stays the two entry ceilings in apps/web/.size-limit.json
- * ("entry JS (index)" and "entry CSS (index)"); every other JS chunk the build emits (each lazily loaded route chunk,
- * and each shared chunk those load) has its own gzip ceiling there, named `chunk: <name>`. A new screen grows only the
- * chunk of the route it lives in, so screens in different routes no longer share one total.
+ * ADR-0344: per-route bundle budgets. The hard first-load budget is `first-load JS` in apps/web/.size-limit.json: the
+ * gzip total of the entry chunk and every chunk dist/index.html preloads with it (its static imports), beside the
+ * "entry JS (index)" and "entry CSS (index)" ceilings. Every JS chunk the build emits (each lazily loaded route chunk,
+ * and each shared chunk) has its own gzip ceiling there, named `chunk: <name>`. A new screen grows only the chunk of
+ * the route it lives in; there is no total over every chunk (ADR-0344 addendum, owner decision 2026-11-21).
  *
  *   --check   after `pnpm --filter @regulait/web build`: exit 1 unless every JS file under apps/web/dist/assets is
  *             covered by exactly one ceiling, every `chunk:` ceiling names a chunk the build emitted, and no two
- *             chunks share a name (size-limit would add them up under one ceiling). size-limit itself checks the
- *             sizes; this checks that nothing is left without a ceiling.
+ *             chunks share a name (size-limit would add them up under one ceiling), and `first-load JS` lists
+ *             exactly the JS files dist/index.html loads. size-limit itself checks the sizes; this checks that
+ *             nothing is left without a ceiling and that the first-load total measures what a first visit loads.
  *   --write   add a `chunk:` ceiling for each emitted chunk that has none, at its current gzip size plus HEADROOM, and
- *             drop `chunk:` ceilings for chunks the build no longer emits. It never changes an existing ceiling: a raise
+ *             drop `chunk:` ceilings for chunks the build no longer emits, and set the `first-load JS` path list to
+ *             what dist/index.html loads. It never changes an existing limit: a raise
  *             goes through an owner exception (scripts/ui-enterprise-baseline.mjs, CEILING_EXCEPTIONS).
  *
  * A route that is not lazy-loaded is part of the entry chunk, so it counts against "entry JS (index)". There is no
@@ -31,9 +34,10 @@ import { gzipSync } from "node:zlib";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const SIZE_LIMIT_FILE = path.join(root, "apps", "web", ".size-limit.json");
 export const ASSETS_DIR = path.join(root, "apps", "web", "dist", "assets");
+export const INDEX_HTML = path.join(root, "apps", "web", "dist", "index.html");
 export const CHUNK_PREFIX = "chunk: ";
-/** the path of a total over every JS chunk, which is not a per-chunk ceiling */
-export const ALL_JS_PATH = "dist/assets/*.js";
+/** the hard first-load total: the entry chunk plus its static imports; it is not a chunk's own ceiling */
+export const FIRST_LOAD_NAME = "first-load JS";
 
 /**
  * ADR-0344's headroom: a new ceiling is the chunk's gzip size plus 10%, and at least 2 kB more, rounded up to the next
@@ -51,6 +55,39 @@ export const chunkPath = (name) => `dist/assets/${name}-????????.js`;
 export function ceilingFor(bytes) {
   const withRoom = Math.max(bytes * (1 + HEADROOM.ratio), bytes + HEADROOM.minBytes);
   return `${(Math.ceil(withRoom / 100) / 10).toFixed(1)} kB`;
+}
+
+/**
+ * the JS files a first visit loads, read from the built dist/index.html: the module entry script and every
+ * `modulepreload` link, which Vite writes for each chunk the entry imports statically. Sorted file names.
+ */
+export function firstLoadFiles(html) {
+  const out = new Set();
+  for (const tag of html.match(/<(?:script|link)\b[^>]*>/gi) ?? []) {
+    const isEntry = /^<script\b/i.test(tag) && /\btype=["']module["']/i.test(tag);
+    const isPreload = /^<link\b/i.test(tag) && /\brel=["']modulepreload["']/i.test(tag);
+    const url = /\b(?:src|href)=["']([^"']+\.js)["']/i.exec(tag)?.[1];
+    if ((isEntry || isPreload) && url) out.add(url.slice(url.lastIndexOf("/") + 1));
+  }
+  return [...out].sort();
+}
+
+/** the `first-load JS` path list for those files */
+export const firstLoadPaths = (files) => files.map((f) => chunkPath(chunkName(f) ?? f)).sort();
+
+/** problems with the `first-load JS` total against the files a first visit loads, as lines */
+export function firstLoadProblems(files, entries) {
+  const e = entries.find((x) => x.name === FIRST_LOAD_NAME);
+  if (!e) return [`no "${FIRST_LOAD_NAME}" ceiling in apps/web/.size-limit.json; the first-load JS budget is required`];
+  const out = [];
+  if (e.gzip !== true) out.push(`"${FIRST_LOAD_NAME}": must measure gzip (\`"gzip": true\`)`);
+  if (files.length === 0) out.push("dist/index.html loads no JS; the build did not write its entry");
+  const want = firstLoadPaths(files);
+  const have = [e.path].flat().slice().sort();
+  if (JSON.stringify(want) !== JSON.stringify(have)) {
+    out.push(`"${FIRST_LOAD_NAME}": its paths must be exactly what dist/index.html loads (${want.join(", ")}); set them with node scripts/ui-chunk-budgets.mjs --write`);
+  }
+  return out;
 }
 
 /** the chunk name a JS ceiling path spells, and whether it is the exact `chunk:` form; null for another shape */
@@ -78,10 +115,11 @@ export function coverageProblems(files, entries) {
   }
   const covers = new Map([...names.keys()].map((n) => [n, []]));
   for (const e of entries) {
+    // the first-load total adds chunks up; it is no chunk's own ceiling (firstLoadProblems checks it)
+    if (e.name === FIRST_LOAD_NAME) continue;
     const isChunk = e.name.startsWith(CHUNK_PREFIX);
     for (const p of [e.path].flat()) {
-      // a total over every chunk ("all JS", until ADR-0344 removes it) covers no chunk on its own
-      if (!p.endsWith(".js") || p === ALL_JS_PATH) continue;
+      if (!p.endsWith(".js")) continue;
       const pc = pathChunk(p);
       if (pc === null) {
         out.push(`"${e.name}": path "${p}" is not dist/assets/<name>-????????.js or dist/assets/<name>-*.js`);
@@ -110,12 +148,14 @@ export function coverageProblems(files, entries) {
  * `chunk:` ceilings for chunks not in `sizes` dropped. Existing ceilings keep their limit; the other entries keep their
  * place, and the `chunk:` ceilings follow them sorted by name.
  */
-export function withChunkCeilings(entries, sizes) {
-  const fixed = entries.filter((e) => !e.name.startsWith(CHUNK_PREFIX));
+export function withChunkCeilings(entries, sizes, firstLoad = null) {
+  const fixed = entries
+    .filter((e) => !e.name.startsWith(CHUNK_PREFIX))
+    .map((e) => (e.name === FIRST_LOAD_NAME && firstLoad ? { ...e, path: firstLoadPaths(firstLoad) } : e));
   const covered = new Set();
-  for (const e of fixed) {
+  for (const e of fixed.filter((x) => x.name !== FIRST_LOAD_NAME)) {
     for (const p of [e.path].flat()) {
-      const pc = p.endsWith(".js") && p !== ALL_JS_PATH ? pathChunk(p) : null;
+      const pc = p.endsWith(".js") ? pathChunk(p) : null;
       if (pc) for (const n of Object.keys(sizes)) if (n === pc.name || (!pc.exact && n.startsWith(`${pc.name}-`))) covered.add(n);
     }
   }
@@ -148,14 +188,19 @@ function main(argv) {
     return 2;
   }
   const entries = JSON.parse(readFileSync(SIZE_LIMIT_FILE, "utf8"));
+  if (!existsSync(INDEX_HTML)) {
+    console.error(`${path.relative(root, INDEX_HTML)} is missing; build the web app first (pnpm --filter @regulait/web build)`);
+    return 2;
+  }
+  const firstLoad = firstLoadFiles(readFileSync(INDEX_HTML, "utf8"));
   if (mode === "--write") {
-    const next = withChunkCeilings(entries, chunkSizes(ASSETS_DIR));
+    const next = withChunkCeilings(entries, chunkSizes(ASSETS_DIR), firstLoad);
     writeFileSync(SIZE_LIMIT_FILE, `${JSON.stringify(next, null, 2)}\n`);
     console.log(`apps/web/.size-limit.json: ${next.filter((e) => e.name.startsWith(CHUNK_PREFIX)).length} chunk ceilings`);
     return 0;
   }
   const files = readdirSync(ASSETS_DIR).filter((f) => f.endsWith(".js")).sort();
-  const problems = coverageProblems(files, entries);
+  const problems = [...coverageProblems(files, entries), ...firstLoadProblems(firstLoad, entries)];
   for (const line of problems) console.log(`::error file=apps/web/.size-limit.json::${line}`);
   console.log(problems.length ? `${problems.length} bundle-ceiling coverage problems` : `every one of ${files.length} JS chunks has exactly one ceiling`);
   return problems.length ? 1 : 0;

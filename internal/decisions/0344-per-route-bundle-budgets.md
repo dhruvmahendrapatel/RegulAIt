@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (owner decision of 2026-11-16, relayed by the master session to lane UI-C). Applied in two
   steps: this ADR's PR adds the per-chunk ceilings and their coverage check; removing the `all JS` total also needs a
-  change to the ceiling guard, which the owner lands (see "What is not done here").
+  change to the ceiling guard, which the owner lands (see "What is not done here"). Amended 2026-11-21: the JS gate counts first-load JS only, and `all JS` is removed (see the addendum).
 - **Date**: 2026-11-16
 - **Index**: Per-route bundle budgets: one gzip ceiling per JS chunk in place of the single all-JS total; the entry budget stays strict
 - **Builds on**: [ADR-0196](0196-ui-enterprise-harness.md) (the bundle ceilings and their guard), [ADR-0200](0200-engineering-best-practice-guidelines.md) (front-end guidelines: lazy loading, minified bundles)
@@ -91,3 +91,34 @@ chunk's ceiling.
   rename sees the `.size-limit.json` diff.
 - size-limit measures every ceiling with its own gzip (level 9). `--write` measures the same way, so a fresh ceiling
   starts exactly 10% (or 2 kB) above what CI reads.
+
+## Addendum (2026-11-21): the JS gate counts first-load JS only
+
+Recorded from an owner decision of 2026-11-21, relayed to lane UI-C by the master session. The decision text is
+"owner decision 2026-11-21: the JS bundle gate counts first-load JS only". This addendum lands the step that "What is
+not done here" left open.
+
+- **Hard budget: first-load JS.** A new ceiling, `first-load JS`, is the gzip total of the entry chunk plus every chunk
+  it imports statically: the module script and each `modulepreload` link that Vite writes into `dist/index.html`. Its
+  limit is 139.5 kB, the same as `entry JS (index)`. That number was set when the whole first load was one file. On
+  2026-11-21 the first load is the entry chunk and 7 preloaded chunks, 134,006 B together. Raising this limit needs a
+  `CEILING_EXCEPTIONS` row and an owner decision, like any other ceiling. `entry JS (index)` and `entry CSS (index)`
+  stay as they are.
+- **Lazy chunks: their own, looser cap.** Each lazily loaded chunk keeps its `chunk:` ceiling (gzip size plus 10%, at
+  least 2 kB more). None of them counts toward a shared total.
+- **`all JS` is removed.** owner decision 2026-11-21: the JS bundle gate counts first-load JS only, so `all JS` leaves `apps/web/.size-limit.json`.
+- **Guard (`scripts/ui-enterprise-baseline.mjs --guard`).** It still refuses every raised limit and every changed
+  option, with three exceptions:
+  - It allows removing an entry named by a dated `CEILING_REMOVALS` row whose decision a line of this ADR names
+    together with the entry. That row is `all JS`.
+  - It allows removing a `chunk:` ceiling, because the coverage check fails while that chunk is still built.
+  - It allows `first-load JS` to change its path list, but only to exact chunk paths that include the entry chunk. Its
+    limit and its other options stay guarded.
+- **Coverage check (`scripts/ui-chunk-budgets.mjs --check`).** It now also fails when `first-load JS` is missing, does
+  not measure gzip, or does not list exactly the JS files that `dist/index.html` loads. A new static import of the entry
+  therefore cannot leave the first-load total uncounted. `--write` sets that path list from the build and never changes
+  a limit.
+- **Open-source options (ADR-0176).** size-limit still does the measuring. Vite's `build.manifest` would also list the
+  entry's static imports, but it needs a build-config change, and `dist/index.html` is exactly what a browser loads on a
+  first visit. So the check reads the `<script type="module">` and `<link rel="modulepreload">` tags Vite writes there.
+  No library on npm checks that a ceiling covers exactly a page's first-load files (see the table above).
