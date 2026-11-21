@@ -10,7 +10,7 @@ Remaining:
   delegated sign-in against a real Entra app registration (its redirect URI must name the gateway's
   `/v1/discovery/control-credential/delegated/callback`). Until then every control credential reports
   `controlScope: unverified`.
-- **triage-low candidate, not filed.** Spent or expired `vendor_control_delegated_requests` rows are not swept; each is
+- **#1160 (triage-low): no sweep.** Spent or expired `vendor_control_delegated_requests` rows are not swept; each is
   a few hundred bytes and holds no secret once spent (the verifier is destroyed with `used_at`). An unspent expired row
   keeps its encrypted verifier until its source is deleted.
 - **Screen.** The admin screen is on #453.

@@ -479,4 +479,4 @@ section records where the build fills in what it left open.
 - **Open source (ADR-0176).** `@azure/msal-node` 7.1.1 (MIT) becomes a direct, exact-pinned gateway dependency. It was
   already in the lockfile at that version through `@azure/identity`. No other dependency is added.
 - **Not swept.** Spent or expired request rows are not deleted. A spent row holds no secret, and an unspent expired one
-  keeps only its encrypted verifier until its source is deleted. This is recorded as a triage-low candidate, not built.
+  keeps only its encrypted verifier until its source is deleted. Filed as #1160 (triage-low), not built.
