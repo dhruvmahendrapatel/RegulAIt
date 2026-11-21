@@ -5110,3 +5110,5 @@ export * from "./fairness-evaluation.js";
 // ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
 export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";

@@ -144,6 +144,10 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
   agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
   agentRiskDailyMark: "agent-risk-daily-mark",
+  // ADR-0361: reads enabled AI SaaS compliance exports (ai-saas-monitor.ts); off by default
+  aiSaasMonitorSweep: "ai-saas-monitor-sweep",
+  // ADR-0361: deletes AI SaaS interaction evidence past the cascade floor (ai-saas-monitor.ts)
+  aiSaasEvidenceRetentionSweep: "ai-saas-evidence-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -879,6 +883,7 @@ import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.j
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
+import { aiSaasMonitorJobDefinitions } from "./ai-saas-monitor.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -904,6 +909,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
+    ...aiSaasMonitorJobDefinitions({ dataKey: opts.dataKey }), // ADR-0361: ai-saas-monitor-sweep, ai-saas-evidence-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

@@ -261,6 +261,16 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "internal", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "internal", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "internal", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -1867,6 +1877,16 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "cost-imports", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "cost-imports", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "cost-imports", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",
