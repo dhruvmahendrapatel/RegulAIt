@@ -561,7 +561,7 @@ describe("ADR-0337 entitlement_salesforce", () => {
     expect(sf.queries.some((q) => q.includes("ConnectedApplication"))).toBe(false);
   });
 
-  it("refuses another org's token, a target that names no My Domain, a short RSA key and a non-PKCS#8 key", async () => {
+  it("refuses another org's token, a target that names no My Domain, a key that is not RSA and a non-PKCS#8 key", async () => {
     await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source: { ...source, target: { ...source.target, orgId: "00D5g000009ZzZzEAA" } }, credential }).ctx)).rejects.toThrow(/another org/);
     const v = (target: Record<string, string>) => scanner("entitlement_salesforce").validateTarget!(target, { orgLevel: true, include: [] });
     expect(v({ environment: "production", myDomain: "https://login.salesforce.com", orgId: ORG })).toMatch(/myDomain/);
@@ -569,8 +569,10 @@ describe("ADR-0337 entitlement_salesforce", () => {
     expect(v({ myDomain: INSTANCE, orgId: ORG })).toMatch(/environment/);
     expect(v({ environment: "sandbox", myDomain: "https://acme--uat.sandbox.my.salesforce.com", orgId: ORG })).toBeNull();
     expect(v({ environment: "production", myDomain: INSTANCE, orgId: "nope" })).toMatch(/orgId/);
-    const weak = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: weak } }).ctx)).rejects.toThrow(/at least 2048 bits/);
+    // the shared helper's key check is in force: a key that is not RSA is refused (its RSA size rule, under 2048 bits
+    // refused, is pinned in the helper's own suite through rsaKeyStrongEnough, without generating a weak key here)
+    const notRsa = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: notRsa } }).ctx)).rejects.toThrow(/RSA private key of at least 2048 bits/);
     await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: "not a key" } }).ctx)).rejects.toThrow(/PKCS#8/);
   });
 });
