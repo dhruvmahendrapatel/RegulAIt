@@ -2,6 +2,7 @@
 export { default as AdmissionReviewPage } from "../views/admin/governance/AdmissionReviewPage";
 // ADR-0219: the Agents screen holds the catalogue and the remote (A2A) agents as two tabs
 export { default as AgentsPage } from "../views/admin/integrations/AgentsScreen";
+export { default as ConnectorsPage } from "../views/admin/integrations/ConnectorsPage";
 export { default as CustomProvidersPage } from "../views/admin/integrations/CustomProvidersPage";
 export { default as DeployTargetsPage } from "../views/admin/integrations/DeployTargetsPage";
 export { default as EnginesPage } from "../views/admin/integrations/EnginesPage";
@@ -19,5 +20,3 @@ export { AgentsArea } from "../views/admin/integrations/AgentCatalogPage";
 // list on its own page), reached through this screen so the sub-pages add nothing to the entry bundle.
 export { McpServersArea } from "../views/admin/integrations/McpRegistrySubpages";
 export { EnginesArea } from "../views/admin/integrations/EnginesSubpages";
-// ADR-0255: the Connectors page and the governed connector catalogue under it, one area in this chunk
-export { ConnectorsArea } from "../views/admin/integrations/ConnectorsArea";
