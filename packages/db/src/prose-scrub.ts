@@ -227,8 +227,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // controls are jsonb, which this registry cannot reach (see the exclusions).
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
-  // ADR-0366: a builder agent's halt reason (a containment or an admin), as for agents.halted_reason
-  [s.builderAgents, ["autonomyNote", "haltedReason"]],
+  // ADR-0180 addendum (E51): the autonomy-enforcement reason; ADR-0366: a builder agent's halt reason (a containment
+  // or an admin), as for agents.halted_reason
+  [s.builderAgents, ["autonomyNote", "autonomyEnforcementReason", "haltedReason"]],
   // ADR-0366: the admin's reason for releasing a rogue-agent containment, and the signal's explanation (it quotes an
   // agent name a person typed)
   [s.agentContainments, ["releaseReason", "explanation"]],

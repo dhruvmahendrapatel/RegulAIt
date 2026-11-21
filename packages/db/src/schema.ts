@@ -12196,6 +12196,15 @@ export const builderAgents = pgTable(
     autonomyDeclaredBy: uuid("autonomy_declared_by").references(() => users.id, { onDelete: "set null" }),
     autonomyDeclaredAt: timestamp("autonomy_declared_at", { withTimezone: true }),
     autonomyNote: text("autonomy_note"),
+    // --- ADR-0180 addendum (lane E51, pending migration builder_agent_autonomy_enforcement) --------------------
+    /** whether an unmet autonomy floor blocks a delegated or autonomous run (AUTONOMY_ENFORCEMENT_MACHINE in
+     * @regulait/shared). Strict by default for every agent, existing ones included; only an admin relaxes it */
+    autonomyEnforcement: text("autonomy_enforcement", { enum: ["enforced", "relaxed"] }).notNull().default("enforced"),
+    /** the admin who relaxed it, and when; both null while enforced */
+    autonomyRelaxedBy: uuid("autonomy_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    autonomyRelaxedAt: timestamp("autonomy_relaxed_at", { withTimezone: true }),
+    /** the admin's reason for the latest change (relax or restore), prose-scrubbed by the db handle */
+    autonomyEnforcementReason: text("autonomy_enforcement_reason"),
     // --- ADR-0366 (pending/rogue_agent_containment.sql): the builder agent's own halt --------
     /** the ADR-0124 halt for one builder agent: NULL = not halted. Set by a rogue-agent containment (or an admin);
      * every turn (chat, schedule, inbound message, resume) is refused while set. The DB CHECK makes "halted with no
@@ -12206,6 +12215,12 @@ export const builderAgents = pgTable(
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
+    check("builder_agents_autonomy_enforcement_ck", sql`${t.autonomyEnforcement} IN ('enforced', 'relaxed')`),
+    check(
+      "builder_agents_autonomy_relaxed_ck",
+      sql`(${t.autonomyEnforcement} = 'relaxed') = (${t.autonomyRelaxedAt} IS NOT NULL)
+        AND (${t.autonomyEnforcementReason} IS NULL OR length(${t.autonomyEnforcementReason}) <= 2000)`,
+    ),
     check(
       "builder_agents_limit_ck",
       sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
