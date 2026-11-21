@@ -61,6 +61,7 @@
  */
 import { z } from "zod";
 import type { ThirdPartyEvidenceKind } from "./third-party-ingest/index.js";
+import { VENDORED_SECRET_RULES } from "./detection-content/index.js";
 import {
   activeDiscoveryPosture,
   PRESENCE_BACKING_KINDS,
@@ -503,7 +504,30 @@ export interface Observation {
   /** ADR-0195: the package ecosystem (rows scoped to an ecosystem match only it) */
   ecosystem?: string | null;
   declaredProvider?: string | null;
+  /**
+   * ADR-0336 slice 4: a plaintext credential in a staged agent's configuration (evidence `agent_config`): the vendored
+   * secret rule that matched and the platform's vendor (set by the worker from the source kind). Never the value, an
+   * excerpt, an offset or a hash; `location.path` names the field.
+   */
+  configSecret?: { rule: string; vendor: string } | null;
   detail?: Record<string, unknown>;
+}
+
+/**
+ * ADR-0336 slice 4: vendored secret rules that are not credentials (personal data or a public identifier), so a hit
+ * in an agent's configuration is not reported as a plaintext credential. A filter over the existing rules, not a
+ * matcher of its own.
+ */
+export const AGENT_CONFIG_SECRET_RULES_EXCLUDED: readonly string[] = Object.freeze([
+  "pipelock.secrets.social_security_number",
+  "pipelock.secrets.google_oauth_client_id",
+]);
+const AGENT_CONFIG_SECRET_RULE_IDS: ReadonlySet<string> = new Set(
+  VENDORED_SECRET_RULES.map((r) => r.id).filter((id) => !AGENT_CONFIG_SECRET_RULES_EXCLUDED.includes(id)),
+);
+/** whether a vendored rule id may be reported as a plaintext credential in an agent's configuration */
+export function agentConfigSecretRuleAllowed(rule: unknown): rule is string {
+  return typeof rule === "string" && AGENT_CONFIG_SECRET_RULE_IDS.has(rule);
 }
 
 export const SHADOW_AI_SEVERITIES = ["low", "medium", "high", "critical"] as const;
@@ -603,6 +627,22 @@ export function presenceBackingSignature(
 }
 
 export function classifyObservation(obs: Observation, catalogue: readonly AiSignature[]): Classification {
+  // 0. ADR-0336 slice 4: a plaintext credential in a staged agent's configuration. No catalogue row is involved: the
+  //    provider is the agent platform, and nothing about the value is kept (the matched value is the rule id)
+  if (obs.signalSource === "agent_config") {
+    const cs = obs.configSecret;
+    if (!cs || !agentConfigSecretRuleAllowed(cs.rule) || !cs.vendor || !obs.location?.path) return UNMATCHED;
+    return {
+      matched: true,
+      provider: cs.vendor,
+      signatureKind: null,
+      matchedValue: cs.rule,
+      severity: "critical",
+      replacementAgentId: null,
+      replacementNote: null,
+      reason: `a plaintext credential matching the vendored rule '${cs.rule}' was found at ${obs.location.path} of the staged agent ${obs.subject}; the value is not kept, so rotate the credential and move it out of the agent's configuration`,
+    };
+  }
   // ADR-0195: a row scoped to an OS or a package ecosystem matches only an observation from it
   const obsEcosystem = obs.ecosystem ? obs.ecosystem.trim().toLowerCase() : null;
   const enabled = catalogue.filter(
