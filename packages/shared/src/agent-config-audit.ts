@@ -47,7 +47,7 @@ export const AGENT_CONFIG_AUDIT_ENGINE = Object.freeze({
 export const AGENT_CONFIG_BUNDLE_SCHEMA = "regulait.agent-config-bundle.v1";
 export const AGENT_CONFIG_AUDIT_REPORT_SCHEMA = "regulait.agent-config-audit.v1";
 /** the catalogue's version: a rule, score or hint change is a reviewed change (agent-config-audit.test.ts pins it) */
-export const AGENT_CONFIG_RULES_VERSION = "agent-config-rules/1";
+export const AGENT_CONFIG_RULES_VERSION = "agent-config-rules/2";
 
 /** the driver's limits, mirrored (engines/agentaudit/driver/main.go; the test keeps them in lockstep) */
 export const AGENT_CONFIG_LIMITS = Object.freeze({
@@ -79,19 +79,37 @@ const CONFIG_FILES = new Set([
 ]);
 /** instruction files: text addressed to the model (the injection rules apply) */
 const INSTRUCTION_RE = /(?:^|\/)(?:AGENTS\.md|CLAUDE(?:\.local)?\.md|SKILL\.md|\.cursorrules|copilot-instructions\.md|[^/]+\.instructions\.md|[^/]+\.prompt\.md|[^/]+\.agent\.md|[^/]+\.mdc)$/;
+/** slash-command bodies and subagent system prompts: also text addressed to the model (review R4 [1]) */
+const PROMPT_DIR_RE = /^\.(?:claude|cursor)\/(?:commands|agents)\/.+\.md$/;
+/** instruction files agents pick up from the directory they work in, at any depth */
+const NESTED_INSTRUCTION_RE = /(?:^|\/)(?:AGENTS\.md|CLAUDE(?:\.local)?\.md)$/;
 
-/** true when a repository path is one the audit reads (a nested AGENTS.md counts: agents read the nearest one) */
+/**
+ * The driver's path rule (engines/agentaudit/driver/main.go `cleanBundlePath`), mirrored so a path the driver would
+ * refuse is left out of the bundle (and the audit reported incomplete) instead of failing the whole engine run
+ * (security review S4 [2]): relative, slash-separated, no empty, `.` or `..` segment, no backslash or control character.
+ */
+export function isBundlePath(path: string): boolean {
+  if (!path || Buffer.byteLength(path, "utf8") > AGENT_CONFIG_LIMITS.maxPathBytes || path.startsWith("/")) return false;
+  if (/[\\\u0000-\u001f\u007f]/.test(path)) return false;
+  return path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+/**
+ * True when a repository path is one the audit selects (a nested AGENTS.md or CLAUDE.md counts: agents read the one
+ * nearest the directory they work in). A selected path the driver would refuse is still selected, so the bundle builder
+ * can report it as skipped (`invalid_path`) and the audit as incomplete.
+ */
 export function isAgentConfigPath(path: string): boolean {
-  if (!path || path.length > AGENT_CONFIG_LIMITS.maxPathBytes || path.startsWith("/") || path.split("/").includes("..")) return false;
+  if (!path || path.startsWith("/") || path.split("/").includes("..")) return false;
   if (CONFIG_FILES.has(path)) return true;
   if (CONFIG_DIRS.some((d) => path.startsWith(d))) return true;
   if (/^\.github\/(?:instructions|prompts|agents)\/[^/]+\.md$/.test(path)) return true;
-  // nested instruction files agents pick up from the directory they work in
-  return /(?:^|\/)AGENTS\.md$/.test(path);
+  return NESTED_INSTRUCTION_RE.test(path);
 }
 
 export function isInstructionPath(path: string): boolean {
-  return INSTRUCTION_RE.test(path);
+  return INSTRUCTION_RE.test(path) || PROMPT_DIR_RE.test(path);
 }
 
 export interface AgentConfigFile {
@@ -105,7 +123,7 @@ export interface AgentConfigBundle {
   sha256: string;
   files: number;
   /** paths left out, with why: the scan is INCOMPLETE when any is present (never clean) */
-  skipped: { path: string; reason: "not_config" | "too_large" | "over_file_limit" | "over_bundle_limit" | "duplicate" | "not_text" }[];
+  skipped: { path: string; reason: "not_config" | "invalid_path" | "too_large" | "over_file_limit" | "over_bundle_limit" | "duplicate" | "not_text" }[];
 }
 
 /**
@@ -121,6 +139,10 @@ export function buildAgentConfigBundle(files: readonly AgentConfigFile[]): Agent
   for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     if (!isAgentConfigPath(f.path)) {
       skipped.push({ path: f.path.slice(0, AGENT_CONFIG_LIMITS.maxPathBytes), reason: "not_config" });
+      continue;
+    }
+    if (!isBundlePath(f.path)) {
+      skipped.push({ path: f.path.slice(0, AGENT_CONFIG_LIMITS.maxPathBytes), reason: "invalid_path" });
       continue;
     }
     if (seen.has(f.path)) {
@@ -141,8 +163,9 @@ export function buildAgentConfigBundle(files: readonly AgentConfigFile[]): Agent
       skipped.push({ path: f.path, reason: "over_file_limit" });
       continue;
     }
-    // JSON escaping can grow a file up to 6×; budget the escaped size, with headroom for the envelope
-    const escaped = JSON.stringify(f.content).length + JSON.stringify(f.path).length + 24;
+    // the driver caps UTF-8 bytes of the whole bundle: budget the escaped entry in UTF-8 bytes, not UTF-16 units
+    // (reviews R4 [3] / S4 [1]), with headroom for the entry's punctuation
+    const escaped = Buffer.byteLength(JSON.stringify(f.content), "utf8") + Buffer.byteLength(JSON.stringify(f.path), "utf8") + 24;
     if (total + escaped > AGENT_CONFIG_LIMITS.maxBundleBytes) {
       skipped.push({ path: f.path, reason: "over_bundle_limit" });
       continue;
@@ -261,6 +284,7 @@ const REGULAIT_RULES: readonly RuleRow[] = [
   ["regulait.instructions.prompt-injection", 3, 8, "Agent instructions contain prompt-injection phrasing", "Review the instruction text; remove directives that override the agent's rules, hide actions from the user or send data out."],
   ["regulait.instructions.hidden-unicode", 3, 10, "Agent configuration contains hidden Unicode", "Remove the invisible characters (zero-width, bidi-control or Unicode-tag); they hide text from reviewers."],
   ["regulait.vscode.auto-approve", 4, 8, "VS Code auto-approves agent tool calls", "Remove `chat.tools.global.autoApprove` (or the older `chat.tools.autoApprove`) from workspace settings."],
+  ["regulait.vscode.terminal-auto-approve", 4, 6, "VS Code pre-approves terminal commands", "Remove the `chat.tools.terminal.autoApprove` entries that are `true` from workspace settings; let each person approve commands in their own settings."],
   ["regulait.vscode.url-auto-approve", 3, 6, "VS Code auto-approves agent requests to URLs", "Remove the `chat.tools.urls.autoApprove` entries that are `true` from workspace settings."],
   ["regulait.vscode.mcp.server", 2, 5, "VS Code starts an MCP server declared in the repository", H.mcp],
   ["regulait.instructions.present", 1, 2, "The repository carries agent instruction files", "Informational: instruction files steer every agent that opens the repository; review changes to them like code."],
@@ -534,7 +558,11 @@ export function launchedPackage(command: string, args: readonly string[]): { eco
 
 /** true when a package spec names one exact version (npm `name@1.2.3`, PyPI `name==1.2.3`) */
 export function isPinnedPackageSpec(ecosystem: "npm" | "pypi", spec: string): boolean {
-  if (ecosystem === "pypi") return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?==[0-9][0-9A-Za-z.+!-]*$/.test(spec);
+  if (ecosystem === "pypi") {
+    // `name==1.2.3` (pip, pipx, `uvx --from`) or uv's own `name@1.2.3` (review R4 [2]); a PEP 440 version, never
+    // `@latest` or a range
+    return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?(?:==|@)(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?(?:\+[0-9A-Za-z.]+)?$/.test(spec);
+  }
   // a local path or URL is not a registry fetch; a tarball URL is still remote and unpinned
   if (spec.startsWith(".") || spec.startsWith("/")) return true;
   const at = spec.startsWith("@") ? spec.indexOf("@", 1) : spec.indexOf("@");
@@ -693,6 +721,13 @@ export function auditAgentConfigFiles(files: readonly AgentConfigFile[]): AgentC
       for (const e of entries(doc?.body)) {
         if ((e.name === "chat.tools.global.autoApprove" || e.name === "chat.tools.autoApprove") && e.value.type === "Boolean" && e.value.value) {
           add("regulait.vscode.auto-approve", f.path, e.line, ["permissions"]);
+        }
+        if (e.name === "chat.tools.terminal.autoApprove") {
+          // a rule approves when its value is `true` or `{ approve: true }` (code.visualstudio.com, checked 2026-11-21)
+          const approved = entries(e.value).filter(
+            (u) => (u.value.type === "Boolean" && u.value.value) || (u.value.type === "Object" && entries(u.value).some((x) => x.name === "approve" && x.value.type === "Boolean" && x.value.value)),
+          );
+          if (approved.length > 0) add("regulait.vscode.terminal-auto-approve", f.path, approved[0]!.line, ["permissions"], approved.length);
         }
         if (e.name === "chat.tools.urls.autoApprove") {
           const approved = entries(e.value).filter(

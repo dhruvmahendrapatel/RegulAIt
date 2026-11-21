@@ -78,12 +78,12 @@ yaml.v3 v3.0.1; the CLI's go-git and cobra are not linked). It is run as `agenta
 
 ### 3. Posture findings, scored on the owner's scale (`packages/shared/src/agent-config-audit.ts`)
 
-- **One catalogue** (`AGENT_CONFIG_RULES`, version `agent-config-rules/1`, digest pinned in its test) gives every
+- **One catalogue** (`AGENT_CONFIG_RULES`, version `agent-config-rules/2`, digest pinned in its test) gives every
   rule an id, a title, a **frequency** F and a **severity** S on the owner's 1–10 scales, and a fix hint. It holds
   all 59 agentaudit v0.1.2 rules (checked against `engines/agentaudit/rule-ids.txt`, read from the tagged source) and
-  our eleven: `regulait.mcp.unpinned-package`, `regulait.mcp.remote-plaintext`, `regulait.hook.remote-code`,
+  our twelve: `regulait.mcp.unpinned-package`, `regulait.mcp.remote-plaintext`, `regulait.hook.remote-code`,
   `regulait.secret.literal`, `regulait.instructions.prompt-injection`, `regulait.instructions.hidden-unicode`,
-  `regulait.vscode.auto-approve`, `regulait.vscode.url-auto-approve`, `regulait.vscode.mcp.server`,
+  `regulait.vscode.auto-approve`, `regulait.vscode.terminal-auto-approve`, `regulait.vscode.url-auto-approve`, `regulait.vscode.mcp.server`,
   `regulait.instructions.present` and `agentaudit.unmapped`.
 - **F × S < 5 is informational** (owner, 2026-11-17): reported, never failing a check. Above that the bands are
   low (5–14), medium (15–29), high (30–59) and critical (60+). F means how often the setting is abused or goes wrong,
@@ -98,7 +98,10 @@ yaml.v3 v3.0.1; the CLI's go-git and cobra are not linked). It is run as `agenta
   only) injection phrasing; parses JSON and JSONC with momoa (MIT, already a dependency) and Codex TOML with
   smol-toml (already a dependency) for MCP pinning and transport; and matches a download piped into an interpreter.
   The VS Code setting names were checked against code.visualstudio.com on 2026-11-17 (`chat.tools.global.autoApprove`,
-  renamed from `chat.tools.autoApprove` in 1.104, and `chat.tools.urls.autoApprove`). Findings carry file and line,
+  renamed from `chat.tools.autoApprove` in 1.104, and `chat.tools.urls.autoApprove`; `chat.tools.terminal.autoApprove`,
+  whose entries approve a command when `true` or `{ approve: true }`, checked on 2026-11-21). An MCP package counts
+  as pinned at one exact version: npm `name@1.2.3`, PyPI `name==1.2.3` or uv's `name@1.2.3`; `@latest` and ranges
+  never do. Instruction text also covers `.claude/` and `.cursor/` `commands/` and `agents/` prompts. Findings carry file and line,
   never the matched text.
 - **The PR check's verdict** (`agentConfigCheckVerdict`) fails on any finding at or above `failOn`, and on any audit
   that is incomplete or unknown. The default `failOn` is `low`: every finding that is not informational fails
@@ -106,8 +109,9 @@ yaml.v3 v3.0.1; the CLI's go-git and cobra are not linked). It is run as `agenta
 - **Which paths are read** (`isAgentConfigPath`): everything under `.claude/`, `.cursor/`, `.codex/`, `.agents/`,
   `.claude-plugin/` and `.cursor-plugin/`; `.mcp.json`, `.claude.json`, `.vscode/mcp.json`, `.vscode/settings.json`,
   `.cursorrules`, `.github/copilot-instructions.md`, `.github/{instructions,prompts,agents}/*.md`; and every
-  `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md`. A config file left out of the bundle (too large, over a limit, not
-  text) makes the audit incomplete.
+  `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` at any depth. A config file left out of the bundle (too large, over
+  a limit, not text, or a path the driver would refuse, mirrored in `isBundlePath`) makes the audit incomplete. The
+  bundle budget counts UTF-8 bytes, as the driver does.
 
 ### 4. Read-only by construction
 
