@@ -103,3 +103,42 @@ func TestPublicJWKHasNoPrivateMember(t *testing.T) {
 		t.Fatal("P-384 accepted")
 	}
 }
+
+func TestDecisionsSignature(t *testing.T) {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	url := "https://gw.example.invalid" + contract.RouteDecisions
+	s, err := DecisionsSignature(k, "cid", url, "6f0b6f4e-2c1d-4a7e-9b3a-1d2c3e4f5a6b", "sha-256=:x:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, claims, obj := parse(t, s)
+	tp, _ := Thumbprint(&k.PublicKey)
+	if h.ExtraHeaders["typ"] != contract.TypDecisionsSignature || h.KeyID != tp || h.JSONWebKey != nil || h.Algorithm != "ES256" {
+		t.Fatalf("header %+v", h)
+	}
+	if claims["iss"] != "cid" || claims["aud"] != url || claims["batchId"] != "6f0b6f4e-2c1d-4a7e-9b3a-1d2c3e4f5a6b" ||
+		claims["contentDigest"] != "sha-256=:x:" || claims["jti"] == "" || claims["iat"] == nil || claims["snapshotId"] != nil {
+		t.Fatalf("claims %+v", claims)
+	}
+	if _, err := obj.Verify(&k.PublicKey); err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := DecisionsSignature(k, "cid", url, "b", "d")
+	if _, c2, _ := parse(t, s2); c2["jti"] == claims["jti"] {
+		t.Fatal("jti reused")
+	}
+}
+
+// One signer serves every upload route: typ, id claim and audience are the caller's, and nothing else differs.
+func TestBodySignatureIsParameterised(t *testing.T) {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s, err := BodySignature(k, "example+jwt", "cid", "https://gw.example.invalid/v1/x", "uploadId", "u-1", "sha-256=:y:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, claims, _ := parse(t, s)
+	if h.ExtraHeaders["typ"] != "example+jwt" || claims["uploadId"] != "u-1" || claims["aud"] != "https://gw.example.invalid/v1/x" ||
+		claims["contentDigest"] != "sha-256=:y:" || claims["batchId"] != nil || claims["snapshotId"] != nil {
+		t.Fatalf("header %+v claims %+v", h, claims)
+	}
+}

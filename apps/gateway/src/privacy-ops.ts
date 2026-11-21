@@ -46,6 +46,7 @@ import {
   or,
   processingRecords,
   projectContextItems,
+  ruleStepSuggestions,
   projects,
   sql,
   users,
@@ -193,6 +194,14 @@ export function subjectPattern(kind: DsrIdentifierKind, identifier: string): str
 /** the column matches the subject pattern (case-insensitive) */
 const matchesSubject = (column: unknown, pattern: string) => sql`${column} ~* ${pattern}`;
 
+/**
+ * ADR-0327: a rule-step suggestion holds the subject when any cell's key value or output matches, compared element by element
+ * (the jsonb text form escapes `"` and `\`, so matching `rule::text` could miss a value that holds either). One
+ * predicate, used by locate and by erasure alike.
+ */
+const ruleHoldsSubject = (pattern: string) =>
+  sql`exists (select 1 from jsonb_array_elements(${ruleStepSuggestions.rule} -> 'cells') c where c ->> 'output' ~* ${pattern} or exists (select 1 from jsonb_array_elements_text(c -> 'key') k where k ~* ${pattern}))`;
+
 interface Located {
   findings: DsrStoreFinding[];
   auditIds: string[];
@@ -202,7 +211,7 @@ interface Located {
 
 /** said with every locate result, so the counts are never read as an exhaustive search */
 export const SEARCH_SCOPE_NOTE =
-  "Only these four RegulAIt-held stores are searched, for the identifier as typed. Data held in other systems, in " +
+  "Only these five RegulAIt-held stores are searched, for the identifier as typed. Data held in other systems, in " +
   "conversation message metadata, or in a different spelling or format is not found.";
 
 const STORE_NOTES: Readonly<Record<DsrStore, string>> = {
@@ -210,6 +219,9 @@ const STORE_NOTES: Readonly<Record<DsrStore, string>> = {
     "A sign-in account is not deleted by a request: deactivate the person under Users, which keeps their history and audit trail.",
   conversations: "Erasure replaces the identifier in the matching messages and conversation summaries.",
   project_context: "Erasure replaces the identifier in every revision of the matching shared context items.",
+  rule_step_suggestions:
+    "A rule-like AI step suggestion copies recorded input values into its rule (ADR-0327). Erasure deletes the matching " +
+    "suggestions; a later scan rebuilds them only from trace data still held under the audit-retention floor.",
   audit_trail:
     "The audit trail is tamper-evident and is never edited. Matching rows stay until their retention rule prunes them; erasure records a tombstone listing them.",
 };
@@ -218,11 +230,12 @@ async function locateSubject(db: Db, kind: DsrIdentifierKind, identifier: string
   // the identifier as typed (trimmed) is what appears in free text; the normalised form is what an account holds
   const pattern = subjectPattern(kind, identifier);
   const normalised = normaliseDsrIdentifier(kind, identifier);
-  const [accountRows, messageRows, summaryRows, contextRows, auditCountRows, auditIdRows] = await Promise.all([
+  const [accountRows, messageRows, summaryRows, contextRows, ruleStepRows, auditCountRows, auditIdRows] = await Promise.all([
     kind === "email" ? db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${normalised}`) : Promise.resolve([]),
     db.select({ n: sql<number>`count(*)::int` }).from(conversationMessages).where(matchesSubject(conversationMessages.content, pattern)),
     db.select({ n: sql<number>`count(*)::int` }).from(conversations).where(and(sql`${conversations.summary} IS NOT NULL`, matchesSubject(conversations.summary, pattern))),
     db.select({ n: sql<number>`count(*)::int` }).from(projectContextItems).where(matchesSubject(projectContextItems.content, pattern)),
+    db.select({ n: sql<number>`count(*)::int` }).from(ruleStepSuggestions).where(ruleHoldsSubject(pattern)),
     db
       .select({ n: sql<number>`count(*)::int`, newest: sql<Date | null>`max(${auditLog.at})` })
       .from(auditLog)
@@ -241,6 +254,7 @@ async function locateSubject(db: Db, kind: DsrIdentifierKind, identifier: string
       { store: "accounts", matches: accountRows.length, erasure: "retained", note: STORE_NOTES.accounts },
       { store: "conversations", matches: (messageRows[0]?.n ?? 0) + (summaryRows[0]?.n ?? 0), erasure: "erased", note: STORE_NOTES.conversations },
       { store: "project_context", matches: contextRows[0]?.n ?? 0, erasure: "erased", note: STORE_NOTES.project_context },
+      { store: "rule_step_suggestions", matches: ruleStepRows[0]?.n ?? 0, erasure: "erased", note: STORE_NOTES.rule_step_suggestions },
       { store: "audit_trail", matches: auditCount, erasure: "tombstoned", note: STORE_NOTES.audit_trail },
     ],
     auditIds: auditIdRows.map((r) => r.id),
@@ -258,6 +272,24 @@ export interface PrivacyGateContext {
   agentId: string;
   agentName: string;
   projectId: string | null;
+  input: string;
+}
+
+/**
+ * ADR-0224 addendum (2026-11-20): what the processing limit is deciding for. Model dispatch, connector calls and MCP
+ * calls all reach the one implementation below through the governed core (`governedProcessingLimit`), so a record of
+ * processing limits every call type the same way. The target only shapes the audit row.
+ */
+export type ProcessingLimitTarget =
+  | { type: "model"; agentId: string; agentName: string }
+  | { type: "connector"; connectorId: string; connectorName: string; operation: string }
+  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string };
+
+export interface ProcessingLimitInput {
+  userId: string;
+  target: ProcessingLimitTarget;
+  projectId: string | null;
+  /** the text that would leave the gateway (prompt, connector object and payload, MCP arguments) */
   input: string;
 }
 
@@ -289,12 +321,26 @@ export async function permittedCategories(db: Db, projectId: string): Promise<{ 
   return { categories: [...new Set(rows.flatMap((r) => r.dataCategories))], recordIds: rows.map((r) => r.id) };
 }
 
+function targetAuditColumns(t: ProcessingLimitTarget) {
+  switch (t.type) {
+    case "model":
+      return { columns: { objectType: "agent" as const, objectId: t.agentId }, detail: { agentId: t.agentId, agentName: t.agentName } };
+    case "connector":
+      return {
+        columns: { objectType: "connector" as const, objectId: t.connectorId },
+        detail: { connectorId: t.connectorId, connectorName: t.connectorName, operation: t.operation },
+      };
+    case "mcp_tool":
+      return { columns: { serverId: t.serverId, toolName: t.toolName }, detail: t.method ? { method: t.method } : {} };
+  }
+}
+
 /**
- * The rung `dispatchAttempt` gains after the PII-mode check: returns null when the dispatch may proceed, or an
- * already-audited refusal. Off (the shipped default) it is one settings read. The audit row carries categories,
- * counts and record ids only, never the input.
+ * The processing limit for any governed call: returns null when the call may proceed, or an already-audited refusal.
+ * Off (the shipped default) it is one settings read. The audit row carries categories, counts and record ids only,
+ * never the input.
  */
-export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Promise<PrivacyGateResult> {
+export async function processingLimitGate(db: Db, ctx: ProcessingLimitInput): Promise<PrivacyGateResult> {
   const org = await loadOrgSettings(db);
   if (!org.privacyOpsEnabled) return null;
   const hits: PiiHit[] = detectPII(ctx.input, await piiInternationalCategories(db));
@@ -307,16 +353,16 @@ export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Prom
     projectAttributed: Boolean(ctx.projectId),
     recordCount: permitted.recordIds.length,
   });
+  const target = targetAuditColumns(ctx.target);
   const [row] = await db
     .insert(auditLog)
     .values({
       userId: ctx.userId,
-      objectType: "agent",
-      objectId: ctx.agentId,
+      ...target.columns,
       detail: {
         phase: "privacy",
-        agentId: ctx.agentId,
-        agentName: ctx.agentName,
+        callType: ctx.target.type,
+        ...target.detail,
         ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
         hits,
         refusedCategories: refused,
@@ -331,6 +377,16 @@ export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Prom
     })
     .returning({ id: auditLog.id });
   return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row?.id ?? null };
+}
+
+/** the model-dispatch form of `processingLimitGate`, kept for the dispatch callers' existing signature */
+export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Promise<PrivacyGateResult> {
+  return processingLimitGate(db, {
+    userId: ctx.userId,
+    target: { type: "model", agentId: ctx.agentId, agentName: ctx.agentName },
+    projectId: ctx.projectId,
+    input: ctx.input,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +739,11 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
           .set({ content: sql`regexp_replace(${projectContextItems.content}, ${pattern}, ${ERASED_MARKER}, 'gi')` })
           .where(matchesSubject(projectContextItems.content, pattern))
           .returning({ id: projectContextItems.id });
+        // ADR-0327: a suggestion's rule is derived, so it is deleted, never redacted (a redacted cell would be a wrong rule)
+        const rules = await t
+          .delete(ruleStepSuggestions)
+          .where(ruleHoldsSubject(pattern))
+          .returning({ id: ruleStepSuggestions.id });
         const retainedUntil =
           floorDays != null && located.newestAuditAt ? new Date(located.newestAuditAt.getTime() + floorDays * 86_400_000) : null;
         await t.insert(dataSubjectTombstones).values({
@@ -701,7 +762,9 @@ export function registerPrivacyOpsRoutes(app: FastifyInstance, db: Db, opts: { d
             ? { ...f, matches: msgs.length + sums.length }
             : f.store === "project_context"
               ? { ...f, matches: ctx.length }
-              : f,
+              : f.store === "rule_step_suggestions"
+                ? { ...f, matches: rules.length }
+                : f,
         );
       }
       const [u] = await t

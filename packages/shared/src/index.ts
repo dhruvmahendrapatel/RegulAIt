@@ -1490,13 +1490,37 @@ export const updateInitiativeSchema = z
     message: "nothing to update — provide at least one field",
   });
 
+/** ADR-0352: every VENDOR kind with a shipped adapter, i.e. the kinds a per-kind
+ * credential row (platform or user) may name. Mirrors the vendor subset of
+ * `MODEL_PROVIDER_KINDS` in @regulait/model-provider (a gateway test pins the two
+ * together; this package cannot import that one). */
+export const VENDOR_MODEL_PROVIDERS = [
+  "anthropic",
+  "openai",
+  "google",
+  "xai",
+  "bedrock",
+  "vertex",
+  "mistral",
+  "cohere",
+  "qwen",
+] as const;
+
+/** ADR-0352: the vendor kinds whose platform key can come from a conventional
+ * environment variable (the ADR-0021/0181 fallback, off by default). Bedrock and
+ * Vertex are absent: their credentials are structured and need an explicit,
+ * egress-checked baseUrl, so they only ever come from the encrypted store. */
+export const ENV_FALLBACK_MODEL_PROVIDERS = ["anthropic", "openai", "google", "xai", "mistral", "cohere", "qwen"] as const;
+
 export const createModelCredentialSchema = z.object({
-  // deliberately still the four SHIPPED vendor adapters. A custom provider's
+  // the SHIPPED vendor adapters (ADR-0352 added five). A custom provider's
   // key lives on its own custom_model_providers row (ADR-0034) — one endpoint,
   // one key — not in this per-provider-kind singleton table, which could only
   // ever hold ONE key for all custom endpoints.
-  provider: z.enum(["anthropic", "openai", "google", "xai"]),
-  apiKey: z.string().min(1),
+  provider: z.enum(VENDOR_MODEL_PROVIDERS),
+  // a Bedrock SigV4 or Vertex service-account credential is a JSON document, so
+  // the bound is generous; the gateway validates its shape per kind (ADR-0352)
+  apiKey: z.string().min(1).max(16_384),
   baseUrl: z.string().url().nullable().optional(),
 });
 
@@ -2446,8 +2470,8 @@ export const updateOrgSettingsSchema = z
       .optional(),
     envKeyFallbackEnabled: z.boolean().optional(),
     envFallbackProviders: z
-      .array(z.enum(["anthropic", "openai", "google", "xai"]))
-      .max(4)
+      .array(z.enum(ENV_FALLBACK_MODEL_PROVIDERS))
+      .max(ENV_FALLBACK_MODEL_PROVIDERS.length)
       .optional(),
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
@@ -3172,6 +3196,7 @@ export {
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalAuditPayloadV2,
   type AuditChainVersion,
@@ -4982,6 +5007,7 @@ export * from "./sector-packs.js";
 export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./agent-risk-proofs.js";
 export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
@@ -4993,6 +5019,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
@@ -5038,6 +5066,8 @@ export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
+// ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
+export * from "./saas-entitlements.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5066,5 +5096,41 @@ export * from "./supplier-portal.js";
 export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
+export * from "./state-machine.js";
+export * from "./state-machines.js";
+export * from "./pipeline-steps.js";
+export * from "./kill-switch-guard.js";
+export * from "./vendor-agent-control.js";
+export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
+export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";
+
+// ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
+export * from "./agent-risk-score.js";
+// ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)
+export * from "./agent-identity.js";
+
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-actions.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
+export * from "./sensitivity-labels.js";
+
+// ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
+export * from "./fairness-evaluation.js";
+
+// ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
+export * from "./custom-classifiers.js";
+export * from "./agent-credential.js";

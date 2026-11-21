@@ -30,12 +30,13 @@
  *      and caps it at `METRIC_CARDINALITY_LIMIT` series (the SDK folds the rest
  *      into one overflow series).
  */
+import { PROCESS_INSTANCE_ID } from "./instance-id.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { DecisionEffect } from "@regulait/policy-kernel";
-import { constantTimeEqual, type McpUpstreamTransport } from "@regulait/shared";
+import { constantTimeEqual, type McpServerTransport } from "@regulait/shared";
 import {
   MeterProvider,
   MetricReader,
@@ -71,7 +72,7 @@ export interface DecisionMetricLabels {
 export interface UpstreamMetricLabels {
   /** the `mcp_servers.id` (a uuid, bounded by the registry — never a URL) */
   serverId: string;
-  transport: McpUpstreamTransport;
+  transport: McpServerTransport;
   outcome: MetricUpstreamOutcome;
 }
 
@@ -93,7 +94,7 @@ export const METRICS_PATH = "/metrics";
 
 const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const DECISION_EFFECTS = ["allow", "deny", "require_approval"] as const satisfies readonly DecisionEffect[];
-const UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const satisfies readonly McpUpstreamTransport[];
+const UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio", "first_party"] as const satisfies readonly McpServerTransport[];
 const JOB_OUTCOMES = ["ok", "failed", "skipped"] as const;
 /** how one ADR-0301 OTLP metrics push ended */
 export const METRIC_OTLP_PUSH_OUTCOMES = ["ok", "rejected", "failed", "egress_blocked"] as const;
@@ -361,7 +362,8 @@ function buildMeter(): Meter {
     views,
     // replaces the SDK's default resource (which names the SDK and runtime);
     // the Prometheus side drops it anyway (`withoutTargetInfo`)
-    resource: resourceFromAttributes({ "service.name": OTLP_METRICS_SERVICE_NAME }),
+    // ADR-0343: `service.instance.id` keeps N replicas' series apart at an OTLP collector
+    resource: resourceFromAttributes({ "service.name": OTLP_METRICS_SERVICE_NAME, "service.instance.id": PROCESS_INSTANCE_ID }),
   });
   const m = provider.getMeter("regulait-gateway");
   return {

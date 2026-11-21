@@ -33,7 +33,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { definitionDiff } from "@regulait/shared";
-import { planInstanceMigration, type InstanceState, type MigrationRefusal, type WorkflowDefinition } from "@regulait/workflow-kernel";
+import { nextMigrationStatus, planInstanceMigration, type InstanceState, type MigrationRefusal, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import { adminsOtherThan } from "./workflow-approvers.js";
 import type { DbOrTx } from "./orchestration.js";
 import {
@@ -203,12 +203,20 @@ export async function applyWorkflowMigrationDecision(
       .set({ status: "superseded" })
       .where(and(eq(approvals.stageId, approval.stageId!), eq(approvals.status, "pending")));
   });
-  const close = (status: "applied" | "denied" | "stale") =>
-    tx.update(workflowInstanceMigrations).set({ status, decidedByUserId: deciderUserId, decidedAt: new Date() }).where(eq(workflowInstanceMigrations.id, id));
+  // rule 12: the request moves only as MIGRATION_LIFECYCLE allows, and only from `pending` (a guarded UPDATE)
+  const close = async (trigger: "approve_applied" | "approve_stale" | "deny") => {
+    const status = nextMigrationStatus("pending", trigger)!;
+    const moved = await tx
+      .update(workflowInstanceMigrations)
+      .set({ status, decidedByUserId: deciderUserId, decidedAt: new Date() })
+      .where(and(eq(workflowInstanceMigrations.id, id), eq(workflowInstanceMigrations.status, "pending")))
+      .returning({ id: workflowInstanceMigrations.id });
+    if (moved.length !== 1) throw new Error(`workflow migration ${id} was decided concurrently`);
+  };
   const audit = (ruleId: string, effect: "allow" | "deny", reason: string, detail: Record<string, unknown>) =>
     tx.insert(auditLog).values({ userId: deciderUserId, objectType: "workflow", objectId: m.instanceId, detail: { migrationId: id, ...detail }, effect, ruleId, ruleChain: [], reason });
   if (decision === "denied") {
-    await close("denied");
+    await close("deny");
     await audit("workflow:migration-denied", "deny", "the migration was denied; the instance stays on its version", {});
     return;
   }
@@ -218,7 +226,7 @@ export async function applyWorkflowMigrationDecision(
   const a = assessMigration(instance, version);
   const moved = sha256(instance.definition) !== m.fromDefinitionSha256;
   if (!a.ok || moved) {
-    await close("stale");
+    await close("approve_stale");
     await audit("workflow:migration-stale", "deny", "the approved migration no longer holds for the instance as it is now; nothing changed", {
       ...(moved ? { definitionMoved: true } : {}),
       ...(a.ok ? {} : { refusals: a.refusals }),
@@ -240,7 +248,7 @@ export async function applyWorkflowMigrationDecision(
     "migration",
     deciderUserId,
   );
-  await close("applied");
+  await close("approve_applied");
   await audit("workflow:instance-migrated", "allow", `instance migrated to template version ${version.version}`, {
     targetVersionId: version.id,
     targetVersion: version.version,

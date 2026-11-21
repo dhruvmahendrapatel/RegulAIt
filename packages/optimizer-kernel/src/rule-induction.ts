@@ -192,6 +192,17 @@ export function applyInducedRule(rule: InducedRule, fields: Readonly<Record<stri
   return { matched: false };
 }
 
+/** Render a rule as readable lines, one per cell, plus the fallback line. Values are JSON-quoted so they cannot be misread. */
+export function renderInducedRule(rule: InducedRule): string[] {
+  const show = (v: FieldValue | AbsentMarker): string => (isAbsent(v) ? "(absent)" : JSON.stringify(v));
+  const lines = rule.cells.map((c) => {
+    const when = rule.fields.length === 0 ? "always" : `when ${rule.fields.map((f, i) => `${f} = ${show(c.key[i]!)}`).join(" and ")}`;
+    return `${when} -> ${JSON.stringify(c.output)} (${c.support} runs)`;
+  });
+  lines.push("otherwise -> ask the AI (input not covered by this rule)");
+  return lines;
+}
+
 /** Find the smallest exact-match rule that reproduces a step's outputs, or explain why none does. */
 export function induceStepRule(runsIn: readonly StepRun[], overrides: Partial<RuleInductionOptions> = {}): RuleInductionResult {
   const o = resolveRuleInductionOptions(overrides);
@@ -334,8 +345,14 @@ function encodeKey(fields: readonly string[], values: Readonly<Record<string, Fi
   return JSON.stringify(fields.map((f) => encodeValue(Object.hasOwn(values, f) ? values[f] : ABSENT)));
 }
 
-function encodeCellKey(key: readonly (FieldValue | AbsentMarker)[]): string {
+/** The key a rule cell is looked up by (`applyInducedRule`): exported so the decision-table compiler detects
+ * overlapping rows with the same encoding the engine matches on (one encoding, never two). */
+export function encodeCellKey(key: readonly (FieldValue | AbsentMarker)[]): string {
   return JSON.stringify(key.map((v) => encodeValue(v)));
+}
+
+function isAbsent(v: FieldValue | AbsentMarker): v is AbsentMarker {
+  return typeof v === "object" && v !== null;
 }
 
 function isScalar(v: unknown): v is FieldValue {
@@ -348,4 +365,33 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 function stripUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+/** ADR-0327 shadow mode: how a rule would have done on runs the AI answered (counts only) */
+export interface ShadowTally {
+  /** structured runs considered */
+  runs: number;
+  /** runs the rule answers (an input inside its table) */
+  covered: number;
+  /** covered runs where the rule's answer equals the AI's (both normalised as at induction) */
+  agreed: number;
+}
+
+/**
+ * Measure a rule against live runs without changing anything: for each run, apply the rule; a covered run agrees when
+ * the rule's output equals the AI's output after `normalizeStepOutput`. Pure; cost `runs + cells`.
+ */
+export function tallyShadow(rule: InducedRule, runs: readonly StepRun[]): ShadowTally {
+  // one lookup per run (the same encoding `applyInducedRule` compares), so the cost is runs + cells, not runs × cells
+  const byKey = new Map<string, string>();
+  for (const cell of rule.cells) byKey.set(encodeCellKey(cell.key), cell.output);
+  let covered = 0;
+  let agreed = 0;
+  for (const run of runs) {
+    const output = byKey.get(encodeKey(rule.fields, run.fields));
+    if (output === undefined) continue;
+    covered += 1;
+    if (output === normalizeStepOutput(run.output)) agreed += 1;
+  }
+  return { runs: runs.length, covered, agreed };
 }

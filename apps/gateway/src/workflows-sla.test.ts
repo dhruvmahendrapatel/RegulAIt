@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, approvals, auditLog, createDb, eq, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { and, approvals, auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { runStageDeadlineJob } from "./workflows.js";
@@ -11,7 +11,8 @@ import { registerWorkflowSlaCourier, type WorkflowSlaNotice } from "./workflow-s
 /**
  * ADR-0340 slice 2 — stage deadlines. Entering a stage with an `sla` sends its timers in the entering transaction; a
  * timer that fires while the instance still rests at that stage execution warns, then breaches with the stage's
- * action (notify, reassign, fail). The worker is off under vitest, so the tests run the handler the worker calls
+ * action (notify, fail). A sign-off stage takes only `fail`: its reminders and escalation are the approvals queue's
+ * SLA (ADR-0340 decision 9). The worker is off under vitest, so the tests run the handler the worker calls
  * (`runStageDeadlineJob`) on the job the transition really queued. Everything is prefixed ws- and run-scoped.
  */
 
@@ -29,7 +30,6 @@ let app: ReturnType<typeof buildApp>;
 type U = { id: string; auth: { authorization: string } };
 let pia: U;
 let ana: U;
-let bo: U;
 let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
 const notices: WorkflowSlaNotice[] = [];
 
@@ -102,7 +102,6 @@ beforeAll(async () => {
   });
   pia = await makeUser("pia");
   ana = await makeUser("ana");
-  bo = await makeUser("bo");
   expect((await post("/v1/git/connections", { name: conn, provider: "mock", token: "not-a-real-token" })).statusCode).toBe(201);
 });
 afterAll(async () => {
@@ -111,16 +110,15 @@ afterAll(async () => {
 });
 
 describe("ADR-0340 slice 2: stage deadlines", () => {
-  it("entering a timed sign-off queues a warning and a breach; the warning reminds once; the breach reassigns", async () => {
-    const name = `ws-reassign-${RUN}`;
+  it("entering a timed stage queues a warning and a breach; the warning reminds once; the breach notifies", async () => {
+    const name = `ws-notify-${RUN}`;
     await registerTemplate(name, [
       { id: "intake", type: "trigger" },
-      { id: "gate", type: "human_approval", approvers: [ana.id], sla: { warnAfterSeconds: 3600, breachAfterSeconds: 7200, onBreach: "reassign", reassignTo: [bo.id] } },
+      { id: "req", type: "artifact_generation", output: "r", sla: { warnAfterSeconds: 3600, breachAfterSeconds: 7200 } },
     ]);
     const id = await start(name);
     const inst = await view(id);
-    expect(inst.status).toBe("blocked_on_approval");
-    expect(inst.context["sla:gate"]).toMatchObject({ onBreach: "reassign", executionKey: `${id}:gate:0:0` });
+    expect(inst.context["sla:req"]).toMatchObject({ phase: "scheduled", onBreach: "notify", executionKey: `${id}:req:0:0` });
     expect(await rules(id)).toContain("workflow:sla-scheduled");
     const jobs = await queued(id);
     expect(jobs.map((j) => [j.data.phase, j.delay])).toEqual([
@@ -131,18 +129,20 @@ describe("ADR-0340 slice 2: stage deadlines", () => {
     const warn = jobs[0]!.data;
     expect(await runStageDeadlineJob(db, warn, DATA_KEY)).toBe("warned");
     expect(await runStageDeadlineJob(db, warn, DATA_KEY)).toBe("already_done");
-    expect(notices.filter((n) => n.instanceId === id)).toEqual([expect.objectContaining({ phase: "warn", recipientUserIds: [ana.id] })]);
+    expect(notices.filter((n) => n.instanceId === id)).toEqual([expect.objectContaining({ phase: "warn", recipientUserIds: [pia.id] })]);
 
-    expect(await runStageDeadlineJob(db, jobs[1]!.data, DATA_KEY)).toBe("reassigned");
-    expect(await pendingApprovers(id, "gate")).toEqual([bo.id]);
-    const r = await rules(id);
-    expect(r).toEqual(expect.arrayContaining(["workflow:sla-warned", "workflow:sla-breached", "workflow:sla-reassigned"]));
-    // escalation never decided anything: the instance still waits, now on bo
-    expect((await view(id)).status).toBe("blocked_on_approval");
-    const [a] = await db.select().from(approvals).where(and(eq(approvals.instanceId, id), eq(approvals.status, "pending")));
-    const d = await post(`/v1/approvals/${a!.id}/decide`, { decision: "approved" }, bo.auth);
-    expect(d.statusCode, d.body).toBe(200);
-    expect((await view(id)).status).toBe("completed");
+    expect(await runStageDeadlineJob(db, jobs[1]!.data, DATA_KEY)).toBe("notified");
+    // the lifecycle table refuses a late warning and a second breach
+    expect(await runStageDeadlineJob(db, warn, DATA_KEY)).toBe("already_done");
+    expect(await runStageDeadlineJob(db, jobs[1]!.data, DATA_KEY)).toBe("already_done");
+    const after = await view(id);
+    expect(after.status).toBe(inst.status);
+    expect(after.context["sla:req"]).toMatchObject({ phase: "breached" });
+    expect(notices.filter((n) => n.instanceId === id).map((n) => [n.phase, n.action])).toEqual([
+      ["warn", "notify"],
+      ["breach", "notify"],
+    ]);
+    expect(await rules(id)).toEqual(expect.arrayContaining(["workflow:sla-warned", "workflow:sla-breached"]));
   });
 
   it("a timer for a stage execution the instance has left does nothing", async () => {
@@ -187,36 +187,19 @@ describe("ADR-0340 slice 2: stage deadlines", () => {
     expect(abort!.detail).toMatchObject({ actor: "workflow-sla" });
   });
 
-  it("notify on breach leaves the stage waiting and tells the pending approvers", async () => {
-    const name = `ws-notify-${RUN}`;
-    await registerTemplate(name, [
-      { id: "intake", type: "trigger" },
-      { id: "gate", type: "human_approval", approvers: [ana.id], sla: { breachAfterSeconds: 600 } },
-    ]);
-    const id = await start(name);
-    const [job] = await queued(id);
-    expect(job!.data.phase).toBe("breach");
-    expect(await runStageDeadlineJob(db, job!.data, DATA_KEY)).toBe("notified");
-    expect((await view(id)).status).toBe("blocked_on_approval");
-    expect(notices.filter((n) => n.instanceId === id)).toEqual([
-      expect.objectContaining({ phase: "breach", action: "notify", recipientUserIds: [ana.id] }),
-    ]);
-    const [row] = await db.select({ context: workflowInstances.context }).from(workflowInstances).where(eq(workflowInstances.id, id));
-    expect((row!.context as Record<string, { breachedAt?: string }>)["sla:gate"]?.breachedAt).toBeDefined();
-  });
-
-  it("a template that reassigns from a stage with no sign-off is refused", async () => {
-    const res = await post("/v1/workflows/templates", {
-      name: `ws-bad-${RUN}`,
-      definition: {
-        workflow: `ws-bad-${RUN}`,
-        stages: [
-          { id: "intake", type: "trigger" },
-          { id: "req", type: "artifact_generation", output: "r", sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: [bo.id] } },
-        ],
-      },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(res.body).toMatch(/only a human_approval stage/);
+  it("a sign-off stage with a reminder or a notify deadline is refused (the approvals queue owns those)", async () => {
+    for (const sla of [{ breachAfterSeconds: 600 }, { breachAfterSeconds: 600, warnAfterSeconds: 60, onBreach: "fail" }, { breachAfterSeconds: 600, onBreach: "reassign" }]) {
+      const res = await post("/v1/workflows/templates", {
+        name: `ws-bad-${RUN}`,
+        definition: {
+          workflow: `ws-bad-${RUN}`,
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "gate", type: "human_approval", approvers: [ana.id], sla },
+          ],
+        },
+      });
+      expect(res.statusCode, JSON.stringify(sla)).toBe(400);
+    }
   });
 });

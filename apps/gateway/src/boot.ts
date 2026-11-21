@@ -41,6 +41,8 @@ import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
 import { runMigrations, runWithRlsSystem, type Db } from "@regulait/db";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
+import { markDraining, resolveDrainDelayMs } from "./readiness.js";
 import {
   auditPrivilegedRuntimeLogin,
   checkRuntimeLogin,
@@ -376,10 +378,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   let anchorTimer: NodeJS.Timeout | null = null;
   let rateLimitPruneTimer: NodeJS.Timeout | null = null;
   let pmDeliveryPruneTimer: NodeJS.Timeout | null = null;
+  // ADR-0343: one replica of the cluster captures and flushes anchors (two flushes pushed the same anchor twice)
+  const anchorLeader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.auditAnchor);
   app.addHook("onClose", async () => {
     if (anchorTimer) clearInterval(anchorTimer);
     if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
     if (pmDeliveryPruneTimer) clearInterval(pmDeliveryPruneTimer);
+    await anchorLeader.release();
   });
 
   // ADR-0185 G5 — the separate metrics listener. Its close hook is registered
@@ -426,7 +431,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // that drops rather than refuses) used to leave a capture hanging and the
     // interval kept starting another one every 15 minutes on top of it.
     anchorTimer = setInterval(
-      withoutOverlap(() =>
+      withoutOverlap(leaderOnly(anchorLeader, () =>
         // ADR-0234 batch 7a: the anchor reads the chain head and appends its own audit row, with no principal
         runWithRlsSystem("system_task", "timer.audit-anchor", async () => {
           try {
@@ -436,7 +441,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
             app.log.warn({ err }, "audit anchor capture failed — the hash chain is unaffected");
           }
         }),
-      ),
+      )),
       anchorEveryMs,
     );
     anchorTimer.unref();
@@ -469,7 +474,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // like the counters above: a missed prune only keeps rows longer, which refuses more replays, never fewer.
     pmDeliveryPruneTimer = setInterval(
       () => {
-        void prunePmWebhookDeliveries(db).catch((err: unknown) => {
+        // ADR-0234 PM batch: pm_webhook_deliveries is under row-level security; the prune runs as system_task.
+        void runWithRlsSystem("system_task", "boot.pm-delivery-prune", () => prunePmWebhookDeliveries(db)).catch((err: unknown) => {
           app.log.warn({ err }, "PM webhook delivery prune failed; replay refusal is unaffected");
         });
       },
@@ -664,6 +670,9 @@ export interface ShutdownHandlerOptions {
    * docker-compose.yml's `stop_grace_period` for the gateway is set above
    * this so the orchestrator never SIGKILLs a drain that was going to finish. */
   graceMs?: number;
+  /** ADR-0343: how long `/ready` answers 503 before the listener closes (REGULAIT_DRAIN_DELAY_MS, default 0); capped
+   * one second under `graceMs` so the drain itself always has time */
+  drainDelayMs?: number;
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 15_000;
@@ -709,6 +718,7 @@ export function installShutdownHandlers(
   const proc: ProcessLike = opts.proc ?? process;
   const log = opts.log ?? ((line: string) => console.error(line));
   const graceMs = opts.graceMs ?? resolveShutdownGraceMs();
+  const drainDelayMs = Math.min(opts.drainDelayMs ?? resolveDrainDelayMs(), Math.max(0, graceMs - 1_000));
   let draining: Promise<void> | null = null;
 
   const shutdown = (reason: string, code: number): Promise<void> => {
@@ -720,6 +730,13 @@ export function installShutdownHandlers(
         proc.exit(code === 0 ? 1 : code);
       }, graceMs);
       deadline.unref();
+      // ADR-0343: say "not ready" first and keep serving for the drain delay, so the load balancer stops sending new
+      // requests here before the listener closes
+      markDraining(started.app);
+      if (drainDelayMs > 0) {
+        log(`[regulait] readiness now 503 (draining); serving in-flight traffic for ${drainDelayMs} ms before closing`);
+        await new Promise((r) => setTimeout(r, drainDelayMs));
+      }
       try {
         await started.app.close();
       } catch (err) {

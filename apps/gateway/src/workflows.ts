@@ -25,14 +25,17 @@ import {
   workflowInstanceTemplateVersions,
   workflowTemplates,
   withinSystemReason,
-  configVersions,
   type Db,
 } from "@regulait/db";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
   initialState,
   isCompensating,
   planInstanceMigration,
   matchTemplates,
+  nextDeadlinePhase,
+  type DeadlinePhase,
   mergeDefinitions,
   transition,
   validateDefinition,
@@ -139,6 +142,7 @@ import {
   scrubAuditText,
   retireTemplateSchema,
   startInstanceSchema,
+  type changeDescriptorSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
   definitionDiff,
@@ -246,8 +250,7 @@ export const TERMINAL_STATUSES: readonly string[] = ["completed", "aborted", "de
 
 /**
  * Request a stage's sign-off from `approvers` (resolved: `requesting_user` is the initiator, ADR-0195 A4
- * `admin_not_initiator` is every active admin other than the initiator, deduplicated). The stage's request and an
- * ADR-0340 SLA reassignment both write through here.
+ * `admin_not_initiator` is every active admin other than the initiator, deduplicated).
  */
 async function requestStageApprovals(
   tx: DbOrTx,
@@ -308,8 +311,11 @@ export async function scheduleStageDeadlines(
   const sent = [];
   for (const p of phases) sent.push({ ...p, result: await enqueueStageDeadline(tx as unknown as Db, { ...base, phase: p.phase }, p.after) });
   const failed = sent.filter((x) => !x.result.scheduled && x.result.reason !== "already_scheduled");
+  // a new entry's deadline starts from `none` (rule 12: STAGE_DEADLINE_LIFECYCLE)
+  const phase = nextDeadlinePhase("none", failed.length > 0 ? "enter_unsent" : "enter")!;
   const marker = {
     executionKey,
+    phase,
     onBreach: sla.onBreach,
     ...(sla.warnAfterSeconds !== undefined ? { warnAt: new Date(now + sla.warnAfterSeconds * 1000).toISOString() } : {}),
     dueAt: new Date(now + sla.breachAfterSeconds * 1000).toISOString(),
@@ -464,7 +470,11 @@ async function applyEvent(
     const round = instance.round + (isReopen ? 1 : 0);
     const stageEntry = instance.stageEntry + (bumpEntry ? 1 : 0);
 
-    await tx
+    // ADR-0340 (rule 12): a compensation phase implies the instance status (the lifecycle table); a state that
+    // disagrees is refused before it is written. The UPDATE is guarded on the status and stage entry read under the
+    // lock, so the move it writes is exactly the one computed from that row.
+    assertCompensationStatus(def, state);
+    const written = await tx
       .update(workflowInstances)
       .set({
         state,
@@ -474,7 +484,15 @@ async function applyEvent(
         updatedAt: new Date(),
         ...(context ? { context } : {}),
       })
-      .where(eq(workflowInstances.id, instance.id));
+      .where(
+        and(
+          eq(workflowInstances.id, instance.id),
+          eq(workflowInstances.status, instance.status),
+          eq(workflowInstances.stageEntry, instance.stageEntry),
+        ),
+      )
+      .returning({ id: workflowInstances.id });
+    if (written.length !== 1) throw new WorkflowStateError(`instance ${instance.id} moved while '${event.kind}' was applied`);
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
@@ -2323,7 +2341,18 @@ async function runGitExecutions(
             context[recordKey] = { action: stage.action, compensates: stage.compensates, branch, changed: res?.deleted ?? false, ...(branch ? {} : { nothingRecorded: true }) };
           } else {
             const prId = context.prId === undefined || context.prId === null ? null : String(context.prId);
-            const res = prId
+            // a pull request this instance merged, whose merge its own revert already undid in this saga, has
+            // nothing left to close: closing a merged pull request throws on every provider, so without this the
+            // saga would fail on every retry. Only a provider that says MERGED supersedes it; a PR merged by
+            // anyone else, or with no revert, still fails honestly.
+            const superseded =
+              prId !== null &&
+              closePrSupersededByMerge(def, instance.state as InstanceState, stage.id) &&
+              (await provider.getPullRequest(stage.repo!, prId)).state === "merged";
+            if (superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: false, superseded: "merged" };
+            }
+            const res = prId && !superseded
               ? await runExternalWrite(
                   db,
                   "git.close_pull_request",
@@ -2331,7 +2360,9 @@ async function runGitExecutions(
                   effectAudit((r) => ({ repo: stage.repo, prId, closed: r.closed, compensates: stage.compensates })),
                 )
               : null;
-            context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            if (!superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            }
           }
         }
       } else if (stage.action === "create_branch") {
@@ -2979,15 +3010,16 @@ async function commitStageResult(
  */
 /**
  * ADR-0340 slice 2 — ONE DEADLINE TIMER FIRING. Under the instance lock: if the instance still rests at the stage
- * execution the job names (same stage, round and entry; not ended, not compensating) and this phase has not run for
- * it yet, the phase runs and is recorded on the `sla:<stage>` marker in the same transaction as its audit row:
+ * execution the job names (same stage, round and entry; not ended, not compensating) and the deadline lifecycle table
+ * (rule 12, `STAGE_DEADLINE_LIFECYCLE`) allows this phase from the marker's current one, the phase runs and is
+ * recorded on the `sla:<stage>` marker in the same transaction as its audit row:
  *  - `warn`: `workflow:sla-warned`, and a reminder;
- *  - `breach`: `workflow:sla-breached` (deny), then the stage's `onBreach`: `notify` (a notice), `reassign` (the
- *    stage's pending sign-off rows are superseded and the `reassignTo` approvers are requested, audited
- *    `workflow:sla-reassigned`) or `fail` (the kernel's `abort`, as the system actor `workflow-sla`, which supersedes
- *    the gates and compensates when the template declares compensations; the first compensation runs after the
- *    commit, with the same executor and guard as any other).
- * Escalation never approves or denies a sign-off. The chat notice is sent after the commit and never fails the job.
+ *  - `breach`: `workflow:sla-breached` (deny), then the stage's `onBreach`: `notify` (a notice) or `fail` (the
+ *    kernel's `abort`, as the system actor `workflow-sla`, which supersedes the gates and compensates when the
+ *    template declares compensations; the first compensation runs after the commit, with the same executor and guard
+ *    as any other).
+ * A deadline never approves or denies a sign-off, and never reminds or escalates one (that is the approvals queue's
+ * SLA, decision 9). The chat notice is sent after the commit and never fails the job.
  */
 export async function runStageDeadlineJob(
   db: Db,
@@ -3017,66 +3049,44 @@ export async function runStageDeadlineJob(
     const sla = stage.sla;
     const markerKey = `sla:${stage.id}`;
     const marker = { ...((row.context as Record<string, unknown>)[markerKey] as Record<string, unknown> | undefined) };
-    const doneKey = job.phase === "warn" ? "warnedAt" : "breachedAt";
-    if (marker.executionKey === key && marker[doneKey] !== undefined) return "already_done";
+    if (marker.executionKey !== key) return "superseded";
+    const from = (typeof marker.phase === "string" ? marker.phase : "scheduled") as DeadlinePhase;
+    const to = nextDeadlinePhase(from, job.phase);
+    if (to === null) return "already_done";
     const at = new Date().toISOString();
-    Object.assign(marker, { executionKey: key, [doneKey]: at });
+    Object.assign(marker, { phase: to, [job.phase === "warn" ? "warnedAt" : "breachedAt"]: at });
     await tx
       .update(workflowInstances)
       .set({ context: sql`${workflowInstances.context} || jsonb_build_object(${markerKey}::text, ${JSON.stringify(marker)}::jsonb)` })
       .where(eq(workflowInstances.id, row.id));
-    const pendingApprovers = async () =>
-      (
-        await tx
-          .select({ approverUserId: approvals.approverUserId })
-          .from(approvals)
-          .where(and(eq(approvals.instanceId, row.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
-      ).map((r) => r.approverUserId);
     const audit = (ruleId: string, effect: "allow" | "deny", reason: string, extra: Record<string, unknown> = {}) =>
       tx.insert(auditLog).values({
         userId: SYSTEM_IDENTITY,
         objectType: "workflow",
         objectId: row.id,
-        detail: { actor: "workflow-sla", stageId: stage.id, executionKey: key, phase: job.phase, dueAt: marker.dueAt ?? null, ...extra },
+        detail: { actor: "workflow-sla", stageId: stage.id, executionKey: key, phase: job.phase, from, to, dueAt: marker.dueAt ?? null, ...extra },
         effect,
         ruleId,
         ruleChain: [],
         reason,
       });
     const dueAt = typeof marker.dueAt === "string" ? marker.dueAt : null;
+    const toInitiator = [row.initiatorUserId];
     if (job.phase === "warn") {
       await audit("workflow:sla-warned", "allow", `stage '${stage.id}' is approaching its deadline${dueAt ? ` (${dueAt})` : ""}; a reminder was sent`);
-      notice = { instanceId: row.id, stageId: stage.id, phase: "warn", action: "notify", recipientUserIds: await pendingApprovers(), dueAt };
+      notice = { instanceId: row.id, stageId: stage.id, phase: "warn", action: "notify", recipientUserIds: toInitiator, dueAt };
       return "warned";
     }
     await audit("workflow:sla-breached", "deny", `stage '${stage.id}' missed its deadline${dueAt ? ` (${dueAt})` : ""}; on breach: ${sla.onBreach}`, {
       onBreach: sla.onBreach,
     });
-    if (sla.onBreach === "reassign") {
-      const superseded = await withinSystemReason(tx, "approval_maintenance", "workflows.sla-reassign", async () =>
-        tx
-          .update(approvals)
-          .set({ status: "superseded" })
-          .where(and(eq(approvals.instanceId, row.id), eq(approvals.stageId, stage.id), eq(approvals.status, "pending")))
-          .returning({ id: approvals.id, approverUserId: approvals.approverUserId }),
-      );
-      const requested = await requestStageApprovals(tx, row, stage.id, sla.reassignTo ?? [], "workflows.sla-reassign");
-      await audit(
-        "workflow:sla-reassigned",
-        "allow",
-        `stage '${stage.id}' sign-off moved from ${superseded.length} pending approver row(s) to ${requested.length} approver(s) by its deadline; nothing was approved or denied`,
-        { supersededApprovalIds: superseded.map((r) => r.id), from: superseded.map((r) => r.approverUserId), to: requested },
-      );
-      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "reassign", recipientUserIds: requested, dueAt };
-      return "reassigned";
-    }
     if (sla.onBreach === "fail") {
       const applied = await applyEvent(tx, row.id, { kind: "abort" }, null, undefined, undefined, { systemActor: "workflow-sla" });
       followUp = applied.effects;
-      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "fail", recipientUserIds: [row.initiatorUserId], dueAt };
+      notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "fail", recipientUserIds: toInitiator, dueAt };
       return "failed_instance";
     }
-    notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "notify", recipientUserIds: await pendingApprovers(), dueAt };
+    notice = { instanceId: row.id, stageId: stage.id, phase: "breach", action: "notify", recipientUserIds: toInitiator, dueAt };
     return "notified";
   });
   // the cancel's first compensation runs once the cancel is durable, through the ordinary executor and its guard
@@ -3179,16 +3189,29 @@ export async function runStageRetryJob(
  * A zod definition failure THROWS (ZodError → the global 400 mapping), exactly
  * as the route always behaved.
  */
-/**
- * Every check a template definition must pass before anything can run it: the kernel schema, then the references it
- * makes (eval datasets, review agents, approvers, nested run graphs). A new template and an ADR-0340 template VERSION
- * pass the same checks. Throws the kernel's ZodError on a schema failure (the routes answer it as a 400).
- */
-export async function validateWorkflowTemplateDefinition(
+export async function createWorkflowTemplateValidated(
   db: Db,
-  raw: unknown,
-): Promise<{ ok: true; definition: WorkflowDefinition } | { ok: false; status: number; body: Record<string, unknown> }> {
-  const definition = validateDefinition(raw);
+  body: { name: string; definition?: unknown },
+  actorUserId: string | null = null,
+): Promise<
+  | { ok: true; row: typeof workflowTemplates.$inferSelect }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const definition = validateDefinition(body.definition);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  if (refused) return refused;
+  return insertWorkflowTemplate(db, body.name, definition, actorUserId);
+}
+
+/**
+ * ADR-0341: the gateway-side checks of a kernel-valid definition (what the kernel cannot see: retired datasets,
+ * registry agents, user ids, nested run graphs), shared by the create path and the builder's validate and publish.
+ * Null = the definition may be stored; otherwise the refusal to send.
+ */
+export async function checkWorkflowTemplateReferences(
+  db: Db,
+  definition: WorkflowDefinition,
+): Promise<{ ok: false; status: number; body: Record<string, unknown> } | null> {
   // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
   const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
   if (retiredBound.length > 0) {
@@ -3273,7 +3296,28 @@ export async function validateWorkflowTemplateDefinition(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
-  return { ok: true, definition };
+  return null;
+}
+
+async function insertWorkflowTemplate(
+  db: Db,
+  name: string,
+  definition: WorkflowDefinition,
+  actorUserId: string | null,
+): Promise<{ ok: true; row: typeof workflowTemplates.$inferSelect }> {
+  // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
+  // says so; a template that turns automatic retry on is audited, by stage and
+  // policy, in ONE transaction with the insert (a savepoint when the caller
+  // already holds one), so a retry-enabled template never exists unaudited.
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowTemplates)
+      .values({ name, definition })
+      .returning();
+    await auditTemplateRetryEnabled(tx, created!.id, name, definition, actorUserId);
+    return created!;
+  });
+  return { ok: true, row };
 }
 
 /**
@@ -3301,30 +3345,18 @@ export async function auditTemplateRetryEnabled(
   });
 }
 
-export async function createWorkflowTemplateValidated(
+/**
+ * Every check a template definition must pass before anything can run it: the kernel schema, then the references it
+ * makes. A new template and an ADR-0340 template VERSION pass the same checks. Throws the kernel's ZodError on a
+ * schema failure (the routes answer it as a 400).
+ */
+export async function validateWorkflowTemplateDefinition(
   db: Db,
-  body: { name: string; definition?: unknown },
-  actorUserId: string | null = null,
-): Promise<
-  | { ok: true; row: typeof workflowTemplates.$inferSelect }
-  | { ok: false; status: number; body: Record<string, unknown> }
-> {
-  const checked = await validateWorkflowTemplateDefinition(db, body.definition);
-  if (!checked.ok) return checked;
-  const definition = checked.definition;
-  // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
-  // says so; a template that turns automatic retry on is audited, by stage and
-  // policy, in ONE transaction with the insert (a savepoint when the caller
-  // already holds one), so a retry-enabled template never exists unaudited.
-  const row = await db.transaction(async (tx) => {
-    const [created] = await tx
-      .insert(workflowTemplates)
-      .values({ name: body.name, definition })
-      .returning();
-    await auditTemplateRetryEnabled(tx, created!.id, body.name, definition, actorUserId);
-    return created!;
-  });
-  return { ok: true, row };
+  raw: unknown,
+): Promise<{ ok: true; definition: WorkflowDefinition } | { ok: false; status: number; body: Record<string, unknown> }> {
+  const definition = validateDefinition(raw);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  return refused ?? { ok: true, definition };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
@@ -3478,6 +3510,59 @@ export async function gitConnectionUse(
     .where(and(notInArray(workflowInstances.status, [...TERMINAL_INSTANCE_STATUSES]), naming(workflowInstances.definition)))
     .orderBy(workflowInstances.id);
   return { templates: tpl.length, instances: inst.length, templateNames: tpl.slice(0, 20).map((t) => t.name), instanceIds: inst.slice(0, 20).map((i) => i.id) };
+}
+
+/**
+ * The server-side half of a workflow start, shared by every route that starts an instance for a person
+ * (`POST /v1/workflows/instances` and `POST /v1/pipeline-runs`, ADR-0232), so the attributes that decide which stages
+ * and sign-offs apply can never drift between them:
+ * ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
+ * (never from the request body) and passed on the change descriptor so a
+ * role-scoped assignment rule can only ever fire for a genuine role holder.
+ * The kernel stays subject-free — it just matches these strings.
+ * ADR-0038: distinct — a role held both directly and via an IdP group
+ * mapping is two assignment rows and one role name.
+ * ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
+ * 5th: a change's data sensitivity is the set of compliance classification
+ * tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
+ * effectiveCompliancePolicy cascades from. That is the only
+ * server-authoritative sensitivity signal in the model, and it means the
+ * dim cannot be asserted by a client. No project, or a project with no
+ * classifications, yields [] — a sensitivity-scoped rule then simply does
+ * not fire (matches as absent; never an invented sensitivity).
+ * targetSystem is a legitimate client-supplied change attribute;
+ * initiatorRoles and dataSensitivities are authoritative server truth.
+ * Neither could ever reach here from a client — changeDescriptorSchema
+ * accepts neither — but rebuild explicitly.
+ *
+ * `cascadeTemplateIds` is the §8.3 cascade: a classified project's required templates, unioned in by the caller with
+ * `withCascadeTemplates` (it can force a workflow even when no assignment rule matches).
+ */
+export async function resolveServerChange(
+  db: Db,
+  userId: string,
+  clientChange: z.infer<typeof changeDescriptorSchema>,
+  projectId: string | null,
+): Promise<{
+  change: z.infer<typeof changeDescriptorSchema> & { initiatorRoles: string[]; dataSensitivities: string[] };
+  cascadeTemplateIds: string[];
+}> {
+  const initiatorRoleRows = await db
+    .select({ name: roles.name })
+    .from(roleAssignments)
+    .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+    .where(eq(roleAssignments.userId, userId));
+  const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
+  const dataSensitivities = projectId ? await projectClassifications(db, projectId) : [];
+  const cascadeTemplateIds = projectId ? await requiredTemplateIdsFor(db, projectId) : [];
+  return { change: { ...clientChange, initiatorRoles, dataSensitivities }, cascadeTemplateIds };
+}
+
+/** the §8.3 cascade union: the chosen templates first, in order, then each required template not already chosen */
+export function withCascadeTemplates(templateIds: readonly string[], cascadeTemplateIds: readonly string[]): string[] {
+  const out = [...templateIds];
+  for (const id of cascadeTemplateIds) if (!out.includes(id)) out.push(id);
+  return out;
 }
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
@@ -3940,34 +4025,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
 
-    // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
-    // (never from the request body) and passed on the change descriptor so a
-    // role-scoped assignment rule can only ever fire for a genuine role holder.
-    // The kernel stays subject-free — it just matches these strings.
-    const initiatorRoleRows = await db
-      .select({ name: roles.name })
-      .from(roleAssignments)
-      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-      .where(eq(roleAssignments.userId, userId));
-    // ADR-0038: distinct — a role held both directly and via an IdP group
-    // mapping is two assignment rows and one role name.
-    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
-    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
-    // 5th: a change's data sensitivity is the set of compliance classification
-    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
-    // effectiveCompliancePolicy cascades from. That is the only
-    // server-authoritative sensitivity signal in the model, and it means the
-    // dim cannot be asserted by a client. No project, or a project with no
-    // classifications, yields [] — a sensitivity-scoped rule then simply does
-    // not fire (matches as absent; never an invented sensitivity).
-    const dataSensitivities = body.projectId
-      ? await projectClassifications(db, body.projectId)
-      : [];
-    // targetSystem is a legitimate client-supplied change attribute;
-    // initiatorRoles and dataSensitivities are authoritative server truth.
-    // Neither could ever reach here from a client — changeDescriptorSchema
-    // accepts neither — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles, dataSensitivities };
+    // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
+    // start path (resolveServerChange)
+    const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
 
     // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
     // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
@@ -4020,10 +4080,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // templates are unioned in with no manual per-control setup (and can
     // force a workflow even when no assignment rule matches). The existing
     // §4 union/strictest merge keeps every added sign-off stage.
-    if (body.projectId) {
-      const required = await requiredTemplateIdsFor(db, body.projectId);
-      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
-    }
+    templateIds = withCascadeTemplates(templateIds, cascadeTemplateIds);
     if (templateIds.length === 0) {
       // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
       // rule, installed above): say who can fix it

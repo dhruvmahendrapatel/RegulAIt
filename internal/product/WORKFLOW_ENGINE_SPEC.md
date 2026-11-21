@@ -69,9 +69,10 @@ number** of workflow templates, composed from a shared library of reusable stage
   stages that ran, in reverse order, through the ordinary executors and audit, then the instance ends `aborted` or
   `denied`; ending a compensation early is an admin's act.
 - **Stage deadline (SLA)** *(2026-11-16, ADR-0340 slice 2)* — any resting or executed stage (not a trigger, rollback
-  or compensation) may carry `sla`: a reminder before the breach, then on breach `notify`, `reassign` (a sign-off moves
-  to named approvers) or `fail` (the instance is cancelled and compensated). Timers are durable queue jobs set when
-  the stage is entered; escalation never approves or denies a sign-off.
+  or compensation) may carry `sla`: a reminder before the breach, then on breach `notify` or `fail` (the instance is
+  cancelled and compensated). A sign-off stage takes only `fail`; its reminders and escalation are the approvals
+  queue's SLA (ADR-0342). Timers are durable queue jobs set when the stage is entered; a deadline never approves or
+  denies a sign-off.
 
 **Versions, canary and migration (2026-11-16, ADR-0340 slice 3).** A template has immutable versions (the ADR-0048
 config-version routes). A running instance finishes on the version it started on. A canary serves a percentage of
