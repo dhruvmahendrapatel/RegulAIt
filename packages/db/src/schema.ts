@@ -16991,7 +16991,8 @@ export const thirdPartyIngestRecordFindings = pgTable(
 );
 
 // ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
-export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+/** ADR-0351 slice 1 (migration pending/siem_syslog_tls): `syslog_tls` is RFC 5424 over TLS (RFC 5425) */
+export const SIEM_DESTINATION_KINDS = ["webhook", "syslog_tls"] as const;
 export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
 
 /**
@@ -17009,7 +17010,10 @@ export const siemDestinations = pgTable(
     url: text("url").notNull(),
     allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
     enabled: boolean("enabled").notNull().default(false),
-    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** the webhook's `whsec_` secret under REGULAIT_DATA_KEY; null exactly for a `syslog_tls` destination (CHECK) */
+    secretCiphertext: text("secret_ciphertext"),
+    /** ADR-0351: `syslog_tls` only, the PEM of the CA(s) that issued the receiver's certificate (public, not a secret) */
+    tlsCaPem: text("tls_ca_pem"),
     secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
     /** the highest `audit_log.seq` the receiver acknowledged */
     cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
