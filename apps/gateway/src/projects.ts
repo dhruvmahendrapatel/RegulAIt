@@ -40,7 +40,6 @@ import {
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
 import { recordContextRevision } from "./lineage.js";
-import { memoryWriteGate, memoryWriteRefusal } from "./memory-write-gate.js";
 import {
   addProjectMemberSchema,
   addTeamMemberSchema,
@@ -1895,7 +1894,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
     // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so a write here is held to the
     // same content-trust floor as a write tool call (its causal context is the producing run, when declared) and
-    // to the injection scan. Before the transaction: a refused write takes no revision number.
+    // to the injection scan. Before the transaction: a refused write takes no revision number. Imported lazily:
+    // the gate needs guardrails.js, which imports this module, so a static import would close a cycle.
+    const { memoryWriteGate, memoryWriteRefusal } = await import("./memory-write-gate.js");
     const trust = await memoryWriteGate(db, {
       userId,
       contextId: args.producedByRunId ? runContextId(args.producedByRunId) : null,
