@@ -48,7 +48,6 @@ import {
   governanceAlerts,
   inArray,
   isNull,
-  lt,
   ne,
   notInArray,
   or,
@@ -71,7 +70,9 @@ import {
   type ContainmentAutoThreshold,
   type ContainmentSignal,
 } from "@regulait/shared";
-import { haltAgentInTx, type HaltActor } from "./execution-control.js";
+import { haltAgentInTx, unhaltAgentInTx, type HaltActor } from "./execution-control.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
+import { whereFrom } from "./state-transition.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { checkStepUp, requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { errMessage } from "./err-serializer.js";
@@ -92,6 +93,7 @@ export const CONTAINMENT_RULE_IDS = {
   released: "containment-released",
   failed: "containment-failed",
   builderAgentHalted: "execution-builder-agent-halted",
+  builderAgentUnhalted: "execution-builder-agent-unhalted",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -125,6 +127,34 @@ export async function haltBuilderAgentInTx(
     ruleId: CONTAINMENT_RULE_IDS.builderAgentHalted,
     ruleChain: [],
     reason: `builder agent '${before.name}' HALTED: ${reason}`,
+  });
+  return { changed: true, name: before.name };
+}
+
+/**
+ * The builder agent's UNHALT inside the caller's transaction, the mirror of `haltBuilderAgentInTx` and of ADR-0124's
+ * `unhaltAgentInTx`: locks the row, writes nothing when not halted, else clears the three columns and writes the
+ * `execution-builder-agent-unhalted` row on the builder agent with the previous reason. Null for an unknown agent.
+ */
+export async function unhaltBuilderAgentInTx(
+  tx: Db,
+  builderAgentId: string,
+  reason: string,
+  actor: HaltActor,
+): Promise<{ changed: boolean; name: string } | null> {
+  const [before] = await tx.select().from(builderAgents).where(eq(builderAgents.id, builderAgentId)).for("update");
+  if (!before) return null;
+  if (!before.haltedAt) return { changed: false, name: before.name };
+  await tx.update(builderAgents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(builderAgents.id, builderAgentId));
+  await tx.insert(auditLog).values({
+    userId: actor.userId ?? NO_IDENTITY,
+    objectType: "builder_agent",
+    objectId: builderAgentId,
+    detail: { via: actor.via, previousReason: before.haltedReason, ...actor.detail, receiptClass: "configuration" },
+    effect: "allow",
+    ruleId: CONTAINMENT_RULE_IDS.builderAgentUnhalted,
+    ruleChain: [],
+    reason: `builder agent '${before.name}' halt LIFTED: ${reason} (was halted for: ${before.haltedReason})`,
   });
   return { changed: true, name: before.name };
 }
@@ -411,6 +441,24 @@ export async function fileContainment(
   });
 }
 
+/**
+ * One guarded lifecycle move (rule 12): `UPDATE … WHERE id AND status IN sourcesOf(event)` with `.returning()`, so a
+ * concurrent or out-of-order write matches no row and fails the decision loudly instead of being silently lost.
+ */
+async function moveContainment(
+  tx: Db,
+  row: Pick<AgentContainmentRow, "id" | "status">,
+  event: Parameters<typeof CONTAINMENT_MACHINE.next>[1],
+  set: Partial<typeof agentContainments.$inferInsert>,
+): Promise<void> {
+  const moved = await tx
+    .update(agentContainments)
+    .set({ ...set, status: CONTAINMENT_MACHINE.next(row.status, event) })
+    .where(and(eq(agentContainments.id, row.id), whereFrom(agentContainments.status, CONTAINMENT_MACHINE, event)))
+    .returning({ id: agentContainments.id });
+  if (moved.length !== 1) throw new ContainmentDecideError(409, "containment_state_changed", `the containment left '${row.status}' before '${event}' could apply`);
+}
+
 // ---------------------------------------------------------------------------
 // the decide path's two hooks (POST /v1/approvals/:approvalId/decide), for both kinds of containment approval
 // ---------------------------------------------------------------------------
@@ -526,29 +574,20 @@ export async function applyContainmentDecision(
 
   if (action === "contain") {
     if (decision === "denied") {
-      await tx
-        .update(agentContainments)
-        .set({ status: CONTAINMENT_MACHINE.next(row.status, "decline"), decidedByUserId: deciderUserId, decidedAt: now })
-        .where(and(eq(agentContainments.id, row.id), inArray(agentContainments.status, [...CONTAINMENT_MACHINE.sourcesOf("decline")])));
+      await moveContainment(tx, row, "decline", { decidedByUserId: deciderUserId, decidedAt: now });
       await audit(CONTAINMENT_RULE_IDS.declined, "allow", `containment declined: ${row.explanation}`);
       return;
     }
     const halted = await haltSubject(tx, row, { userId: deciderUserId, detail: { approvalId: approval.id } });
     if (!halted) throw new ContainmentDecideError(409, "containment_subject_gone", "the agent this containment names no longer exists");
-    await tx
-      .update(agentContainments)
-      .set({ status: CONTAINMENT_MACHINE.next(row.status, "approve"), containedAt: now, haltApplied: halted.changed, decidedByUserId: deciderUserId, decidedAt: now })
-      .where(and(eq(agentContainments.id, row.id), inArray(agentContainments.status, [...CONTAINMENT_MACHINE.sourcesOf("approve")])));
+    await moveContainment(tx, row, "approve", { containedAt: now, haltApplied: halted.changed, decidedByUserId: deciderUserId, decidedAt: now });
     await audit(CONTAINMENT_RULE_IDS.approved, "deny", `containment approved, agent halted: ${row.explanation}`, { haltApplied: halted.changed });
     return;
   }
 
   // a release
   if (decision === "denied") {
-    await tx
-      .update(agentContainments)
-      .set({ status: CONTAINMENT_MACHINE.next(row.status, "deny_release"), releaseRequestedAt: null, releaseRequestedByUserId: null, releaseReason: null, releaseApprovalId: null })
-      .where(and(eq(agentContainments.id, row.id), inArray(agentContainments.status, [...CONTAINMENT_MACHINE.sourcesOf("deny_release")])));
+    await moveContainment(tx, row, "deny_release", { releaseRequestedAt: null, releaseRequestedByUserId: null, releaseReason: null, releaseApprovalId: null });
     await audit(CONTAINMENT_RULE_IDS.releaseDenied, "deny", `containment release refused; the agent stays halted (asked: ${row.releaseReason})`, {
       requestedByUserId: row.releaseRequestedByUserId,
     });
@@ -557,11 +596,8 @@ export async function applyContainmentDecision(
   // the dial is read again under the decision's lock: a halt thrown since the precheck refuses the release
   const guard = killSwitchNarrowingOnly({ dial: (await loadOrgSettings(tx)).executionMode as "normal", direction: "widening" });
   if (guard) throw new ContainmentDecideError(409, "execution_dial_not_normal", guard);
-  const lift = await liftContainmentHalt(tx, row);
-  await tx
-    .update(agentContainments)
-    .set({ status: CONTAINMENT_MACHINE.next(row.status, "approve_release"), releasedAt: now, releasedByUserId: deciderUserId })
-    .where(and(eq(agentContainments.id, row.id), inArray(agentContainments.status, [...CONTAINMENT_MACHINE.sourcesOf("approve_release")])));
+  const lift = await liftContainmentHalt(tx, row, deciderUserId, approval.id);
+  await moveContainment(tx, row, "approve_release", { releasedAt: now, releasedByUserId: deciderUserId });
   await audit(
     CONTAINMENT_RULE_IDS.released,
     "allow",
@@ -575,7 +611,12 @@ export async function applyContainmentDecision(
  * the prefix) and no other open containment (contained or release pending) still holds the same agent. A halt a person
  * threw by hand is never lifted here.
  */
-async function liftContainmentHalt(tx: Db, row: AgentContainmentRow): Promise<{ haltLifted: boolean; heldByOther: string | null }> {
+async function liftContainmentHalt(
+  tx: Db,
+  row: AgentContainmentRow,
+  deciderUserId: string,
+  approvalId: string,
+): Promise<{ haltLifted: boolean; heldByOther: string | null }> {
   const subjectWhere =
     row.subjectKind === "agent" ? eq(agentContainments.agentId, row.agentId!) : eq(agentContainments.builderAgentId, row.builderAgentId!);
   const [other] = await tx
@@ -584,16 +625,20 @@ async function liftContainmentHalt(tx: Db, row: AgentContainmentRow): Promise<{ 
     .where(and(subjectWhere, inArray(agentContainments.status, ["contained", "release_pending"]), ne(agentContainments.id, row.id)))
     .limit(1);
   if (other) return { haltLifted: false, heldByOther: other.id };
+  // the ONE unhalt per subject (#1134 review): ADR-0124's `unhaltAgentInTx`, or the builder agent's mirror, so the
+  // subject's own history reads HALTED … LIFTED with the previous reason, whichever path lifted it
+  const actor: HaltActor = { userId: deciderUserId, detail: { containmentId: row.id, approvalId } };
+  const reason = `containment ${row.id} released by an approved release: ${row.releaseReason ?? ""}`.slice(0, 2000);
   if (row.subjectKind === "agent") {
     const [a] = await tx.select({ r: agents.haltedReason }).from(agents).where(eq(agents.id, row.agentId!)).for("update");
     if (!a?.r?.startsWith(CONTAINMENT_HALT_PREFIX)) return { haltLifted: false, heldByOther: null };
-    await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(agents.id, row.agentId!));
-    return { haltLifted: true, heldByOther: null };
+    const lifted = await unhaltAgentInTx(tx, row.agentId!, reason, actor);
+    return { haltLifted: !!lifted?.changed, heldByOther: null };
   }
   const [b] = await tx.select({ r: builderAgents.haltedReason }).from(builderAgents).where(eq(builderAgents.id, row.builderAgentId!)).for("update");
   if (!b?.r?.startsWith(CONTAINMENT_HALT_PREFIX)) return { haltLifted: false, heldByOther: null };
-  await tx.update(builderAgents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(builderAgents.id, row.builderAgentId!));
-  return { haltLifted: true, heldByOther: null };
+  const lifted = await unhaltBuilderAgentInTx(tx, row.builderAgentId!, reason, actor);
+  return { haltLifted: !!lifted?.changed, heldByOther: null };
 }
 
 /** the approvals queue's label for each containment approval (a containment proposal or a release request) */
@@ -674,38 +719,30 @@ const serialize = (r: AgentContainmentRow) => ({
   createdAt: r.createdAt.toISOString(),
 });
 
-const cursorOf = (r: AgentContainmentRow) => `${r.createdAt.toISOString()}_${r.id}`;
-function parseCursor(c: string): { at: Date; id: string } | null {
-  const i = c.lastIndexOf("_");
-  if (i < 0) return null;
-  const at = new Date(c.slice(0, i));
-  const id = c.slice(i + 1);
-  return Number.isNaN(at.getTime()) || !/^[0-9a-f-]{36}$/i.test(id) ? null : { at, id };
-}
 
 /** Admin-only through the default gate (none is in NON_ADMIN_ROUTES). */
 export function registerContainmentRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/containments", async (req, reply) => {
     const q = listQuery.parse(req.query);
-    const cursor = q.before ? parseCursor(q.before) : null;
+    // ADR-0031's keyset primitives (#1134 review): a microsecond-exact cursor, never a millisecond JS Date
+    const cursor = q.before ? decodeCursor(q.before) : null;
     if (q.before && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
     const rows = await db
-      .select()
+      .select({ row: agentContainments, at: atTextSql(agentContainments.createdAt) })
       .from(agentContainments)
       .where(
         and(
           q.status ? eq(agentContainments.status, q.status) : undefined,
-          cursor
-            ? or(lt(agentContainments.createdAt, cursor.at), and(eq(agentContainments.createdAt, cursor.at), lt(agentContainments.id, cursor.id)))
-            : undefined,
+          cursor ? afterCursorDesc(agentContainments.createdAt, agentContainments.id, cursor) : undefined,
         ),
       )
       .orderBy(desc(agentContainments.createdAt), desc(agentContainments.id))
       .limit(q.limit + 1);
     const page = rows.slice(0, q.limit);
+    const last = page[page.length - 1];
     return {
-      containments: page.map(serialize),
-      next: rows.length > q.limit ? cursorOf(page[page.length - 1]!) : null,
+      containments: page.map((r) => serialize(r.row)),
+      next: rows.length > q.limit && last ? encodeCursor({ at: last.at, id: last.row.id }) : null,
     };
   });
 
@@ -773,7 +810,7 @@ export function registerContainmentRoutes(app: FastifyInstance, db: Db): void {
           releaseReason: body.reason,
           releaseApprovalId: approval!.id,
         })
-        .where(and(eq(agentContainments.id, id), inArray(agentContainments.status, [...CONTAINMENT_MACHINE.sourcesOf("request_release")])))
+        .where(and(eq(agentContainments.id, id), whereFrom(agentContainments.status, CONTAINMENT_MACHINE, "request_release")))
         .returning();
       await tx.insert(auditLog).values({
         userId: actorUserId,

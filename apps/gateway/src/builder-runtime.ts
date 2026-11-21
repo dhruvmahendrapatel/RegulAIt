@@ -875,6 +875,29 @@ async function writeAgentMessage(seg: Segment, state: LoopState) {
  */
 async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"): Promise<Refusal | null> {
   const { db, userId } = seg;
+  // ADR-0366 (#1134 security review): a containment can land MID-TURN. The halt is read fresh before every model step
+  // and every tool call, so a contained agent makes no further call; the turn ends on the refusal, audited.
+  const [halt] = await db
+    .select({ haltedAt: builderAgents.haltedAt, haltedReason: builderAgents.haltedReason })
+    .from(builderAgents)
+    .where(eq(builderAgents.id, seg.agent.id));
+  if (halt?.haltedAt) {
+    await audit(
+      db,
+      userId,
+      seg.agent.id,
+      "builder-agent-halted-refused",
+      `${phase === "tool" ? "tool call" : "model step"} refused mid-turn: builder agent '${seg.agent.name}' is halted`,
+      { source: seg.source, phase, step: state.modelSteps, toolCalls: state.toolCalls, threadId: seg.thread.id },
+      "deny",
+    );
+    return {
+      ok: false,
+      status: 409,
+      error: "builder_agent_halted",
+      detail: `this agent was halted during the turn: ${halt.haltedReason ?? "(no reason recorded)"}. An administrator releases it.`,
+    };
+  }
   if (phase === "step") {
     const [fresh] = await db.select().from(agents).where(eq(agents.id, seg.model.id));
     const model = (fresh ?? seg.model) as AgentRow;

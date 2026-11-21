@@ -398,6 +398,10 @@ describe("ADR-0366: release needs approval (owner decision 2026-11-21)", () => {
     expect((await auditFor(c2.id)).map((a) => a.ruleId)).toEqual(
       expect.arrayContaining([CONTAINMENT_RULE_IDS.releaseRequested, CONTAINMENT_RULE_IDS.released]),
     );
+    // the builder agent's own history reads HALTED … LIFTED (one unhalt per subject)
+    expect((await auditFor(b.id)).map((a) => a.ruleId)).toEqual(
+      expect.arrayContaining([CONTAINMENT_RULE_IDS.builderAgentHalted, CONTAINMENT_RULE_IDS.builderAgentUnhalted]),
+    );
   });
 
   it("a refused release leaves the agent halted and the containment contained", async () => {
@@ -412,6 +416,28 @@ describe("ADR-0366: release needs approval (owner decision 2026-11-21)", () => {
     expect((await containmentOf(alertId))!).toMatchObject({ status: "contained", releaseApprovalId: null, releaseReason: null });
     expect((await chat(b.id)).json().error).toBe("builder_agent_halted");
     expect((await auditFor(c.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.releaseDenied);
+  });
+
+  it("ADR-0124's unhalt defers to a containment: one admin cannot lift it; the approved release writes the agent's LIFTED row", async () => {
+    await setPolicy({ containmentAutoSeverity: "high", containmentApproverUserId: approverId });
+    const agentId = await registryAgent("unhalt");
+    const alertId = await alert("classical_model_drift", `model_card:${agentId}`, "high", { agentId });
+    expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 1 });
+    const c = (await containmentOf(alertId))!;
+    const unhaltStep: StepUpCheckArgs = { kind: "settings_relax", facts: { agentId, values: { halted: false } } };
+    const unhalt = await as(adminId, unhaltStep, "POST", `/v1/agents/${agentId}/unhalt`, { reason: `a366 one admin tries ${RUN}` });
+    expect(unhalt.statusCode, unhalt.body).toBe(409);
+    expect(unhalt.json()).toMatchObject({ error: "held_by_containment", containmentIds: [c.id] });
+    const [still] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
+    expect(still!.haltedAt).not.toBeNull();
+    // the approved release lifts it through ADR-0124's one unhalt: the agent's own history reads LIFTED
+    const asked = await as(adminId, releaseStep(c.id), "POST", `/v1/containments/${c.id}/release`, { reason: `a366 reviewed ${RUN}` });
+    expect(asked.statusCode, asked.body).toBe(202);
+    expect((await decide(asked.json().approvalId, "approved", approverId)).statusCode).toBe(200);
+    const [lifted] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
+    expect(lifted!.haltedAt).toBeNull();
+    expect((await auditFor(agentId)).map((a) => a.ruleId)).toContain("execution-agent-unhalted");
+    await setPolicy({ containmentAutoSeverity: "critical" });
   });
 
   it("never lifts a halt a person threw by hand", async () => {
@@ -445,6 +471,7 @@ describe("ADR-0366: release needs approval (owner decision 2026-11-21)", () => {
     const id = list.json().containments[0].id as string;
     const one = await as(adminId, null, "GET", `/v1/containments/${id}`);
     expect(one.json().lifecycle).toMatchObject({ machine: "agent_containment" });
+    expect((await as(adminId, null, "GET", "/v1/containments?before=not-a-cursor")).statusCode).toBe(400);
     const steward = await as(stewardId, null, "GET", "/v1/containments");
     expect(steward.statusCode).toBe(403);
   });

@@ -20304,7 +20304,8 @@ export const agentContainments = pgTable(
     uniqueIndex("agent_containments_signal_uq").on(t.signalSource, t.signalRefId),
     index("agent_containments_agent_idx").on(t.agentId, t.status),
     index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
-    index("agent_containments_created_idx").on(t.createdAt),
+    // the list's keyset (created_at DESC, id DESC), ADR-0031
+    index("agent_containments_created_idx").on(t.createdAt, t.id),
     index("agent_containments_release_approval_idx").on(t.releaseApprovalId),
   ],
 );

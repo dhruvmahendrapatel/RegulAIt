@@ -219,16 +219,6 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "price column must go through `applyRuleEdit` and raises this count.",
   },
   {
-    file: "rogue-containment.ts",
-    method: "update",
-    expr: "agents",
-    why:
-      "ADR-0366's containment release: lifts an ADR-0124 halt that a containment set, inside the release's " +
-      "transaction under a row lock. It writes ONLY `halted_at` / `halted_reason` / `halted_by_user_id` (to null), " +
-      "none of which is in VERSIONED_RULE_FIELDS, so there is no version to mint and nothing is silently discarded " +
-      "at dispatch. The halt itself goes through `haltAgentInTx`; the release is audited `containment-released`.",
-  },
-  {
     file: "remediation.ts",
     method: "update",
     expr: "agents",
