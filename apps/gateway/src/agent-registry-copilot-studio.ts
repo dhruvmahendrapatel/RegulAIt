@@ -12,7 +12,7 @@
  * that exclude `configuration`, `content`, `data` and `dependencies`; a connected app is its connection reference's
  * connector id and name, never the connection itself. People only as pseudonyms (the owner's display name).
  *
- * Every call goes through `allowListedFetch` (COPILOT_STUDIO_ENDPOINTS: GET on five Dataverse paths of the named
+ * Every call goes through `allowListedFetch` (COPILOT_STUDIO_ENDPOINTS: GET on six Dataverse paths of the named
  * environments, nothing else) on top of the guarded fetch. Paging passes the `$skiptoken` back on the same path; a
  * `@odata.nextLink` is never fetched as given.
  *
@@ -41,6 +41,8 @@ const GUID_PATH = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 export const COPILOT_STUDIO_ENDPOINTS: readonly EndpointRule[] = Object.freeze([
   { method: "GET", path: /^\/api\/data\/v9\.2\/WhoAmI$/ },
   { method: "GET", path: new RegExp(`^/api/data/v9\\.2/systemusers\\(${GUID_PATH}\\)/Microsoft\\.Dynamics\\.CRM\\.RetrieveUserPrivileges\\(\\)$`) },
+  // ADR-0338 slice 1b: the environment's Power Platform id, the locator the governed quarantine needs (a read)
+  { method: "GET", path: /^\/api\/data\/v9\.2\/RetrieveCurrentOrganization\(AccessType=@p1\)$/ },
   { method: "GET", path: /^\/api\/data\/v9\.2\/bots$/ },
   { method: "GET", path: /^\/api\/data\/v9\.2\/botcomponents$/ },
   { method: "GET", path: /^\/api\/data\/v9\.2\/connectionreferences$/ },
@@ -166,6 +168,21 @@ async function readOrg(ctx: ScanContext, org: string, include: Set<string> | nul
   }
   outcomes.push({ read: PRIVILEGES, status: "read" });
 
+  // 2b. ADR-0338 slice 1b: the environment's Power Platform id (`Detail.EnvironmentId`), kept on each agent as the
+  // locator the governed quarantine addresses; unreadable, the agents are still staged, without it (no control)
+  let environmentId: string | null = null;
+  const ENV_ID = `environment id of ${host}`;
+  try {
+    const detail = await get(`${org}${API}/RetrieveCurrentOrganization(AccessType=@p1)?@p1=Microsoft.Dynamics.CRM.EndpointAccessType'Default'`);
+    const id = str(atPath(detail, "Detail.EnvironmentId"), 64);
+    if (!id || !GUID.test(id)) throw new ReadFailure("error", "the organization detail named no environment id");
+    environmentId = id.toLowerCase();
+    outcomes.push({ read: ENV_ID, status: "read" });
+  } catch (err) {
+    if (!(err instanceof ReadFailure)) throw err;
+    outcomes.push({ read: ENV_ID, status: err.status, detail: `${err.message.slice(0, 200)}; its agents cannot be quarantined from regulAIt` });
+  }
+
   // 3. the agents
   const bots = new Map<string, Bot>();
   const BOTS = `agents in ${host}`;
@@ -191,6 +208,7 @@ async function readOrg(ctx: ScanContext, org: string, include: Set<string> | nul
           description: null,
           attributes: attrs({
             environment: host,
+            environmentId,
             botId,
             schemaName: str(atPath(b, "schemaname"), 100),
             state: atPath(b, "statecode") === 0 ? "active" : atPath(b, "statecode") === 1 ? "inactive" : null,

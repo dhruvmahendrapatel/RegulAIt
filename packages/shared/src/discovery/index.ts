@@ -201,6 +201,19 @@ export type RegistryComponentProvider = (typeof REGISTRY_COMPONENT_PROVIDERS)[nu
 /** federated (short-lived, the default, free) or static (a stored secret: a `settings_relax` step-up) */
 export const DISCOVERY_CREDENTIAL_MODES = ["federated", "static"] as const;
 export type DiscoveryCredentialMode = (typeof DISCOVERY_CREDENTIAL_MODES)[number];
+/**
+ * ADR-0338 §2: what a credential row is for, fixed at insert (an update trigger refuses a change). `discovery_read` is
+ * the scanner's read-only credential (every row before ADR-0338); `platform_write` is a source's separate vendor
+ * control credential. The scanner loads only `discovery_read`, the control path only `platform_write`.
+ */
+export const DISCOVERY_CREDENTIAL_PURPOSES = ["discovery_read", "platform_write"] as const;
+export type DiscoveryCredentialPurpose = (typeof DISCOVERY_CREDENTIAL_PURPOSES)[number];
+/**
+ * ADR-0338 §3a: every mode a stored row may hold. `delegated` (a named admin's refresh token, by admin opt-in, with a
+ * mandatory expiry) is allowed only on a `platform_write` row; a read credential is federated or static as before.
+ */
+export const DISCOVERY_STORED_CREDENTIAL_MODES = [...DISCOVERY_CREDENTIAL_MODES, "delegated"] as const;
+export type DiscoveryStoredCredentialMode = (typeof DISCOVERY_STORED_CREDENTIAL_MODES)[number];
 
 /**
  * The write-scope state of a source's credential (ADR-0195 decision 7). `refused`: a scanner found it grants write
@@ -298,6 +311,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   vendorAgentControl: "discoveryVendorAgentControl",
   /** ADR-0338 §4: lengthening a vendor agent control approval's window past 24 hours */
   vendorAgentControlTtl: "discoveryVendorAgentControlApprovalTtl",
+  /** ADR-0338 §3a: allowing a delegated (named admin) control credential where the vendor documents only that */
+  vendorAgentControlDelegated: "discoveryVendorAgentControlDelegated",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 

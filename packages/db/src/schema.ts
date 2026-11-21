@@ -139,7 +139,8 @@ import {
   EXECUTION_OFFER_DECLINE_REASONS,
   EXECUTION_OFFER_END_OUTCOMES,
   // ADR-0195 SD0 (migration 0202): shadow-AI active discovery
-  DISCOVERY_CREDENTIAL_MODES,
+  DISCOVERY_CREDENTIAL_PURPOSES,
+  DISCOVERY_STORED_CREDENTIAL_MODES,
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
@@ -8287,7 +8288,12 @@ export const discoveryCredentials = pgTable(
     sourceId: uuid("source_id")
       .notNull()
       .references(() => discoverySources.id, { onDelete: "cascade" }),
-    credentialMode: text("credential_mode", { enum: DISCOVERY_CREDENTIAL_MODES }).notNull(),
+    // ADR-0338: `delegated` only on a `platform_write` row (pending migration vendor_agent_control_credentials)
+    credentialMode: text("credential_mode", { enum: DISCOVERY_STORED_CREDENTIAL_MODES }).notNull(),
+    /** ADR-0338 §2: fixed at insert (the guard trigger refuses a change); the scanner loads only `discovery_read` */
+    purpose: text("purpose", { enum: DISCOVERY_CREDENTIAL_PURPOSES }).notNull().default("discovery_read"),
+    /** ADR-0338 §3a: mandatory on a delegated row, at most 90 days after it was stored; refused once past */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     publicConfig: jsonb("public_config").$type<Record<string, string>>().notNull(),
     /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
     secretCiphertext: text("secret_ciphertext"),
@@ -8299,7 +8305,14 @@ export const discoveryCredentials = pgTable(
     revokedBy: uuid("revoked_by"),
   },
   (t) => [
-    check("discovery_credentials_mode_check", sql`${t.credentialMode} IN ('federated', 'static')`),
+    check("discovery_credentials_mode_check", sql`${t.credentialMode} IN ('federated', 'static', 'delegated')`),
+    check("discovery_credentials_purpose_check", sql`${t.purpose} IN ('discovery_read', 'platform_write')`),
+    check(
+      "discovery_credentials_delegated_check",
+      sql`${t.credentialMode} <> 'delegated' OR (${t.purpose} = 'platform_write' AND ${t.expiresAt} IS NOT NULL AND ${t.expiresAt} <= ${t.createdAt} + interval '90 days' AND (${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL))`,
+    ),
+    check("discovery_credentials_expires_check", sql`${t.expiresAt} IS NULL OR ${t.expiresAt} > ${t.createdAt}`),
+    check("discovery_credentials_write_purpose_scope_check", sql`${t.purpose} <> 'platform_write' OR ${t.writeScope} = 'unverified'`),
     check("discovery_credentials_write_scope_check", sql`${t.writeScope} IN ('unverified', 'read_only', 'refused')`),
     check("discovery_credentials_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
     check(
@@ -8308,7 +8321,7 @@ export const discoveryCredentials = pgTable(
     ),
     check("discovery_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
     check("discovery_credentials_revoked_by_check", sql`(${t.revokedAt} IS NULL) = (${t.revokedBy} IS NULL)`),
-    uniqueIndex("discovery_credentials_live_uq").on(t.sourceId).where(sql`${t.revokedAt} IS NULL`),
+    uniqueIndex("discovery_credentials_live_uq").on(t.sourceId, t.purpose).where(sql`${t.revokedAt} IS NULL`),
   ],
 );
 export type DiscoveryCredentialRow = typeof discoveryCredentials.$inferSelect;
@@ -8396,6 +8409,8 @@ export const discoverySettings = pgTable(
     vendorAgentControlEnabled: boolean("vendor_agent_control_enabled").notNull().default(false),
     /** ADR-0338 §4: how long a control action's approval stays open, 1 to 72 hours; lengthening past 24 is a step-up */
     vendorAgentControlApprovalTtlHours: integer("vendor_agent_control_approval_ttl_hours").notNull().default(24),
+    /** ADR-0338 §3a: a delegated (named admin) control credential is usable only while this is on; off by default */
+    vendorAgentControlDelegatedEnabled: boolean("vendor_agent_control_delegated_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -20040,6 +20055,9 @@ export const vendorAgentActions = pgTable(
     sourceId: uuid("source_id").notNull(),
     registry: text("registry").notNull(),
     externalId: text("external_id").notNull(),
+    // 3NF exception, the same snapshot: the vendor locator besides the agent id (Copilot Studio: the environment id),
+    // read from the record's vendor attributes at request time (pending migration vendor_agent_control_credentials)
+    vendorLocator: text("vendor_locator"),
     action: text("action", { enum: VENDOR_AGENT_CONTROL_ACTIONS }).notNull(),
     direction: text("direction", { enum: ["apply", "reverse"] }).notNull(),
     /** a `reverse` (restore) row names the succeeded action it reverses; at most one restore per action */
@@ -20072,6 +20090,7 @@ export const vendorAgentActions = pgTable(
     check("vendor_agent_actions_direction_check", sql`(${t.direction} = 'reverse') = (${t.reversesActionId} IS NOT NULL)`),
     check("vendor_agent_actions_registry_check", sql`char_length(${t.registry}) BETWEEN 1 AND 64`),
     check("vendor_agent_actions_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
+    check("vendor_agent_actions_locator_check", sql`${t.vendorLocator} IS NULL OR char_length(${t.vendorLocator}) BETWEEN 1 AND 256`),
     check("vendor_agent_actions_reason_check", sql`char_length(${t.reason}) BETWEEN 1 AND 500`),
     check(
       "vendor_agent_actions_state_check",

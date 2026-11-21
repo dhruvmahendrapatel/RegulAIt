@@ -165,6 +165,8 @@ const settingsSchema = z
     // ADR-0338: governed vendor agent control; turning it on is a relaxation, and so is a window longer than 24 hours
     vendorAgentControl: z.boolean().optional(),
     vendorAgentControlApprovalTtlHours: z.number().int().min(1).max(72).optional(),
+    // ADR-0338 §3a: a delegated (named admin) control credential may be used; turning it on is a relaxation
+    vendorAgentControlDelegated: z.boolean().optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -400,7 +402,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await t
         .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
         .from(discoveryCredentials)
-        .where(and(eq(discoveryCredentials.sourceId, sourceId), isNull(discoveryCredentials.revokedAt)))
+        // ADR-0338 §2: these routes manage the READ credential only; a source's control credential is never touched here
+        .where(and(eq(discoveryCredentials.sourceId, sourceId), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)))
     ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))[0];
 
   const versionConflict = (current: number) =>
@@ -434,7 +437,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           await db
             .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
             .from(discoveryCredentials)
-            .where(and(inArray(discoveryCredentials.sourceId, ids), isNull(discoveryCredentials.revokedAt)))
+            .where(and(inArray(discoveryCredentials.sourceId, ids), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)))
         ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))
       : [];
     const lastRuns = ids.length
@@ -908,6 +911,10 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (vacAfter && !row.vendorAgentControlEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControl] = true;
       const ttlAfter = body.vendorAgentControlApprovalTtlHours ?? row.vendorAgentControlApprovalTtlHours;
       if (ttlAfter > row.vendorAgentControlApprovalTtlHours && ttlAfter > 24) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlTtl] = ttlAfter;
+      // ADR-0338 §3a: a delegated control credential acts with a named admin's authority; off until turned on (step-up),
+      // and off is free: every delegated control credential is refused `credential_mode_disabled` at once
+      const delegatedAfter = body.vendorAgentControlDelegated ?? row.vendorAgentControlDelegatedEnabled;
+      if (delegatedAfter && !row.vendorAgentControlDelegatedEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlDelegated] = true;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -926,6 +933,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           endpointAddonRemovalEnabled: removalAfter,
           vendorAgentControlEnabled: vacAfter,
           vendorAgentControlApprovalTtlHours: ttlAfter,
+          vendorAgentControlDelegatedEnabled: delegatedAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
@@ -934,8 +942,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
         `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours, vendorAgentControlDelegated: row.vendorAgentControlDelegatedEnabled },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter, vendorAgentControlDelegated: delegatedAfter },
         });
       return true;
     });
