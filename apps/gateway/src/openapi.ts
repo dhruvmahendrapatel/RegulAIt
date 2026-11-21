@@ -203,7 +203,7 @@ const auditRefusalSchema = z.object({
  * `x-regulait-schema: "unspecified"` rather than pretending.
  */
 export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
-  "GET /health": { summary: "Liveness probe. The only route that is never rate limited." },
+  "GET /health": { summary: "Liveness probe. Never rate limited (nor is the internal readiness probe, /ready)." },
   "GET /v1/me": {
     summary: "Identity echo — who the presented credential is, and the org size ceilings a client needs to pre-validate uploads.",
   },

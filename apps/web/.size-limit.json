@@ -49,6 +49,618 @@
     "name": "all JS",
     "path": "dist/assets/*.js",
     "gzip": true,
-    "limit": "1150 kB"
+    "limit": "1170 kB"
+  },
+  {
+    "name": "chunk: AccountSubpages",
+    "path": "dist/assets/AccountSubpages-????????.js",
+    "gzip": true,
+    "limit": "10.3 kB"
+  },
+  {
+    "name": "chunk: AgentStewardship",
+    "path": "dist/assets/AgentStewardship-????????.js",
+    "gzip": true,
+    "limit": "11.3 kB"
+  },
+  {
+    "name": "chunk: BomEvidencePanel",
+    "path": "dist/assets/BomEvidencePanel-????????.js",
+    "gzip": true,
+    "limit": "8.1 kB"
+  },
+  {
+    "name": "chunk: CardBoundary",
+    "path": "dist/assets/CardBoundary-????????.js",
+    "gzip": true,
+    "limit": "2.5 kB"
+  },
+  {
+    "name": "chunk: ChatPage",
+    "path": "dist/assets/ChatPage-????????.js",
+    "gzip": true,
+    "limit": "9.9 kB"
+  },
+  {
+    "name": "chunk: ClassicalDriftPanel",
+    "path": "dist/assets/ClassicalDriftPanel-????????.js",
+    "gzip": true,
+    "limit": "8.7 kB"
+  },
+  {
+    "name": "chunk: CopilotRedteamGateCard",
+    "path": "dist/assets/CopilotRedteamGateCard-????????.js",
+    "gzip": true,
+    "limit": "5.3 kB"
+  },
+  {
+    "name": "chunk: DataList",
+    "path": "dist/assets/DataList-????????.js",
+    "gzip": true,
+    "limit": "6.1 kB"
+  },
+  {
+    "name": "chunk: DecisionBomPanel",
+    "path": "dist/assets/DecisionBomPanel-????????.js",
+    "gzip": true,
+    "limit": "5.6 kB"
+  },
+  {
+    "name": "chunk: DecisionRegressionPage",
+    "path": "dist/assets/DecisionRegressionPage-????????.js",
+    "gzip": true,
+    "limit": "7.7 kB"
+  },
+  {
+    "name": "chunk: DemoBeatsCard",
+    "path": "dist/assets/DemoBeatsCard-????????.js",
+    "gzip": true,
+    "limit": "2.8 kB"
+  },
+  {
+    "name": "chunk: DetailDialog",
+    "path": "dist/assets/DetailDialog-????????.js",
+    "gzip": true,
+    "limit": "2.9 kB"
+  },
+  {
+    "name": "chunk: DetailDrawer",
+    "path": "dist/assets/DetailDrawer-????????.js",
+    "gzip": true,
+    "limit": "3.6 kB"
+  },
+  {
+    "name": "chunk: DetectionContentPanel",
+    "path": "dist/assets/DetectionContentPanel-????????.js",
+    "gzip": true,
+    "limit": "3.1 kB"
+  },
+  {
+    "name": "chunk: EnergyEstimate",
+    "path": "dist/assets/EnergyEstimate-????????.js",
+    "gzip": true,
+    "limit": "4.6 kB"
+  },
+  {
+    "name": "chunk: ExecutorDetail",
+    "path": "dist/assets/ExecutorDetail-????????.js",
+    "gzip": true,
+    "limit": "5.2 kB"
+  },
+  {
+    "name": "chunk: ExpandableTable",
+    "path": "dist/assets/ExpandableTable-????????.js",
+    "gzip": true,
+    "limit": "3.9 kB"
+  },
+  {
+    "name": "chunk: ExternalSecondFactorDialog",
+    "path": "dist/assets/ExternalSecondFactorDialog-????????.js",
+    "gzip": true,
+    "limit": "3.7 kB"
+  },
+  {
+    "name": "chunk: FairnessTestingPage",
+    "path": "dist/assets/FairnessTestingPage-????????.js",
+    "gzip": true,
+    "limit": "7.5 kB"
+  },
+  {
+    "name": "chunk: HomePage",
+    "path": "dist/assets/HomePage-????????.js",
+    "gzip": true,
+    "limit": "5.7 kB"
+  },
+  {
+    "name": "chunk: IntegrationEditDialogs",
+    "path": "dist/assets/IntegrationEditDialogs-????????.js",
+    "gzip": true,
+    "limit": "5.0 kB"
+  },
+  {
+    "name": "chunk: IsolationSettings",
+    "path": "dist/assets/IsolationSettings-????????.js",
+    "gzip": true,
+    "limit": "4.4 kB"
+  },
+  {
+    "name": "chunk: ListPreview",
+    "path": "dist/assets/ListPreview-????????.js",
+    "gzip": true,
+    "limit": "3.1 kB"
+  },
+  {
+    "name": "chunk: Logo",
+    "path": "dist/assets/Logo-????????.js",
+    "gzip": true,
+    "limit": "4.3 kB"
+  },
+  {
+    "name": "chunk: ModelRateLimits",
+    "path": "dist/assets/ModelRateLimits-????????.js",
+    "gzip": true,
+    "limit": "3.9 kB"
+  },
+  {
+    "name": "chunk: ModelsPage",
+    "path": "dist/assets/ModelsPage-????????.js",
+    "gzip": true,
+    "limit": "7.3 kB"
+  },
+  {
+    "name": "chunk: OrgSettingsCard",
+    "path": "dist/assets/OrgSettingsCard-????????.js",
+    "gzip": true,
+    "limit": "4.5 kB"
+  },
+  {
+    "name": "chunk: PmAndDecisions",
+    "path": "dist/assets/PmAndDecisions-????????.js",
+    "gzip": true,
+    "limit": "5.1 kB"
+  },
+  {
+    "name": "chunk: PortalSecondFactor",
+    "path": "dist/assets/PortalSecondFactor-????????.js",
+    "gzip": true,
+    "limit": "3.4 kB"
+  },
+  {
+    "name": "chunk: ProfileEditModal",
+    "path": "dist/assets/ProfileEditModal-????????.js",
+    "gzip": true,
+    "limit": "5.4 kB"
+  },
+  {
+    "name": "chunk: ProjectArchiveDialogs",
+    "path": "dist/assets/ProjectArchiveDialogs-????????.js",
+    "gzip": true,
+    "limit": "3.8 kB"
+  },
+  {
+    "name": "chunk: ReasonedAction",
+    "path": "dist/assets/ReasonedAction-????????.js",
+    "gzip": true,
+    "limit": "2.8 kB"
+  },
+  {
+    "name": "chunk: RefusalNotice",
+    "path": "dist/assets/RefusalNotice-????????.js",
+    "gzip": true,
+    "limit": "2.4 kB"
+  },
+  {
+    "name": "chunk: RenameModal",
+    "path": "dist/assets/RenameModal-????????.js",
+    "gzip": true,
+    "limit": "3.7 kB"
+  },
+  {
+    "name": "chunk: ReportIncidentModal",
+    "path": "dist/assets/ReportIncidentModal-????????.js",
+    "gzip": true,
+    "limit": "6.7 kB"
+  },
+  {
+    "name": "chunk: RunGraph",
+    "path": "dist/assets/RunGraph-????????.js",
+    "gzip": true,
+    "limit": "5.5 kB"
+  },
+  {
+    "name": "chunk: SpdxFieldsPanel",
+    "path": "dist/assets/SpdxFieldsPanel-????????.js",
+    "gzip": true,
+    "limit": "8.9 kB"
+  },
+  {
+    "name": "chunk: SpendPage",
+    "path": "dist/assets/SpendPage-????????.js",
+    "gzip": true,
+    "limit": "8.1 kB"
+  },
+  {
+    "name": "chunk: Stepper",
+    "path": "dist/assets/Stepper-????????.js",
+    "gzip": true,
+    "limit": "2.5 kB"
+  },
+  {
+    "name": "chunk: SupplierAccessPanel",
+    "path": "dist/assets/SupplierAccessPanel-????????.js",
+    "gzip": true,
+    "limit": "6.8 kB"
+  },
+  {
+    "name": "chunk: SupplierPortalPage",
+    "path": "dist/assets/SupplierPortalPage-????????.js",
+    "gzip": true,
+    "limit": "6.5 kB"
+  },
+  {
+    "name": "chunk: ThemesCard",
+    "path": "dist/assets/ThemesCard-????????.js",
+    "gzip": true,
+    "limit": "3.0 kB"
+  },
+  {
+    "name": "chunk: TotpQrCode",
+    "path": "dist/assets/TotpQrCode-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
+  },
+  {
+    "name": "chunk: TrustDashboardPage",
+    "path": "dist/assets/TrustDashboardPage-????????.js",
+    "gzip": true,
+    "limit": "14.3 kB"
+  },
+  {
+    "name": "chunk: UseCaseQuestionnaire",
+    "path": "dist/assets/UseCaseQuestionnaire-????????.js",
+    "gzip": true,
+    "limit": "4.6 kB"
+  },
+  {
+    "name": "chunk: UsernameForm",
+    "path": "dist/assets/UsernameForm-????????.js",
+    "gzip": true,
+    "limit": "3.4 kB"
+  },
+  {
+    "name": "chunk: account",
+    "path": "dist/assets/account-????????.js",
+    "gzip": true,
+    "limit": "2.9 kB"
+  },
+  {
+    "name": "chunk: admin-access-reviews",
+    "path": "dist/assets/admin-access-reviews-????????.js",
+    "gzip": true,
+    "limit": "14.0 kB"
+  },
+  {
+    "name": "chunk: admin-ai-governance",
+    "path": "dist/assets/admin-ai-governance-????????.js",
+    "gzip": true,
+    "limit": "125.5 kB"
+  },
+  {
+    "name": "chunk: admin-approvals-audit",
+    "path": "dist/assets/admin-approvals-audit-????????.js",
+    "gzip": true,
+    "limit": "44.2 kB"
+  },
+  {
+    "name": "chunk: admin-compliance-infra",
+    "path": "dist/assets/admin-compliance-infra-????????.js",
+    "gzip": true,
+    "limit": "34.4 kB"
+  },
+  {
+    "name": "chunk: admin-cost-optimization",
+    "path": "dist/assets/admin-cost-optimization-????????.js",
+    "gzip": true,
+    "limit": "29.0 kB"
+  },
+  {
+    "name": "chunk: admin-identity-access",
+    "path": "dist/assets/admin-identity-access-????????.js",
+    "gzip": true,
+    "limit": "61.5 kB"
+  },
+  {
+    "name": "chunk: admin-integrations",
+    "path": "dist/assets/admin-integrations-????????.js",
+    "gzip": true,
+    "limit": "93.8 kB"
+  },
+  {
+    "name": "chunk: admin-overview",
+    "path": "dist/assets/admin-overview-????????.js",
+    "gzip": true,
+    "limit": "26.0 kB"
+  },
+  {
+    "name": "chunk: admin-policies-gates",
+    "path": "dist/assets/admin-policies-gates-????????.js",
+    "gzip": true,
+    "limit": "36.0 kB"
+  },
+  {
+    "name": "chunk: admin-quality-security",
+    "path": "dist/assets/admin-quality-security-????????.js",
+    "gzip": true,
+    "limit": "33.9 kB"
+  },
+  {
+    "name": "chunk: admin-settings",
+    "path": "dist/assets/admin-settings-????????.js",
+    "gzip": true,
+    "limit": "43.3 kB"
+  },
+  {
+    "name": "chunk: adminKit",
+    "path": "dist/assets/adminKit-????????.js",
+    "gzip": true,
+    "limit": "7.1 kB"
+  },
+  {
+    "name": "chunk: approvalQueuePages",
+    "path": "dist/assets/approvalQueuePages-????????.js",
+    "gzip": true,
+    "limit": "13.4 kB"
+  },
+  {
+    "name": "chunk: auth",
+    "path": "dist/assets/auth-????????.js",
+    "gzip": true,
+    "limit": "6.7 kB"
+  },
+  {
+    "name": "chunk: auth.module",
+    "path": "dist/assets/auth.module-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
+    "name": "chunk: bomModel",
+    "path": "dist/assets/bomModel-????????.js",
+    "gzip": true,
+    "limit": "13.2 kB"
+  },
+  {
+    "name": "chunk: builder",
+    "path": "dist/assets/builder-????????.js",
+    "gzip": true,
+    "limit": "50.6 kB"
+  },
+  {
+    "name": "chunk: client",
+    "path": "dist/assets/client-????????.js",
+    "gzip": true,
+    "limit": "7.9 kB"
+  },
+  {
+    "name": "chunk: defineProperty",
+    "path": "dist/assets/defineProperty-????????.js",
+    "gzip": true,
+    "limit": "2.4 kB"
+  },
+  {
+    "name": "chunk: demoGovernance.module",
+    "path": "dist/assets/demoGovernance.module-????????.js",
+    "gzip": true,
+    "limit": "3.1 kB"
+  },
+  {
+    "name": "chunk: discoverySources.module",
+    "path": "dist/assets/discoverySources.module-????????.js",
+    "gzip": true,
+    "limit": "2.2 kB"
+  },
+  {
+    "name": "chunk: editForms",
+    "path": "dist/assets/editForms-????????.js",
+    "gzip": true,
+    "limit": "6.3 kB"
+  },
+  {
+    "name": "chunk: feedback",
+    "path": "dist/assets/feedback-????????.js",
+    "gzip": true,
+    "limit": "5.3 kB"
+  },
+  {
+    "name": "chunk: feedbackKit",
+    "path": "dist/assets/feedbackKit-????????.js",
+    "gzip": true,
+    "limit": "6.4 kB"
+  },
+  {
+    "name": "chunk: focus",
+    "path": "dist/assets/focus-????????.js",
+    "gzip": true,
+    "limit": "2.3 kB"
+  },
+  {
+    "name": "chunk: fold",
+    "path": "dist/assets/fold-????????.js",
+    "gzip": true,
+    "limit": "3.3 kB"
+  },
+  {
+    "name": "chunk: format",
+    "path": "dist/assets/format-????????.js",
+    "gzip": true,
+    "limit": "3.8 kB"
+  },
+  {
+    "name": "chunk: inbox",
+    "path": "dist/assets/inbox-????????.js",
+    "gzip": true,
+    "limit": "10.7 kB"
+  },
+  {
+    "name": "chunk: incidents",
+    "path": "dist/assets/incidents-????????.js",
+    "gzip": true,
+    "limit": "10.9 kB"
+  },
+  {
+    "name": "chunk: isolationModel",
+    "path": "dist/assets/isolationModel-????????.js",
+    "gzip": true,
+    "limit": "7.9 kB"
+  },
+  {
+    "name": "chunk: jsx-runtime",
+    "path": "dist/assets/jsx-runtime-????????.js",
+    "gzip": true,
+    "limit": "46.9 kB"
+  },
+  {
+    "name": "chunk: listState",
+    "path": "dist/assets/listState-????????.js",
+    "gzip": true,
+    "limit": "3.3 kB"
+  },
+  {
+    "name": "chunk: metricConditions",
+    "path": "dist/assets/metricConditions-????????.js",
+    "gzip": true,
+    "limit": "9.4 kB"
+  },
+  {
+    "name": "chunk: modelBindings",
+    "path": "dist/assets/modelBindings-????????.js",
+    "gzip": true,
+    "limit": "7.0 kB"
+  },
+  {
+    "name": "chunk: monitoringModel",
+    "path": "dist/assets/monitoringModel-????????.js",
+    "gzip": true,
+    "limit": "4.8 kB"
+  },
+  {
+    "name": "chunk: orgSettingSpecs",
+    "path": "dist/assets/orgSettingSpecs-????????.js",
+    "gzip": true,
+    "limit": "9.7 kB"
+  },
+  {
+    "name": "chunk: palette",
+    "path": "dist/assets/palette-????????.js",
+    "gzip": true,
+    "limit": "2.8 kB"
+  },
+  {
+    "name": "chunk: postureTabs",
+    "path": "dist/assets/postureTabs-????????.js",
+    "gzip": true,
+    "limit": "8.0 kB"
+  },
+  {
+    "name": "chunk: preload-helper",
+    "path": "dist/assets/preload-helper-????????.js",
+    "gzip": true,
+    "limit": "2.9 kB"
+  },
+  {
+    "name": "chunk: projectForms",
+    "path": "dist/assets/projectForms-????????.js",
+    "gzip": true,
+    "limit": "3.8 kB"
+  },
+  {
+    "name": "chunk: projects",
+    "path": "dist/assets/projects-????????.js",
+    "gzip": true,
+    "limit": "14.6 kB"
+  },
+  {
+    "name": "chunk: promptsLogic",
+    "path": "dist/assets/promptsLogic-????????.js",
+    "gzip": true,
+    "limit": "12.8 kB"
+  },
+  {
+    "name": "chunk: react",
+    "path": "dist/assets/react-????????.js",
+    "gzip": true,
+    "limit": "4.9 kB"
+  },
+  {
+    "name": "chunk: refusalCopy",
+    "path": "dist/assets/refusalCopy-????????.js",
+    "gzip": true,
+    "limit": "2.3 kB"
+  },
+  {
+    "name": "chunk: registry.module",
+    "path": "dist/assets/registry.module-????????.js",
+    "gzip": true,
+    "limit": "2.6 kB"
+  },
+  {
+    "name": "chunk: runs",
+    "path": "dist/assets/runs-????????.js",
+    "gzip": true,
+    "limit": "11.3 kB"
+  },
+  {
+    "name": "chunk: shadowAi.module",
+    "path": "dist/assets/shadowAi.module-????????.js",
+    "gzip": true,
+    "limit": "2.3 kB"
+  },
+  {
+    "name": "chunk: trust",
+    "path": "dist/assets/trust-????????.js",
+    "gzip": true,
+    "limit": "4.1 kB"
+  },
+  {
+    "name": "chunk: trustModel",
+    "path": "dist/assets/trustModel-????????.js",
+    "gzip": true,
+    "limit": "3.2 kB"
+  },
+  {
+    "name": "chunk: useCaseLifecycle",
+    "path": "dist/assets/useCaseLifecycle-????????.js",
+    "gzip": true,
+    "limit": "4.0 kB"
+  },
+  {
+    "name": "chunk: useMutation",
+    "path": "dist/assets/useMutation-????????.js",
+    "gzip": true,
+    "limit": "3.1 kB"
+  },
+  {
+    "name": "chunk: useQueries",
+    "path": "dist/assets/useQueries-????????.js",
+    "gzip": true,
+    "limit": "3.7 kB"
+  },
+  {
+    "name": "chunk: views.module",
+    "path": "dist/assets/views.module-????????.js",
+    "gzip": true,
+    "limit": "43.5 kB"
+  },
+  {
+    "name": "chunk: with-selector",
+    "path": "dist/assets/with-selector-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
+  },
+  {
+    "name": "chunk: workflows",
+    "path": "dist/assets/workflows-????????.js",
+    "gzip": true,
+    "limit": "8.1 kB"
   }
 ]

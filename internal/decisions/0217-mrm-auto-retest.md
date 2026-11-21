@@ -73,3 +73,17 @@ saw the drift, but no fresh evidence about the model as it now is.
     should have been chosen.
 - Open-source check (ADR-0176): this is governance logic over our own runners and ledgers. The scheduler, runners and
   budget gates already exist, so no external module applies.
+
+## Amendment (2026-11-14) — merge, quantization and fine-tune as model-version drift (lane L7, P16 remainder)
+
+P16 said "merging and quantizing are not tracked as version changes". They now are. When a fine-tune, merge or
+quantization is recorded (ADR-0216 amendment, same date) from a file that a model card cites through its scan
+evidence, `computeCardStaleness` counts it as a configuration change since certification
+(`model-lineage-drift.ts`). It is counted from the audit row, so deleting either file later does not erase it. That
+connects it to the existing machinery:
+
+- with staleness-forces-recertification on (default), dispatch holds until a person signs off again;
+- with `mrmAutoRetestEnabled` on, this file's sweep queues the eval and red-team suites already chosen for the agent
+  and attaches their results to the recertification.
+
+A repackaging or format conversion is not drift: the weights are the same.

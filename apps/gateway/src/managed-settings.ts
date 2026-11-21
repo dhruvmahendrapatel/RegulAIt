@@ -1,0 +1,516 @@
+/**
+ * ADR-0310 (G2) — the "Managed" rung of the IDE ladder: compile a user's or role's effective MCP entitlements into
+ * vendor-native managed settings and export them as a signed, versioned bundle an admin pushes through MDM.
+ *
+ * Pillar 1 stays the source of truth. The policy is resolved with the kernel's own `visibleTools` over the registry
+ * (the same filter `tools/list` applies), so a bundle can never admit a server the gateway would not serve the subject.
+ * Each entitled server is named by its governed gateway URL; the gateway still decides every call. A subject with no
+ * entitled server gets an explicit deny-all (ADR-0180 secure default). This is a different mechanism from ADR-0298
+ * (on-device hooks): nothing here runs on a device.
+ *
+ *   POST /v1/managed-settings/bundles                 {subject:{kind,id}, claudeCodeMinimumVersion?}  compile, sign, audit
+ *   GET  /v1/managed-settings/bundles                 ?subjectKind&subjectId&limit&before  list (keyset, newest first)
+ *   GET  /v1/managed-settings/bundles/:id/archive     the signed tar.gz (manifest.json, manifest.json.sig, vendor files)
+ *
+ * A bundle is signed with the export signing key (REGULAIT_EXPORT_SIGNING_KEY / _ID, ADR-0041 export-bundle.ts). With
+ * no key configured the export is REFUSED: an unsigned bundle is exactly what an attacker would push. With no public
+ * URL configured it is refused too, because the allowlist would have nothing true to name.
+ */
+import { createHash } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
+import {
+  aiEndpointSignatures,
+  and,
+  auditLog,
+  asc,
+  count,
+  desc,
+  endpointDevices,
+  endpointMcpServers,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  managedSettingsBundleFiles,
+  managedSettingsBundles,
+  mcpServers,
+  mcpTools,
+  or,
+  roles,
+  sql,
+  users,
+  type Db,
+} from "@regulait/db";
+import {
+  canonicalPolicyJson,
+  compileManagedSettings,
+  isGatewayHost,
+  MANAGED_SETTINGS_SCHEMA,
+  MANAGED_SETTINGS_VENDORS,
+  MANAGED_VENDOR_CONFIG_PATHS,
+  managedVendorCoverage,
+  managedVendorOfConfigPath,
+  ManagedSettingsCompileError,
+  type EffectiveMcpPolicy,
+  type EffectiveMcpServer,
+} from "@regulait/shared";
+import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { visibleMcpToolNamesByServer } from "./builder-access.js";
+import { loadRoleEntitlements } from "./entitlements.js";
+import { isReservedToolName } from "./mcp-protocol.js";
+import { admissionHidesTools } from "./mcp-admission.js";
+import { buildTarGz, resolveExportSigningKey } from "./export-bundle.js";
+import { loadDiscoverySettings } from "./discovery-posture.js";
+import { joinPublicUrl, resolvePublicUrl } from "./public-url.js";
+
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+export type ManagedSubject = { kind: "user" | "role"; id: string };
+
+/** Where each vendor reads the file (documented in ADR-0310; carried in the manifest so the bundle is self-describing). */
+export const MANAGED_SETTINGS_INSTALL = {
+  "claude-code": {
+    macos: "/Library/Application Support/ClaudeCode/managed-settings.json (or MDM domain com.anthropic.claudecode)",
+    linux: "/etc/claude-code/managed-settings.json",
+    windows: "C:\\Program Files\\ClaudeCode\\managed-settings.json (or HKLM\\SOFTWARE\\Policies\\ClaudeCode value Settings)",
+  },
+  "github-copilot": {
+    server: ".github-private repository: copilot/managed-settings.json",
+    macos: "/Library/Application Support/GitHubCopilot/managed-settings.json",
+    linux: "/etc/github-copilot/managed-settings.json",
+    windows: "%ProgramFiles%\\GitHubCopilot\\managed-settings.json",
+  },
+  "openai-codex": {
+    macos: "/etc/codex/requirements.toml (or MDM domain com.openai.codex key requirements_toml_base64)",
+    linux: "/etc/codex/requirements.toml",
+    windows: "%ProgramData%\\OpenAI\\Codex\\requirements.toml",
+  },
+  cursor: { dashboard: "team dashboard > MCP Configuration (Enterprise); apply the worksheet by hand" },
+} as const;
+
+/**
+ * The subject's effective MCP policy: every enabled, admitted server on which the kernel shows the subject at least one
+ * un-halted tool, with those tool names. A disabled user resolves to nothing (deny all).
+ *
+ * One entitlement load per server that has tools: bounded by the registry size, the same cost `tools/list` pays.
+ */
+export async function loadEffectiveMcpPolicy(db: Db, subject: ManagedSubject, publicUrl: string): Promise<EffectiveMcpPolicy> {
+  const empty: EffectiveMcpPolicy = { subject, servers: [] };
+  if (subject.kind === "user") {
+    const [u] = await db.select({ disabledAt: users.disabledAt }).from(users).where(eq(users.id, subject.id));
+    if (!u || u.disabledAt) return empty;
+  }
+  const servers = await db
+    .select({ id: mcpServers.id, name: mcpServers.name })
+    .from(mcpServers)
+    .where(isNull(mcpServers.disabledAt));
+  if (servers.length === 0) return empty;
+  const tools = (
+    await db
+      .select({ serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind })
+      .from(mcpTools)
+      .where(and(inArray(mcpTools.serverId, servers.map((s) => s.id)), isNull(mcpTools.haltedAt)))
+  )
+    // the reserved `mcp:` names are protocol grants, never tools: `tools/list` drops them (mcp-proxy), so do we
+    .filter((t) => !isReservedToolName(t.name));
+
+  // the same helpers the gateway decides with (#850 review): a user goes through the builder-access loop (admission,
+  // entitlements, kernel visibility); a role through `loadRoleEntitlements` (the gateway's role-grant read plus the
+  // role's ADR-0236 bundles, owner decision M1) and the same admission check and kernel filter
+  let visible: Map<string, Set<string>>;
+  if (subject.kind === "user") {
+    visible = await visibleMcpToolNamesByServer(db, subject.id, tools);
+  } else {
+    visible = new Map();
+    const byServer = new Map<string, ToolRef[]>();
+    for (const t of tools) byServer.set(t.serverId, [...(byServer.get(t.serverId) ?? []), { serverId: t.serverId, name: t.name, kind: t.kind }]);
+    for (const [serverId, refs] of byServer) {
+      if (await admissionHidesTools(db, serverId)) continue;
+      const names = visibleTools(`role:${subject.id}`, serverId, refs, await loadRoleEntitlements(db, subject.id, serverId)).map((r) => r.name);
+      if (names.length > 0) visible.set(serverId, new Set(names));
+    }
+  }
+
+  const out: EffectiveMcpServer[] = [];
+  for (const s of servers) {
+    const names = visible.get(s.id);
+    if (!names || names.size === 0) continue;
+    out.push({ serverId: s.id, name: s.name, gatewayUrl: joinPublicUrl(publicUrl, `/mcp/${s.id}`), tools: [...names] });
+  }
+  return { subject, servers: out };
+}
+
+const sha256 = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+
+export type BundleOutcome =
+  | { ok: true; created: boolean; bundle: BundleView }
+  | { ok: false; status: number; error: string; detail: string };
+
+export interface BundleView {
+  id: string;
+  subject: ManagedSubject;
+  version: number;
+  policyDigest: string;
+  keyId: string;
+  serverCount: number;
+  createdAt: string;
+}
+
+const view = (r: typeof managedSettingsBundles.$inferSelect): BundleView => {
+  const m = JSON.parse(r.manifest) as { servers?: number };
+  return {
+    id: r.id,
+    subject: { kind: r.subjectKind, id: (r.subjectKind === "user" ? r.userId : r.roleId) as string },
+    version: r.version,
+    policyDigest: r.policyDigest,
+    keyId: r.keyId,
+    serverCount: typeof m.servers === "number" ? m.servers : 0,
+    createdAt: r.createdAt.toISOString(),
+  };
+};
+
+/**
+ * Compile, sign and store a bundle for `subject`, or return the latest one when the compiled policy is unchanged.
+ * Serialised per subject (advisory lock) so two exports never take the same version.
+ */
+export async function exportManagedSettingsBundle(
+  db: Db,
+  subject: ManagedSubject,
+  opts: { actorUserId: string | null; claudeCodeMinimumVersion?: string },
+): Promise<BundleOutcome> {
+  const publicUrl = resolvePublicUrl();
+  if (!publicUrl) {
+    return { ok: false, status: 409, error: "public_url_unset", detail: "REGULAIT_PUBLIC_URL is not set, so the gateway URL a managed allowlist must name is unknown" };
+  }
+  const key = resolveExportSigningKey();
+  if (!key.ok) return { ok: false, status: 409, error: key.ruleId, detail: key.reason };
+
+  if (subject.kind === "user") {
+    const [u] = await db.select({ id: users.id }).from(users).where(eq(users.id, subject.id));
+    if (!u) return { ok: false, status: 404, error: "subject_not_found", detail: "no user with that id" };
+  } else {
+    const [r] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, subject.id));
+    if (!r) return { ok: false, status: 404, error: "subject_not_found", detail: "no role with that id" };
+  }
+
+  const policy = await loadEffectiveMcpPolicy(db, subject, publicUrl);
+  let files;
+  try {
+    files = compileManagedSettings(policy, { claudeCodeMinimumVersion: opts.claudeCodeMinimumVersion });
+  } catch (e) {
+    // only the compiler's own fixed messages are returned; anything else is a bug and propagates (500, no text)
+    if (e instanceof ManagedSettingsCompileError) return { ok: false, status: 422, error: "compile_refused", detail: e.message };
+    throw e;
+  }
+  // the digest covers the options too: a new minimum version is a new bundle
+  const policyDigest = `sha256:${sha256(`${canonicalPolicyJson(policy)}\n${opts.claudeCodeMinimumVersion ?? ""}`)}`;
+  const subjectCol = subject.kind === "user" ? managedSettingsBundles.userId : managedSettingsBundles.roleId;
+
+  return db.transaction(async (tx) => {
+    const t = tx as unknown as Db;
+    await t.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`managed-settings:${subject.kind}:${subject.id}`}))`);
+    const [latest] = await t.select().from(managedSettingsBundles).where(eq(subjectCol, subject.id)).orderBy(desc(managedSettingsBundles.version)).limit(1);
+    if (latest && latest.policyDigest === policyDigest) return { ok: true as const, created: false, bundle: view(latest) };
+
+    const version = (latest?.version ?? 0) + 1;
+    // the database clock, never the process clock (mistakes ledger: timestamps on rows come from now())
+    const clock = (await t.execute(
+      sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS now, gen_random_uuid()::text AS id`,
+    )) as unknown as { rows: Array<{ now: string; id: string }> };
+    const { now, id } = clock.rows[0]!;
+    const manifest = `${JSON.stringify(
+      {
+        schema: MANAGED_SETTINGS_SCHEMA,
+        bundleId: id,
+        subject,
+        version,
+        generatedAt: now,
+        policyDigest,
+        servers: policy.servers.length,
+        signing: { alg: "Ed25519", keyId: key.keyId, publicKeyFingerprint: key.fingerprint },
+        files: files.map((f) => ({ path: f.path, vendor: f.vendor, delivery: f.delivery, sha256: sha256(f.body), bytes: Buffer.byteLength(f.body) })),
+        install: MANAGED_SETTINGS_INSTALL,
+      },
+      null,
+      2,
+    )}\n`;
+    const signature = key.sign(Buffer.from(manifest, "utf8")).toString("base64");
+    const [row] = await t
+      .insert(managedSettingsBundles)
+      .values({
+        id,
+        subjectKind: subject.kind,
+        userId: subject.kind === "user" ? subject.id : null,
+        roleId: subject.kind === "role" ? subject.id : null,
+        version,
+        policyDigest,
+        manifest,
+        signature,
+        keyId: key.keyId,
+        createdBy: opts.actorUserId,
+      })
+      .returning();
+    await t.insert(managedSettingsBundleFiles).values(files.map((f) => ({ bundleId: id, path: f.path, body: f.body, sha256: sha256(f.body) })));
+    await t.insert(auditLog).values({
+      userId: opts.actorUserId ?? NIL_UUID,
+      objectType: "managed_settings_bundle",
+      objectId: id,
+      detail: { subsystem: "managed-settings", adr: "0310", subjectKind: subject.kind, subjectId: subject.id, version, policyDigest, keyId: key.keyId, servers: policy.servers.length },
+      effect: "allow",
+      ruleId: "managed-settings-bundle-exported",
+      ruleChain: [],
+      reason: `managed-settings bundle v${version} for ${subject.kind} ${subject.id} compiled from ${policy.servers.length} entitled MCP server(s) and signed with key '${key.keyId}' (ADR-0310)`,
+    });
+    return { ok: true as const, created: true, bundle: view(row!) };
+  });
+}
+
+/** The signed archive: manifest.json, manifest.json.sig and every vendor file, byte-identical on every download. */
+export async function managedSettingsArchive(db: Db, bundleId: string): Promise<{ name: string; body: Buffer } | null> {
+  const [b] = await db.select().from(managedSettingsBundles).where(eq(managedSettingsBundles.id, bundleId));
+  if (!b) return null;
+  const files = await db.select().from(managedSettingsBundleFiles).where(eq(managedSettingsBundleFiles.bundleId, bundleId)).orderBy(managedSettingsBundleFiles.path);
+  const body = buildTarGz([
+    { path: "manifest.json", body: Buffer.from(b.manifest, "utf8") },
+    { path: "manifest.json.sig", body: Buffer.from(`${b.signature}\n`, "utf8") },
+    ...files.map((f) => ({ path: f.path, body: Buffer.from(f.body, "utf8") })),
+  ]);
+  return { name: `regulait-managed-settings-${b.subjectKind}-v${b.version}.tar.gz`, body };
+}
+
+const subjectSchema = z.object({ kind: z.enum(["user", "role"]), id: z.string().uuid() }).strict();
+const exportBody = z
+  .object({ subject: subjectSchema, claudeCodeMinimumVersion: z.string().regex(/^\d{1,4}\.\d{1,4}\.\d{1,6}$/).optional() })
+  .strict();
+const listQuery = z
+  .object({
+    subjectKind: z.enum(["user", "role"]).optional(),
+    subjectId: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    before: z.string().uuid().optional(),
+  })
+  .strict()
+  .refine((q) => (q.subjectId === undefined) === (q.subjectKind === undefined), { message: "subjectKind and subjectId go together" });
+const idParams = z.object({ id: z.string().uuid() }).strict();
+
+
+// ---------------------------------------------------------------------------
+// Slice 2: drift against ADR-0259's endpoint MCP inventory (ADR-0310 decision 8)
+// ---------------------------------------------------------------------------
+
+const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+/** SQL: the managed vendor an inventory row's config file belongs to (managedVendorOfConfigPath, in SQL), or NULL */
+const VENDOR_OF_ROW = sql<string | null>`(CASE ${sql.join(
+  MANAGED_SETTINGS_VENDORS.map(
+    (v) =>
+      sql`WHEN ${sql.join(
+        MANAGED_VENDOR_CONFIG_PATHS[v].map(
+          (suffix) => sql`(replace(${endpointMcpServers.configPath}, '\\', '/') = ${suffix} OR replace(${endpointMcpServers.configPath}, '\\', '/') LIKE ${`%/${likeEscape(suffix)}`})`,
+        ),
+        sql` OR `,
+      )} THEN ${v}`,
+  ),
+  sql` `,
+)} END)`;
+
+/** the host strings a device may report for this gateway (isGatewayHost, as a set for SQL) */
+function gatewayHostForms(publicUrl: string): string[] {
+  const u = new URL(publicUrl);
+  const host = u.host.toLowerCase();
+  const dflt = u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "";
+  return u.port || !dflt ? [host] : [host, `${host}:${dflt}`];
+}
+
+export const driftQuery = z
+  .object({
+    deviceId: z.string().uuid().optional(),
+    vendor: z.enum(MANAGED_SETTINGS_VENDORS).optional(),
+    cursor: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  })
+  .strict();
+export type DriftQuery = z.infer<typeof driftQuery>;
+
+export type DriftOutcome =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; status: number; error: string; detail: string };
+
+/**
+ * Drift: an enabled MCP server configured in a managed vendor's config file on an enrolled device whose identity is
+ * not this gateway. A bundle names only gateway URLs and sets the vendor's managed-only switch, so such a server
+ * means the bundle is not applied on that device, or the client does not enforce it. Measured against what was
+ * exported: with no bundle exported nothing is managed yet, and the request is refused rather than reporting every
+ * server as drift. Devices are pseudonymous (ADR-0195), so drift is per device and identity, never per named user.
+ */
+export async function managedSettingsDrift(db: Db, q: DriftQuery, publicUrl: string | null = resolvePublicUrl()): Promise<DriftOutcome> {
+  if (!publicUrl) {
+    return { ok: false, status: 409, error: "public_url_unset", detail: "REGULAIT_PUBLIC_URL is not set, so the gateway host a managed device must name is unknown" };
+  }
+  const [latest] = await db
+    .select({ id: managedSettingsBundles.id, createdAt: managedSettingsBundles.createdAt })
+    .from(managedSettingsBundles)
+    .orderBy(desc(managedSettingsBundles.createdAt), desc(managedSettingsBundles.id))
+    .limit(1);
+  if (!latest) {
+    return { ok: false, status: 409, error: "no_bundle_exported", detail: "no managed-settings bundle has been exported, so there is no managed allowlist to drift from" };
+  }
+  const hosts = gatewayHostForms(publicUrl);
+  const isGateway = sql`(${endpointMcpServers.transport} IN ('http', 'sse') AND lower(${endpointMcpServers.host}) IN (${sql.join(
+    hosts.map((h) => sql`${h}`),
+    sql`, `,
+  )}))`;
+  const base = [eq(endpointMcpServers.disabled, false), sql`${VENDOR_OF_ROW} IS NOT NULL`, sql`NOT coalesce(${isGateway}, false)`];
+  if (q.deviceId) base.push(eq(endpointMcpServers.deviceId, q.deviceId));
+  if (q.vendor) base.push(sql`${VENDOR_OF_ROW} = ${q.vendor}`);
+  const [totals] = await db
+    .select({ servers: count(), devices: sql<number>`count(DISTINCT ${endpointMcpServers.deviceId})` })
+    .from(endpointMcpServers)
+    .where(and(...base));
+  // #902 review: a vendor whose config files the enabled catalogue (its `assistant_config` rows, the config_path
+  // catalogue SD3 matches and the collection manifest is built from) does not collect is not measured, so its count is
+  // null (unknown), never a reassuring zero (ADR-0180)
+  const catalogue = await db
+    .select({ value: aiEndpointSignatures.value })
+    .from(aiEndpointSignatures)
+    .where(and(eq(aiEndpointSignatures.enabled, true), eq(aiEndpointSignatures.kind, "assistant_config")));
+  const perVendor = new Map<string, number>();
+  for (const r of await db
+    .select({ vendor: VENDOR_OF_ROW, servers: count() })
+    .from(endpointMcpServers)
+    .where(and(...base))
+    .groupBy(sql`1`)) {
+    if (r.vendor) perVendor.set(r.vendor, Number(r.servers));
+  }
+  // #902 review [3]: a catalogue path is collection CAPABILITY. Collection itself runs only while the ADR-0259 org
+  // switch is on (default off); while it is off the agent collects nothing and the gateway refuses mcp_config facts,
+  // so every vendor is unmeasured: status not_collected, drift null, whatever the catalogue names.
+  const collectionEnabled = (await loadDiscoverySettings(db)).endpointMcpConfig;
+  const coverage = managedVendorCoverage(catalogue.map((c) => c.value))
+    .filter((c) => !q.vendor || c.vendor === q.vendor)
+    .map((c) => {
+      const status = collectionEnabled ? c.status : ("not_collected" as const);
+      return { ...c, catalogueStatus: c.status, status, driftServers: status === "not_collected" ? null : (perVendor.get(c.vendor) ?? 0) };
+    });
+  const unmeasured = coverage.filter((c) => c.status !== "collected").map((c) => c.vendor);
+  const conds = q.cursor ? [...base, gt(endpointMcpServers.id, q.cursor)] : base;
+  const rows = await db
+    .select({ row: endpointMcpServers, devicePseudonym: endpointDevices.devicePseudonym })
+    .from(endpointMcpServers)
+    .innerJoin(endpointDevices, eq(endpointDevices.id, endpointMcpServers.deviceId))
+    .where(and(...conds))
+    .orderBy(asc(endpointMcpServers.id))
+    .limit(q.limit + 1);
+  const page = rows.slice(0, q.limit);
+  const items = page.map(({ row, devicePseudonym }) => {
+    const vendor = managedVendorOfConfigPath(row.configPath);
+    const remote = row.transport === "http" || row.transport === "sse";
+    // a remote row on this gateway is excluded by the query; the check here keeps the two definitions honest
+    const onGateway = remote && !!row.host && isGatewayHost(row.host, publicUrl);
+    return {
+      id: row.id,
+      deviceId: row.deviceId,
+      devicePseudonym,
+      vendor,
+      config: { root: row.configRoot, path: row.configPath },
+      serverName: row.serverName,
+      transport: row.transport,
+      identity: { kind: row.identityKind, value: row.identity },
+      risks: row.risks,
+      secretTypes: row.secretTypes,
+      onGateway,
+      reportedAfterLatestExport: row.lastSeenAt >= latest.createdAt,
+      verdict: remote
+        ? `DRIFT: a remote MCP server (${row.identity}) in ${vendor}'s config that is not this gateway. The managed allowlist names only gateway URLs, so its presence means the managed settings are not applied on this device, or the client does not enforce them.`
+        : `DRIFT: a local (${row.transport}) MCP server (${row.identity}) in ${vendor}'s config. The managed allowlist names only gateway URLs, so its presence means the managed settings are not applied on this device, or the client does not enforce them.`,
+      firstSeenAt: row.firstSeenAt.toISOString(),
+      lastSeenAt: row.lastSeenAt.toISOString(),
+    };
+  });
+  return {
+    ok: true,
+    body: {
+      latestBundle: { id: latest.id, createdAt: latest.createdAt.toISOString() },
+      gatewayHost: hosts[0],
+      summary: {
+        driftServers: Number(totals?.servers ?? 0),
+        devices: Number(totals?.devices ?? 0),
+        // the totals cover only what is collected; `complete: false` says some vendor's files are not (fully) read
+        complete: unmeasured.length === 0,
+      },
+      coverage,
+      collectionEnabled,
+      coverageNote: !collectionEnabled
+        ? "Not measured: endpoint MCP config discovery is off (ADR-0259, the default), so no endpoint agent reads MCP config files and none is reported; drift is unknown, not zero. Any rows listed are historical evidence from while it was on (see each lastSeenAt), not a current measurement."
+        : unmeasured.length
+        ? `Not fully measured: ${unmeasured.join(", ")}. The enabled endpoint catalogue has no config_path row for some of these vendors' MCP config files, so the endpoint agent does not read them; drift there is unknown, not zero. Add the catalogue rows (see each vendor's missingPaths) to measure it.`
+        : "Every managed vendor's MCP config files are collected by the enabled endpoint catalogue.",
+      items,
+      nextCursor: rows.length > q.limit ? page[page.length - 1]!.row.id : null,
+    },
+  };
+}
+
+const refuse = (reply: FastifyReply, status: number, error: string, detail: string) => reply.status(status).send({ error, detail });
+const issues = (e: z.ZodError) => e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+
+/** Admin-only by the app-level default (none of these is in NON_ADMIN_ROUTES). */
+export function registerManagedSettingsRoutes(app: FastifyInstance, db: Db): void {
+  const actor = (req: FastifyRequest) => req.authCtx.userId ?? null;
+
+  app.post("/v1/managed-settings/bundles", async (req, reply) => {
+    const b = exportBody.safeParse(req.body ?? {});
+    if (!b.success) return refuse(reply, 400, "invalid_body", issues(b.error));
+    const out = await exportManagedSettingsBundle(db, b.data.subject, { actorUserId: actor(req), claudeCodeMinimumVersion: b.data.claudeCodeMinimumVersion });
+    if (!out.ok) return refuse(reply, out.status, out.error, out.detail);
+    return reply.status(out.created ? 201 : 200).send({ ...out.bundle, created: out.created });
+  });
+
+  app.get("/v1/managed-settings/bundles", async (req, reply) => {
+    const q = listQuery.safeParse(req.query ?? {});
+    if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
+    const { subjectKind, subjectId, limit, before } = q.data;
+    const conds = [];
+    if (subjectKind && subjectId) conds.push(eq(subjectKind === "user" ? managedSettingsBundles.userId : managedSettingsBundles.roleId, subjectId));
+    if (before) {
+      const [cur] = await db.select({ createdAt: managedSettingsBundles.createdAt }).from(managedSettingsBundles).where(eq(managedSettingsBundles.id, before));
+      if (!cur) return refuse(reply, 400, "invalid_cursor", "the 'before' bundle does not exist");
+      conds.push(
+        or(
+          lt(managedSettingsBundles.createdAt, cur.createdAt),
+          and(eq(managedSettingsBundles.createdAt, cur.createdAt), lt(managedSettingsBundles.id, before)),
+        )!,
+      );
+    }
+    const rows = await db
+      .select()
+      .from(managedSettingsBundles)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(managedSettingsBundles.createdAt), desc(managedSettingsBundles.id))
+      .limit(limit + 1);
+    const page = rows.slice(0, limit);
+    return { bundles: page.map(view), next: rows.length > limit ? page[page.length - 1]!.id : null };
+  });
+
+  app.get("/v1/managed-settings/drift", async (req, reply) => {
+    const q = driftQuery.safeParse(req.query ?? {});
+    if (!q.success) return refuse(reply, 400, "invalid_query", issues(q.error));
+    const out = await managedSettingsDrift(db, q.data);
+    if (!out.ok) return refuse(reply, out.status, out.error, out.detail);
+    return out.body;
+  });
+
+  app.get("/v1/managed-settings/bundles/:id/archive", async (req, reply) => {
+    const p = idParams.safeParse(req.params ?? {});
+    if (!p.success) return refuse(reply, 400, "invalid_params", issues(p.error));
+    const a = await managedSettingsArchive(db, p.data.id);
+    if (!a) return refuse(reply, 404, "bundle_not_found", "no managed-settings bundle with that id");
+    return reply
+      .header("content-type", "application/gzip")
+      .header("content-disposition", `attachment; filename="${a.name}"`)
+      .header("cache-control", "no-store")
+      .send(a.body);
+  });
+}
