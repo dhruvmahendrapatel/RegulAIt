@@ -1,6 +1,6 @@
 ---
 phase: parallel-build-orchestrated
-last_updated: 2026-11-20
+last_updated: 2026-11-21
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -19,7 +19,42 @@ roadmap: ../product/ROADMAP.md
 > at the end of a long batch** — a session that ended unexpectedly during that window would have
 > handed its successor a file describing a project with "no workload to deploy".
 
-## Snapshot (2026-11-20, 15:30 UTC) - read this first
+## Snapshot (2026-11-21, 19:45 UTC) - read this first
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **Merged on 2026-11-21 (23 PRs, every merge audited against its released head):**
+  - Governance and security: #905 governed agent memory writes (ADR-0347), #1144 per-row link visibility and RLS on
+    decisions, #1142 browser origin pinning, #1130 plaintext-credential findings, #818 approval-rule and rate-limit
+    admin routes, #810 A2A role grants and revocations, #967 sandbox-only content extractor (ADR-0362), #923
+    remaining state machines and `GET /v1/state-machines`, #1002 scanner fixtures.
+  - Platform: #1145 MCP 2026-07-28 beside v1, #955 native Bedrock/Vertex/Mistral/Cohere/Qwen providers, #891 stage
+    deadlines with SLA escalation, #925 workflow replay check, #1122 published decision tables, #1131 repetitive-ask
+    detector, #1141 syslog over TLS, #1079 agent-risk register APIs, #963 AI adoption analytics API.
+  - Records: #1132, #1138, #1152 (D-2026-11-21-01 to -06), #1139, #1140.
+- **Sessions (owner, 2026-11-21):** the 50-session push ran until about 14:00 UTC; the owner then asked to wind down
+  and, at 18:50 UTC, to keep at most 10 worker sessions at a time. Running: builders E16 (#1028 disabled-user fix),
+  UI-C (first-load JS gate, ADR-0344), L1 (ABAC v5 session facts), E50 (memory trust floor, #1133), E51 (oversight
+  enforcement, #1135), E52 (rogue-agent containment, #1134); reviewers R2, R3 (code), S3, S4 (security). Every other
+  lane is archived with its PRs left open as drafts (about 78 open PRs); a lane is woken, nearest-to-merge first,
+  when a kept builder finishes.
+- **Stalls on 2026-11-21:** worker restarts (07:22-11:27 and 14:45-18:15 UTC) stopped the merge loop, and many builders
+  hit the account's weekly usage limit in the afternoon.
+- **Merge settings (owner, 2026-11-21):** branch ruleset `main-protection` is active on `main`: block force pushes,
+  restrict deletions, PR required (0 approvals, merge commits only), five required checks (`build-and-test`,
+  `ui enterprise / all`, `Dependency audit (pnpm)`, `Secret scan (gitleaks)`, `Scope and engine images`) from GitHub
+  Actions. Squash and rebase merging are off. **GitHub's merge queue is not available** because the repository is
+  user-owned, so the master's merge loop stays the merge path. Open consequence: the `assign-at-merge` fragment fold
+  (ADR-0252) was waiting on the merge queue and needs another trigger; 170+ fragments are still unfolded.
+- **Owner questions open (from parked lanes):** E26 content-trust floor on the shared-context write route (#1054);
+  E29 approvals/infra DB-check migration batch next?; E47 `privacyOpsEnabled` default (off per 2026-10-30, or on per
+  ADR-0180); E41 configurable halt threshold, self-update per source or per device group; L4 ATR 4.3.0 rule pack and
+  the pending engine-images release run; L6 Forge assign app, re-assign after PM workflow ends, Atlassian Guard key;
+  L2 close #1174 or keep; E20/E13 bundle ceiling 1,170 to 1,180 kB or wait for UI-C's first-load gate.
+- **AWS:** the owner asked to undeploy AWS to zero cost. This session has no valid AWS credentials, so nothing was
+  changed; the owner runs `internal/product/DEMO_TEARDOWN.md` T6, T7 (demo-sandbox account closure) and, if applied,
+  the demo-host stacks.
+
+## Snapshot (2026-11-20, 15:30 UTC) - superseded by the 2026-11-21 snapshot above
 
 > The recap below stopped at 2026-11-07 because recap entries now arrive as fragments (ADR-0252). 170 fragments are
 > waiting in `internal/fragments/` and fold into this file when an `assign-at-merge/<sha>` pull request merges. Those

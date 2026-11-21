@@ -545,6 +545,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    "a2a_agent_revocations.reason",
     // ADR-0327 addendum — a decision-table version's proposal reason
     "decision_table_versions.reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
@@ -612,6 +613,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
     // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
     "agent_identity_links.note",
     "agent_identity_links.decision_note",

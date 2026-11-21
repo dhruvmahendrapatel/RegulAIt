@@ -459,7 +459,12 @@ export type SodMint =
   | { kind: "role_connector"; roleId: string; connectorId: string; mode: "read" | "readwrite" }
   | { kind: "role_tool"; roleId: string; serverId: string; toolName: string }
   | { kind: "role_server"; roleId: string; serverId: string }
-  | { kind: "role_assignment"; userId: string; roleId: string };
+  | { kind: "role_assignment"; userId: string; roleId: string }
+  // ADR-0219 follow-up (PR #810 review): remote-agent (A2A) grants go through the same gate. A rule side cannot name a
+  // remote agent yet (`selectorSchema.kind` is the four native kinds), so these confer no matching capability today;
+  // the routes still call `refuseSodMint` so an `a2a_agent` selector kind needs only `mintFootprint` to change.
+  | { kind: "a2a"; userId: string; agentId: string }
+  | { kind: "role_a2a"; roleId: string; agentId: string };
 
 export interface SodConflict {
   rule: SodRuleRow;
@@ -513,6 +518,10 @@ async function mintFootprint(
               : cap("mcp_server", mint.serverId);
       return { capabilities: [capability], userIds };
     }
+    case "a2a":
+      return { capabilities: [], userIds: [mint.userId] };
+    case "role_a2a":
+      return { capabilities: [], userIds: [] };
     case "role_assignment": {
       // assigning a role confers its WHOLE bundle on the assignee
       const [agentsB, connectorsB, toolsB, serversB] = await Promise.all([

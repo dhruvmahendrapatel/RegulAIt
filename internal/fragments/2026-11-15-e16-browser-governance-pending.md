@@ -8,4 +8,5 @@ which is bound per device since review #867); (the gateway origin is pinned at b
 needed); feeding breach events into the
 shadow-AI inventory and detection engine through their contracts; per-role site rules; a browser opt-out for single DLP
 rules (an audited relaxation); hardware-bound device keys through the endpoint agent; DLP for script-sent prompts and
-file uploads; Firefox (its own fragment, owner decision B3) and Safari; surface (b), browser-driving agents (its own ADR, PR 2). Owner decisions B1 to B4 are in the ADR.
+file uploads; Firefox (its own fragment, owner decision B3) and Safari; surface (b), browser-driving agents, is superseded by
+ADR-0364 (lane E45, owner decision 2026-11-21) and is not an E16 follow-up. Owner decisions B1 to B4 are in the ADR.

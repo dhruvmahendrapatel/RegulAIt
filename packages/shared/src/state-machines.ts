@@ -802,6 +802,36 @@ export const PIPELINE_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `builder_agents.autonomy_enforcement` (ADR-0180 addendum, 2026-11-21, lane E51). Whether an unmet autonomy floor
+ * blocks dispatch for a `delegated` or `autonomous` builder agent. Every agent starts `enforced` (ADR-0180: the strict
+ * value is the default, existing agents included). Only an admin relaxes it, with a reason and a step-up; restoring it
+ * is an admin act too. Both changes are audited. Neither state is final: an agent can be relaxed and restored again. */
+export const AUTONOMY_ENFORCEMENT_STATES = ["enforced", "relaxed"] as const;
+export const AUTONOMY_ENFORCEMENT_MACHINE = defineMachine({
+  id: "builder_agent_autonomy_enforcement",
+  stored: "builder_agents.autonomy_enforcement",
+  states: AUTONOMY_ENFORCEMENT_STATES,
+  initial: ["enforced"],
+  terminal: [],
+  transitions: {
+    relax: {
+      from: ["enforced"],
+      to: "relaxed",
+      by: ["admin"],
+      summary:
+        "An admin let the agent run while its autonomy floors are unmet, with a reason and a step-up. Each such run is audited.",
+    },
+    restore: {
+      from: ["relaxed"],
+      to: "enforced",
+      by: ["admin"],
+      summary: "An admin restored the strict default: an unmet floor blocks the agent's delegated or autonomous runs again.",
+    },
+  },
+});
+export type AutonomyEnforcementState = (typeof AUTONOMY_ENFORCEMENT_STATES)[number];
+export type AutonomyEnforcementEvent = keyof typeof AUTONOMY_ENFORCEMENT_MACHINE.def.transitions;
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 /** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
  * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
@@ -988,5 +1018,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
   [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
+  // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
+  [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
   [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
 } as Record<string, StateMachine<string, string>>);
