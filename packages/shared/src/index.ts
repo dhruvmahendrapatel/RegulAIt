@@ -2484,6 +2484,15 @@ export const updateOrgSettingsSchema = z
     /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
      * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
     mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
+    /** ADR-0230 owner decision 2026-11-15: SAP business server defaults. The approval quorum seeded on a mark
+     * (default 2; never below 1, and the requester never approves their own write); below 2 is a relaxation. */
+    sapApprovalQuorum: z.number().int().min(1).max(10).optional(),
+    /** SAP writes per user per hour on the seeded write-only limit (default 10); higher is a relaxation */
+    sapWriteRatePerHour: z.number().int().min(1).max(1000).optional(),
+    /** false (default) refuses an SAP write with no project; true is a relaxation */
+    sapUnattributedWritesAllowed: z.boolean().optional(),
+    /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
+    sapReadsApproveFirst: z.boolean().optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -3163,6 +3172,7 @@ export {
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalAuditPayloadV2,
   type AuditChainVersion,
@@ -4973,6 +4983,7 @@ export * from "./sector-packs.js";
 export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./agent-risk-proofs.js";
 export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
@@ -4984,6 +4995,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
@@ -5059,5 +5072,41 @@ export * from "./supplier-portal.js";
 export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
+export * from "./state-machine.js";
+export * from "./state-machines.js";
+export * from "./pipeline-steps.js";
+export * from "./kill-switch-guard.js";
+export * from "./vendor-agent-control.js";
+export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
+export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";
+
+// ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
+export * from "./agent-risk-score.js";
+// ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)
+export * from "./agent-identity.js";
+
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-actions.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
+export * from "./sensitivity-labels.js";
+
+// ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
+export * from "./fairness-evaluation.js";
+
+// ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
+export * from "./custom-classifiers.js";
+export * from "./agent-credential.js";

@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { plural } from "../../api/format";
+import { plural, errorText } from "../../api/format";
 import { Button, Field, Modal, SkeletonBlock, Textarea } from "../../ui/kit";
 import { RefusalNotice } from "../../ui/RefusalNotice";
 import { useAction } from "../admin/adminKit";
@@ -96,7 +96,7 @@ export function CloseIncidentFromList(props: { id: string; onClose: () => void; 
     return (
       <Modal open title="Close incident" onClose={props.onClose} actions={<Button onClick={props.onClose}>Cancel</Button>}>
         <div className={v.errLine} role="alert">
-          The incident could not be read, so it cannot be closed from here: {q.error instanceof Error ? q.error.message : String(q.error)}
+          The incident could not be read, so it cannot be closed from here: {errorText(q.error)}
         </div>
       </Modal>
     );

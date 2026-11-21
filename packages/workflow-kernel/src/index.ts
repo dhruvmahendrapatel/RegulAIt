@@ -29,8 +29,16 @@ export const EXECUTABLE_STAGE_TYPES = [
   "rollback",
 ] as const;
 
-export const GIT_ACTIONS = ["create_branch", "open_pr", "merge"] as const;
+export const GIT_ACTIONS = ["create_branch", "open_pr", "merge", "delete_branch", "close_pr"] as const;
 export type GitAction = (typeof GIT_ACTIONS)[number];
+/** ADR-0340: the git actions that UNDO another git stage's effect. They are valid only on a compensation stage
+ * (`compensates`), and each undoes exactly one forward action. A merge has no git compensation: reverting a merge
+ * is a new change that needs its own review, so a template compensates it with a governed build stage (a nested
+ * run, or a manual task a person completes). */
+export const COMPENSATING_GIT_ACTIONS: Readonly<Record<"delete_branch" | "close_pr", GitAction>> = {
+  delete_branch: "create_branch",
+  close_pr: "open_pr",
+};
 
 export type StageType = (typeof EXECUTABLE_STAGE_TYPES)[number];
 
@@ -87,6 +95,15 @@ const stageSchema = z.object({
   offlineAutoPass: z.boolean().optional(),
   /** git_operation: which operation this stage performs */
   action: z.enum(GIT_ACTIONS).optional(),
+  /** ADR-0340 (saga): this stage is the COMPENSATION of the named forward stage. A compensation stage never runs
+   * in the forward flow (like a rollback stage, it is skipped); when the instance is cancelled (`abort`) or a
+   * sign-off denies it (`approval_denied`), the compensations of every forward stage that ran are executed in
+   * reverse order, each through the same executor, claim and audit as a forward stage, and the instance then ends
+   * in the terminal status the cancel or denial asked for. Allowed: a git_operation `delete_branch` (undoes a
+   * `create_branch`) or `close_pr` (undoes an `open_pr`), a `rollback` (undoes a `deployment`), or an
+   * `automated_build` (with a run: a governed nested run; without one: a manual task a person completes). One
+   * compensation per forward stage. A compensation must be idempotent: it can run again after a failure. */
+  compensates: z.string().min(1).optional(),
   /** git_operation: name of the registered git connection to use */
   connection: z.string().min(1).optional(),
   /** git_operation: owner/repo the operation targets */
@@ -473,6 +490,76 @@ export const workflowDefinitionSchema = z
         }
       }
     }
+    // ADR-0340: compensation (saga) stages
+    const compensated = new Set<string>();
+    for (const s of def.stages) {
+      const isUndoGit = s.type === "git_operation" && (s.action === "delete_branch" || s.action === "close_pr");
+      if (s.compensates === undefined) {
+        if (isUndoGit) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `git_operation stage '${s.id}' (${s.action}) undoes another stage — it needs compensates`,
+          });
+        }
+        continue;
+      }
+      const target = def.stages.find((o) => o.id === s.compensates);
+      if (!target || target.id === s.id || target.compensates !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `compensation stage '${s.id}' compensates '${s.compensates}', which is not a forward stage of this template`,
+        });
+        continue;
+      }
+      if (compensated.has(target.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${target.id}' has more than one compensation stage`,
+        });
+      }
+      compensated.add(target.id);
+      const fits =
+        (isUndoGit && target.type === "git_operation" && target.action === COMPENSATING_GIT_ACTIONS[s.action as "delete_branch" | "close_pr"]) ||
+        (s.type === "rollback" && target.type === "deployment") ||
+        (s.type === "automated_build" &&
+          (target.type === "git_operation" || target.type === "deployment" || target.type === "automated_build"));
+      if (!fits) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `compensation stage '${s.id}' (${s.type}${s.action ? ` ${s.action}` : ""}) cannot compensate '${target.id}' (${target.type}${target.action ? ` ${target.action}` : ""}) — ` +
+            "delete_branch undoes create_branch, close_pr undoes open_pr, a rollback undoes a deployment, and an automated_build can undo a git, deploy or build stage",
+        });
+      }
+      if (isUndoGit && fits && (s.connection !== target.connection || s.repo !== target.repo)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `compensation stage '${s.id}' must use the connection and repo of '${target.id}', whose effect it undoes`,
+        });
+      }
+      if (s.type === "automated_build" && s.scope !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `compensation stage '${s.id}' cannot be scope-locked to an artifact`,
+        });
+      }
+    }
+    // ADR-0340: once a pull request is merged, closing it cannot undo it. A template whose close_pr undoes an
+    // open_pr that a later stage merges must therefore compensate that merge too (a governed revert); then a saga
+    // after the merge reverts it and the close_pr is recorded as superseded instead of failing on every retry.
+    for (const s of def.stages) {
+      if (s.type !== "git_operation" || s.action !== "close_pr" || s.compensates === undefined) continue;
+      for (const m of mergesOfPullRequest(def, s)) {
+        if (!def.stages.some((c) => c.compensates === m.id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `compensation stage '${s.id}' closes the pull request that '${m.id}' merges, and closing cannot undo a merge — ` +
+              `give '${m.id}' its own compensation (an automated_build that reverts it)`,
+          });
+        }
+      }
+    }
     if (def.stages[0]!.type !== "trigger") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "first stage must be a trigger" });
     }
@@ -658,12 +745,39 @@ export type InstanceStatus =
   // §2 terminal: a post-deploy verify failed and the deploy was reversed.
   | "rolled_back";
 
+/**
+ * The ONE declared set of terminal instance statuses (ADR-0342 review): an instance in one of these accepts no event
+ * except a `reopen` of a `completed` instance. Every consumer imports this (or `isTerminalStatus`) rather than
+ * restating it; SQL CHECKs that must repeat it say so in a comment.
+ */
+export const TERMINAL_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const satisfies readonly InstanceStatus[];
+export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
+export function isTerminalStatus(status: string): status is TerminalStatus {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
 export interface InstanceState {
   status: InstanceStatus;
   currentStageIndex: number;
   stageStatuses: StageStatus[];
   /** version of the most recently submitted artifact per artifact name */
   artifactVersions: Record<string, number>;
+  /** ADR-0340: present once a cancel or a denial started compensating the instance (kept after it ends) */
+  compensation?: CompensationState;
+}
+
+/** ADR-0340 (saga): what the instance is compensating, and how far it got */
+export interface CompensationState {
+  /** the terminal status the instance ends in once its compensations ran: a cancel (`abort`) or a denial */
+  cause: "aborted" | "denied";
+  /** the stage the instance was at when the cancel or denial came */
+  fromStageId: string | null;
+  /** every compensation stage of the plan, in run order (the reverse of the forward stages they undo) */
+  plan: string[];
+  /** the compensation stages still to run AFTER the current one, in run order */
+  remaining: string[];
+  /** set when it ended: every compensation ran, or an operator abandoned the rest */
+  outcome?: "completed" | "abandoned";
 }
 
 export type WorkflowEvent =
@@ -722,6 +836,12 @@ export type Effect =
   | { kind: "await_manual_deploy"; stageId: string; reason: string }
   // §2 the deployment was reversed — the instance ended in rolled_back.
   | { kind: "instance_rolled_back"; stageId: string }
+  // ADR-0340: a cancel or a denial started running the compensations in `plan` (reverse order of the stages they undo)
+  | { kind: "compensation_started"; cause: CompensationState["cause"]; plan: string[] }
+  // ADR-0340: every compensation ran; the instance ends in `cause`
+  | { kind: "compensation_completed"; cause: CompensationState["cause"]; plan: string[] }
+  // ADR-0340: an operator ended the compensation early; `notRun` names the compensations that never completed
+  | { kind: "compensation_abandoned"; cause: CompensationState["cause"]; notRun: string[] }
   | { kind: "instance_completed" }
   | { kind: "instance_denied" }
   | { kind: "instance_aborted" };
@@ -761,6 +881,255 @@ export function isExecutedStage(stage: Stage): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0340 — THE COMPENSATION LIFECYCLE, declared once (build rule 12). Every compensation transition below goes
+// through `nextCompensationPhase`; a move the table does not list is a WorkflowStateError, never a silent change.
+//
+//   none ──cancel/deny──▶ compensating ──step_succeeded──▶ compensating (next compensation)
+//                              │  └──────step_failed─────▶ compensating (same compensation, retryable)
+//                              ├──last_step_succeeded──▶ completed   (instance ends in its cause)
+//                              └──abort───────────────▶ abandoned   (admin; instance ends in its cause)
+// ---------------------------------------------------------------------------
+
+export type CompensationPhase = "none" | "compensating" | "completed" | "abandoned";
+export type CompensationTrigger = "cancel" | "deny" | "step_succeeded" | "last_step_succeeded" | "step_failed" | "abort";
+/**
+ * The instance status a compensation move implies: `stage` is the resting status of the compensation stage it
+ * enters (`awaiting_execution` for an executed one, `awaiting_trigger` for a manual one), `cause` is the terminal
+ * status the cancel or denial asked for (`aborted` or `denied`), `unchanged` keeps the status it had.
+ */
+export type CompensationStatusRule = "stage" | "cause" | "unchanged";
+export interface CompensationMove {
+  readonly to: CompensationPhase;
+  readonly status: CompensationStatusRule;
+}
+
+export const COMPENSATION_LIFECYCLE: Readonly<Record<CompensationPhase, Readonly<Partial<Record<CompensationTrigger, CompensationMove>>>>> = {
+  none: { cancel: { to: "compensating", status: "stage" }, deny: { to: "compensating", status: "stage" } },
+  compensating: {
+    step_succeeded: { to: "compensating", status: "stage" },
+    step_failed: { to: "compensating", status: "unchanged" },
+    last_step_succeeded: { to: "completed", status: "cause" },
+    abort: { to: "abandoned", status: "cause" },
+  },
+  completed: {},
+  abandoned: {},
+};
+
+/** where an instance is in the compensation lifecycle */
+export function compensationPhaseOf(state: InstanceState): CompensationPhase {
+  if (!state.compensation) return "none";
+  return state.compensation.outcome ?? "compensating";
+}
+
+/** the move `trigger` makes from `from`, or a WorkflowStateError when the table does not allow it */
+export function nextCompensationMove(from: CompensationPhase, trigger: CompensationTrigger): CompensationMove {
+  const move = COMPENSATION_LIFECYCLE[from][trigger];
+  if (!move) throw new WorkflowStateError(`compensation cannot '${trigger}' from '${from}'`);
+  return move;
+}
+
+/** the phase `trigger` moves to from `from`, or a WorkflowStateError when the table does not allow it */
+export function nextCompensationPhase(from: CompensationPhase, trigger: CompensationTrigger): CompensationPhase {
+  return nextCompensationMove(from, trigger).to;
+}
+
+/** the resting status of a compensation stage: an executor runs it, or a person completes it by hand */
+function compensationStageStatus(stage: Stage): "awaiting_execution" | "awaiting_trigger" {
+  return isExecutedStage(stage) || stage.type === "rollback" ? "awaiting_execution" : "awaiting_trigger";
+}
+
+/**
+ * ADR-0340 (rule 12): the instance statuses a compensation phase allows. A compensating instance rests at its
+ * current compensation stage's status; a completed or abandoned one is in its cause's terminal status. `null` when
+ * the instance never compensated (its status is the ordinary machine's). The gateway checks a new state against
+ * this before it writes it, so a later edit cannot end a saga without its outcome, or the reverse.
+ */
+export function compensationStatusFor(def: WorkflowDefinition, state: InstanceState): InstanceStatus | null {
+  const phase = compensationPhaseOf(state);
+  if (phase === "none") return null;
+  if (phase !== "compensating") return state.compensation!.cause;
+  const stage = def.stages[state.currentStageIndex];
+  return stage ? compensationStageStatus(stage) : null;
+}
+
+/** ADR-0340 (rule 12): throw when a state's status is not the one its compensation phase implies */
+export function assertCompensationStatus(def: WorkflowDefinition, state: InstanceState): void {
+  const want = compensationStatusFor(def, state);
+  if (want !== null && state.status !== want) {
+    throw new WorkflowStateError(`compensation phase '${compensationPhaseOf(state)}' needs status '${want}', not '${state.status}'`);
+  }
+}
+
+/** apply `trigger`'s move to `s` (a copy the caller owns): the phase, and the status the table says it implies */
+function applyCompensationMove(
+  def: WorkflowDefinition,
+  s: InstanceState,
+  from: CompensationPhase,
+  trigger: CompensationTrigger,
+): CompensationPhase {
+  const move = nextCompensationMove(from, trigger);
+  const comp = s.compensation!;
+  if (move.to === "completed" || move.to === "abandoned") s.compensation = { ...comp, outcome: move.to };
+  if (move.status === "cause") s.status = comp.cause;
+  else if (move.status === "stage") s.status = compensationStageStatus(def.stages[s.currentStageIndex]!);
+  return move.to;
+}
+
+/** ADR-0340: is the instance compensating right now (started, not yet ended)? */
+export function isCompensating(state: InstanceState): boolean {
+  return compensationPhaseOf(state) === "compensating";
+}
+
+/**
+ * ADR-0340: the compensation stages a cancel or a denial would run now, in run order. A forward stage that ran
+ * (completed, or completed and later re-opened) and has a compensation stage contributes it; the list is the
+ * reverse of the forward order, so the last effect is undone first. A stage that never completed (the one the
+ * instance is at, or one never reached) is not compensated: its effect did not happen, or did not finish.
+ */
+export function compensationPlan(def: WorkflowDefinition, state: InstanceState): string[] {
+  const plan: string[] = [];
+  for (let i = def.stages.length - 1; i >= 0; i--) {
+    const st = def.stages[i]!;
+    if (st.compensates !== undefined || st.type === "rollback") continue;
+    const ran = state.stageStatuses[i] === "completed" || state.stageStatuses[i] === "reopened";
+    if (!ran) continue;
+    const comp = def.stages.find((c) => c.compensates === st.id);
+    if (comp) plan.push(comp.id);
+  }
+  return plan;
+}
+
+/** ADR-0340: the merge stages that merge the pull request a close_pr compensation closes (same connection and repo) */
+function mergesOfPullRequest(def: { stages: readonly Stage[] }, closePr: Stage): Stage[] {
+  return def.stages.filter(
+    (m) =>
+      m.type === "git_operation" &&
+      m.action === "merge" &&
+      m.compensates === undefined &&
+      m.connection === closePr.connection &&
+      m.repo === closePr.repo,
+  );
+}
+
+/**
+ * ADR-0340: is close_pr compensation `stageId` superseded by a merge? True when this instance's own merge of that
+ * pull request has a compensation which already completed in the current saga: the merge was undone by its own
+ * governed revert, so the merged pull request has nothing left to close. The executor still asks the provider
+ * whether the pull request IS merged before it records the stage as superseded.
+ */
+export function closePrSupersededByMerge(def: WorkflowDefinition, state: InstanceState, stageId: string): boolean {
+  const stage = def.stages.find((st) => st.id === stageId);
+  const comp = state.compensation;
+  if (!stage || stage.type !== "git_operation" || stage.action !== "close_pr" || !comp) return false;
+  return mergesOfPullRequest(def, stage).some((m) => {
+    const revertIndex = def.stages.findIndex((c) => c.compensates === m.id);
+    const revert = def.stages[revertIndex];
+    return revert !== undefined && comp.plan.includes(revert.id) && state.stageStatuses[revertIndex] === "completed";
+  });
+}
+
+/** ADR-0340: point the instance at compensation stage `stageId` (its status comes from the lifecycle table) */
+function enterCompensationStage(
+  def: WorkflowDefinition,
+  s: InstanceState,
+  stageId: string,
+  from: CompensationPhase,
+  trigger: CompensationTrigger,
+  effects: Effect[],
+): TransitionResult {
+  const index = def.stages.findIndex((st) => st.id === stageId);
+  const stage = def.stages[index]!;
+  s.currentStageIndex = index;
+  s.stageStatuses[index] = "active";
+  applyCompensationMove(def, s, from, trigger);
+  // an executed compensation runs now; an automated_build without a run is a manual one a person completes
+  effects.push(s.status === "awaiting_execution" ? { kind: "execute_stage", stageId } : { kind: "await_human_trigger", stageId });
+  return { state: s, effects };
+}
+
+/** ADR-0340: start compensating, or null when nothing that ran has a compensation */
+function startCompensation(
+  def: WorkflowDefinition,
+  state: InstanceState,
+  cause: CompensationState["cause"],
+): TransitionResult | null {
+  const plan = compensationPlan(def, state);
+  if (plan.length === 0) return null;
+  const from = compensationPhaseOf(state);
+  const s: InstanceState = {
+    ...state,
+    stageStatuses: [...state.stageStatuses],
+    artifactVersions: { ...state.artifactVersions },
+    compensation: { cause, fromStageId: def.stages[state.currentStageIndex]?.id ?? null, plan, remaining: plan.slice(1) },
+  };
+  return enterCompensationStage(def, s, plan[0]!, from, cause === "aborted" ? "cancel" : "deny", [{ kind: "compensation_started", cause, plan }]);
+}
+
+/** ADR-0340: the current compensation finished; run the next one, or end in the cause's terminal status */
+function advanceCompensation(def: WorkflowDefinition, state: InstanceState): TransitionResult {
+  const comp = state.compensation!;
+  const from = compensationPhaseOf(state);
+  const s: InstanceState = {
+    ...state,
+    stageStatuses: [...state.stageStatuses],
+    artifactVersions: { ...state.artifactVersions },
+    compensation: { ...comp, remaining: comp.remaining.slice(1) },
+  };
+  s.stageStatuses[s.currentStageIndex] = "completed";
+  const next = comp.remaining[0];
+  if (next !== undefined) return enterCompensationStage(def, s, next, from, "step_succeeded", []);
+  applyCompensationMove(def, s, from, "last_step_succeeded");
+  return {
+    state: s,
+    effects: [
+      { kind: "compensation_completed", cause: comp.cause, plan: comp.plan },
+      comp.cause === "aborted" ? { kind: "instance_aborted" } : { kind: "instance_denied" },
+    ],
+  };
+}
+
+/** ADR-0340: the events a compensating instance accepts — its current compensation's own outcome, or `abort` */
+function compensatingTransition(def: WorkflowDefinition, state: InstanceState, event: WorkflowEvent): TransitionResult {
+  const comp = state.compensation!;
+  const current = stageAt(def, state.currentStageIndex);
+  if (event.kind === "abort") {
+    // an operator ends the compensation early: the instance ends in its cause, the rest never runs (audited)
+    const notRun = [current?.id, ...comp.remaining].filter((x): x is string => typeof x === "string");
+    const s: InstanceState = { ...state, stageStatuses: [...state.stageStatuses], compensation: { ...comp } };
+    applyCompensationMove(def, s, "compensating", "abort");
+    return {
+      state: s,
+      effects: [
+        { kind: "compensation_abandoned", cause: comp.cause, notRun },
+        comp.cause === "aborted" ? { kind: "instance_aborted" } : { kind: "instance_denied" },
+      ],
+    };
+  }
+  const onCurrent = "stageId" in event && current !== undefined && current.id === event.stageId;
+  if (onCurrent && (event.kind === "execution_succeeded" || event.kind === "execution_failed") && isExecutedStage(current)) {
+    // a failed compensation stays where it is (retryable through /advance or its retry policy), like a forward stage
+    if (event.kind === "execution_failed") {
+      const s: InstanceState = { ...state };
+      applyCompensationMove(def, s, "compensating", "step_failed");
+      return { state: s, effects: [] };
+    }
+    return advanceCompensation(def, state);
+  }
+  if (onCurrent && event.kind === "rolled_back" && current.type === "rollback") return advanceCompensation(def, state);
+  if (
+    onCurrent &&
+    (event.kind === "human_trigger" || event.kind === "stage_completed") &&
+    current.type === "automated_build" &&
+    current.run === undefined
+  ) {
+    return advanceCompensation(def, state);
+  }
+  throw new WorkflowStateError(
+    `instance is compensating (${comp.cause}) at stage '${current?.id ?? "?"}' — it accepts only that stage's own outcome, or abort`,
+  );
+}
+
 /**
  * ADR-0283: the delay before automatic retry number `attempt` (1-based), in
  * seconds, without jitter: `delaySeconds` for the first, then doubling when
@@ -791,12 +1160,7 @@ export function currentPlanningStage(
   def: WorkflowDefinition,
   state: InstanceState,
 ): Stage | null {
-  if (
-    state.status === "completed" ||
-    state.status === "aborted" ||
-    state.status === "denied" ||
-    state.status === "rolled_back"
-  ) {
+  if (isTerminalStatus(state.status)) {
     return null;
   }
   const stage = stageAt(def, state.currentStageIndex);
@@ -833,7 +1197,8 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
     // post-deploy verify jumps to it (that jump bypasses runForward). In the
     // normal forward flow it is skipped, so a passing deploy never reverses
     // itself. It stays "pending" — it was never entered.
-    if (stage.type === "rollback") {
+    // ADR-0340: a compensation stage is failure-only too — it runs only when a cancel or a denial compensates.
+    if (stage.type === "rollback" || stage.compensates !== undefined) {
       s.currentStageIndex += 1;
       continue;
     }
@@ -905,6 +1270,7 @@ export function transition(
   // AER-049: the one event a COMPLETED instance accepts — checked before the
   // terminal refusal below. Aborted / denied / rolled_back stay terminal.
   if (event.kind === "reopen") {
+    if (isCompensating(state)) throw new WorkflowStateError("instance is compensating and cannot be re-opened");
     if (state.status === "aborted" || state.status === "denied" || state.status === "rolled_back") {
       throw new WorkflowStateError(`instance is terminal (${state.status}) and cannot be re-opened`);
     }
@@ -925,9 +1291,10 @@ export function transition(
     // fresh round branch itself), so a review AFTER it is still a valid target
     const firstShipping = def.stages.findIndex(
       (st) =>
-        (st.type === "git_operation" && st.action !== "create_branch") ||
-        st.type === "deployment" ||
-        st.type === "rollback",
+        st.compensates === undefined &&
+        ((st.type === "git_operation" && st.action !== "create_branch") ||
+          st.type === "deployment" ||
+          st.type === "rollback"),
     );
     if (firstShipping >= 0 && targetIndex > firstShipping) {
       throw new WorkflowStateError(
@@ -953,16 +1320,16 @@ export function transition(
     return runForward(def, s);
   }
 
-  if (
-    state.status === "completed" ||
-    state.status === "aborted" ||
-    state.status === "denied" ||
-    state.status === "rolled_back"
-  ) {
+  if (isTerminalStatus(state.status)) {
     throw new WorkflowStateError(`instance is terminal (${state.status}) and accepts no events`);
   }
 
+  if (isCompensating(state)) return compensatingTransition(def, state, event);
+
   if (event.kind === "abort") {
+    // ADR-0340: a cancel compensates whatever ran first, when the template declares compensations
+    const compensating = startCompensation(def, state, "aborted");
+    if (compensating) return compensating;
     const s = { ...state, status: "aborted" as const };
     return { state: s, effects: [{ kind: "instance_aborted" }] };
   }
@@ -1026,6 +1393,9 @@ export function transition(
         `instance is not blocked on approval stage '${event.stageId}'`,
       );
     }
+    // ADR-0340: a denial compensates whatever ran before the gate, when the template declares compensations
+    const compensating = startCompensation(def, state, "denied");
+    if (compensating) return compensating;
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
   }
@@ -1229,3 +1599,8 @@ export function transition(
 
   throw new WorkflowStateError(`unhandled event`);
 }
+
+// ADR-0341: the visual pipeline builder's governance rules
+export * from "./builder.js";
+// ADR-0342: the pure workflow-history replayer (process analytics; lane E30's CI replay check)
+export * from "./replay.js";

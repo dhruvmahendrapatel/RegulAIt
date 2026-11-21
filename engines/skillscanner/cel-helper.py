@@ -1,4 +1,4 @@
-# ADR-0242 §3 — install the CEL helper we rebuilt (Go 1.27.3, from skill-scanner 2.3.2's own hashed sdist, the same
+# ADR-0242 §3 — install the CEL helper we rebuilt (Go 1.27.4, from skill-scanner 2.3.2's own hashed sdist, the same
 # `go build` flags as its packaging script) in place of the one its wheel bundles (built with Go 1.27.1, whose standard
 # library carries published advisories), and rewrite the helper's manifest to describe the new binary.
 #

@@ -10,7 +10,7 @@ import { Link } from "react-router-dom";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import type { Approval, WorkflowDetailResponse } from "../../api/types";
-import { ago, approvalStageLabel, humanize, plural } from "../../api/format";
+import { ago, approvalStageLabel, humanize, plural, errorText } from "../../api/format";
 import { pendingQueueQuery, pendingRows } from "../../api/approvalQueue";
 import { DECIDED_STATUSES, pendingCapNote } from "../../api/approvalQueuePages";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
@@ -200,7 +200,7 @@ export default function InboxPage() {
       toast(decision === "approved" ? "Approved" : "Denied", "success");
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
     } catch (e) {
-      setRowErrors((er) => ({ ...er, [a.id]: e instanceof Error ? e.message : String(e) }));
+      setRowErrors((er) => ({ ...er, [a.id]: errorText(e) }));
     } finally {
       setDeciding(null);
     }

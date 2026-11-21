@@ -205,9 +205,7 @@ export default function GroupMappingsPage() {
         </Card>
 
         <QueryGate
-          loading={asserted.isLoading}
-          error={asserted.error}
-          onRetry={() => void asserted.refetch()}
+          query={asserted}
         >
           <Card
             title={`Groups your IdP has asserted${

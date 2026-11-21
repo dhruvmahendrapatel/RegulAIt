@@ -10,7 +10,8 @@ switches stand in front of each one:
 2. **The source** itself, off until enabled.
 
 RegulAIt never changes anything in the tenant: every read is a GET, the only other call is the token request, and a
-credential that may write is refused (Microsoft 365) or is asked for a read-only scope only (Google Workspace). Nothing
+credential that may write is refused (Microsoft 365) or is asked for a read-only scope only (Google Workspace, unless an
+admin opts in to the Directory token listing below, which RegulAIt still only reads with). Nothing
 is revoked automatically; findings built on this graph are recommendations a person acts on.
 
 Every call goes through the egress allow list: add the hosts named below before the first run.
@@ -59,6 +60,44 @@ In the Admin console, give the service account domain-wide delegation of exactly
 Directory API's token listing, whose only scope can also revoke tokens.
 
 Egress: `oauth2.googleapis.com` and `admin.googleapis.com`.
+
+### Opt-in: the Directory token listing
+
+The Reports API only sees grants made in the last 180 days. To see older grants too, an admin can turn on the
+Directory API's per-user token listing. It is off by default and has two switches, both audited:
+
+1. **The org switch**, `googleDirectoryTokens` in the discovery settings (Settings on the Discovery sources page).
+   Turning it on asks the admin to confirm it is them; turning it off is free. While it is off, no source can be
+   created, enabled, changed to or run with the listing, and a queued run stops before it reads a credential. The
+   discovery posture lists every source configured for it.
+2. **The source**, target `directoryTokens: "on"` (the default is `"off"`). It takes effect only on an enabled source:
+   enabling the source, or changing the target of an enabled source, asks the admin to confirm it is them. Turning it
+   back off, with nothing else changed, needs no confirmation.
+
+With it on, delegate exactly these two scopes instead of the Reports scope:
+`https://www.googleapis.com/auth/admin.directory.user.readonly` (to list users) and
+`https://www.googleapis.com/auth/admin.directory.user.security` (to list each user's tokens). The second scope can also
+revoke tokens. RegulAIt never does: every data call is a read, and any other request is refused inside the gateway
+before it is sent. Because this listing sees every grant, a run that reads every user is complete, and a grant that
+later disappears is removed from the graph.
+
+## Linking apps to agents
+
+An app in the graph can be linked to a RegulAIt agent, so its grants are shown against that agent.
+
+- **Automatic, on an exact match.** Declare the agent's app id for a platform (`POST /v1/discovery/agent-identifiers`
+  with the agent, the platform and the id). Every app on that platform whose id is exactly the same, including case,
+  is linked to the agent, now and after each later read. Each automatic link is audited. An identifier applies to every
+  source of its platform: the response and the declaration's audit row list each app and source it linked. A
+  Microsoft 365 app id (a GUID) is stored lowercase, as Graph reports it. An agent with a declared identifier cannot be
+  deleted until the identifier is removed, and a retired agent is never linked.
+- **By hand, for anything else.** A partial or similar match is never linked automatically. An admin links it with
+  `PUT /v1/discovery/entitlements/apps/<app id>/agent-link`.
+- **Unlinking.** `DELETE /v1/discovery/entitlements/apps/<app id>/agent-link` removes any link, audited. An unlinked
+  app is not linked automatically again; only an admin can link it.
+
+`GET /v1/discovery/entitlements/apps?sourceId=<source id>` lists a source's apps with their link state and which link
+changes are allowed next. There is no screen yet.
 
 ## Salesforce connected apps — `entitlement_salesforce`
 

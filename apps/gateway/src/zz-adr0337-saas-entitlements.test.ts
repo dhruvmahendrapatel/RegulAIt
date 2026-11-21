@@ -138,7 +138,7 @@ describe("ADR-0337 SaaS entitlement graph", () => {
     expect((await db.select().from(saasEntitlementScopes).where(and(eq(saasEntitlementScopes.platform, "m365"), eq(saasEntitlementScopes.name, "Mail.Read")))).length).toBe(1);
 
     // an admin links the vendor app to a registered agent; the link survives later reads
-    await db.update(saasEntitlementApps).set({ agentId }).where(and(eq(saasEntitlementApps.sourceId, s.id), eq(saasEntitlementApps.externalId, AGENT_APP)));
+    await db.update(saasEntitlementApps).set({ agentId, agentLinkState: "admin" }).where(and(eq(saasEntitlementApps.sourceId, s.id), eq(saasEntitlementApps.externalId, AGENT_APP)));
 
     // U2 withdrew consent, Mail.Send was revoked, the wiki lost its grant entirely
     const run2 = await runOnce(s, m365(true, [appOf(AGENT_APP, [grant("Mail.ReadWrite", "application", "tenant"), grant("Mail.Read", "delegated", "user", [U1])])]));

@@ -10,7 +10,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ago } from "../../api/format";
+import { ago, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, EmptyState, ErrorState, Field, Input, Modal, Select, SkeletonBlock, Textarea } from "../../ui/kit";
@@ -22,7 +22,7 @@ import { PROD_TAG, shortHash } from "./promptsLogic";
 import s from "./builder.module.css";
 import p from "./prompts.module.css";
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => (errorText(e));
 
 export const VISIBILITY_LABEL: Record<PromptVisibility, string> = {
   private: "Only me",

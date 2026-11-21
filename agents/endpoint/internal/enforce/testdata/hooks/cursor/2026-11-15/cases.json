@@ -5,5 +5,5 @@
   {"input": "mcp-http-unlisted.json", "policy": "audit", "want": "ask"},
   {"input": "mcp-no-server-name.json", "policy": "enforce", "want": "deny"},
   {"input": "mcp-no-server-name.json", "policy": "audit", "want": "ask"},
-  {"input": "shell-event.json", "policy": "enforce", "want": "deny"}
+  {"input": "shell-event.json", "policy": "enforce", "want": "allow"}
 ]

@@ -33,7 +33,14 @@
  *                        credential: static only; secret = the API token; publicConfig authHeader? as above
  */
 import { BodyTooLargeError, azureCredential as entraCredential, readBodyCapped } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, authHeaderNameRefused, type DiscoveryReadOutcome, type DiscoveryReadStatus } from "@regulait/shared";
+import {
+  DISCOVERY_READ_OUTCOMES_MAX,
+  authHeaderNameRefused,
+  purviewDefinitionsFromGraph,
+  type DiscoveryReadOutcome,
+  type DiscoveryReadStatus,
+  type LabelDefinition,
+} from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { errMessage } from "./err-serializer.js";
 import type { ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -142,6 +149,8 @@ export async function getJson(fetchImpl: typeof fetch, url: string, headers: Rec
     res = await fetchImpl(url, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal });
   } catch (err) {
     if (signal.aborted) throw err;
+    // ADR-0336 decision 5: an adapter's endpoint allow-list refuses before sending, and says so
+    if (err instanceof ReadFailure) throw err;
     throw new ReadFailure("unreachable", "the request did not reach the service (is its host on the egress allow list?)");
   }
   if (res.status === 401 || res.status === 403) throw new ReadFailure("denied", `HTTP ${res.status}: the credential may not read this`);
@@ -325,22 +334,33 @@ export function entraWriteScope(accessToken: string): { scope: "read_only" | "wr
   return { scope: roles.every((r) => /\.Read(?:Basic)?\.All$/.test(r)) ? "read_only" : "write", roles };
 }
 
+interface EntraApp {
+  appId: string;
+  displayName: string | null;
+  host: string | null;
+}
+
 /**
- * An access token for Microsoft Graph from the source's Entra credential (federated or a client secret), registered as
- * a secret before it is used. A token whose app holds more than read permissions is refused before anything is read
- * (ADR-0195 decision 7): the caller returns `refused` as its result. Shared by `idp_entra` and ADR-0337's
- * `entitlement_m365`.
+ * A Microsoft Graph access token for an Entra-reading source (`idp_entra`, ADR-0314 `agent_registry_entra`, ADR-0337 `entitlement_m365`): the
+ * credential must name the source's tenant; static mode uses its client secret, federated mode the source's
+ * federation token. The token is registered for scrubbing before it is returned, with the write scope it carries.
  */
-export async function entraGraphToken(
-  ctx: ScanContext,
-  kind: string,
-): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> } | { refused: ScanResult }> {
+export async function entraGraphToken(ctx: ScanContext, kind: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
+  return entraToken(ctx, kind, GRAPH_SCOPE);
+}
+
+/**
+ * The same Entra credential path for another resource (ADR-0336: a Dataverse org's `https://<org>/.default`). The
+ * write scope is read from the token's application roles, which only Graph carries; a caller for another resource
+ * checks the credential's permissions there (Dataverse: `RetrieveUserPrivileges`).
+ */
+export async function entraToken(ctx: ScanContext, kind: string, scope: string): Promise<{ accessToken: string; write: ReturnType<typeof entraWriteScope> }> {
   const c = ctx.credential;
   if (!c) throw new WiderSourceConfigError(`${kind}: a credential is required`);
   const tenantId = c.publicConfig.tenantId;
   const clientId = c.publicConfig.clientId;
   if (!tenantId || !clientId) throw new WiderSourceConfigError(`${kind}: the credential names tenantId and clientId`);
-  if (tenantId.toLowerCase() !== ctx.source.target.tenantId!.toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
+  if (tenantId.toLowerCase() !== (ctx.source.target.tenantId ?? "").toLowerCase()) throw new WiderSourceConfigError(`${kind}: the credential's tenant is not the source's tenant`);
   let credential;
   if (c.mode === "static") {
     if (!c.secret) throw new WiderSourceConfigError(`${kind}: the static credential has no client secret`);
@@ -360,7 +380,7 @@ export async function entraGraphToken(
   await ctx.throttle();
   let accessToken: string;
   try {
-    const tok = await tokenSource.getToken(GRAPH_SCOPE, { abortSignal: ctx.signal });
+    const tok = await tokenSource.getToken(scope, { abortSignal: ctx.signal });
     if (!tok?.token) throw new Error("no token");
     accessToken = tok.token;
   } catch (err) {
@@ -369,26 +389,17 @@ export async function entraGraphToken(
     throw new WiderSourceConfigError(`${kind}: the Entra token request failed${code ? ` (${code})` : ""}`);
   }
   onSecret(accessToken);
-  const write = entraWriteScope(accessToken);
-  if (write.scope === "write") {
-    // decision 7: a credential that may write is refused before anything is read
-    return { refused: { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] } };
-  }
-  return { accessToken, write };
-}
-
-interface EntraApp {
-  appId: string;
-  displayName: string | null;
-  host: string | null;
+  return { accessToken, write: entraWriteScope(accessToken) };
 }
 
 async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   const problem = entraTargetProblem(ctx.source.target, ctx.source.scope);
   if (problem) throw new WiderSourceConfigError(`idp_entra: ${problem}`);
-  const token = await entraGraphToken(ctx, "idp_entra");
-  if ("refused" in token) return token.refused;
-  const { accessToken, write } = token;
+  const { accessToken, write } = await entraGraphToken(ctx, "idp_entra");
+  if (write.scope === "write") {
+    // decision 7: a credential that may write is refused before anything is read
+    return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the app holds more than read permissions: ${write.roles.join(", ").slice(0, 300)}` }] };
+  }
   const fetchImpl = scannerFetch(ctx);
   const headers = { authorization: `Bearer ${accessToken}` };
   const outcomes: DiscoveryReadOutcome[] = [];
@@ -477,8 +488,38 @@ async function runEntra(ctx: ScanContext): Promise<ScanResult> {
   if (unmatched > 0) {
     outcomes.push({ read: "Entra grants matched to applications", status: "skipped", detail: `${unmatched} consented application(s) were not in the service principal listing and are not reported` });
   }
-  return finish(observations, outcomes, write.scope);
+
+  // ADR-0363 slice 1: the tenant's Purview sensitivity-label definitions, read only when the app was granted the
+  // read-only `InformationProtectionPolicy.Read.All` (the role is checked on our own token, never assumed)
+  let labelDefinitions: LabelDefinition[] | undefined;
+  if (write.roles.includes(PURVIEW_LABEL_ROLE)) {
+    const collected: unknown[] = [];
+    const complete = await readListing(
+      ctx,
+      "Purview sensitivity labels",
+      `${GRAPH_ORIGIN}/beta/security/informationProtection/sensitivityLabels`,
+      outcomes,
+      (body) => {
+        const value = atPath(body, "value");
+        if (!Array.isArray(value)) throw new ReadFailure("error", "the sensitivity label listing has no value list");
+        for (const l of value) {
+          if (collected.length >= WIDER_MAX_ITEMS) return ITEM_CAP;
+          collected.push(l);
+        }
+        return nextLink(body);
+      },
+      get,
+    );
+    // a listing cut short would mark the unread labels inactive, so only a complete read is kept
+    if (complete) labelDefinitions = purviewDefinitionsFromGraph({ value: collected });
+  } else {
+    outcomes.push({ read: "Purview sensitivity labels", status: "skipped", detail: `grant the app ${PURVIEW_LABEL_ROLE} to honour Purview labels at the gateway` });
+  }
+  return { ...finish(observations, outcomes, write.scope), ...(labelDefinitions ? { labelDefinitions } : {}) };
 }
+
+/** the one Graph application permission the label read needs (read-only) */
+export const PURVIEW_LABEL_ROLE = "InformationProtectionPolicy.Read.All";
 
 // ---------------------------------------------------------------------------
 // ml_mlflow

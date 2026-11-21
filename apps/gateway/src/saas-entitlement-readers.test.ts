@@ -13,10 +13,14 @@
  */
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE } from "@regulait/cloud-discovery";
+import {
+  GOOGLE_WORKSPACE_DIRECTORY_USER_READONLY_SCOPE,
+  GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE,
+  GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE,
+} from "@regulait/cloud-discovery";
 import { checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
 import { DISCOVERY_SCANNERS, type ScanContext } from "./discovery-scanners.js";
-import { M365_PERMISSION_RESOURCES, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, slackWriteScope } from "./saas-entitlement-readers.js";
+import { M365_PERMISSION_RESOURCES, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000e18";
 const CLIENT = "00000000-0000-4000-8000-000000000e19";
@@ -286,6 +290,90 @@ describe("ADR-0337 entitlement_google_workspace", () => {
     expect(calls.secrets).toContain(g.accessToken);
     expect(calls.raw.join("")).not.toContain(g.accessToken);
     expect(JSON.stringify(res)).not.toContain("acme.example");
+  });
+
+  // ---- the admin opt-in Directory token listing (owner decision 2026-11-17) ----
+  const dirSource = { ...source, target: { directoryTokens: "on" } };
+  function fakeDirectory(opts: { deny?: string } = {}) {
+    const g = fakeGoogle();
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.hostname === "admin.googleapis.com" && url.pathname === "/admin/directory/v1/users") {
+        return url.searchParams.get("pageToken") ? json({ users: [{ id: "222" }] }) : json({ users: [{ id: "111" }], nextPageToken: "n2" });
+      }
+      const m = /^\/admin\/directory\/v1\/users\/([0-9]+)\/tokens$/.exec(url.pathname);
+      if (url.hostname === "admin.googleapis.com" && m) {
+        if (m[1] === opts.deny) return json({ error: { code: 403 } }, 403);
+        if (m[1] === "111") return json({ items: [{ clientId: NOTETAKER, displayText: "AI notetaker", scopes: ["https://www.googleapis.com/auth/drive", "openid"] }] });
+        return json({ items: [{ clientId: NOTETAKER, displayText: "AI notetaker", scopes: ["https://www.googleapis.com/auth/drive"] }, { clientId: MAILER, displayText: "Mailer", scopes: ["https://mail.google.com/"] }] });
+      }
+      return g.f(input, init);
+    }) as typeof fetch;
+    return { ...g, f };
+  }
+
+  it("Directory opt-in: asks for the two Directory scopes, reads every user's tokens and is COMPLETE", async () => {
+    const g = fakeDirectory();
+    const { ctx, calls } = ctxFor({ fetch: g.f, source: dirSource, credential });
+    const res = await scanner("entitlement_google_workspace").run(ctx);
+    const batch = checkSaasEntitlementBatch(res.entitlements, "google_workspace");
+    expect(batch.complete).toBe(true);
+    expect(res.credentialWriteScope).toBe("unverified");
+    const claims = JSON.parse(Buffer.from(g.assertions[0]!.split(".")[1]!, "base64url").toString("utf8")) as { scope: string };
+    expect(claims.scope.split(" ").sort()).toEqual([GOOGLE_WORKSPACE_DIRECTORY_USER_READONLY_SCOPE, GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE].sort());
+    expect(claims.scope).not.toContain(GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE);
+    const psn = (u: string) => `psn:${Buffer.from(u).toString("hex").slice(0, 24).padEnd(24, "0")}`;
+    const notetaker = batch.apps.find((a) => a.externalId === NOTETAKER)!;
+    expect(notetaker.grants.map((x) => [x.scope, x.principals]).sort()).toEqual([
+      ["https://www.googleapis.com/auth/drive", [psn("111"), psn("222")]],
+      ["openid", [psn("111")]],
+    ]);
+    expect(batch.apps.find((a) => a.externalId === MAILER)!.grants.map((x) => x.scope)).toEqual(["https://mail.google.com/"]);
+    expect(calls.pseudonymise.every((k) => k === "idp_user")).toBe(true);
+    // the read says the opted-in scope could revoke, and that it only read
+    expect((res.readOutcomes ?? []).some((o) => /can also revoke/.test(o.detail ?? ""))).toBe(true);
+    expect(calls.raw.join("")).not.toContain(g.accessToken);
+  });
+
+  it("Directory opt-in never revokes: every data call is a GET, and no DELETE ever reaches a token endpoint", async () => {
+    const g = fakeDirectory();
+    const sent: Array<[string, string]> = [];
+    const spy = (async (input: string | URL | Request, init?: RequestInit) => {
+      sent.push([(init?.method ?? "GET").toUpperCase(), urlOf(input).pathname]);
+      return g.f(input, init);
+    }) as typeof fetch;
+    await scanner("entitlement_google_workspace").run(ctxFor({ fetch: spy, source: dirSource, credential }).ctx);
+    const data = sent.filter(([, path]) => path.startsWith("/admin/"));
+    expect(data.length).toBeGreaterThan(0);
+    expect(data.every(([m]) => m === "GET")).toBe(true);
+    expect(sent.some(([m, path]) => m === "DELETE" || /\/tokens\/[^/]+$/.test(path))).toBe(false);
+    // the transport itself refuses a revoke before it leaves, whatever the token's scope allows
+    const inner: string[] = [];
+    const guarded = readOnlyFetch((async (input: string | URL | Request) => {
+      inner.push(String(input));
+      return json({});
+    }) as typeof fetch);
+    await expect(guarded("https://admin.googleapis.com/admin/directory/v1/users/111/tokens/" + NOTETAKER, { method: "DELETE" })).rejects.toThrow(/DELETE refused/);
+    await expect(guarded(new Request("https://admin.googleapis.com/x", { method: "POST" }))).rejects.toThrow(/POST refused/);
+    await expect(guarded("https://admin.googleapis.com/x", { method: "GET" })).resolves.toBeInstanceOf(Response);
+    expect(inner).toEqual(["https://admin.googleapis.com/x"]);
+  });
+
+  it("Directory opt-in: a user whose tokens cannot be read makes the read PARTIAL (nothing unseen is removed)", async () => {
+    const g = fakeDirectory({ deny: "222" });
+    const res = await scanner("entitlement_google_workspace").run(ctxFor({ fetch: g.f, source: dirSource, credential }).ctx);
+    const batch = checkSaasEntitlementBatch(res.entitlements, "google_workspace");
+    expect(batch.complete).toBe(false);
+    expect(batch.apps.map((a) => a.externalId)).toEqual([NOTETAKER]);
+  });
+
+  it("the Directory switch is 'on' or 'off' only; off (the default) keeps the Reports-only read", async () => {
+    expect(scanner("entitlement_google_workspace").validateTarget!({ directoryTokens: "yes" }, { orgLevel: true, include: [] })).toMatch(/directoryTokens/);
+    expect(scanner("entitlement_google_workspace").validateTarget!({ directoryTokens: "off" }, { orgLevel: true, include: [] })).toBeNull();
+    const g = fakeDirectory();
+    await scanner("entitlement_google_workspace").run(ctxFor({ fetch: g.f, source: { ...source, target: { directoryTokens: "off" } }, credential }).ctx);
+    const claims = JSON.parse(Buffer.from(g.assertions[0]!.split(".")[1]!, "base64url").toString("utf8")) as { scope: string };
+    expect(claims.scope).toBe(GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE);
   });
 
   it("refuses without the admin subject or a key", async () => {

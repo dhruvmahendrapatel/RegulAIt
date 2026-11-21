@@ -151,6 +151,24 @@ export class BitbucketProvider implements GitProvider {
     });
   }
 
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    try {
+      await this.request("DELETE", `/repositories/${repo}/refs/branches/${encodeURIComponent(branch)}`);
+      return { deleted: true };
+    } catch (err) {
+      if (err instanceof GitProviderError && err.status === 404) return { deleted: false };
+      throw err;
+    }
+  }
+
+  async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {
+    const pr = await this.getPullRequest(repo, prId);
+    if (pr.state === "merged") throw new GitProviderError(`bitbucket pull request #${prId} is merged; declining cannot undo it`, 409);
+    if (pr.state === "closed") return { closed: false };
+    await this.request("POST", `/repositories/${repo}/pullrequests/${prId}/decline`);
+    return { closed: true };
+  }
+
   async openPullRequest(
     repo: string,
     params: { head: string; base: string; title: string; body: string },

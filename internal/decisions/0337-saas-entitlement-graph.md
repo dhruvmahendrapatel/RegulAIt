@@ -1,6 +1,6 @@
 # ADR-0337: SaaS entitlement graph and usage-based least privilege for agents in Microsoft 365, Google Workspace, Salesforce and Slack
 
-- **Status**: Accepted (owner direction 2026-11-16, lane E18 brief: close the Obsidian gap analysis item "SaaS entitlement graph"; slice 1 built)
+- **Status**: Accepted (owner direction 2026-11-16, lane E18 brief: close the Obsidian gap analysis item "SaaS entitlement graph"; slice 1 built). Amended by the owner's decisions of 2026-11-17 on both slice 1 questions (§4 Google Directory opt-in, §6 agent links), built in slice 1
 - **Date**: 2026-11-16
 - **Index**: **SaaS entitlement graph: read-only `entitlement_*` discovery sources (M365 Graph, Google Workspace, Salesforce, Slack) store each agent's granted OAuth scopes and permissions in four 3NF tables, inside the run's fenced transaction with its audit row; a frozen, versioned scope classifier; usage comparison, unused-grant, excessive-scope, oversharing and public-exposure findings follow as recommendations through the approvals queue, never auto-revoked.**
 - **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1), `builder/e18-saas-entitlements-s2` (slice 2)
@@ -34,7 +34,7 @@ ADR-0235), each source also off until an admin enables it (a `settings_relax` st
 | Kind | Platform | Reads (slice) |
 |---|---|---|
 | `entitlement_m365` | Microsoft 365 | Graph `servicePrincipals`, `oauth2PermissionGrants` (delegated, with consenting users), and `appRoleAssignedTo` on Microsoft Graph, Exchange Online and SharePoint Online (application permissions, role ids resolved through each resource's `appRoles`). Microsoft first-party apps are left out. (1) |
-| `entitlement_google_workspace` | Google Workspace | Admin SDK Reports `token` activity: `authorize` and `revoke` events, latest per user and app. (1) |
+| `entitlement_google_workspace` | Google Workspace | Admin SDK Reports `token` activity: `authorize` and `revoke` events, latest per user and app; or, as an admin opt-in, the Directory API's per-user token listing (§4). (1) |
 | `entitlement_salesforce` | Salesforce | `ConnectedApplication` (and whether any user may self-authorise it) and `SetupEntityAccess` (the profiles and permission sets an admin pre-authorised), through the JWT bearer flow as a read-only integration user. (2) |
 | `entitlement_slack` | Slack | `admin.apps.approved.list` (Enterprise Grid org or workspace): approved apps and their user and bot scopes. (2) |
 
@@ -51,8 +51,8 @@ Reused code: ADR-0235's bounded JSON reader, paging, origin-pinned next links an
 ### 2. The graph, in third normal form
 
 - `saas_entitlement_apps`: one app per source and vendor id (`external_id`, exact case), its kind, the vendor's display
-  name and publisher, and an optional `agent_id` FK to a RegulAIt agent registration. The platform is not stored: it is
-  the source's kind.
+  name and publisher, and its link to a RegulAIt agent (`agent_id` FK and `agent_link_state`, §6). The platform is not
+  stored: it is the source's kind.
 - `saas_entitlement_scopes`: the scope dictionary, one row per (platform, resource, name). `resource` is the Microsoft
   resource application id, empty where names are global.
 - `saas_entitlement_grants`: app x scope x grant type (`delegated` | `application`), with the consent breadth
@@ -86,10 +86,26 @@ the window is not seen and is never removed for that reason.
 
 - **M365:** the token's `roles` must all be `.Read.All` or `.ReadBasic.All`; anything more refuses the credential
   before any Graph read (as `idp_entra`).
-- **Google:** the Directory API's per-user token listing would see older grants, but its only scope
-  (`admin.directory.user.security`) can also revoke tokens. The reader therefore uses only
-  `admin.reports.audit.readonly`. The write scope of the delegation itself cannot be read, so the credential is
-  `unverified`, never `read_only`.
+- **Google (default):** the reader uses only `admin.reports.audit.readonly`. The write scope of the delegation itself
+  cannot be read, so the credential is `unverified`, never `read_only`.
+- **Google Directory token listing (owner decision 2026-11-17: allowed as an admin opt-in).** The Directory API's
+  per-user token listing sees grants older than the Reports window, but its only scope (`admin.directory.user.security`)
+  can also revoke tokens. It is off by default behind two gates (security review of #884). First the org switch
+  `googleDirectoryTokens` in the discovery settings: off by default, turned on only with a `settings_relax` step-up
+  bound to exactly it (`DISCOVERY_STEP_UP_KEYS.googleDirectoryTokens`), audited before/after, turned off for free; it
+  shows in the settings view, and the posture names every source configured for the listing. While it is off, a
+  source with `directoryTokens: "on"` cannot be created, widened into, enabled or run (409
+  `directory_tokens_not_allowed`), and a run queued before it was turned off fails in the worker before any credential
+  is read. Then the source: its target `directoryTokens: "on"` takes effect only on an enabled source, so turning it on
+  is the existing enable step-up (its approved facts include the target), or the widening step-up when the source is
+  already enabled; both are audited. Turning it OFF on an enabled source, with nothing else changed, narrows the read
+  and needs no step-up. With it on, the reader asks
+  for exactly `admin.directory.user.readonly` and `admin.directory.user.security` (not the Reports scope), lists every
+  user and each user's tokens, and its batch is complete when every listing was read. RegulAIt never revokes with the
+  scope: every data call goes through `readOnlyFetch`, which refuses any method but GET and HEAD before it leaves the
+  gateway, and a test proves no DELETE reaches a token endpoint. A revoke belongs to the governed removal flow (§5: a
+  recommendation a person acts on), never to a reader. The credential stays `unverified`, and the run records that the
+  opted-in scope could revoke.
 
 ### 5. Findings are recommendations, through the approvals queue (slice 3)
 
@@ -124,6 +140,36 @@ public-exposure rule reads it through their interface rather than a second adapt
   judged, so the credential stays `unverified`. The JWT assertion is signed with `jose` (already pinned); the token
   query never selects a token field.
 
+### 6. Linking a vendor app to a RegulAIt agent (owner decision 2026-11-17)
+
+- **Auto-link on an exact identifier match.** An admin declares an agent's app id on one platform
+  (`agent_vendor_identifiers`: agent, platform, external id; one identifier names one agent). An app whose vendor id
+  equals it exactly (case-sensitive, same platform) is linked to that agent automatically: after each read, inside the
+  run's transaction, and at once when the identifier is declared. Each auto-link writes its own
+  `saas-entitlement-agent-auto-linked` audit row. An M365 app id is a GUID that Graph prints lowercase and the reader
+  stores lowercase, so a GUID identifier is stored lowercase too (the same GUID in either case is one identifier);
+  every other platform's id is exact.
+- **An identifier applies across sources (security review of #884).** It names a platform, not a source, so declaring
+  it links matching apps in EVERY entitlement source of that platform. That is deliberate (one agent, one app id,
+  however many tenants are read) and explicit: the declaration's own `agent-vendor-identifier-declared` audit row and
+  response name every app and source it linked. An agent with a declared identifier cannot be deleted (`ON DELETE
+  RESTRICT`), so an identifier never disappears without its own `agent-vendor-identifier-removed` row. A retired agent
+  (terminal, ADR-0089) is never linked: declaring an identifier for it or linking it is refused (409 `agent_retired`),
+  and a read does not auto-link through an identifier whose agent was retired later.
+- **Partial or fuzzy matches stay admin-only.** A case variant, prefix or similar name is never linked automatically;
+  an admin links it by hand (`saas-entitlement-agent-linked`).
+- **An admin can unlink** any link (`saas-entitlement-agent-unlinked`); an unlinked app is not auto-linked again until an
+  admin links it.
+- **Declared machine (ADR-0348).** `saas_entitlement_apps.agent_link_state` is `none | auto | admin | unlinked`, declared
+  as `SAAS_APP_AGENT_LINK_MACHINE` (events `auto_link` from `none`, `link` from any state, `unlink` from `auto` or
+  `admin`). Every write is guarded on the states the event may leave from; a CHECK ties `auto` and `admin` to a named
+  agent; the agent FK is RESTRICT (an agent is retired through its lifecycle, not deleted under a link). Removing an
+  identifier stops future auto-links through it; links already made stay until an admin unlinks them.
+- **Routes** (admin-only, no vendor call; census entries on #453 until a screen exists): `GET
+  /v1/discovery/entitlements/apps` (each app with its state and the machine's `describe()` view), `PUT` and `DELETE
+  /v1/discovery/entitlements/apps/:appId/agent-link`, `GET` and `POST /v1/discovery/agent-identifiers`, `DELETE
+  /v1/discovery/agent-identifiers/:identifierId`.
+
 ## Open source first (ADR-0176)
 
 Searched: `@microsoft/microsoft-graph-client` (MIT), `googleapis` (Apache-2.0), `jsforce` (MIT), `@slack/web-api` (MIT),
@@ -141,16 +187,16 @@ Salesforce JWT bearer assertion.
   from one graph, with each read audited and every person pseudonymised.
 - Collision note: `discovery_sources_kind_check` and `discovery_runs_kind_check` are rewritten with the full kind list.
   A lane that adds discovery kinds and merges after this one must include these four kinds in its own list.
-- Follow-ups: slice 3 (usage, findings, the agent-link and read routes with their route
-  census and KNOWN_UI_GAPS entries pointing at #453). Keyless Google delegation (IAM Credentials `signJwt` under
+- Follow-ups: slice 3 (usage and findings). The agent-link and app-listing routes came with
+  the owner's 2026-11-17 decisions (§6), with route census and KNOWN_UI_GAPS entries pointing at #453. Keyless Google delegation (IAM Credentials `signJwt` under
   workload identity federation) would remove the static key.
 
-### Owner questions (built with the secure default meanwhile)
+### Owner decisions (2026-11-17)
 
-1. Should an admin be allowed to opt in to Google's Directory token listing (it sees grants older than 180 days, but its
-   scope can also revoke)? Default: no; the Reports API only.
-2. Should a vendor app be linked to a RegulAIt agent automatically when an identifier matches, or only by an admin?
-   Default: only by an admin (slice 3 route).
+1. Google Directory token listing: **allowed as an admin opt-in**, off by default, turned on with a step-up and audited;
+   the scope can revoke, but RegulAIt never calls revoke outside the governed removal flow (§4, with a test).
+2. Linking a vendor app to an agent: **auto-link on an exact identifier match**, each auto-link audited and unlinkable by
+   an admin; partial or fuzzy matches stay admin-only (§6).
 3. Salesforce: should an admin be allowed to grant the integration user Customize Application (org-wide OAuth tokens,
    per-user grants and `LastUsedDate` usage) or metadata read (OAuth scopes), knowing both can also change the org?
    Default: no; connected apps, self-authorisation and pre-authorisations only.

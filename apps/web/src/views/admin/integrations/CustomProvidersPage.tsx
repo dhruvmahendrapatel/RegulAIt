@@ -46,7 +46,7 @@ import type {
   EgressAllowHost,
   OrgSettingsResponse,
 } from "../../../api/adminTypes";
-import { ago } from "../../../api/format";
+import { ago, errorText } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -129,7 +129,7 @@ function toOutcome(subject: string, err: unknown): Outcome {
     kind: "deny",
     subject,
     title: "Refused",
-    reason: err instanceof Error ? err.message : String(err),
+    reason: errorText(err),
   };
 }
 

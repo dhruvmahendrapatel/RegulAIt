@@ -28,7 +28,8 @@ ALTER TABLE "discovery_sources" ADD CONSTRAINT "discovery_sources_kind_check" CH
   'cloud_aws', 'cloud_gcp', 'cloud_azure',
   'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent',
   'saas_inventory_api', 'idp_entra', 'ml_mlflow',
-  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack'));
+  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack',
+  'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore'));
 --> statement-breakpoint
 ALTER TABLE "discovery_runs" DROP CONSTRAINT IF EXISTS "discovery_runs_kind_check";
 --> statement-breakpoint
@@ -37,7 +38,10 @@ ALTER TABLE "discovery_runs" ADD CONSTRAINT "discovery_runs_kind_check" CHECK ("
   'cloud_aws', 'cloud_gcp', 'cloud_azure',
   'endpoint_osquery', 'endpoint_inventory', 'endpoint_agent',
   'saas_inventory_api', 'idp_entra', 'ml_mlflow',
-  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack'));
+  'entitlement_m365', 'entitlement_google_workspace', 'entitlement_salesforce', 'entitlement_slack',
+  'agent_registry_entra', 'agent_registry_gemini', 'agent_registry_agentcore'));
+--> statement-breakpoint
+ALTER TABLE "discovery_settings" ADD COLUMN IF NOT EXISTS "google_directory_tokens_enabled" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "saas_entitlement_apps" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -47,7 +51,8 @@ CREATE TABLE IF NOT EXISTS "saas_entitlement_apps" (
   "display_name" text,
   "publisher" text,
   "publisher_verified" boolean,
-  "agent_id" uuid REFERENCES "agents"("id") ON DELETE SET NULL,
+  "agent_id" uuid REFERENCES "agents"("id") ON DELETE RESTRICT,
+  "agent_link_state" text DEFAULT 'none' NOT NULL,
   "first_seen_at" timestamp with time zone NOT NULL,
   "last_seen_at" timestamp with time zone NOT NULL,
   "last_seen_run_id" uuid REFERENCES "discovery_runs"("id") ON DELETE SET NULL,
@@ -57,10 +62,27 @@ CREATE TABLE IF NOT EXISTS "saas_entitlement_apps" (
   CONSTRAINT "saas_entitlement_apps_external_id_check" CHECK (length("external_id") BETWEEN 1 AND 255),
   CONSTRAINT "saas_entitlement_apps_display_name_check" CHECK ("display_name" IS NULL OR length("display_name") BETWEEN 1 AND 200),
   CONSTRAINT "saas_entitlement_apps_publisher_check" CHECK ("publisher" IS NULL OR length("publisher") BETWEEN 1 AND 200),
-  CONSTRAINT "saas_entitlement_apps_seen_check" CHECK ("first_seen_at" <= "last_seen_at")
+  CONSTRAINT "saas_entitlement_apps_seen_check" CHECK ("first_seen_at" <= "last_seen_at"),
+  CONSTRAINT "saas_entitlement_apps_agent_link_state_check" CHECK ("agent_link_state" IN ('none', 'auto', 'admin', 'unlinked')),
+  CONSTRAINT "saas_entitlement_apps_agent_link_pair_check"
+    CHECK (("agent_id" IS NOT NULL) = ("agent_link_state" = 'auto' OR "agent_link_state" = 'admin'))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "saas_entitlement_apps_agent_idx" ON "saas_entitlement_apps" ("agent_id") WHERE "agent_id" IS NOT NULL;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "agent_vendor_identifiers" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "agent_id" uuid NOT NULL REFERENCES "agents"("id") ON DELETE RESTRICT,
+  "platform" text NOT NULL,
+  "external_id" text NOT NULL,
+  "created_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "agent_vendor_identifiers_uq" UNIQUE ("platform", "external_id"),
+  CONSTRAINT "agent_vendor_identifiers_platform_check" CHECK ("platform" IN ('m365', 'google_workspace', 'salesforce', 'slack')),
+  CONSTRAINT "agent_vendor_identifiers_external_id_check" CHECK ("external_id" ~ '^[!-~]{1,255}$')
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "agent_vendor_identifiers_agent_idx" ON "agent_vendor_identifiers" ("agent_id");
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "saas_entitlement_scopes" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -139,5 +161,15 @@ ALTER TABLE "saas_entitlement_grant_principals" FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "saas_entitlement_grant_principals_admin" ON "saas_entitlement_grant_principals";
 --> statement-breakpoint
 CREATE POLICY "saas_entitlement_grant_principals_admin" ON "saas_entitlement_grant_principals" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+ALTER TABLE "agent_vendor_identifiers" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "agent_vendor_identifiers" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "agent_vendor_identifiers_admin" ON "agent_vendor_identifiers";
+--> statement-breakpoint
+CREATE POLICY "agent_vendor_identifiers_admin" ON "agent_vendor_identifiers" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));

@@ -26,6 +26,7 @@ import { createPortal } from "react-dom";
 import { useParams } from "react-router-dom";
 import { useSession } from "../session/SessionContext";
 import s from "./kit.module.css";
+import { errorText } from "../api/format";
 
 // ---- Button ---------------------------------------------------------------
 
@@ -33,6 +34,12 @@ type ButtonVariant = "default" | "primary" | "danger" | "ghost";
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: "md" | "sm";
+  /**
+   * Busy (a request in flight), but still focusable (DESIGN_GUIDELINES: `aria-disabled` plus a guard, not `disabled`):
+   * focus stays on the button mid-request, so a step-up dialog can return to it. A click does nothing, and a submit
+   * button does not submit.
+   */
+  busy?: boolean;
 }
 const variantClass: Record<ButtonVariant, string> = {
   default: s.btn!,
@@ -41,14 +48,59 @@ const variantClass: Record<ButtonVariant, string> = {
   ghost: s.btnGhost!,
 };
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "default", size = "md", className, type, ...rest },
+  { variant = "default", size = "md", className, type, busy, onClick, ...rest },
   ref,
 ) {
   const cls = [variantClass[variant], size === "sm" ? s.btnSm : "", className ?? ""]
     .filter(Boolean)
     .join(" ");
-  return <button ref={ref} type={type ?? "button"} className={cls} {...rest} />;
+  return (
+    <button
+      ref={ref}
+      type={type ?? "button"}
+      className={cls}
+      {...rest}
+      aria-disabled={busy || rest["aria-disabled"] === true || rest["aria-disabled"] === "true" || undefined}
+      onClick={(e) => {
+        if (busy) return e.preventDefault();
+        onClick?.(e);
+      }}
+    />
+  );
 });
+
+/**
+ * The one on/off switch (`role="switch"`), named by a visible label (`labelledBy`) or `label`. While `busy` or
+ * `disabled` it stays focusable (`aria-disabled`) and ignores clicks, so focus does not drop to the page mid-request.
+ * `size="sm"` is the compact one the agent builder uses (review of #744: one switch in the repo).
+ */
+export function Switch(props: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label?: string;
+  labelledBy?: string;
+  describedBy?: string;
+  busy?: boolean;
+  disabled?: boolean;
+  size?: "sm";
+}) {
+  const inert = props.busy || props.disabled;
+  return (
+    <button
+      type="button"
+      role="switch"
+      className={props.size === "sm" ? `${s.switch} ${s.switchSm}` : s.switch}
+      aria-checked={props.checked}
+      aria-label={props.labelledBy ? undefined : props.label}
+      aria-labelledby={props.labelledBy}
+      aria-describedby={props.describedBy}
+      aria-disabled={inert || undefined}
+      onClick={() => {
+        if (!inert) props.onChange(!props.checked);
+      }}
+    />
+  );
+}
 
 // ---- fields ---------------------------------------------------------------
 
@@ -1114,7 +1166,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length} className={s.tableStale} role="alert">
                 <StatusDot tone="danger" />
                 <span>
-                  Couldn't refresh this list — {props.error instanceof Error ? props.error.message : String(props.error)}.
+                  Couldn't refresh this list — {errorText(props.error)}.
                   Showing the last loaded rows.
                 </span>
                 {props.onRetry && (
@@ -1130,7 +1182,7 @@ export function Table<T>(props: TableProps<T>) {
               <td colSpan={shown.length}>
                 <ErrorState
                   title="Couldn't load this list"
-                  message={props.error instanceof Error ? props.error.message : String(props.error)}
+                  message={errorText(props.error)}
                   access={(props.error as { status?: number }).status === 403}
                   onRetry={props.onRetry}
                 />
