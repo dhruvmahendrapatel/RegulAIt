@@ -6,9 +6,10 @@
 //	regulait-agent run-once                         one collection and upload
 //	regulait-agent run                              run-once on the org's schedule until stopped
 //	regulait-agent preview -manifest FILE           collect against a local manifest and print the facts; sends nothing
-//	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, default off): the
-//	                                                MCP tool-call hook for AGENT = claude-code, cursor, copilot-cli
-//	                                                or codex; reads stdin, never the network
+//	regulait-agent hook AGENT -policy FILE          on-device enforcement (ADR-0298, ADR-0330, ADR-0350, default off): the
+//	                                                MCP and built-in command hook for AGENT = claude-code, cursor, copilot-cli
+//	                                                or codex; reads stdin, never the network; its decision is
+//	                                                spooled on the device, and the run loop uploads it
 //	regulait-agent hook-capabilities                print each hook adapter's contract and capability matrix as JSON
 //	regulait-agent version
 package main
@@ -23,11 +24,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/agent"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/enforce"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack"
 )
@@ -55,7 +58,7 @@ func main() {
 	defer stop()
 	opts := agent.Options{Paths: agent.DefaultPaths(), SystemOwner: agent.SystemOwner(), TicketGID: -1, Log: log}
 	cycle := func() *agent.Cycle {
-		return &agent.Cycle{Options: opts, Keyring: pack.CompiledKeyring, Identity: agent.ProductionIdentity(), Env: func() (*collect.Env, error) {
+		return &agent.Cycle{Options: opts, Keyring: pack.CompiledKeyring, DirectiveKeyring: enforce.CompiledKeyring, Identity: agent.ProductionIdentity(), Env: func() (*collect.Env, error) {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return nil, err
@@ -124,8 +127,9 @@ func preview(log *slog.Logger, file string) {
 }
 
 // hook answers one coding-agent hook call (ADR-0298, ADR-0330). Every failure blocks: a missing or unverifiable
-// policy denies MCP tool calls, and a usage error exits 2, which every supported agent treats as a block. Nothing is
-// sent anywhere.
+// policy denies MCP tool calls, and a usage error exits 2, which every supported agent treats as a block. The hook
+// itself sends nothing: the decision is spooled in the user's state directory (internal/decisionlog, ADR-0310
+// addendum), without the call's arguments, and the agent's run loop uploads it to the org's gateway.
 func hook(args []string) int {
 	const usage = "RegulAIt: usage: regulait-agent hook claude-code|cursor|copilot-cli|codex -policy FILE"
 	if len(args) < 1 {
@@ -139,7 +143,7 @@ func hook(args []string) int {
 	}
 	fs := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	file := fs.String("policy", "", "the signed enforcement policy (regulait.endpoint-enforcement/1)")
+	file := fs.String("policy", "", "the signed enforcement policy (regulait.endpoint-enforcement/2)")
 	if err := fs.Parse(args[1:]); err != nil || *file == "" {
 		fmt.Fprintln(os.Stderr, "RegulAIt: the enforcement hook is registered without a policy file, so it blocks.")
 		return enforce.ExitBlock
@@ -155,14 +159,59 @@ func hook(args []string) int {
 		policy, _ = enforce.LoadPolicy(f, keys, time.Now())
 		_ = f.Close()
 	}
-	stdout, stderr, code := adapter.Hook(os.Stdin, policy)
-	if len(stdout) > 0 {
-		_, _ = os.Stdout.Write(stdout)
+	r := adapter.HookDecide(os.Stdin, policy, hookEnv(adapter.Name))
+	// answer first, then spool: a slow state directory must not push the answer past the vendor's hook timeout
+	if len(r.Stdout) > 0 {
+		_, _ = os.Stdout.Write(r.Stdout)
 	}
-	if stderr != "" {
-		fmt.Fprintln(os.Stderr, stderr)
+	if r.Stderr != "" {
+		fmt.Fprintln(os.Stderr, r.Stderr)
 	}
-	return code
+	spoolDecision(adapter.Name, r, policy)
+	return r.Exit
+}
+
+// spoolDecision records the answered call (internal/decisionlog). It is silent: no error, and no panic, from the
+// spool ever changes the decision, the exit code, stdout or stderr.
+func spoolDecision(agentName string, r enforce.HookResult, policy *enforce.Policy) {
+	defer func() { _ = recover() }()
+	state := agent.DefaultPaths().StateDir
+	if !filepath.IsAbs(state) {
+		// no home directory in the hook's environment: never spool relative to the coding agent's working directory
+		return
+	}
+	spool := decisionlog.New(state)
+	_ = decisionlog.Record(spool, spool, agentName, r.Call, r.Decision, policy, time.Now())
+}
+
+// hookEnv is what a command decision reads from the device (ADR-0350). The device id stays empty until the agent
+// delivers policies itself (slice 2), so a policy's per-device exceptions never apply yet: strict by default.
+func hookEnv(agentName string) enforce.HookEnv {
+	env := enforce.HookEnv{Now: time.Now(), Resolve: resolveExisting}
+	if home, err := os.UserHomeDir(); err == nil {
+		env.Home = home
+	}
+	if agentName == enforce.AgentClaudeCode {
+		// Claude Code sets it for every hook: the project root, a workspace root besides the call's cwd
+		env.ProjectDir = os.Getenv("CLAUDE_PROJECT_DIR")
+	}
+	return env
+}
+
+// resolveExisting resolves symlinks in the longest prefix of p that exists, so a link cannot step around a path
+// rule; the rest of p (a file about to be created) is kept as written.
+func resolveExisting(p string) string {
+	rest := ""
+	for dir := p; ; dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 func fail(log *slog.Logger, err error) {

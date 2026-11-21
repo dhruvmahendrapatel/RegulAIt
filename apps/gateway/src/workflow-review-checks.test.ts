@@ -315,7 +315,8 @@ describe("ADR-0260 review-bound check at the automated-checks stage", () => {
     globalThis.__rvProviderCalls = [];
     const id = await start(erinAuth, "<<rv-clean>>");
     const inst = await view(id);
-    expect(inst.status).toBe("blocked_on_approval");
+    // the check result names why a clean review did not pass (a refused dispatch, an unusable answer), so a failure here is diagnosable
+    expect(inst.status, JSON.stringify(inst.context["checks:checks"])).toBe("blocked_on_approval");
     const [r] = inst.context["checks:checks"] as Result[];
     expect(r).toMatchObject({ check: "code_review", status: "passed", severity: null });
     expect((r!.review!.findings as Array<{ id: string }>).map((f) => f.id)).toEqual(["F1"]);
