@@ -1706,6 +1706,17 @@ export const startInstanceSchema = z.object({
   change: changeDescriptorSchema,
   /** admin-only explicit template pick, bypassing assignment rules */
   templateId: z.string().uuid().optional(),
+  /** ADR-0349 slice 2: the PM tool's key for the work item this change is for (e.g. a Jira or Azure DevOps id).
+   * With it, at most one OPEN instance may exist per template set + target system + work item. Printable, no
+   * leading or trailing space (checked without a regex on caller input, M-074). */
+  workItem: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((v) => v.trim() === v && [...v].every((c) => c >= " " && c !== "\u007f"), {
+      message: "workItem must be printable text with no leading or trailing space",
+    })
+    .optional(),
 });
 
 export const submitArtifactSchema = z.object({
@@ -2414,6 +2425,8 @@ export const summarizerSelectionSchema = z.enum(["cheapest", "fixed_agent"]);
 export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
+/** ADR-0349 slice 2: what a start does when an open instance already has its template set + target + work item */
+export const workflowStartConflictPolicySchema = z.enum(["refuse", "use_existing"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
 /** ADR-0174: may people sign in with a local account? 'break_glass_only' keeps
  * the door open only for the designated break-glass admins. */
@@ -2596,6 +2609,8 @@ export const updateOrgSettingsSchema = z
     /** AER-048 (migration 0130): allow key-authenticated workflow check
      * reports that name no `round` (false = refused 422 round_required). */
     checkReportsAllowUnbound: z.boolean().optional(),
+    /** ADR-0349 slice 2: `use_existing` is the audited, step-up relaxation of the default `refuse` */
+    workflowStartConflictPolicy: workflowStartConflictPolicySchema.optional(),
     // ADR-0022: approver-delegation master switch + persisted default
     // infra-remediation approver (null clears it)
     approvalDelegationEnabled: z.boolean().optional(),
@@ -5130,6 +5145,7 @@ export * from "./endpoint-actions.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+export * from "./workflow-status.js";
 
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
