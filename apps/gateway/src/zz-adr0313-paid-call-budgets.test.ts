@@ -29,6 +29,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { loadOrgSettings } from "./org-settings.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -251,13 +252,19 @@ describe("ADR-0313 reserve, settle, release", () => {
 
 describe("ADR-0313 the budget envelope", () => {
   it("concurrent paid calls never overshoot the project budget, and the overage is queued", async () => {
-    const p = await mkProject(1); // room for exactly four $0.25 holds
+    // the block threshold is read, not assumed: the org dial decides where it engages, and this file must not change
+    // org-wide state (M-068), so a $1 budget has room for floor(pct / 25) holds of $0.25
+    const org = await loadOrgSettings(db);
+    const room = Math.floor((org.budgetHardBlockPct + 1e-9) / 25);
+    expect(room).toBeGreaterThan(0);
+    expect(room).toBeLessThan(10);
+    const p = await mkProject(1);
     const before = hits[FLAT]!;
     const outs = await Promise.all(Array.from({ length: 10 }, () => call(FLAT, p)));
     const allowed = outs.filter((o) => o.kind === "allowed").length;
-    expect(allowed).toBe(4);
-    expect(outs.filter((o) => o.kind === "budget_blocked" && (o as { error: string }).error === "paid_call_over_budget")).toHaveLength(6);
-    expect(hits[FLAT]! - before).toBe(4);
+    expect(allowed).toBe(room);
+    expect(outs.filter((o) => o.kind === "budget_blocked" && (o as { error: string }).error === "paid_call_over_budget")).toHaveLength(10 - room);
+    expect(hits[FLAT]! - before).toBe(room);
     const [spent] = await db.select().from(usageEvents).where(and(eq(usageEvents.projectId, p), eq(usageEvents.objectType, "mcp_tool")));
     expect(spent).toBeTruthy();
     const queued = await db.select().from(approvals).where(and(eq(approvals.projectId, p), eq(approvals.stageId, "__project_budget__"), eq(approvals.status, "pending")));
