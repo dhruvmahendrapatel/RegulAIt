@@ -191,7 +191,7 @@ import {
   type SemanticCacheKey,
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
-import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
+import { recordRuleStepSaving, switchedRuleAnswer, type RuleStepRef } from "./rule-step-serve.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { customProviderDisabledRefusal, resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
@@ -500,7 +500,7 @@ export interface GovernedDispatchArgs {
   /** ADR-0327 slice 4b: set with `cachedResponse` when the candidate answer is an approved rule-like step's rule
    * output, not a cached model answer. It only relabels the span and audit rows; every gate runs exactly as for a
    * cache hit. */
-  ruleStepServed?: { suggestionId: string; switchId: string } | undefined;
+  ruleStepServed?: RuleStepRef | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -1005,7 +1005,7 @@ async function dispatchOnce(
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
     ...(args.ruleStepServed
-      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      ? { ruleStep: { ...args.ruleStepServed } }
       : args.cachedResponse
         ? { semanticCache: "hit" }
         : {}),
@@ -1771,7 +1771,7 @@ async function dispatchAttempt(
     const cached = args.cachedResponse;
     // where the candidate came from, as the audit rows below record it: never a cache claim for a rule's answer
     const candidateSource: Record<string, unknown> = args.ruleStepServed
-      ? { ruleStep: { suggestionId: args.ruleStepServed.suggestionId, switchId: args.ruleStepServed.switchId } }
+      ? { ruleStep: { ...args.ruleStepServed } }
       : { semanticCache: { hit: true } };
     let outputHits: PiiHit[] = [];
     if (piiMode) {
@@ -4305,7 +4305,7 @@ export function registerAgentConnectorRoutes(
           ? await switchedRuleAnswer(db, { agentId: agent.id, stepName: agent.name, inputText: body.input })
           : null;
       if (ruleAnswer && body.input) {
-        const ruleStep = { suggestionId: ruleAnswer.suggestionId, switchId: ruleAnswer.switchId };
+        const ruleStep = ruleAnswer.ref;
         const governed = await executeGovernedDispatch(db, opts.dataKey, {
           userId,
           served: agent,

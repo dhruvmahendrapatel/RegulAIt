@@ -624,7 +624,8 @@ export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
 });
 
 /**
- * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule. Proposed `pending_review` with a
+ * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule (a detector suggestion, or since
+ * slice 4d one published decision-table version). Proposed `pending_review` with a
  * named reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
  * `rule_step_switches.status`.
  */
@@ -639,7 +640,8 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
       from: ["pending_review"],
       to: "switched",
       by: ["approver"],
-      summary: "The named reviewer approves; the suggestion is switched in the same transaction.",
+      summary:
+        "The named reviewer approves; the suggestion, or the decision table's published version (slice 4d), is switched in the same transaction.",
     },
     reject: {
       from: ["pending_review"],
@@ -657,8 +659,9 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
     revert: {
       from: ["switched"],
       to: "reverted",
-      by: ["admin"],
-      summary: "An admin reverts the switch; the AI answers every request again. No approval needed.",
+      by: ["admin", "system"],
+      summary:
+        "An admin reverts the switch, or publishing a newer decision-table version reverts a switch of the old one; the AI answers every request again. No approval needed.",
     },
   },
 });

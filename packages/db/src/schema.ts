@@ -17946,10 +17946,12 @@ export const ruleStepSwitches = pgTable(
   "rule_step_switches",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    suggestionId: uuid("suggestion_id")
-      .notNull()
-      .references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
-    /** sha256 hex of `canonicalJson(rule)` at request time */
+    /** the detector suggestion switched (slice 4a); exactly one of this and `decisionTableVersionId` is set */
+    suggestionId: uuid("suggestion_id").references(() => ruleStepSuggestions.id, { onDelete: "cascade" }),
+    /** the published decision-table version switched (slice 4d, migration `rule_step_switch_decision_table`); the table
+     * is reached through the version, and one open request per table is held under the `decision_tables` row lock */
+    decisionTableVersionId: uuid("decision_table_version_id").references(() => decisionTableVersions.id, { onDelete: "cascade" }),
+    /** sha256 hex of `canonicalJson(rule)` at request time; for a table, the version's `body_sha256` */
     ruleSha256: text("rule_sha256").notNull(),
     status: text("status", { enum: RULE_STEP_SWITCH_STATUSES }).notNull().default("pending_review"),
     requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
@@ -17969,6 +17971,8 @@ export const ruleStepSwitches = pgTable(
       .where(sql`${t.status} IN ('pending_review', 'switched')`),
     index("rule_step_switches_suggestion_requested_idx").on(t.suggestionId, t.requestedAt),
     index("rule_step_switches_approval_idx").on(t.approvalId),
+    index("rule_step_switches_version_requested_idx").on(t.decisionTableVersionId, t.requestedAt),
+    check("rule_step_switches_subject_check", sql`(${t.suggestionId} IS NULL) <> (${t.decisionTableVersionId} IS NULL)`),
     check("rule_step_switches_rule_sha256_check", sql`${t.ruleSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "rule_step_switches_status_check",

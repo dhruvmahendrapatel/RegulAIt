@@ -175,7 +175,25 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
   - **Only a plain single-turn dispatch qualifies.** The rule was measured on spans whose input is `body.input` alone,
     so a conversation, a system prompt, attachments, a baseline or reference content each go to the AI.
   - A passthrough user keeps every AI call, as on the compat path.
-  - Next: switching to a published decision table.
+- Slice 4d (built): a step can be switched to its **published decision table** instead of a detected rule.
+  - **Same lifecycle and queue.** `POST /v1/decision-tables/:id/switch` (admin, a person, step-up, a named active
+    administrator other than the requester) writes a `rule_step_switches` row whose subject is the published version
+    (`decision_table_version_id`; exactly one of it and `suggestion_id` is set, migration
+    `rule_step_switch_decision_table`). The approval is `object_type` `rule_step_switch`, bound to the version's body
+    digest. `POST /v1/decision-tables/:id/revert` takes the table out in one action. The table detail shows the latest
+    request (`switch`).
+  - **Bound to one version.** The decide path switches only while that version is still the published one and its body
+    still hashes to the approved digest; otherwise the request is recorded `stale`. Publishing a newer version reverts a
+    live switch of the old one in the same transaction, so a newly published table never answers without its own
+    approved switch, and the switch state never claims what the serve path no longer does.
+  - **One live switch per step.** A table switch is refused while the step's detected rule is switched or asked to be
+    (`step_switched_to_suggestion`), and the other way round (`step_switched_to_decision_table`). The two checks read
+    under different row locks, so two concurrent requests could both pass; the serve path then prefers the detected
+    rule, and either revert ends it (F1×S2, below rule 10's bar).
+  - **Serving** uses the same path, gates, span marker and saving as slices 4b and 4c. The table compiles with
+    `compileDecisionTable` to the same `InducedRule`; the saving is priced from the step's detector measurement when
+    there is one, else recorded as null. The span, saving and audit carry `{switchId, suggestionId,
+    decisionTableVersionId}`.
 
 ## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
 
@@ -225,7 +243,7 @@ approval. This addendum records it; no new ADR.
   (the list under the ADR-0226 contract), `GET /v1/decision-tables/:id` (published and pending versions with readable
   rows and test cases, plus the latest 20 versions), `POST /v1/decision-tables/:id/versions`.
 - **Publishing changes no routing.** The AI still answers the step. Serving a published table in place of the AI is the
-  slice 4 switch, which will take either a suggestion or a published table and needs its own approval.
+  slice 4d switch, which needs its own approval and is bound to one version (above).
 - **Open source (ADR-0176, compared in the slice PR).** DMN evaluators (`@hbtgmbh/dmn-eval-js`, `js-feel`) are stale
   with open advisories; `json-rules-engine` is outside the maintenance window and evaluates rules at runtime; GoRules
   ZEN evaluates its own expression language in a native binary; `dmn-js` carries a watermark clause outside the

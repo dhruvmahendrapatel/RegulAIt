@@ -10,7 +10,8 @@
  *    (`POST /v1/approvals/:id/decide` → `applyDecisionTableDecision`), and only if the version it was proposed against
  *    is still the published one (else it is recorded `stale`). The author never decides their own version.
  *  - Every create, proposal and decision writes an audit row in the same transaction. Admin-only (default gate).
- *  - Publishing changes no routing: the AI still answers the step until the switch (ADR-0327 slice 4) is approved.
+ *  - Publishing changes no routing: the AI still answers the step until a switch to the published version is approved
+ *    (`decision-table-switch.ts`, slice 4d). Publishing a newer version reverts a live switch of the old one.
  *    Nothing here is an authorisation decision (ADR-0327 §Decision 5).
  */
 import { createHash } from "node:crypto";
@@ -44,6 +45,7 @@ import { DECISION_TABLE_VERSION_MACHINE, canonicalJson } from "@regulait/shared"
 import type { ListSpec } from "./list-contract.js";
 import { whereFrom } from "./state-transition.js";
 import { answerListPage, type ContractList } from "./list-contract-route.js";
+import { latestTableSwitch, revertSwitchOfSupersededVersion } from "./decision-table-switch.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** approvals.stage_id of a decision-table review: the prefix plus the version id */
@@ -321,6 +323,8 @@ export function registerDecisionTableRoutes(app: FastifyInstance, db: Db): void 
       pending: pending ? versionView(pending, true) : null,
       history: versions.map((v) => versionView(v, false)),
       historyLimit: HISTORY_LIMIT,
+      /** ADR-0327 slice 4d: the latest request to switch the step to this table, and the version it was for */
+      switch: await latestTableSwitch(db, id),
     };
   });
 
@@ -512,13 +516,23 @@ export async function applyDecisionTableDecision(
   // the old pointer moves first: the partial unique index admits one published version per table
   if (published) await transitionVersion(tx, published.id, "supersede");
   if (!(await transitionVersion(tx, draft.id, "publish", decided))) return;
+  // ADR-0327 slice 4d: a switch was approved for the old version only; the new one needs its own
+  if (published) {
+    await revertSwitchOfSupersededVersion(tx, published.id, deciderUserId, {
+      decisionTableId: table.id,
+      agentId: table.agentId,
+      stepName: table.stepName,
+      version: published.version,
+      publishedVersion: draft.version,
+    });
+  }
   await audit(
     tx,
     deciderUserId,
     table.id,
     DECISION_TABLE_AUDIT_RULE_IDS.published,
     "allow",
-    `version ${draft.version} approved by the named reviewer and published; the AI still answers this step until a switch is approved`,
+    `version ${draft.version} approved by the named reviewer and published; the AI answers this step until a switch to this version is approved`,
     { ...detail, from: published?.version ?? null },
   );
 }
