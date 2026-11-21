@@ -40,7 +40,7 @@ describe("ADR-0336 slice 4: the worker's contract for agent_config", () => {
     const leak = ["gh", "p_", "Z9y8X7w6".repeat(4), "V5u4"].join("");
     const cases: Array<[string, ScanObservation]> = [
       ["a key fragment", { ...OK, keyFragment: leak.slice(0, 8), keyLength: 40 }],
-      ["a host", { ...OK, host: "api.example.com" }],
+      ["a host", { ...OK, host: "model-endpoint-host" }],
       ["names", { ...OK, names: ["x"] }],
       ["a line", { ...OK, location: { path: OK.location!.path, line: 3 } }],
       ["a commit", { ...OK, location: { path: OK.location!.path, commit: "abcdef0" } }],
