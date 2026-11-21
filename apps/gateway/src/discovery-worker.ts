@@ -91,7 +91,9 @@ import {
   normaliseGuid,
   nextDiscoveryWriteScope,
   discoveryWriteScopeFinal,
+  agentConfigSecretRuleAllowed,
 } from "@regulait/shared";
+import { AGENT_PLATFORM_ADAPTERS } from "./agent-platform-adapters.js";
 import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
@@ -448,6 +450,7 @@ export function checkObservations(
     throw new ObservationRefused(`the scanner reported ${observations.length} observations; at most ${EVIDENCE_MAX_ROWS} are accepted per run`);
   }
   return observations.map((o, i) => {
+    if (o.evidenceKind === "agent_config" || o.secretRule !== undefined) return checkConfigSecret(kind, o, i, nowIso);
     if (!spec.evidenceKinds.includes(o.evidenceKind)) {
       throw new ObservationRefused(`observation ${i}: evidenceKind is not one a ${kind} source reports`);
     }
@@ -541,6 +544,41 @@ export function checkObservations(
       ecosystem: o.ecosystem ? o.ecosystem.trim().toLowerCase() : null,
     };
   });
+}
+
+/** ADR-0336 slice 4: the agent platform vendor of each E17 source kind, from the one adapter list */
+const VENDOR_OF_KIND: ReadonlyMap<string, string> = new Map(AGENT_PLATFORM_ADAPTERS.map((a) => [a.kind, a.vendor]));
+/** what an `agent_config` observation may carry: these fields and nothing else */
+const CONFIG_SECRET_FIELDS: ReadonlySet<string> = new Set(["evidenceKind", "subjectKind", "subject", "location", "secretRule", "observedAt"]);
+
+/**
+ * ADR-0336 slice 4: a plaintext credential in a staged agent's configuration, held to location only. The rule must be
+ * a vendored credential rule, the location a field path (no line, no commit: no offset into the text), and no other
+ * field may ride along (no key fragment, no host, no names). Refusals never echo what was sent.
+ */
+function checkConfigSecret(kind: DiscoverySourceRow["kind"], o: ScanObservation, i: number, nowIso: string): Observation {
+  const vendor = VENDOR_OF_KIND.get(kind);
+  if (o.evidenceKind !== "agent_config" || !vendor || !DISCOVERY_KIND_SPECS[kind].evidenceKinds.includes("agent_config")) {
+    throw new ObservationRefused(`observation ${i}: a plaintext-credential finding is reported only as agent_config evidence by an agent platform source`);
+  }
+  if (o.subjectKind !== "system") throw new ObservationRefused(`observation ${i}: an agent_config subject is the staged agent (system)`);
+  for (const k of Object.keys(o)) {
+    if (!CONFIG_SECRET_FIELDS.has(k) && (o as unknown as Record<string, unknown>)[k] !== undefined) {
+      throw new ObservationRefused(`observation ${i}: an agent_config observation carries only its subject, field path and rule id`);
+    }
+  }
+  const rule = o.secretRule;
+  if (!agentConfigSecretRuleAllowed(rule)) throw new ObservationRefused(`observation ${i}: secretRule is not a vendored credential rule id`);
+  const subject = typeof o.subject === "string" ? o.subject.trim() : "";
+  if (!subject || subject.length > SUBJECT_MAX) throw new ObservationRefused(`observation ${i}: the subject must be 1 to ${SUBJECT_MAX} characters`);
+  if (scrubAuditText(subject) !== subject) throw new ObservationRefused(`observation ${i}: the subject looks like it carries a credential; it was refused, not stored`);
+  if (!o.location || o.location.line !== undefined || o.location.commit !== undefined) {
+    throw new ObservationRefused(`observation ${i}: an agent_config location is a field path only (no line or commit)`);
+  }
+  const location = checkLocation(o.location, i);
+  if (scrubAuditText(location.path) !== location.path) throw new ObservationRefused(`observation ${i}: location.path looks like it carries a credential; it was refused, not stored`);
+  const observedAt = o.observedAt && Number.isFinite(Date.parse(o.observedAt)) ? new Date(o.observedAt).toISOString() : nowIso;
+  return { subjectKind: "system", subject, signalSource: "agent_config", observedAt, count: 1, location, configSecret: { rule, vendor } };
 }
 
 /** a sighting location: a normalised relative path (no `..`), a line, a commit; never contents (decision 6) */
@@ -778,6 +816,10 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
     // ADR-0314: a registry source's agents are shape-checked like observations; a refused record refuses the run
     registry = checkRegistryAgents(source.kind, result.registryAgents, result.registriesComplete);
+    // ADR-0336 slice 4: a plaintext-credential finding names a record this same run staged, nothing else
+    const staged = new Set(registry.records.map((r) => r.externalId));
+    const unbound = observations.findIndex((o) => o.signalSource === "agent_config" && !staged.has(o.subject));
+    if (unbound >= 0) throw new ObservationRefused(`observation ${unbound}: an agent_config subject must be a record staged by the same run`);
   } catch (err) {
     if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;
