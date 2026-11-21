@@ -113,6 +113,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "endpoint_addon_removal",
   // ADR-0338: disabling, quarantining or restoring an agent in its vendor platform (stageId = vendor-agent-action:<id>)
   "vendor_agent_control",
+  // ADR-0340: moving one running workflow instance to another template version (bound to the request's plan)
+  "workflow_migration",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -120,6 +122,7 @@ export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   mcp_tool: "MCP tool call",
   workflow: "workflow stage sign-off",
+  workflow_migration: "workflow instance migration",
   run: "agent run escalation",
   project: "project budget overage",
   infra_operation: "infrastructure operation",

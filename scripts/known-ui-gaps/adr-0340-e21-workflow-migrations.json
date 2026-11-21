@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0340",
+  "lane": "E21",
+  "tracking": "ADR-0340 slice 3 (lane E21): API-only by the master brief for lane E21 2026-11-16; the migration screen is built by the design builder on #453",
+  "gaps": {
+    "POST /v1/workflows/instances/:instanceId/migrations": "dry-runs (default) or files a governed migration of a running workflow instance to another template version (approved by another admin in the approvals queue)",
+    "GET /v1/workflows/instances/:instanceId/migrations": "lists a workflow instance's migration requests with the plan and diff each was filed against"
+  }
+}

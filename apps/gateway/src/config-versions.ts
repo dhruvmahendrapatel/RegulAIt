@@ -80,6 +80,7 @@ import {
   rateLimits,
   sql,
   usageEvents,
+  workflowTemplates,
   type ConfigArtifactType,
   type ConfigVersionRow,
   type Db,
@@ -659,6 +660,19 @@ export async function activateVersion(
         .update(agents)
         .set({ systemPrompt: promptFromBody(row!.body) })
         .where(eq(agents.id, args.artifactId));
+    }
+    // ADR-0340: a workflow template's row is the read model of its active version (what the template list shows and
+    // what an instance starts on when no canary serves it); turning automatic retry on through a version is audited
+    // exactly as through a new template (ADR-0283 owner decision)
+    if (args.artifactType === "workflow_template") {
+      const [tpl] = await tx
+        .update(workflowTemplates)
+        .set({ definition: row!.body })
+        .where(eq(workflowTemplates.id, args.artifactId))
+        .returning({ name: workflowTemplates.name });
+      const { auditTemplateRetryEnabled } = await import("./workflows.js");
+      const { validateDefinition } = await import("@regulait/workflow-kernel");
+      await auditTemplateRetryEnabled(tx as never, args.artifactId, tpl?.name ?? args.artifactId, validateDefinition(row!.body), args.actorUserId ?? null);
     }
     // ADR-0073: the SAME read-model discipline for rule/compliance artifacts. The
     // rule's own row is rewritten to the newly-active body, so every listing
@@ -1347,7 +1361,9 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     // something a governance product gets to do) — the surface says so instead.
     const artifactDeleted = isRuleArtifact(artifactType)
       ? (await loadRuleRow(db, artifactType, artifactId)) == null
-      : (await db.select({ id: agents.id }).from(agents).where(eq(agents.id, artifactId))).length === 0;
+      : artifactType === "workflow_template"
+        ? (await db.select({ id: workflowTemplates.id }).from(workflowTemplates).where(eq(workflowTemplates.id, artifactId))).length === 0
+        : (await db.select({ id: agents.id }).from(agents).where(eq(agents.id, artifactId))).length === 0;
     return {
       artifactType,
       artifactId,
@@ -1381,6 +1397,23 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     if (artifactType === "agent_system_prompt") {
       const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, artifactId));
       if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    }
+    // ADR-0340: a template version must name a real, unretired template and pass every check a new template passes
+    if (artifactType === "workflow_template") {
+      const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, artifactId));
+      if (!tpl) return reply.status(404).send({ error: "unknown_workflow_template" });
+      if (tpl.retiredAt) return reply.status(409).send({ error: "workflow_template_retired", detail: "a retired template starts no instances; it takes no new versions" });
+      const { validateWorkflowTemplateDefinition } = await import("./workflows.js");
+      let checked: Awaited<ReturnType<typeof validateWorkflowTemplateDefinition>>;
+      try {
+        checked = await validateWorkflowTemplateDefinition(db, body.body);
+      } catch (err) {
+        if (err instanceof Error && err.name === "ZodError") {
+          return reply.status(422).send({ error: "invalid_workflow_definition", issues: (err as unknown as { issues: unknown }).issues });
+        }
+        throw err;
+      }
+      if (!checked.ok) return reply.status(checked.status).send(checked.body);
     }
     // ADR-0073 — a rule version must name a REAL rule and may only carry
     // ENFORCING fields. Both are real refusals rather than a stored version
@@ -1803,7 +1836,10 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     for (const type of new Set(canaries.map((c) => c.artifactType))) {
       const ids = canaries.filter((c) => c.artifactType === type).map((c) => c.artifactId);
       for (const id of ids) {
-        if (!isRuleArtifact(type)) {
+        if (type === "workflow_template") {
+          const [w] = await db.select({ id: workflowTemplates.id }).from(workflowTemplates).where(eq(workflowTemplates.id, id));
+          if (w) liveIds.add(key(type, id));
+        } else if (!isRuleArtifact(type)) {
           const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
           if (a) liveIds.add(key(type, id));
         } else if (await loadRuleRow(db, type, id)) {

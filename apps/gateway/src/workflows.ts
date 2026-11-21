@@ -21,6 +21,8 @@ import {
   workflowAssignmentRules,
   workflowEvents,
   workflowInstances,
+  workflowInstanceMigrations,
+  workflowInstanceTemplateVersions,
   workflowTemplates,
   withinSystemReason,
   type Db,
@@ -30,6 +32,7 @@ import {
   closePrSupersededByMerge,
   initialState,
   isCompensating,
+  planInstanceMigration,
   matchTemplates,
   nextDeadlinePhase,
   type DeadlinePhase,
@@ -142,6 +145,9 @@ import {
   type changeDescriptorSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
+  definitionDiff,
+  resolveVersion,
+  stableKeyFor,
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
 import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
@@ -182,8 +188,65 @@ function normalizeCheckReports(v: unknown): CheckReport[] {
     : [];
 }
 
+/** ADR-0340 slice 3: the definition a template serves to one new instance, and which version that was */
+export interface ResolvedTemplateVersion {
+  templateId: string;
+  templateName: string;
+  definition: WorkflowDefinition;
+  /** null: the template has no version history; its row's definition serves */
+  versionId: string | null;
+  version: number | null;
+  canary: boolean;
+}
+
+/** resolve each template's version for a new instance (ADR-0048's resolver, bucketed by the instance id) */
+async function resolveTemplateVersions(
+  db: Db,
+  templates: ReadonlyArray<typeof workflowTemplates.$inferSelect>,
+  instanceId: string,
+): Promise<ResolvedTemplateVersion[]> {
+  const { loadVersions } = await import("./config-versions.js");
+  const out: ResolvedTemplateVersion[] = [];
+  for (const t of templates) {
+    const versions = await loadVersions(db, "workflow_template", t.id);
+    const r = versions.length
+      ? resolveVersion({ artifactType: "workflow_template", artifactId: t.id, versions, stableKey: stableKeyFor({ runId: instanceId, userId: instanceId }) })
+      : null;
+    out.push(
+      r
+        ? { templateId: t.id, templateName: t.name, definition: validateDefinition(r.body), versionId: r.versionId, version: r.version, canary: r.canary }
+        : { templateId: t.id, templateName: t.name, definition: t.definition as WorkflowDefinition, versionId: null, version: null, canary: false },
+    );
+  }
+  return out;
+}
+
+/** pin an instance to the versions that serve it, with a canary selection audited (ADR-0340 slice 3) */
+export async function recordInstanceTemplateVersions(
+  tx: DbOrTx,
+  instanceId: string,
+  resolved: readonly ResolvedTemplateVersion[],
+  via: "start" | "migration",
+  actorUserId: string | null,
+): Promise<void> {
+  for (const r of resolved) {
+    await tx.insert(workflowInstanceTemplateVersions).values({ instanceId, templateId: r.templateId, configVersionId: r.versionId, canary: r.canary, via });
+    if (!r.canary) continue;
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? SYSTEM_IDENTITY,
+      objectType: "workflow",
+      objectId: instanceId,
+      detail: { templateId: r.templateId, templateName: r.templateName, versionId: r.versionId, version: r.version },
+      effect: "allow",
+      ruleId: "workflow:canary-version-selected",
+      ruleChain: [],
+      reason: `the canary version ${r.version} of template '${r.templateName}' serves this instance (it stays on that version)`,
+    });
+  }
+}
+
 /** the statuses an instance never leaves (a completed one only through `reopen`) */
-const TERMINAL_STATUSES: readonly string[] = ["completed", "aborted", "denied", "rolled_back"];
+export const TERMINAL_STATUSES: readonly string[] = ["completed", "aborted", "denied", "rolled_back"];
 
 /**
  * Request a stage's sign-off from `approvers` (resolved: `requesting_user` is the initiator, ADR-0195 A4
@@ -227,7 +290,7 @@ async function requestStageApprovals(
  * shows, and `workflow:sla-scheduled` (or `-not-scheduled`, deny, when the queue could not take a job: the transition
  * still commits and the stage simply has no deadline).
  */
-async function scheduleStageDeadlines(
+export async function scheduleStageDeadlines(
   tx: DbOrTx,
   instanceId: string,
   projectId: string | null,
@@ -636,7 +699,7 @@ async function applyEvent(
 }
 
 /** the audit identity of a system actor (audit_log.user_id is NOT NULL) */
-const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
+export const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
 /** a `workflow_stage` span whose write waits for the caller's commit */
 type DeferredSpan = {
@@ -2491,7 +2554,7 @@ export function stageClaimState(
 }
 
 /** the context keys that make up a stage execution claim */
-const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
+export const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
 
 /** drop the claim from an in-memory context (the normal release path) */
 function releaseStageClaim(context: Record<string, unknown>): void {
@@ -3246,26 +3309,54 @@ async function insertWorkflowTemplate(
   // says so; a template that turns automatic retry on is audited, by stage and
   // policy, in ONE transaction with the insert (a savepoint when the caller
   // already holds one), so a retry-enabled template never exists unaudited.
-  const retried = definition.stages.filter((st) => st.retry);
   const row = await db.transaction(async (tx) => {
     const [created] = await tx
       .insert(workflowTemplates)
       .values({ name, definition })
       .returning();
-    if (retried.length === 0) return created!;
-    await tx.insert(auditLog).values({
-      userId: actorUserId ?? SYSTEM_IDENTITY,
-      objectType: "workflow_template",
-      objectId: created!.id,
-      detail: { templateName: name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
-      effect: "allow",
-      ruleId: "workflow:template-stage-retry-enabled",
-      ruleChain: [],
-      reason: `template '${name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
-    });
+    await auditTemplateRetryEnabled(tx, created!.id, name, definition, actorUserId);
     return created!;
   });
   return { ok: true, row };
+}
+
+/**
+ * ADR-0283 owner decision: a template definition that turns automatic retry on is audited, by stage and policy, in
+ * the caller's transaction (template creation, and ADR-0340 activation of a template version).
+ */
+export async function auditTemplateRetryEnabled(
+  tx: DbOrTx,
+  templateId: string,
+  templateName: string,
+  definition: WorkflowDefinition,
+  actorUserId: string | null,
+): Promise<void> {
+  const retried = definition.stages.filter((st) => st.retry);
+  if (retried.length === 0) return;
+  await tx.insert(auditLog).values({
+    userId: actorUserId ?? SYSTEM_IDENTITY,
+    objectType: "workflow_template",
+    objectId: templateId,
+    detail: { templateName, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
+    effect: "allow",
+    ruleId: "workflow:template-stage-retry-enabled",
+    ruleChain: [],
+    reason: `template '${templateName}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
+  });
+}
+
+/**
+ * Every check a template definition must pass before anything can run it: the kernel schema, then the references it
+ * makes. A new template and an ADR-0340 template VERSION pass the same checks. Throws the kernel's ZodError on a
+ * schema failure (the routes answer it as a 400).
+ */
+export async function validateWorkflowTemplateDefinition(
+  db: Db,
+  raw: unknown,
+): Promise<{ ok: true; definition: WorkflowDefinition } | { ok: false; status: number; body: Record<string, unknown> }> {
+  const definition = validateDefinition(raw);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  return refused ?? { ok: true, definition };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
@@ -3331,7 +3422,11 @@ export async function startWorkflowInstanceWithTemplates(
   }
   // merge in matched order (deterministic: matchTemplates preserves rule order)
   const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
-  const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+  // ADR-0340 slice 3: each template's definition is its RESOLVED version: the active one, or, for a share of new
+  // instances while a canary runs, the canary (sticky per instance id). The instance is pinned to what served it.
+  const newInstanceId = randomUUID();
+  const resolved = await resolveTemplateVersions(db, ordered, newInstanceId);
+  const merged = mergeDefinitions(resolved.map((r) => r.definition));
 
   // ADR-0195 A4: a sign-off owed by an admin other than the initiator needs one to exist, or the stage could never
   // be decided: refused before anything is written
@@ -3365,18 +3460,23 @@ export async function startWorkflowInstanceWithTemplates(
       return { ok: false, status: attribution.status, body: { error: attribution.error } };
     }
   }
-  const [instance] = await db
-    .insert(workflowInstances)
-    .values({
-      templateIds,
-      definition: merged,
-      initiatorUserId,
-      change,
-      projectId: input.projectId ?? null,
-      state: initialState(merged),
-      status: "running",
-    })
-    .returning();
+  const instance = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowInstances)
+      .values({
+        id: newInstanceId,
+        templateIds,
+        definition: merged,
+        initiatorUserId,
+        change,
+        projectId: input.projectId ?? null,
+        state: initialState(merged),
+        status: "running",
+      })
+      .returning();
+    await recordInstanceTemplateVersions(tx, created!.id, resolved, "start", initiatorUserId);
+    return created;
+  });
 
   const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
   const executed = await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey, 0, input.executor ?? {});

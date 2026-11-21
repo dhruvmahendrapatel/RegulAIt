@@ -73,6 +73,12 @@ number** of workflow templates, composed from a shared library of reusable stage
   cancelled and compensated). A sign-off stage takes only `fail`; its reminders and escalation are the approvals
   queue's SLA (ADR-0342). Timers are durable queue jobs set when the stage is entered; a deadline never approves or
   denies a sign-off.
+
+**Versions, canary and migration (2026-11-16, ADR-0340 slice 3).** A template has immutable versions (the ADR-0048
+config-version routes). A running instance finishes on the version it started on. A canary serves a percentage of
+NEW instances. A running instance moves to another version only through a governed migration: a dry-run diff, an
+approval by another admin in the one queue, and a re-check under the instance lock when it is applied. A migration
+may change only what is ahead of the instance.
 - **Notification / webhook** — alert stakeholders or trigger an external system at any point.
 - **Conditional branch** — route to different subsequent stages based on outcome (e.g. "if security scan finds a critical issue, route to a remediation sub-workflow instead of merge approval").
 

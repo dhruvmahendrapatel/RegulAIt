@@ -42,6 +42,9 @@ export const CONFIG_ARTIFACT_TYPES = [
   "rate_limit",
   "data_scope_rule",
   "compliance_profile",
+  // ADR-0340 slice 3: a workflow template's definition. A canary serves a share of NEW instances (sticky per
+  // instance id); a running instance keeps the version it started on unless a governed migration moves it.
+  "workflow_template",
 ] as const;
 export type ConfigArtifactType = (typeof CONFIG_ARTIFACT_TYPES)[number];
 
@@ -82,6 +85,9 @@ export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
  */
 export const LIVE_CANARY_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
   "agent_system_prompt",
+  // ADR-0340: live, because a template version is a whole process a NEW instance runs from start to end (pinned),
+  // never a partial enforcement of a running one; the instance records the version that served it
+  "workflow_template",
 ];
 
 export function canaryIsLive(t: ConfigArtifactType): boolean {
@@ -151,6 +157,8 @@ export function canaryIsShadowEvaluated(t: ConfigArtifactType): boolean {
 export const RESOLVED_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
   "agent_system_prompt",
   ...SHADOW_CANARY_ARTIFACT_TYPES,
+  // ADR-0340: resolved when a workflow instance starts
+  "workflow_template",
 ];
 
 /** true when a canary of this type genuinely produces a signal — served
@@ -172,6 +180,13 @@ export function canaryModeOf(t: ConfigArtifactType): CanaryMode {
 export function canaryModeNote(t: ConfigArtifactType): string {
   switch (canaryModeOf(t)) {
     case "live":
+      if (t === "workflow_template") {
+        return (
+          "Canary versions are served LIVE to a share of NEW workflow instances, chosen by instance id and recorded " +
+          "in workflow_instance_template_versions. A running instance keeps the version it started on; only a " +
+          "governed, approved migration moves it (ADR-0340)."
+        );
+      }
       return (
         "Canary traffic is served LIVE and stamped onto usage_events.config_version_id — the " +
         "candidate version genuinely answers a share of requests."

@@ -1,9 +1,9 @@
 # ADR-0340: Process-level reliability for pillar 2's runner: compensation (saga) stages, stage deadlines with SLA escalation, and process-version pinning, migration and canary
 
-- **Status**: Accepted (builder lane E21; slice 1, compensation, and slice 2, deadlines, are built; slice 3 follows
-  in this lane under this ADR)
+- **Status**: Accepted (builder lane E21; all three slices built: compensation, deadlines, and versions with
+  migration and canary)
 - **Date**: 2026-11-16
-- **Index**: Process reliability for the workflow runner (Camunda gap 2 and 8): compensation stages run in reverse on a cancel or a denial through the ordinary executors; stage deadlines with SLA escalation (notify, reassign or fail) over pg-boss timers; process versions pinned per instance, governed in-flight migration and canary rollout. No new engine.
+- **Index**: Process reliability for the workflow runner (Camunda gap 2 and 8): compensation stages run in reverse on a cancel or a denial through the ordinary executors; stage deadlines with SLA escalation (notify or fail) over pg-boss timers; process versions pinned per instance, governed in-flight migration and canary rollout. No new engine.
 - **Backlog item**: `internal/product/GAP_ANALYSIS_CAMUNDA_2026-11.md` rows 2, 5 and 8; next step 3 ("process-level
   reliability … extends the ADR-0282–0286 runner, no new engine")
 - **Builds on**: ADR-0254 (keep the runner; a transition and its audit row commit in one transaction, re-authorised at
@@ -11,8 +11,9 @@
   engine), ADR-0046 and ADR-0061 (the approvals queue and ChatOps), ADR-0180 (secure by default), ADR-0176 (open
   source first), AER-048 and AER-049 (rounds, stage entries, effect records).
 - **Migrations**: slice 1 none (the compensation state lives in the instance's `state` jsonb, which the kernel
-  owns). Slice 2: `pending/workflow_stage_queue_deadline.sql` (the `workflow-stage-deadline` queue). Slice 3 adds its
-  own. All numbered at merge (ADR-0252).
+  owns). Slice 2: `pending/workflow_stage_queue_deadline.sql` (the `workflow-stage-deadline` queue). Slice 3:
+  `pending/workflow_template_versions.sql` (the `workflow_template` artifact type on `config_versions`, and the
+  `workflow_instance_template_versions` and `workflow_instance_migrations` tables). All numbered at merge (ADR-0252).
 
 ## Context
 
@@ -139,23 +140,51 @@ kernel and runner.
     anyone a request names. Each post is audited `chatops-workflow-sla-posted` or `-post-failed`. A notice is sent
     after the commit and never fails the timer; a deployment without ChatOps posts nothing.
 
-### Slice 3: process versions, in-flight migration and canary (decided; built after slice 2)
+### Slice 3: process versions, in-flight migration and canary (built)
 
-13. **Versions.** Every template create or change writes an immutable, numbered template version row; an instance
-   records the versions it was started from (a join table, ADR-0200 3NF) beside its snapshotted definition, which
-   stays the definition it runs. A running instance always finishes on its version unless it is migrated.
-14. **Governed migration.** `POST …/instances/:id/migrations` with `dryRun` returns the diff (RFC 6902) between the
-    instance's definition and the target version, and refuses a migration the target cannot honour (the current stage
-    or a stage that ran is missing or changed type; a compensation that would be lost). Applying needs an approval in
-    the approvals queue by an admin other than the requester (ADR-0195), is re-validated under the instance lock when
-    approved, bumps the stage entry, and writes `workflow:instance-migrated` with both versions and the diff.
-15. **Canary.** An admin may roll a new version out to a percentage (1 to 50) of NEW instances of a template; the
-    choice is deterministic per instance id, recorded on the instance and audited at start
-    (`workflow:canary-version-selected`); starting and stopping a canary is audited. Running instances are never
-    switched by a canary.
+13. **Versions are ADR-0048 config versions.** `workflow_template` is a `config_versions` artifact type, so a template
+    gets immutable numbered versions, the append-only activation ledger, rollback and canary through the existing
+    `/v1/config-versions/workflow_template/:templateId` routes (admin). A version body passes every check a new
+    template passes (`validateWorkflowTemplateDefinition`: the kernel schema, eval datasets, review agents, approvers,
+    nested run graphs); a retired template takes no versions. Activating a version rewrites the template row (its
+    read model) in the activation's transaction, and a version that turns automatic retry on is audited
+    `workflow:template-stage-retry-enabled` exactly like a new template (ADR-0283 owner decision).
+14. **Pinning.** An instance starts on each template's RESOLVED version (ADR-0048's resolver), runs its snapshotted
+    definition to the end, and records what served it in `workflow_instance_template_versions` (a row per template
+    at start, a row per applied migration; a NULL version means the template had no history yet). A template edit
+    never reaches a running instance.
+15. **Canary over new instances.** `workflow_template` is a LIVE canary type: while a canary runs, a new instance is
+    served the canary when its bucket (`fnv1a(templateId:instanceId) % 100`) is under the percentage (1 to 99), so the
+    choice is sticky per instance; it is recorded on the pin and audited `workflow:canary-version-selected`. Starting,
+    adjusting, promoting and ending a canary are ADR-0048's own audited acts. A canary never switches a running
+    instance. Promotion follows ADR-0048's gate (an eval run, or an override with a reason, audited); activating a
+    version directly is the plain path.
+16. **Governed migration.** `POST /v1/workflows/instances/:id/migrations` (admin) answers a dry run by default: the
+    kernel's `planInstanceMigration` and the RFC 6902 diff (`definitionDiff`, the pinned `rfc6902`). The kernel
+    refuses a migration of an ended or compensating instance, one that removes or changes a stage already reached,
+    changes the current stage at all, reorders reached stages, adds a stage before the current one (it would be
+    skipped), or drops the compensation of a stage that ran; and the gateway refuses an instance merged from several
+    templates. `dryRun: false` with a reason files the request (`workflow_instance_migrations`, one open per
+    instance, the reviewed plan kept as evidence) and one `workflow_migration` row in the approvals queue for every
+    other active admin; `workflow:migration-requested`. The one decide path refuses the requester
+    (`cannot_approve_own_workflow_migration`, whatever delegation or override says), closes the other rows on the
+    first decision, and applies an approval in the decision's transaction: it re-plans under the instance lock and
+    applies only if the plan still holds and the definition has not moved, replacing the definition and state (stage
+    statuses follow the stage ids), bumping the stage entry, pinning the new version and re-arming the current stage's
+    deadline, audited `workflow:instance-migrated` with both versions, both definition hashes and the diff; otherwise
+    `workflow:migration-stale` (deny) and nothing changes. A denial changes nothing (`workflow:migration-denied`).
+17. **One declared migration lifecycle (build rule 12).** A migration request's status is one kernel table,
+    `MIGRATION_LIFECYCLE`: `pending → applied | denied | stale`, and nothing leaves a terminal status. The decide path
+    moves a request only through `nextMigrationStatus`, and its UPDATE is guarded on `status = 'pending'`, so a second
+    decision or a replayed apply changes nothing.
 
 ## Consequences
 
+- Slice 3 adds two routes, both API-only for now (`scripts/known-ui-gaps/adr-0340-e21-workflow-migrations.json`, the screen is #453), and a `workflow_migration`
+  approvals-queue kind. Tests: kernel ("ADR-0340 slice 3: planInstanceMigration"), shared (the live canary mode of
+  `workflow_template`) and `apps/gateway/src/workflows-versions.test.ts` (a version checked like a template; the
+  canary serving a share of new instances, pinned and audited; a migration that only another admin can approve,
+  including the requester's refused override, and that then runs on; a refused migration; a stale one).
 - Slice 2 adds no route either; `GET /v1/workflows/instances/:id` shows the `sla:<stage>` marker (when it is due,
   when it warned and breached). Slice 2's tests: kernel validation ("ADR-0340 slice 2: stage deadlines") and
   `apps/gateway/src/workflows-sla.test.ts` (the queued timers and their delays, a reminder that runs once, a stale

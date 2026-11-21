@@ -149,6 +149,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.configActivationEvents, ["reason"]],
   [s.configCanaryObservations, ["servedReason", "candidateReason", "failureReason"]],
   [s.workflowTemplates, ["retiredReason"]],
+  // ADR-0340 slice 3: why an admin asked to migrate a running instance
+  [s.workflowInstanceMigrations, ["reason"]],
   // ADR-0208 (migration 0223): why a compliance profile was retired
   [s.complianceProfiles, ["retiredReason"]],
   [s.certRotations, ["reason"]],

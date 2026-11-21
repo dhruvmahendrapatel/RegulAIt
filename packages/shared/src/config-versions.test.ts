@@ -244,6 +244,14 @@ describe("ADR-0073 canary mode vocabulary", () => {
     expect(canaryModeOf("agent_system_prompt")).toBe("live");
   });
 
+  it("ADR-0340: workflow_template is LIVE over new instances, with its own disclosure", () => {
+    expect(canaryIsLive("workflow_template")).toBe(true);
+    expect(canaryIsShadowEvaluated("workflow_template")).toBe(false);
+    expect(canaryModeOf("workflow_template")).toBe("live");
+    expect(canaryModeNote("workflow_template")).toMatch(/NEW workflow instances/);
+    expect(canaryModeNote("workflow_template")).not.toMatch(/usage_events/);
+  });
+
   it("agent_config is SHADOW — the last inert type, closed by batch B1", () => {
     // REWRITTEN (2026-08-22, batch B1), not deleted — the previous test pinned
     // "agent_config is inert" while ADR-0073's residual stood, exactly as
