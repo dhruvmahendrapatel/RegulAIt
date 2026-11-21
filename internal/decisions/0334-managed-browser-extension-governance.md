@@ -3,7 +3,8 @@
 - **Status**: Proposed (owner direction 2026-11-15 via the lane E16 brief; surface (a) built, default off)
 - **Date**: 2026-11-15
 - **Index**: **Managed browser extension, surface (a): AI assistant sites in browser tabs. MV3, force-installed by the customer's browser management only; host permissions limited to the governed site catalogue; fails closed (blocks every governed site) until a signed, unexpired per-user policy says otherwise; corporate-account rules from the profile identity; DLP on the shared `dlp.secret.*` rules before a prompt leaves the browser; breach events tied to user, device and conversation; prompt capture off unless an admin turns it on (step-up, audited, on-screen notice). Off by default.**
-- **Built in**: lane E16, PR 1 of 2 (this ADR, `agents/browser/`, the gateway routes). Browser-driving agents (surface (b)) get their own ADR in PR 2.
+- **Built in**: lane E16 (this ADR, `agents/browser/`, the gateway routes). Browser-driving agents (surface (b)) are
+  **superseded by [ADR-0364](0364-governed-rpa-robots.md)** (lane E45; owner decision 2026-11-21): no separate ADR is written for them.
 - **Migration**: `pending/browser_governance.sql`, numbered at merge (ADR-0252)
 - **Related**: ADR-0055 and ADR-0195 (shadow-AI discovery, the endpoint agent's enrolment and pseudonyms), ADR-0298
   (on-device enforcement: signed policy, fail closed), ADR-0251 (one governed decision core), ADR-0176 (open source
@@ -23,7 +24,9 @@ as the gateway and the endpoint agent, with privacy and security as the core of 
 - **(a) AI assistants in browser tabs:** block a denied site, enforce corporate-account rules, block a prompt that
   matches a DLP rule before it leaves the browser, and record breaches tied to user, device and conversation.
 - **(b) Browser-driving agents:** record their actions as an auditable timeline and apply the same tool-call policies.
-  That is a later PR with its own ADR.
+  **Superseded by [ADR-0364](0364-governed-rpa-robots.md) §4-§7** (owner decision 2026-11-21, relayed by the master):
+  free-form browser control is the first-party, high-risk, opt-in `@playwright/mcp` server governed through the same
+  tool-call gate, with redacted screenshot evidence per call, and lane E45 builds it.
 
 A browser extension is a very privileged piece of software in a very hostile place. It runs beside every page the
 person opens, a page's script is attacker-controlled by default, and the person who installs or removes it is the
@@ -255,7 +258,7 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
   rotation is the operator's file and active key id.
 - **Per-role site rules** (today a rule is org-wide; per-user entitlement comes from the user match and the posture).
 - **Firefox** is a later slice (owner decision B3; PENDING fragment), and Safari after it.
-- **Browser-driving agents** (surface (b)): their own ADR and PR.
+- **Browser-driving agents** (surface (b)): superseded by ADR-0364 (lane E45), not a follow-up of this ADR.
 
 ## 12. Review fixes (#867, 2026-11-18)
 
@@ -336,3 +339,7 @@ The security and code reviews at `4398879` asked for these; each is built and te
 - **B3:** Chromium-based browsers only for now; Firefox is a later slice, recorded as a PENDING fragment.
 - **B4:** one rotatable device-policy signer signs both browser and endpoint policies; lane E13 adopts it. (Built:
   section 4, `device-policy-signer.ts`.)
+- **Surface (b), 2026-11-21:** browser-driving agents belong to ADR-0364 (Robots, lane E45), which already decides
+  their policy (a high-risk, opt-in first-party `@playwright/mcp` server under the ADR-0251 gate, egress limited to the
+  authorised targets) and their timeline (per-call redacted screenshots as run evidence). E16 writes no separate ADR and
+  builds nothing for them; lane E16 continues with the extension's own follow-ups.
