@@ -185,11 +185,18 @@ import {
   VENDOR_AGENT_ACTION_STATES,
   VENDOR_AGENT_CONTROL_ACTIONS,
   VENDOR_AGENT_STATES,
+  // ADR-0359 (lane E40): behaviour baselines, in lockstep with the CHECKs
+  BEHAVIOUR_FINDING_STATUSES,
+  BEHAVIOUR_METHODS,
+  BEHAVIOUR_MODES,
+  BEHAVIOUR_SIGNAL_NAMES,
+  BEHAVIOUR_SUBJECT_KINDS,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
   bigint,
   check,
+  date,
   integer,
   boolean,
   doublePrecision,
@@ -2092,6 +2099,9 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0359 (lane E40): a behaviour finding, its status change, a day's evaluation summary or a mode change
+        // (objectId = the finding when there is one). Plain text column — no DDL.
+        "behaviour_baseline",
       ],
     })
       .notNull()
@@ -20117,3 +20127,103 @@ export const vendorAgentActions = pgTable(
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
+
+// ===== ADR-0359 (lane E40): behaviour baselines and anomaly findings =====
+/** Singleton settings. `shadow` (the default) records findings and never enforces; `off` stops the sweep, a relaxation
+ * that needs a `settings_relax` step-up. */
+export const behaviourBaselineSettings = pgTable(
+  "behaviour_baseline_settings",
+  {
+    id: smallint("id").primaryKey().default(1),
+    mode: text("mode", { enum: BEHAVIOUR_MODES }).notNull().default("shadow"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("behaviour_baseline_settings_singleton_check", sql`${t.id} = 1`),
+    check("behaviour_baseline_settings_mode_check", sql`${t.mode} IN ('shadow', 'off')`),
+  ],
+);
+
+/** The sweep's leased cursor over `audit_log.seq` (rollup) and the last UTC day it evaluated. */
+export const behaviourEngineState = pgTable(
+  "behaviour_engine_state",
+  {
+    id: smallint("id").primaryKey().default(1),
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull().default(0),
+    evaluatedThrough: date("evaluated_through", { mode: "string" }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    leaseToken: uuid("lease_token"),
+    lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
+  },
+  (t) => [check("behaviour_engine_state_singleton_check", sql`${t.id} = 1`)],
+);
+
+/**
+ * The per-day rollup of the audit chain the baselines are computed from. ADR-0200 exception: a measured read model
+ * whose source of truth is `audit_log`; `subject_id` is a `users.id` (kind `user`) or a `workload_identities.id` (kind
+ * `agent`) and is FK-free on purpose, like the audit trail it is rolled up from (a deleted subject's history stays
+ * countable and the audit prune is never blocked). `key` is '' for a volume signal.
+ */
+export const behaviourDailyCounts = pgTable(
+  "behaviour_daily_counts",
+  {
+    day: date("day", { mode: "string" }).notNull(),
+    subjectKind: text("subject_kind", { enum: BEHAVIOUR_SUBJECT_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    signal: text("signal", { enum: BEHAVIOUR_SIGNAL_NAMES }).notNull(),
+    key: text("key").notNull(),
+    count: integer("count").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "behaviour_daily_counts_pk", columns: [t.day, t.subjectKind, t.subjectId, t.signal, t.key] }),
+    check("behaviour_daily_counts_subject_kind_check", sql`${t.subjectKind} IN ('user', 'agent')`),
+    check("behaviour_daily_counts_signal_check", sql`${t.signal} IN ('model_calls', 'data_scoped_calls', 'tool', 'destination', 'hour_of_day')`),
+    check("behaviour_daily_counts_key_check", sql`char_length(${t.key}) <= 200`),
+    check("behaviour_daily_counts_count_check", sql`${t.count} >= 1`),
+  ],
+);
+
+/**
+ * One anomaly finding. ADR-0200 exception: a point-in-time snapshot of the baseline it was measured against (the
+ * numbers must not move when later rows arrive); `subject_id` is FK-free for the reason given on
+ * `behaviour_daily_counts`. Unique per (day, subject, signal, key), so a re-run adds nothing.
+ */
+export const behaviourAnomalyFindings = pgTable(
+  "behaviour_anomaly_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day", { mode: "string" }).notNull(),
+    subjectKind: text("subject_kind", { enum: BEHAVIOUR_SUBJECT_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    signal: text("signal", { enum: BEHAVIOUR_SIGNAL_NAMES }).notNull(),
+    key: text("key").notNull(),
+    method: text("method", { enum: BEHAVIOUR_METHODS }).notNull(),
+    observed: integer("observed").notNull(),
+    baselineDays: integer("baseline_days").notNull(),
+    baselineMedian: doublePrecision("baseline_median"),
+    baselineMad: doublePrecision("baseline_mad"),
+    baselineKeyCount: integer("baseline_key_count"),
+    baselineTotal: integer("baseline_total"),
+    score: doublePrecision("score"),
+    threshold: doublePrecision("threshold").notNull(),
+    explanation: text("explanation").notNull(),
+    status: text("status", { enum: BEHAVIOUR_FINDING_STATUSES }).notNull().default("open"),
+    statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("behaviour_anomaly_findings_subject_signal_uq").on(t.day, t.subjectKind, t.subjectId, t.signal, t.key),
+    index("behaviour_anomaly_findings_status_created_idx").on(t.status, t.createdAt),
+    index("behaviour_anomaly_findings_subject_idx").on(t.subjectKind, t.subjectId, t.day),
+    check("behaviour_anomaly_findings_subject_kind_check", sql`${t.subjectKind} IN ('user', 'agent')`),
+    check("behaviour_anomaly_findings_signal_check", sql`${t.signal} IN ('model_calls', 'data_scoped_calls', 'tool', 'destination', 'hour_of_day')`),
+    check("behaviour_anomaly_findings_method_check", sql`${t.method} IN ('mad_z', 'ratio_over_median', 'share_of_history')`),
+    check("behaviour_anomaly_findings_status_check", sql`${t.status} IN ('open', 'acknowledged', 'dismissed')`),
+    check("behaviour_anomaly_findings_key_check", sql`char_length(${t.key}) <= 200`),
+    check("behaviour_anomaly_findings_explanation_check", sql`char_length(${t.explanation}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type BehaviourAnomalyFindingRow = typeof behaviourAnomalyFindings.$inferSelect;
+// ===== end ADR-0359 =====
