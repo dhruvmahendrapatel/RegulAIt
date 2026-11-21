@@ -174,12 +174,13 @@ export const closeDsrSchema = z
   .strict();
 
 /** the RegulAIt-held stores a subject is located in, and what erasure does to each */
-export const DSR_STORES = ["accounts", "conversations", "project_context", "audit_trail"] as const;
+export const DSR_STORES = ["accounts", "conversations", "project_context", "rule_step_suggestions", "audit_trail"] as const;
 export type DsrStore = (typeof DSR_STORES)[number];
 export const DSR_STORE_LABELS: Readonly<Record<DsrStore, string>> = {
   accounts: "User accounts",
   conversations: "Conversations",
   project_context: "Shared project context",
+  rule_step_suggestions: "Rule-like AI step suggestions",
   audit_trail: "Audit trail",
 };
 

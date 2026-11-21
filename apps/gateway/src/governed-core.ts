@@ -33,15 +33,18 @@ import {
 import {
   composeResourceDecision,
   governedCoreErrorDecision,
-  matchingResourceApprovalRules,
+  matchingResourceApprovalRulesWith,
   RESOURCE_RULE_IDS,
   type AbacDecision,
+  type Decision,
   type EntitlementDecision,
   type GovernedResource,
   type GovernedResourceDecision,
   type ResourceApprovalRule,
+  type ResourceApprovalRuleEvaluator,
   type ResourceRateLimit,
 } from "@regulait/policy-kernel";
+import { perCallResourceApprovalRuleEvaluator } from "@regulait/policy-kernel/resource-approval-rule-cedar";
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
 import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
@@ -52,6 +55,7 @@ import {
   type ModelConsentState,
   type ModelInvocation,
 } from "./model-call-consent.js";
+import { PRIVACY_RULE_IDS, processingLimitGate, type PrivacyGateResult, type ProcessingLimitInput } from "./privacy-ops.js";
 
 export interface ResourceRestrictions {
   approvalRules: ResourceApprovalRule[];
@@ -60,6 +64,10 @@ export interface ResourceRestrictions {
   /** ADR-0251 slice 4: the Cedar verdict for the call's v5 action (`ModelInvoke`, `ConnectorCall`, `A2aMessage`);
    * null = no active v5 policy, so nothing can apply */
   abacDecision: AbacDecision | null;
+  /** ADR-0239 slice 2b: the approval-rule match engine for THIS call (Cedar, one batched request shared by every read
+   * of `approvalRules`: the consent binding here and the kernel's composition). Required, so no path can fall back to
+   * the hand-written predicate by omission. */
+  approvalRuleEvaluator: ResourceApprovalRuleEvaluator;
 }
 
 
@@ -256,7 +264,7 @@ export async function loadResourceRestrictions(
   }));
   // no org row reads as the strict default (ADR-0180), never as a relaxation
   const attributionRequired = resource.type === "connector" ? org?.connector !== false : resource.type === "a2a" ? org?.a2a !== false : false;
-  return { approvalRules, rateLimits, attributionRequired, abacDecision: await abacVerdict };
+  return { approvalRules, rateLimits, attributionRequired, abacDecision: await abacVerdict, approvalRuleEvaluator: perCallResourceApprovalRuleEvaluator() };
 }
 
 export interface GovernedResourceInput {
@@ -283,6 +291,7 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
         attributionRequired: r.attributionRequired,
         rateLimits,
         approvalRules: r.approvalRules,
+        approvalRuleEvaluator: r.approvalRuleEvaluator,
         abacDecision: r.abacDecision,
         approvedApprovalId: input.approvedApprovalId ?? null,
         canQueue: input.canQueue,
@@ -352,7 +361,9 @@ export async function governedModelGate(
     const limited = await checkModelRateLimit(db, { userId: args.userId, agentId: args.agentId, agentName: args.agentName, projectId: args.projectId });
     if (limited) return limited;
     const restrictions = await loadResourceRestrictions(db, { userId: args.userId, resource, projectId: args.projectId });
-    const matched = matchingResourceApprovalRules(resource, restrictions.approvalRules);
+    // ADR-0239 slice 2b: an engine error binds no consent here; the kernel refuses the call on the same error
+    const verdict = matchingResourceApprovalRulesWith(restrictions.approvalRuleEvaluator, resource, restrictions.approvalRules);
+    const matched = verdict.kind === "matched" ? verdict.rules : [];
     if (matched.length) {
       consent = await modelConsentState(db, {
         userId: args.userId,
@@ -414,4 +425,20 @@ export async function governedModelGate(
     ruleId: decision.ruleId,
     auditLogId: row?.id ?? null,
   };
+}
+
+/**
+ * ADR-0224 addendum (2026-11-20) — the core's processing-limit step (records of processing), the one check path for
+ * model dispatch, connector calls and MCP calls. Each call path runs it directly after its PII-mode rung (the cascade
+ * decides first) and before anything leaves the gateway, on the text that would leave. Returns null to proceed, or an
+ * already-audited 409 `processing_not_permitted`. It never answers allow on a failure: an error propagates to the
+ * caller, which refuses the call.
+ */
+export async function governedProcessingLimit(db: Db, input: ProcessingLimitInput): Promise<PrivacyGateResult> {
+  return processingLimitGate(db, input);
+}
+
+/** the MCP paths answer a processing refusal as a policy denial, so every caller of those paths reports it as one */
+export function processingRefusalDecision(refusal: NonNullable<PrivacyGateResult>): Decision {
+  return { effect: "deny", ruleId: PRIVACY_RULE_IDS.dispatchRefused, ruleChain: [], reason: refusal.detail };
 }

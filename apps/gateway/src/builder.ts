@@ -109,6 +109,7 @@ import {
   modelAllowed,
   skillVisible,
   toolboxOptionsFor,
+  unavailableRobotToolIds,
   type Viewer,
 } from "./builder-access.js";
 import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
@@ -946,6 +947,19 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
           detail: `you hold no grant for the MCP tool '${m.serverName}/${m.name}', so you cannot give it to an agent`,
         });
       }
+    }
+    // ADR-0364: a retired (or halted) robot version cannot be added to a toolbox
+    const retiredRobotTools = await unavailableRobotToolIds(db, toolIds);
+    for (const m of mcpRows) {
+      if (!retiredRobotTools.has(m.id)) continue;
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-robot-version-retired",
+        `refused adding robot tool '${m.name}' to '${agent.name}': the robot version is not approved or is retired`,
+        { kind: "mcp_tool", refId: m.id }, "deny");
+      return reply.status(409).send({
+        error: "robot-version-retired",
+        tool: { kind: "mcp_tool", refId: m.id, name: `${m.serverName}/${m.name}` },
+        detail: `the robot version '${m.name}' is not approved or has been retired, so it cannot be given to an agent`,
+      });
     }
     const seen = new Set<string>();
     const rows = body.tools.filter((t) => {

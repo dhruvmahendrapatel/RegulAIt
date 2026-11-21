@@ -1,0 +1,15 @@
+{
+  "adr": "ADR-0333",
+  "lane": "E15",
+  "tracking": "ADR-0333 (lane E15): API-only detection routes, awaiting the screens on #453",
+  "gaps": {
+    "GET /v1/detection/rule-pack": "reads the active detection rule pack, its version, digest and verification state",
+    "PUT /v1/detection/rule-pack": "stores a new signed detection rule pack version (audited; a relaxation needs a settings_relax step-up)",
+    "GET /v1/detection/incidents": "pages detection incidents, newest first, filtered by status",
+    "GET /v1/detection/incidents/:incidentId": "one detection incident with its evidence chain (audit rows, row hashes, receipts)",
+    "PUT /v1/detection/incidents/:incidentId/status": "acknowledges or closes a detection incident (audited)",
+    "GET /v1/detection/quarantines": "pages device quarantines a quarantine_device response opened, newest first, filtered by status or device",
+    "GET /v1/detection/quarantines/:quarantineId": "one device quarantine with its lifecycle and device-enforcement state",
+    "POST /v1/detection/quarantines/:quarantineId/release": "a human admin releases a device quarantine early (settings_relax step-up; only under the normal execution dial; audited)"
+  }
+}

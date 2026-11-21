@@ -78,23 +78,11 @@ describe("the promptfoo image's inputs", () => {
   });
 
   it("B5-P2 [177]: the packages with a published advisory and NO patched release are never installed (optional only)", () => {
-    // `npm audit --omit=dev` on this lockfile (2026-10-10, promptfoo 0.124.1) reports 6 high: braces
-    // (<=3.0.3, the latest) through chokidar 3 → nunjucks' optional peer, and node-forge (<=1.4.0, the
-    // latest) through jks-js. No release of either is patched, and no promptfoo release drops them.
-    // Each is an OPTIONAL package here, so `npm ci --omit=optional` (the Dockerfile) never installs
-    // it, and `npm audit --omit=optional` (the installed closure) reports 0. If one becomes a
-    // required dependency, this fails and the advisory must be dealt with before the image ships.
-    // Every copy counts, hoisted or nested (any key ending in `node_modules/<name>`), and each name the
-    // advisories reach through must be present: a renamed or re-nested entry cannot make this pass vacuously.
-    // chokidar is matched only at 3.x (the braces path); promptfoo's own chokidar 5 has no braces dependency.
-    const advisoryPath: Array<{ name: string; version?: RegExp }> = [
-      { name: "braces" },
-      { name: "fill-range" },
-      { name: "picomatch" },
-      { name: "chokidar", version: /^3\./ },
-      { name: "jks-js" },
-      { name: "node-forge" },
-    ];
+    // node-forge (GHSA-86w9-cpqp-85rv) is patched since 1.4.1 and the lock resolves 1.4.2, but it and jks-js stay
+    // OPTIONAL, so `npm ci --omit=optional` (the Dockerfile) never installs them. If one becomes a required
+    // dependency, this fails. Every copy counts, hoisted or nested (any key ending in `node_modules/<name>`), and
+    // each name must be present: a renamed or re-nested entry cannot make this pass vacuously.
+    const advisoryPath: Array<{ name: string; version?: RegExp }> = [{ name: "jks-js" }, { name: "node-forge" }];
     const notOptional = (packages: typeof lock.packages): string[] => {
       const problems: string[] = [];
       for (const { name, version } of advisoryPath) {
@@ -105,16 +93,45 @@ describe("the promptfoo image's inputs", () => {
       return problems;
     };
     expect(notOptional(lock.packages)).toEqual([]);
-    // red: dropping the optional flag from either advisory package, or losing it from the lock, is caught
+    // red: dropping the optional flag from an advisory package, or losing it from the lock, is caught
     const forge = Object.keys(lock.packages).find((k) => k.endsWith("node_modules/node-forge"))!;
     const { optional: _flag, ...forgeRequired } = lock.packages[forge]!;
     expect(notOptional({ ...lock.packages, [forge]: forgeRequired })).toEqual([`${forge}@${lock.packages[forge]!.version}: not optional`]);
-    const nested = { ...lock.packages, "node_modules/some-dep/node_modules/braces": { version: "3.0.3" } };
-    expect(notOptional(nested)).toEqual(["node_modules/some-dep/node_modules/braces@3.0.3: not optional"]);
     const { [forge]: _dropped, ...withoutForge } = lock.packages;
     expect(notOptional(withoutForge)).toEqual(["node-forge: not in the lockfile (re-check the advisory path)"]);
     // the moderate advisory (smol-toml via an optional peer) is gone from the 0.124.1 closure
     expect(lock.packages["node_modules/smol-toml"]).toBeUndefined();
+  });
+
+  it("E25 (2026-11-16): the unused optional peers that reached deepmerge and braces resolve to the empty placeholder", () => {
+    // deepmerge GHSA-gcqx-w48m-w2h4 (no fixed release) came only through promptfoo's optional peer
+    // puppeteer-extra-plugin-stealth, and braces GHSA-vfj7-8cjw-p6xm (no fixed release) only through nunjucks'
+    // optional peer chokidar 3. Both peers are overridden to `absent-optional-peer` (no code, never installed), so
+    // neither chain is in the lockfile at all (owner decision 2026-11-16: remove, do not extend the acceptance).
+    const manifest = JSON.parse(readFileSync(path.join(root, "engines/promptfoo/package.json"), "utf8")) as {
+      optionalDependencies?: Record<string, string>;
+      overrides: Record<string, unknown>;
+    };
+    expect(manifest.optionalDependencies).toEqual({
+      chokidar: "file:absent-optional-peer",
+      "puppeteer-extra-plugin-stealth": "file:absent-optional-peer",
+    });
+    expect(manifest.overrides["puppeteer-extra-plugin-stealth"]).toBe("$puppeteer-extra-plugin-stealth");
+    expect(manifest.overrides["nunjucks"]).toEqual({ chokidar: "$chokidar" });
+    const placeholder = JSON.parse(readFileSync(path.join(root, "engines/promptfoo/absent-optional-peer/package.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.keys(placeholder).filter((k) => /dependencies|main|exports|bin|scripts/i.test(k))).toEqual([]);
+    const entries = lock.packages as Record<string, { optional?: boolean; link?: boolean; resolved?: string; dependencies?: unknown }>;
+    expect(entries["absent-optional-peer"]).toMatchObject({ optional: true });
+    expect(entries["absent-optional-peer"]!.dependencies).toBeUndefined();
+    for (const peer of ["chokidar", "puppeteer-extra-plugin-stealth"]) {
+      expect(entries[`node_modules/${peer}`]).toEqual({ resolved: "absent-optional-peer", link: true });
+    }
+    const gone = ["deepmerge", "braces", "fill-range", "picomatch", "puppeteer-extra-plugin", "puppeteer-extra-plugin-user-preferences", "puppeteer-extra-plugin-user-data-dir"];
+    expect(Object.keys(entries).filter((k) => gone.some((n) => k.endsWith(`node_modules/${n}`)))).toEqual([]);
+    // chokidar 3 is gone; promptfoo's own chokidar 5 (no braces dependency) is the only real copy
+    expect(Object.keys(entries).filter((k) => k.endsWith("node_modules/chokidar") && entries[k]!.link !== true).map((k) => `${k}@${lock.packages[k]!.version}`)).toEqual([
+      "node_modules/promptfoo/node_modules/chokidar@5.0.0",
+    ]);
   });
 
   it("a GPL package, an AGPL alternative-only expression or a missing licence is denied", () => {
