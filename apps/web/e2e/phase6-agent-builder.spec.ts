@@ -290,6 +290,14 @@ test("chat answers through the governed core with its cost, and the thread is in
   // Dana chose, as an admin does, through the identity grants route (stepped up, from her signed-in page)
   const configured = await readAgent(page);
   expect(configured.modelAgent?.id, "the agent has a model").toBeTruthy();
+  // ADR-0180 addendum (lane E51): the schedule turned on above makes the agent autonomous, and an autonomous agent
+  // whose autonomy floors are not in place is refused (403 autonomy_floor_unmet). This journey is about chat and
+  // spend, so Dana turns the schedule off again, which leaves the agent assist (the template seeds no tools)
+  for (const s of configured.schedules as Array<{ id: string; enabled: boolean }>) {
+    if (!s.enabled) continue;
+    const off = await page.request.patch(`/v1/builder/agents/${agentId}/schedules/${s.id}`, { headers: { "x-regulait-csrf": "1" }, data: { enabled: false } });
+    expect(off.status(), await off.text()).toBe(200);
+  }
   await grantBuilderAgentAsAdmin(
     state.baseUrl,
     state.passwords.admin,
