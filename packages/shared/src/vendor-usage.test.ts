@@ -19,6 +19,7 @@ import {
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
   chatGptDailyUsagePageSchema,
+  configNamesExternalId,
   normalizeChatGptDailyUsage,
   type ChatGptDailyUsageRow,
 } from "./vendor-usage.js";
@@ -370,5 +371,25 @@ describe("ADR-0322 slice 4b: ChatGPT Enterprise Daily Usage", () => {
   it("is never matched as already metered", () => {
     const [f] = normalizeChatGptDailyUsage([row()], { workspaceId: WS, window }).facts;
     expect(factOverlapsMetered("openai_codex", f!, vendorUsagePublicConfigSchemas.openai_codex.parse({ workspaceId: WS }))).toBe(false);
+  });
+});
+
+describe("ADR-0322 slice 4c: AWS CUR principal mode", () => {
+  const base = { region: "us-east-1", bucket: "acme-cur", exportName: "bedrock", roleArn: "arn:aws:iam::123456789012:role/regulait-cur" };
+  const id = "regulait-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  it("needs a role, accepts only a RegulAIt-shaped external id, and only in principal mode", () => {
+    const s = vendorUsagePublicConfigSchemas.aws_cur;
+    expect(s.safeParse({ ...base, credentialMode: "principal" }).success).toBe(true);
+    expect(s.safeParse({ ...base, credentialMode: "principal", externalId: id }).success).toBe(true);
+    expect(s.safeParse({ ...base, credentialMode: "principal", externalId: "chosen-by-admin" }).success).toBe(false);
+    expect(s.safeParse({ ...base, credentialMode: "federated", externalId: id }).success).toBe(false);
+    expect(s.safeParse({ ...base, credentialMode: "principal", roleArn: undefined }).success).toBe(false);
+    expect(vendorUsageSecretSchemas.aws_cur.safeParse({ mode: "principal" }).success).toBe(true);
+    expect(vendorUsageSecretSchemas.aws_cur.safeParse({ mode: "principal", externalId: id }).success).toBe(false);
+  });
+  it("spots an external id in a request in any spelling", () => {
+    for (const k of ["externalId", "ExternalId", "external_id", "EXTERNAL-ID"]) expect(configNamesExternalId({ [k]: "x" }), k).toBe(true);
+    expect(configNamesExternalId({ roleArn: "x" })).toBe(false);
+    expect(configNamesExternalId(null)).toBe(false);
   });
 });

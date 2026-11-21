@@ -33,7 +33,7 @@
  * `openapi-fetch`, MIT) was compared and not added, because it would vendor a 700 KB document and a new dependency for
  * one paginated GET whose fetch must still be the guarded one. The vendor's own sample code calls it with plain fetch.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import OpenAiSdk from "openai";
 import { AWS_CUR_MAX_OBJECT_BYTES, AwsCurReadError, awsCredentialProvider, readAwsCurPeriod } from "@regulait/cloud-discovery";
@@ -65,8 +65,10 @@ import {
   awsCurManifestSchema,
   awsCurPeriodBounds,
   chatGptDailyUsagePageSchema,
+  configNamesExternalId,
   cursorUsageEventsSchema,
   FEDERATION_AUDIENCES,
+  FEDERATION_AWS_PRINCIPAL_SUBJECT,
   normalizeAwsCurCsv,
   vendorUsageConnectorSubject,
   vendorUsageSecretSchemas,
@@ -101,7 +103,7 @@ import {
 } from "@regulait/shared";
 import { loadResolutionContext, scanFreeTexts } from "./cost-import.js";
 import { loadEgressAllowList } from "./custom-providers.js";
-import { FederationError, federationTokenMinter } from "./federation-signing-keys.js";
+import { awsPrincipalRoleArn, FederationError, federationTokenMinter } from "./federation-signing-keys.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import {
   createGuardedFetch,
@@ -505,6 +507,16 @@ interface AwsFetchContext {
 
 /** a federated connector stores no secret: this marker is its credential row, and revoking it stops the pull */
 export const AWS_CUR_FEDERATED_SECRET = JSON.stringify({ mode: "federated" });
+/** the same marker for principal mode (slice 4c): nothing secret exists on the connector either */
+export const AWS_CUR_PRINCIPAL_SECRET = JSON.stringify({ mode: "principal" });
+
+/** principal mode with RegulAIt's own AWS principal unset, or a stored connector without its external id */
+class AwsPrincipalUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AwsPrincipalUnavailableError";
+  }
+}
 
 /** a stored secret parsed for its connector's credential mode, or null when they disagree */
 function awsCurSecret(raw: string, config: AwsCurPublicConfig) {
@@ -515,6 +527,35 @@ function awsCurSecret(raw: string, config: AwsCurPublicConfig) {
     return null;
   }
   return parsed.mode === config.credentialMode ? parsed : null;
+}
+
+/**
+ * Principal mode (slice 4c): RegulAIt reaches its own AWS principal by web identity (a token for the shared principal
+ * subject, as ADR-0195's discovery does), then assumes the customer's role with this connector's external id. Both
+ * exchanges run on the guarded fetch; neither reads the default chain or instance metadata.
+ */
+function principalCredentials(config: AwsCurPublicConfig, fetcher: typeof fetch, ctx: AwsFetchContext) {
+  const principalArn = awsPrincipalRoleArn();
+  if (!principalArn) {
+    throw new AwsPrincipalUnavailableError("RegulAIt's own AWS principal is not configured (REGULAIT_AWS_PRINCIPAL_ROLE_ARN)");
+  }
+  if (!config.externalId) throw new AwsPrincipalUnavailableError("this connector has no external id; save its configuration again");
+  const source = awsCredentialProvider(
+    {
+      fetch: fetcher,
+      credential: { mode: "aws_web_identity", roleArn: principalArn, roleSessionName: "regulait-principal" },
+      oidcToken: federationTokenMinter(ctx.db, { dataKey: ctx.dataKey, subject: FEDERATION_AWS_PRINCIPAL_SUBJECT, allowedAudiences: [FEDERATION_AUDIENCES.aws] }),
+    },
+    config.region,
+  );
+  return awsCredentialProvider(
+    {
+      fetch: fetcher,
+      credential: { mode: "aws_assume_role", roleArn: config.roleArn!, externalId: config.externalId, roleSessionName: "regulait-vendor-usage" },
+      sourceCredentials: source,
+    },
+    config.region,
+  );
 }
 
 /**
@@ -535,7 +576,9 @@ async function fetchAwsCur(key: string, config: AwsCurPublicConfig, ctx: AwsFetc
   const credentials =
     secret.mode === "static"
       ? awsCredentialProvider({ fetch: fetcher, credential: { mode: "aws_static", accessKeyId: secret.accessKeyId, secretAccessKey: secret.secretAccessKey } }, config.region)
-      : awsCredentialProvider(
+      : secret.mode === "principal"
+        ? principalCredentials(config, fetcher, ctx)
+        : awsCredentialProvider(
           {
             fetch: fetcher,
             credential: { mode: "aws_web_identity", roleArn: config.roleArn!, roleSessionName: "regulait-vendor-usage" },
@@ -775,6 +818,7 @@ export async function runVendorUsagePull(
       if (e instanceof FederationError) {
         return refuse("no_credential", "this connector's federated credential cannot be used: cloud workload identity federation is off or has no issuer (ADR-0195)");
       }
+      if (e instanceof AwsPrincipalUnavailableError) return refuse("no_credential", `this connector's principal credential cannot be used: ${e.message}`);
     }
     const e = classifyError(err, 0);
     return finish("fail", {errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
@@ -1104,6 +1148,24 @@ function credentialView(cred: CredentialViewRow) {
   };
 }
 
+const EXTERNAL_ID_REFUSED = {
+  error: "external_id_not_accepted",
+  detail: "RegulAIt generates the AWS external id for a principal-mode connector; it is never chosen in a request",
+} as const;
+
+/**
+ * Principal mode's external id (slice 4c, ADR-0195 decision 3): generated once, kept while the connector stays in
+ * principal mode (so the customer's trust policy keeps holding), dropped when it leaves that mode.
+ */
+function withExternalId(vendor: VendorUsagePullVendor, cfg: PublicConfig, stored: unknown): void {
+  if (vendor !== "aws_cur") return;
+  const c = cfg as AwsCurPublicConfig;
+  if (c.credentialMode !== "principal") return;
+  const prior = (stored as { credentialMode?: unknown; externalId?: unknown } | null) ?? null;
+  c.externalId =
+    prior?.credentialMode === "principal" && typeof prior.externalId === "string" ? prior.externalId : `regulait-${randomUUID()}`;
+}
+
 function connectorView(c: VendorUsageConnectorRow, cred: CredentialViewRow | null) {
   return {
     id: c.id,
@@ -1203,8 +1265,10 @@ export function registerVendorUsagePullRoutes(
     const parsed = createBody.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send(bad("expected { vendor, name, config?, reason }"));
     const { vendor, name, reason } = parsed.data;
+    if (configNamesExternalId(parsed.data.config)) return reply.status(400).send(EXTERNAL_ID_REFUSED);
     const cfg = vendorUsagePublicConfigSchemas[vendor].safeParse(parsed.data.config);
     if (!cfg.success) return reply.status(400).send(bad(`config does not match the ${vendor} connector's schema`));
+    withExternalId(vendor, cfg.data, null);
     const exists = await db
       .select({ id: vendorUsageConnectors.id })
       .from(vendorUsageConnectors)
@@ -1230,8 +1294,10 @@ export function registerVendorUsagePullRoutes(
     if (!connector || !isPullVendor(connector.vendor)) return reply.status(404).send({ error: "not_found" });
     const parsed = configBody.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send(bad("expected { config, reason }"));
+    if (configNamesExternalId(parsed.data.config)) return reply.status(400).send(EXTERNAL_ID_REFUSED);
     const cfg = vendorUsagePublicConfigSchemas[connector.vendor].safeParse(parsed.data.config);
     if (!cfg.success) return reply.status(400).send(bad(`config does not match the ${connector.vendor} connector's schema`));
+    withExternalId(connector.vendor, cfg.data, connector.publicConfig);
     const { row, remarked } = await db.transaction(async (tx) => {
       const [updated] = await tx
         .update(vendorUsageConnectors)
@@ -1283,7 +1349,9 @@ export function registerVendorUsagePullRoutes(
           detail:
             cfg.credentialMode === "federated"
               ? `a federated AWS connector stores ${AWS_CUR_FEDERATED_SECRET} as its credential`
-              : 'a static AWS connector stores {"mode":"static","accessKeyId":"…","secretAccessKey":"…"}',
+              : cfg.credentialMode === "principal"
+                ? `a principal-mode AWS connector stores ${AWS_CUR_PRINCIPAL_SECRET} as its credential`
+                : 'a static AWS connector stores {"mode":"static","accessKeyId":"…","secretAccessKey":"…"}',
         });
       }
       staticAwsKey = cfg.credentialMode === "static";

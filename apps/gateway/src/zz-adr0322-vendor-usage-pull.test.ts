@@ -906,6 +906,77 @@ describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines (static key path; federa
   });
 });
 
+describe("ADR-0322 slice 4c: AWS CUR principal mode (RegulAIt's principal plus a generated external id)", () => {
+  const base = { region: "us-east-1", bucket: "acme-cur", prefix: "exports/ai", exportName: "bedrock" };
+  const ROLE = "arn:aws:iam::123456789012:role/regulait-cur";
+  const EXTERNAL_ID = /^regulait-[0-9a-f-]{36}$/;
+
+  it("generates the external id, refuses one from a request in any spelling, and keeps it across a config change", async () => {
+    for (const key of ["externalId", "ExternalId", "external_id"]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/vendor-usage/connectors",
+        headers: AUTH,
+        payload: { vendor: "aws_cur", name: `adr0322-ext-${key}-${RUN}`, config: { ...base, credentialMode: "principal", roleArn: ROLE, [key]: "regulait-chosen" }, reason: "adr0322 suite" },
+      });
+      expect([res.statusCode, res.json().error], key).toEqual([400, "external_id_not_accepted"]);
+    }
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "principal", roleArn: ROLE });
+    const first = (c as unknown as { config: { externalId?: string } }).config.externalId;
+    expect(first).toMatch(EXTERNAL_ID);
+
+    const put = (config: Record<string, unknown>) => app.inject({ method: "PUT", url: `/v1/vendor-usage/connectors/${c.id}/config`, headers: AUTH, payload: { config, reason: "adr0322 suite" } });
+    const kept = await put({ ...base, credentialMode: "principal", roleArn: ROLE, backfillMonths: 2 });
+    expect(kept.statusCode, kept.body).toBe(200);
+    expect(kept.json().connector.config.externalId).toBe(first);
+    expect((await put({ ...base, credentialMode: "principal", roleArn: ROLE, externalId: first })).json().error).toBe("external_id_not_accepted");
+
+    // leaving principal mode drops it; coming back generates a new one, so an old trust policy cannot be reused by accident
+    const fed = await put({ ...base, credentialMode: "federated", roleArn: ROLE });
+    expect(fed.json().connector.config.externalId).toBeUndefined();
+    const again = await put({ ...base, credentialMode: "principal", roleArn: ROLE });
+    expect(again.json().connector.config.externalId).toMatch(EXTERNAL_ID);
+    expect(again.json().connector.config.externalId).not.toBe(first);
+  });
+
+  it("stores only the principal marker, and refuses a pull while RegulAIt's own AWS principal is unset, without calling AWS", async () => {
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "principal", roleArn: ROLE });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "federated" }), { acknowledgeUnverifiedScope: true })).json().error).toBe("invalid_credential_shape");
+    expect((await storeKey(c.id, JSON.stringify({ mode: "principal" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+    const saved = process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN;
+    delete process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN;
+    try {
+      seen = [];
+      const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+      expect([run.status, run.errorCode]).toEqual(["refused", "no_credential"]);
+      expect(run.errorDetail).toMatch(/REGULAIT_AWS_PRINCIPAL_ROLE_ARN/);
+      expect(seen).toHaveLength(0);
+    } finally {
+      if (saved !== undefined) process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN = saved;
+    }
+  });
+
+  it("refuses a principal-mode pull while federation has no issuer, even with the principal configured, without calling AWS", async () => {
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "principal", roleArn: ROLE });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "principal" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+    const saved = { arn: process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN, url: process.env.REGULAIT_PUBLIC_URL };
+    process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN = "arn:aws:iam::210987654321:role/regulait-principal";
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      seen = [];
+      const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+      expect([run.status, run.errorCode]).toEqual(["refused", "no_credential"]);
+      expect(seen).toHaveLength(0);
+    } finally {
+      if (saved.arn === undefined) delete process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN;
+      else process.env.REGULAIT_AWS_PRINCIPAL_ROLE_ARN = saved.arn;
+      if (saved.url !== undefined) process.env.REGULAIT_PUBLIC_URL = saved.url;
+    }
+  });
+});
+
 describe("ADR-0322: row-level security on the four tables (ADR-0234, #861 review)", () => {
   const TABLES = ["vendor_usage_connectors", "vendor_usage_credentials", "vendor_usage_pull_policy", "vendor_usage_pull_runs"] as const;
   const countAs = (scope: { reason?: string; userId?: string }) =>
