@@ -1172,6 +1172,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/sources/:sourceId/control-credential": "internal",
   "PUT /v1/discovery/sources/:sourceId/control-credential": "internal",
   "DELETE /v1/discovery/sources/:sourceId/control-credential": "internal",
+  "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "internal",
+  "GET /v1/discovery/control-credential/delegated/callback": "internal",
   // ADR-0332 (lane E14): the endpoint AI add-on inventory
   // ADR-0342 (lane E23): process analytics
   "GET /v1/process-analytics/templates": "internal",
@@ -2670,6 +2672,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
   "PUT /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
   "DELETE /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "shadow-ai",
+  "GET /v1/discovery/control-credential/delegated/callback": "shadow-ai",
   "GET /v1/process-analytics/templates": "reports",
   "GET /v1/process-analytics/stages": "reports",
   "GET /v1/process-analytics/heatmap": "reports",

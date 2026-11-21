@@ -41,6 +41,7 @@
     "@azure/arm-resources": "^5.2.0",
     "@azure/identity": "^4.14.1",
     "@azure/keyvault-certificates": "^4.11.0",
+    "@azure/msal-node": "7.1.1",
     "@fastify/rate-limit": "^11.2.1",
     "@google-cloud/backupdr": "^0.13.0",
     "@google-cloud/certificate-manager": "^3.3.0",

@@ -291,6 +291,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
+  { table: "vendor_control_delegated_requests", column: "code_verifier_ciphertext", what: "delegated vendor control sign-in PKCE verifiers (ADR-0338)" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
   // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid

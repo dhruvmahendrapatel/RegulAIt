@@ -1,7 +1,7 @@
 {
   "adr": "ADR-0338",
   "lane": "E19",
-  "tracking": "ADR-0338 (lane E19): vendor agent control admin routes, API-only in slices 1 and 1b; screen requested on #453",
+  "tracking": "ADR-0338 (lane E19): vendor agent control admin routes, API-only in slices 1, 1b and 1c; screen requested on #453",
   "gaps": {
     "POST /v1/vendor-agent-control/actions": "requests a disable, quarantine or restore of a discovered vendor agent (settings_relax step-up, then a second administrator's approval; audited; off until the org switch is on)",
     "GET /v1/vendor-agent-control/actions": "lists vendor agent control actions, newest first, with each one's lifecycle",
@@ -11,6 +11,8 @@
     "POST /v1/vendor-agent-control/actions/:id/cancel": "cancels an action before it runs and withdraws its approval (audited, no step-up)",
     "GET /v1/discovery/sources/:sourceId/control-credential": "the source's vendor control credential (purpose platform_write): its mode, app, expiry and whether it is usable, never a secret",
     "PUT /v1/discovery/sources/:sourceId/control-credential": "stores or replaces a source's separate vendor control credential (settings_relax step-up bound to the source, mode and app; audited)",
-    "DELETE /v1/discovery/sources/:sourceId/control-credential": "revokes a source's vendor control credential and destroys its stored secret (audited, no step-up)"
+    "DELETE /v1/discovery/sources/:sourceId/control-credential": "revokes a source's vendor control credential and destroys its stored secret (audited, no step-up)",
+    "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "starts a delegated (named admin) sign-in for a source's vendor control credential: answers the Entra authorization URL (settings_relax step-up bound to the source, account, app and expiry; audited)",
+    "GET /v1/discovery/control-credential/delegated/callback": "the vendor's sign-in redirect: redeems the code with the server-side PKCE verifier and stores the named account's delegated control credential (audited)"
   }
 }

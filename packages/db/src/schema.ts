@@ -20113,4 +20113,53 @@ export const vendorAgentActions = pgTable(
   ],
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
+
+/**
+ * ADR-0338 slice 1c: one delegated sign-in an admin started (pending migration vendor_control_delegated_requests). The
+ * state, nonce and PKCE verifier stay server side (the verifier as a data-key envelope, CIPHERTEXT_COLUMNS), so an
+ * intercepted redirect cannot be redeemed. At most 10 minutes; spent once (the guard trigger: only `used_at` is set,
+ * once, and the verifier is destroyed with it).
+ */
+export const vendorControlDelegatedRequests = pgTable(
+  "vendor_control_delegated_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    state: text("state").notNull(),
+    nonce: text("nonce").notNull(),
+    codeVerifierCiphertext: text("code_verifier_ciphertext"),
+    // 3NF exception (ADR-0200 addendum): the point-in-time copy of what the start step-up was bound to; the callback
+    // stores exactly these, never a live reference
+    tenantId: text("tenant_id").notNull(),
+    clientId: text("client_id").notNull(),
+    accountUpn: text("account_upn").notNull(),
+    expiresInDays: integer("expires_in_days").notNull(),
+    replacesCredentialId: uuid("replaces_credential_id").references(() => discoveryCredentials.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("vendor_control_delegated_requests_state_uq").on(t.state),
+    check("vendor_control_delegated_requests_state_check", sql`${t.state} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("vendor_control_delegated_requests_nonce_check", sql`${t.nonce} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check(
+      "vendor_control_delegated_requests_ids_check",
+      sql`${t.tenantId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.clientId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check("vendor_control_delegated_requests_account_check", sql`char_length(${t.accountUpn}) BETWEEN 3 AND 320 AND ${t.accountUpn} = lower(${t.accountUpn})`),
+    check("vendor_control_delegated_requests_days_check", sql`${t.expiresInDays} BETWEEN 1 AND 90`),
+    check("vendor_control_delegated_requests_expiry_check", sql`${t.expiresAt} > ${t.requestedAt} AND ${t.expiresAt} <= ${t.requestedAt} + interval '10 minutes'`),
+    check("vendor_control_delegated_requests_verifier_check", sql`(${t.usedAt} IS NULL) = (${t.codeVerifierCiphertext} IS NOT NULL)`),
+    index("vendor_control_delegated_requests_source_idx").on(t.sourceId, t.requestedAt),
+    index("vendor_control_delegated_requests_expires_idx").on(t.expiresAt),
+  ],
+);
+export type VendorControlDelegatedRequestRow = typeof vendorControlDelegatedRequests.$inferSelect;
 // ===== end ADR-0338 =====

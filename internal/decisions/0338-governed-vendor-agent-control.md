@@ -430,3 +430,53 @@ unchanged; this section records where the build departs from it or fills in what
 
   msal-node stays the choice, as section 3a decided, because it is Entra's own client. No new dependency is added in
   slice 1b.
+
+## As built (slice 1c) — 2026-11-21
+
+Slice 1c connects a delegated control credential (section 3a) and uses it. The decision text above is unchanged; this
+section records where the build fills in what it left open.
+
+- **Starting a sign-in.** `POST /v1/discovery/sources/:sourceId/control-credential/delegated` takes `{tenantId,
+  clientId, account, expiresInDays (1 to 90, 30 by default), replacesCredentialId}`.
+  - It is refused while `vendor_agent_control_delegated_enabled` is off (`credential_mode_disabled`), and for a vendor
+    whose control does not list `delegated` or declares no `delegatedScope` (`credential_mode_not_accepted`).
+  - The tenant must be the source's, the app must not be the read app, and the replaced row must be the live one.
+  - The `settings_relax` step-up is bound to `{op: "vendor_control_delegated", sourceId, account, tenantId, clientId,
+    expiresInDays, replacesCredentialId}`, which extends the binding section 3a named with the fields the callback
+    then stores.
+  - The answer is the Entra authorization URL, built by `@azure/msal-node` from static metadata (no network call):
+    the PKCE S256 challenge, a 256-bit state and nonce, `login_hint` = the account, `prompt=login`.
+- **The pending sign-in stays server side.** Pending migration `vendor_control_delegated_requests` keeps the state,
+  the nonce and the PKCE verifier, the verifier encrypted with the data key (`CIPHERTEXT_COLUMNS`). The verifier never
+  reaches the browser, so an intercepted redirect cannot be redeemed. A row lives at most 10 minutes (a CHECK on the
+  database's own clock), is spent once whatever the outcome (a guard trigger: only `used_at`, set once, with the
+  verifier destroyed), has row-level security (admin, or the `system_task` / `migration` reason) and refuses TRUNCATE.
+- **The callback.** `GET /v1/discovery/control-credential/delegated/callback` is the redirect URI the customer's app
+  registration names.
+  - Only the admin who started the sign-in can complete it (`delegated_request_not_yours`, audited, and the request
+    stays open for that admin). A used, expired or declined request stores nothing.
+  - The code is redeemed with the verifier and nonce. The ID token comes from the token endpoint's own TLS response
+    (OIDC Core §3.1.3.7). msal checks the nonce, and the route then requires the tenant, the account's UPN and the
+    nonce to match what the step-up was bound to (`delegated_account_mismatch`).
+  - A sign-in that returns no refresh token (offline access not granted) stores nothing (`delegated_no_refresh_token`).
+  - The store transaction re-checks the opt-in and the replaced row (`credential_changed` when it moved), revokes the
+    old row with its secret destroyed, and stores the `delegated` row: `public_config` holds the tenant, app, the
+    account's object id and UPN; `secret_ciphertext` holds the refresh token; `expires_at` is `now()` plus the chosen
+    days. It is audited with the account's object id and UPN.
+- **Client authentication.** The confidential client authenticates with a federated assertion for the control subject
+  (`vendorAgentControlSubject`), never a stored client secret. The row's one ciphertext is the refresh token, so a
+  delegated credential has no second secret to hold.
+- **Use, and the rotation.** The resolver redeems the refresh token for the control's `delegatedScope` only (Copilot
+  Studio: `https://api.powerplatform.com/CopilotStudio.AdminActions.Invoke`). msal-node is told to keep the rotated
+  refresh token (`forceCache`, since each use is a fresh client), and the one Entra returns replaces the stored one in
+  the same row. The update is conditional on the row still holding the token just redeemed, so a concurrent rotation
+  is not overwritten. A refreshed token for another account is refused (`delegated_account_mismatch`) and stores
+  nothing. Token failures keep only the AADSTS code, as the app-only path does.
+- **The network.** msal-node's `networkClient` is the tenant's guarded fetch narrowed by `allowListedFetch` to one
+  call, POST `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`, and its logger is silenced.
+- **The contract.** `ControlTokenSpec` gains an optional `delegatedScope`. The store route (`PUT …/control-credential`)
+  refuses `delegated` with `409 delegated_needs_sign_in`, pointing to the sign-in route.
+- **Open source (ADR-0176).** `@azure/msal-node` 7.1.1 (MIT) becomes a direct, exact-pinned gateway dependency. It was
+  already in the lockfile at that version through `@azure/identity`. No other dependency is added.
+- **Not swept.** Spent or expired request rows are not deleted. A spent row holds no secret, and an unspent expired one
+  keeps only its encrypted verifier until its source is deleted. This is recorded as a triage-low candidate, not built.

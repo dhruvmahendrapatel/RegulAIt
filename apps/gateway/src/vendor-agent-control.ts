@@ -121,6 +121,8 @@ export interface VendorAgentControlDeps {
   /** TEST SEAMS for the guarded fetch (never set in production) */
   fetchImpl?: typeof fetch;
   resolve?: EgressResolver;
+  /** TEST SEAM: the federation token supplier for a source's control subject (default: the federation issuer) */
+  federationToken?: (db: Db, sourceId: string) => (audience: string) => Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +350,8 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
     });
-  const credentialFor: ControlCredentialResolver = deps.credentialFor ?? controlCredentialResolver({ ...(deps.dataKey ? { dataKey: deps.dataKey } : {}), fetch: guardedFetch });
-  registerVendorControlCredentialRoutes(app, db, { controls, ...(deps.dataKey ? { dataKey: deps.dataKey } : {}) });
+  const credentialFor: ControlCredentialResolver = deps.credentialFor ?? controlCredentialResolver({ ...(deps.dataKey ? { dataKey: deps.dataKey } : {}), ...(deps.federationToken ? { federationToken: deps.federationToken } : {}), fetch: guardedFetch });
+  registerVendorControlCredentialRoutes(app, db, { controls, fetch: guardedFetch, ...(deps.dataKey ? { dataKey: deps.dataKey } : {}), ...(deps.federationToken ? { federationToken: deps.federationToken } : {}) });
   const lookupRefusal = (l: Extract<ControlCredentialLookup, { ok: false }>) => refusal(409, l.code, l.detail);
   /**
    * The token, obtained BEFORE the action moves and outside any transaction (a token failure changes nothing), for

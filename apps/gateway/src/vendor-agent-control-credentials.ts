@@ -10,7 +10,7 @@
  * step-up bound to the source, the mode, the app and the row it replaces, audited in the same transaction. Federated
  * (Entra workload identity, no stored secret) is the default; a stored client secret is accepted on the same step-up;
  * a delegated (named admin) credential is refused here, since it is connected through the vendor's sign-in flow
- * (ADR-0338 §3a, `@azure/msal-node`), which is slice 1c. Revoking is free and audited. The write app must not be the
+ * (ADR-0338 §3a, `@azure/msal-node`, slice 1c: vendor-agent-control-delegated.ts). Revoking is free and audited. The write app must not be the
  * source's read app, and it must be in the source's tenant.
  *
  * Routes (admin-only, API-only: KNOWN_UI_GAPS against #453):
@@ -37,7 +37,8 @@ import { errMessage } from "./err-serializer.js";
 import { federationTokenMinter } from "./federation-signing-keys.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
-import type { ControlTokenSpec, VendorAgentControl } from "./vendor-agent-control-contract.js";
+import type { VendorAgentControl } from "./vendor-agent-control-contract.js";
+import { DelegatedTokenError, delegatedAccessToken, registerDelegatedControlCredentialRoutes } from "./vendor-agent-control-delegated.js";
 
 // ---------------------------------------------------------------------------
 // The loader
@@ -110,11 +111,12 @@ export function controlCredentialResolver(deps: ControlTokenDeps): ControlCreden
     const problem = await usabilityProblem(db, row, control);
     if (problem) return problem;
     const cred = row.cred;
-    return { ok: true, credential: { id: cred.id, mode: cred.credentialMode, acquire: (signal) => acquireToken(db, deps, cred, control.token, signal) } };
+    return { ok: true, credential: { id: cred.id, mode: cred.credentialMode, acquire: (signal) => acquireToken(db, deps, cred, control, signal) } };
   };
 }
 
-async function acquireToken(db: Db, deps: ControlTokenDeps, cred: DiscoveryCredentialRow, spec: ControlTokenSpec, signal: AbortSignal): Promise<string> {
+async function acquireToken(db: Db, deps: ControlTokenDeps, cred: DiscoveryCredentialRow, control: VendorAgentControl, signal: AbortSignal): Promise<string> {
+  const spec = control.token;
   if (spec.provider !== "entra") throw new ControlTokenError("token_provider_unsupported", "this control's token provider is not supported");
   const tenantId = cred.publicConfig.tenantId;
   const clientId = cred.publicConfig.clientId;
@@ -138,7 +140,13 @@ async function acquireToken(db: Db, deps: ControlTokenDeps, cred: DiscoveryCrede
     credential = { mode: "azure_federated", tenantId, clientId };
     oidcToken = (deps.federationToken ?? defaultFederationToken(deps.dataKey))(db, cred.sourceId);
   } else {
-    throw new ControlTokenError("delegated_connect_not_available", "a delegated control credential is connected through the vendor's sign-in flow, which is not built yet (ADR-0338 slice 1c)");
+    // ADR-0338 slice 1c: the named admin's refresh token, redeemed through msal-node; it rotates on use
+    try {
+      return await delegatedAccessToken(db, deps, cred, control, signal);
+    } catch (err) {
+      if (err instanceof DelegatedTokenError) throw new ControlTokenError(err.code, err.message);
+      throw new ControlTokenError("control_token_failed", "the delegated token request failed");
+    }
   }
   const tokenSource = azureCredential({ fetch: await deps.fetch(), credential, ...(oidcToken ? { oidcToken } : {}) });
   try {
@@ -220,7 +228,19 @@ function view(row: { cred: DiscoveryCredentialRow; ageDays: number }, problem: C
   };
 }
 
-export function registerVendorControlCredentialRoutes(app: FastifyInstance, db: Db, opts: { controls: Readonly<Record<string, VendorAgentControl>>; dataKey?: string }): void {
+export function registerVendorControlCredentialRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { controls: Readonly<Record<string, VendorAgentControl>>; dataKey?: string; fetch: () => Promise<typeof fetch>; federationToken?: ControlTokenDeps["federationToken"] },
+): void {
+  registerDelegatedControlCredentialRoutes(app, db, {
+    controls: opts.controls,
+    controlForKind,
+    liveControlCredentialRow,
+    fetch: opts.fetch,
+    ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+    ...(opts.federationToken ? { federationToken: opts.federationToken } : {}),
+  });
   const badRequest = (reply: FastifyReply, err: z.ZodError) =>
     reply.status(400).send({ error: "invalid_request", detail: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
   const send = (reply: FastifyReply, r: Refusal) => reply.status(r.status).send(r.body);
@@ -248,7 +268,7 @@ export function registerVendorControlCredentialRoutes(app: FastifyInstance, db: 
     const userId = personOf(req);
     if (!userId) return send(reply, PERSON);
     if (b.mode === "delegated") {
-      return send(reply, refusal(409, "delegated_connect_not_available", "a delegated control credential is connected through the vendor's sign-in flow as the named admin (ADR-0338 §3a), which is not built yet; store a federated service principal instead"));
+      return send(reply, refusal(409, "delegated_needs_sign_in", "a delegated control credential is connected through the vendor's sign-in flow as the named admin (ADR-0338 §3a): POST .../control-credential/delegated"));
     }
     if (b.mode === "federated" && b.secret !== undefined) return send(reply, refusal(400, "federated_has_no_secret", "a federated credential is short-lived and has no stored secret"));
     if (b.mode === "static" && b.secret === undefined) return send(reply, refusal(400, "secret_required", "a static credential needs its client secret"));

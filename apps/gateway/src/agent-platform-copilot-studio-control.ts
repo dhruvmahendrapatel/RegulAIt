@@ -22,6 +22,8 @@ import type { ControlContext, VendorAgentControl, VendorAgentRef } from "./vendo
 export const POWER_PLATFORM_API_ORIGIN = "https://api.powerplatform.com";
 /** the app-only token scope for the Power Platform API (a delegated token carries CopilotStudio.AdminActions.Invoke) */
 export const POWER_PLATFORM_API_SCOPE = "https://api.powerplatform.com/.default";
+/** ADR-0338 slice 1c: the one delegated permission the quarantine calls document */
+export const POWER_PLATFORM_DELEGATED_SCOPE = "https://api.powerplatform.com/CopilotStudio.AdminActions.Invoke";
 const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const GUID_PATH = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const BASE = `^/copilotstudio/environments/${GUID_PATH}/bots/${GUID_PATH}/api/botQuarantine`;
@@ -89,7 +91,7 @@ export const COPILOT_STUDIO_CONTROL: VendorAgentControl = Object.freeze({
   actions: Object.freeze(["quarantine"] as const),
   // §3a: a federated service principal is preferred; a stored secret is a step-up; delegated only by admin opt-in
   acceptedModes: Object.freeze(["federated", "static", "delegated"] as const),
-  token: Object.freeze({ provider: "entra" as const, scope: POWER_PLATFORM_API_SCOPE }),
+  token: Object.freeze({ provider: "entra" as const, scope: POWER_PLATFORM_API_SCOPE, delegatedScope: POWER_PLATFORM_DELEGATED_SCOPE }),
   locatorOf(vendorAttributes: Readonly<Record<string, unknown>>): string | null {
     const v = Object.hasOwn(vendorAttributes, "environmentId") ? vendorAttributes.environmentId : undefined;
     return typeof v === "string" && GUID.test(v) ? v.toLowerCase() : null;
