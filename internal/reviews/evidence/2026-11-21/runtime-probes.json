@@ -1,0 +1,236 @@
+{
+  "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+  "mode": "Headless Chromium, synthetic API fixtures; observations reproduce defects, not a passing functional/security sign-off. No live gateway/provider or real customer data. Native OS IME remains untested.",
+  "observations": {
+    "scorer-stepup": {
+      "attempts": 1,
+      "optionsCalls": 0,
+      "verifies": 0,
+      "dialogs": 0,
+      "alerts": [
+        "Confirm it's you to continue: this action needs a fresh passkey, authenticator code or sign-in \u2014 this action needs you to confirm it's you"
+      ]
+    },
+    "composer-draft": {
+      "afterRefusal": "",
+      "alerts": [
+        "Agent spend limit reached \u2014 builder agent 'Intake reviewer' has spent $50.0000 of its $50.00 monthly limit; the owner can raise the limit or wait for next month"
+      ]
+    },
+    "mobile-focus": [
+      {
+        "text": "Filter navigation",
+        "tag": "INPUT",
+        "inAside": true,
+        "left": -236,
+        "right": -13,
+        "width": 223,
+        "viewport": 375
+      },
+      {
+        "text": "Home",
+        "tag": "A",
+        "inAside": true,
+        "left": -240,
+        "right": -9,
+        "width": 231,
+        "viewport": 375
+      },
+      {
+        "text": "Switch suite",
+        "tag": "SELECT",
+        "inAside": true,
+        "left": -232,
+        "right": -17,
+        "width": 215,
+        "viewport": 375
+      },
+      {
+        "text": "Evaluations",
+        "tag": "A",
+        "inAside": true,
+        "left": -240,
+        "right": -9,
+        "width": 231,
+        "viewport": 375
+      },
+      {
+        "text": "Red-teaming",
+        "tag": "A",
+        "inAside": true,
+        "left": -240,
+        "right": -9,
+        "width": 231,
+        "viewport": 375
+      },
+      {
+        "text": "External scorers",
+        "tag": "A",
+        "inAside": true,
+        "left": -240,
+        "right": -9,
+        "width": 231,
+        "viewport": 375
+      },
+      {
+        "text": "Annotation queues",
+        "tag": "A",
+        "inAside": true,
+        "left": -240,
+        "right": -9,
+        "width": 231,
+        "viewport": 375
+      },
+      {
+        "text": "Toggle navigation",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 24,
+        "right": 54.9375,
+        "width": 30.9375,
+        "viewport": 375
+      },
+      {
+        "text": "SearchCtrl K",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 70.9375,
+        "right": 155.78125,
+        "width": 84.84375,
+        "viewport": 375
+      },
+      {
+        "text": "Switch to dark theme",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 187.78125,
+        "right": 218.71875,
+        "width": 30.9375,
+        "viewport": 375
+      },
+      {
+        "text": "AAAvery Admin",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 234.71875,
+        "right": 351,
+        "width": 116.28125,
+        "viewport": 375
+      },
+      {
+        "text": "What is the External scorers page?",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 199.515625,
+        "right": 223.515625,
+        "width": 24,
+        "viewport": 375
+      },
+      {
+        "text": "What is an external score?",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 273.28125,
+        "right": 297.28125,
+        "width": 24,
+        "viewport": 375
+      },
+      {
+        "text": "What is Register a scoring endpoint?",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 220.046875,
+        "right": 244.046875,
+        "width": 24,
+        "viewport": 375
+      },
+      {
+        "text": "What is Egress allow-list empty?",
+        "tag": "BUTTON",
+        "inAside": false,
+        "left": 225.203125,
+        "right": 249.203125,
+        "width": 24,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 41,
+        "right": 216,
+        "width": 175,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 41,
+        "right": 334,
+        "width": 293,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 41,
+        "right": 252.5625,
+        "width": 211.5625,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 45,
+        "right": 58,
+        "width": 13,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 45,
+        "right": 58,
+        "width": 13,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 45,
+        "right": 58,
+        "width": 13,
+        "viewport": 375
+      },
+      {
+        "text": "",
+        "tag": "INPUT",
+        "inAside": false,
+        "left": 45,
+        "right": 58,
+        "width": 13,
+        "viewport": 375
+      }
+    ],
+    "nested-palette": {
+      "paletteCount": 1,
+      "activeInNativeDialog": true,
+      "nativeDialogs": 1
+    },
+    "stale-sample": {
+      "greenAfterEdit": true,
+      "greenAfterFailedRerun": true,
+      "calls": 2
+    },
+    "ime-enter": {
+      "inputAfterComposingEnter": "",
+      "chatPosts": 1,
+      "syntheticCompositionEvent": true
+    }
+  }
+}

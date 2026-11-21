@@ -1,0 +1,3717 @@
+{
+  "sourceCommit": "9797d6f42798689d896103b9e9ce04278e01a4ad",
+  "command": "E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=chromium a11y-routes.ent.spec.ts responsive.ent.spec.ts states.ent.spec.ts --reporter=json",
+  "stats": {
+    "startTime": "2026-11-21T15:00:10.677Z",
+    "duration": 963449.0179999999,
+    "expected": 445,
+    "skipped": 5,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "scope": "Synthetic admin session and generic API error/loading responses. Public pages signed out. Axe checks light/dark; layout widths1280,1440,1920,1024,768. This does not cover populated per-page workflows or member/denied roles.",
+  "records": [
+    {
+      "category": "states",
+      "key": "/",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/chat",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/models",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/inbox",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/agents",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/agents/:agentId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/templates",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/templates/:templateId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/integrations",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/skills",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/usage",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/prompts",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/prompts/:promptId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/builder/playground",
+      "findings": {
+        "error-not-shown": 1
+      }
+    },
+    {
+      "category": "states",
+      "key": "/runs",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/runs/:runId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/workflows",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/workflows/:instanceId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/inbox",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/inbox/annotations/:itemId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/projects",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/projects/:projectId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/projects/:projectId/context",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/projects/:projectId/context/graph",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/context",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/spend",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/account",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/account/sessions",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/account/passkeys",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/incidents",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/incidents/:incidentId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/feedback",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/feedback/:useCaseId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/use-cases/:id",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/users",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/roles",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/teams",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/client-access",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/sso",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/sso/link-requests",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/provisioning",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/group-mappings",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/virtual-keys",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/credentials",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/agent-credentials",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/workload-identities",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/workload-identities/identities",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/workload-identities/:identityId/proposals",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/rules",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/simulation",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/abac-policies",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/guardrails",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/content-trust",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/model-policy",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/evals",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/annotation-queues",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/model-risk",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/model-risk/fairness",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/use-cases",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/intake",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/review-policy",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/trust",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/alerts",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/graph",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/regulatory",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/regulatory/sources",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/decision-regression",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/governance/literacy",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/vendors",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/vendors/questionnaires",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/risks",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/inventory",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/certification",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/recommendations",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/sod",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/posture",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/redteam",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/reports",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/prompt-versions",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/approvals",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/review-workbench",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/audit",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/lineage",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/traces",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/monitoring",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/regulait-llm",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/shadow-ai",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/shadow-ai/discovery-sources",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/shadow-ai/discovery-sources/runs",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/shadow-ai/discovery-sources/tokens",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/shadow-ai/discovery-sources/devices",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/copilot",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/chatops",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/chatops/identity-links",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/workflow-templates",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/agents",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/agents/catalog",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/agents/stewardship",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/model-credentials",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/custom-providers",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/external-scorers",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/connectors",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/mcp-servers",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/mcp-servers/registries/:registryId/entries",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/mcp-servers/bundles",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/mcp-servers/bundles/:bundleId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/webhooks",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/siem",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/admission",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/git-connections",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/pm-connections",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/deploy-targets",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/engines",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/engines/placements",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/engines/executors/:executorId/attestations",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/cost",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/cost-consolidation",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/cost-consolidation/imports",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/cost-consolidation/imports/:importId",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/spend-monitor",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/billing",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/optimization",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/compliance",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/compliance-packs",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/compliance-packs/imports",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/trust-publishing",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure/resources",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure/findings",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure/certificates",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure/patches",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/infrastructure/backups",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/privacy",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/privacy/requests",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/organization",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/retention",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/licensing",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/licensing/verifications",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/data-key",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/scheduler",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/enforcement-posture",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/execution",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/setup",
+      "findings": {}
+    },
+    {
+      "category": "states",
+      "key": "/admin/first-run",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/login",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/f/:token",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/trust",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/audit",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/supplier",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/chat",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/models",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/inbox",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/agents",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/agents/:agentId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/templates",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/templates/:templateId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/integrations",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/skills",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/usage",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/prompts",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/prompts/:promptId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/builder/playground",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/runs",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/runs/:runId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/workflows",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/workflows/:instanceId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/inbox",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/inbox/annotations/:itemId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/projects",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/projects/:projectId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/projects/:projectId/context",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/projects/:projectId/context/graph",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/context",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/spend",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/account",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/account/sessions",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/account/passkeys",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/incidents",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/incidents/:incidentId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/feedback",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/feedback/:useCaseId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/use-cases/:id",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/users",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/roles",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/teams",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/client-access",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/sso",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/sso/link-requests",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/provisioning",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/group-mappings",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/virtual-keys",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/credentials",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/agent-credentials",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/workload-identities",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/workload-identities/identities",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/workload-identities/:identityId/proposals",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/rules",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/simulation",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/abac-policies",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/guardrails",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/content-trust",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/model-policy",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/evals",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/annotation-queues",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/model-risk",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/model-risk/fairness",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/use-cases",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/intake",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/review-policy",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/trust",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/alerts",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/graph",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/regulatory",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/regulatory/sources",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/decision-regression",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/governance/literacy",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/vendors",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/vendors/questionnaires",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/risks",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/inventory",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/certification",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/recommendations",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/sod",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/posture",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/redteam",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/reports",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/prompt-versions",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/approvals",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/review-workbench",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/audit",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/lineage",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/traces",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/monitoring",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/regulait-llm",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/shadow-ai",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/shadow-ai/discovery-sources",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/shadow-ai/discovery-sources/runs",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/shadow-ai/discovery-sources/tokens",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/shadow-ai/discovery-sources/devices",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/copilot",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/chatops",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/chatops/identity-links",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/workflow-templates",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/agents",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/agents/catalog",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/agents/stewardship",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/model-credentials",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/custom-providers",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/external-scorers",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/connectors",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/mcp-servers",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/mcp-servers/registries/:registryId/entries",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/mcp-servers/bundles",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/mcp-servers/bundles/:bundleId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/webhooks",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/siem",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/admission",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/git-connections",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/pm-connections",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/deploy-targets",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/engines",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/engines/placements",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/engines/executors/:executorId/attestations",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/cost",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/cost-consolidation",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/cost-consolidation/imports",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/cost-consolidation/imports/:importId",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/spend-monitor",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/billing",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/optimization",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/compliance",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/compliance-packs",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/compliance-packs/imports",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/trust-publishing",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure/resources",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure/findings",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure/certificates",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure/patches",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/infrastructure/backups",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/privacy",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/privacy/requests",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/organization",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/retention",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/licensing",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/licensing/verifications",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/data-key",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/scheduler",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/enforcement-posture",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/execution",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/setup",
+      "findings": {}
+    },
+    {
+      "category": "responsive",
+      "key": "chromium|/admin/first-run",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/chat",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/models",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/inbox",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/agents",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/agents/:agentId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/templates",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/templates/:templateId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/integrations",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/skills",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/usage",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/prompts",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/prompts/:promptId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/builder/playground",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/runs",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/runs/:runId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/workflows",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/workflows/:instanceId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/inbox",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/inbox/annotations/:itemId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/projects",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/projects/:projectId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/projects/:projectId/context",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/projects/:projectId/context/graph",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/context",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/spend",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/account",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/account/sessions",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/account/passkeys",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/incidents",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/incidents/:incidentId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/feedback",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/feedback/:useCaseId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/use-cases/:id",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/users",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/roles",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/teams",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/client-access",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/sso",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/sso/link-requests",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/provisioning",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/group-mappings",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/virtual-keys",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/credentials",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/agent-credentials",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/workload-identities",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/workload-identities/identities",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/workload-identities/:identityId/proposals",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/rules",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/simulation",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/abac-policies",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/guardrails",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/content-trust",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/model-policy",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/evals",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/annotation-queues",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/model-risk",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/model-risk/fairness",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/use-cases",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/intake",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/review-policy",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/trust",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/alerts",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/graph",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/regulatory",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/regulatory/sources",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/decision-regression",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/governance/literacy",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/vendors",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/vendors/questionnaires",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/risks",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/inventory",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/certification",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/recommendations",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/sod",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/posture",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/redteam",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/reports",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/prompt-versions",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/approvals",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/review-workbench",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/audit",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/lineage",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/traces",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/monitoring",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/regulait-llm",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/shadow-ai",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/shadow-ai/discovery-sources",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/shadow-ai/discovery-sources/runs",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/shadow-ai/discovery-sources/tokens",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/shadow-ai/discovery-sources/devices",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/copilot",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/chatops",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/chatops/identity-links",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/workflow-templates",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/agents",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/agents/catalog",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/agents/stewardship",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/model-credentials",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/custom-providers",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/external-scorers",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/connectors",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/mcp-servers",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/mcp-servers/registries/:registryId/entries",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/mcp-servers/bundles",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/mcp-servers/bundles/:bundleId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/webhooks",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/siem",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/admission",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/git-connections",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/pm-connections",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/deploy-targets",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/engines",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/engines/placements",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/engines/executors/:executorId/attestations",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/cost",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/cost-consolidation",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/cost-consolidation/imports",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/cost-consolidation/imports/:importId",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/spend-monitor",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/billing",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/optimization",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/compliance",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/compliance-packs",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/compliance-packs/imports",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/trust-publishing",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure/resources",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure/findings",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure/certificates",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure/patches",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/infrastructure/backups",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/privacy",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/privacy/requests",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/organization",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/retention",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/licensing",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/licensing/verifications",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/data-key",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/scheduler",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/enforcement-posture",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/execution",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/setup",
+      "findings": {}
+    },
+    {
+      "category": "density",
+      "key": "/admin/first-run",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/login|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/login|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/f/:token|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/f/:token|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/trust|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/trust|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/audit|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/audit|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/supplier|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/supplier|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/chat|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/chat|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/models|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/models|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/inbox|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/inbox|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/agents|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/agents|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/agents/:agentId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/agents/:agentId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/templates|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/templates|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/templates/:templateId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/templates/:templateId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/integrations|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/integrations|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/skills|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/skills|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/usage|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/usage|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/prompts|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/prompts|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/prompts/:promptId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/prompts/:promptId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/playground|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/builder/playground|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/runs|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/runs|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/runs/:runId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/runs/:runId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/workflows|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/workflows|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/workflows/:instanceId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/workflows/:instanceId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/inbox|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/inbox|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/inbox/annotations/:itemId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/inbox/annotations/:itemId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId/context|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId/context|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId/context/graph|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/projects/:projectId/context/graph|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/context|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/context|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/spend|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/spend|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account/sessions|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account/sessions|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account/passkeys|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/account/passkeys|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/incidents|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/incidents|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/incidents/:incidentId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/incidents/:incidentId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/feedback|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/feedback|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/feedback/:useCaseId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/feedback/:useCaseId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/use-cases/:id|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/use-cases/:id|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/users|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/users|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/roles|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/roles|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/teams|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/teams|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/client-access|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/client-access|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sso|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sso|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sso/link-requests|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sso/link-requests|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/provisioning|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/provisioning|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/group-mappings|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/group-mappings|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/virtual-keys|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/virtual-keys|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/credentials|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/credentials|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agent-credentials|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agent-credentials|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities/identities|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities/identities|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities/:identityId/proposals|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workload-identities/:identityId/proposals|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/rules|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/rules|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/simulation|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/simulation|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/abac-policies|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/abac-policies|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/guardrails|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/guardrails|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/content-trust|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/content-trust|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-policy|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-policy|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/evals|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/evals|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/annotation-queues|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/annotation-queues|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-risk|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-risk|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-risk/fairness|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-risk/fairness|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/use-cases|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/use-cases|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/intake|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/intake|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/review-policy|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/review-policy|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/trust|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/trust|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/alerts|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/alerts|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/graph|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/graph|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/regulatory|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/regulatory|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/regulatory/sources|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/regulatory/sources|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/decision-regression|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/decision-regression|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/literacy|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/governance/literacy|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/vendors|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/vendors|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/vendors/questionnaires|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/vendors/questionnaires|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/risks|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/risks|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/inventory|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/inventory|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/certification|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/certification|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/recommendations|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/recommendations|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sod|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/sod|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/posture|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/posture|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/redteam|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/redteam|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/reports|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/reports|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/prompt-versions|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/prompt-versions|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/approvals|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/approvals|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/review-workbench|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/review-workbench|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/audit|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/audit|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/lineage|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/lineage|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/traces|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/traces|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/monitoring|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/monitoring|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/regulait-llm|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/regulait-llm|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/runs|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/runs|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/tokens|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/tokens|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/devices|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/shadow-ai/discovery-sources/devices|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/copilot|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/copilot|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/chatops|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/chatops|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/chatops/identity-links|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/chatops/identity-links|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workflow-templates|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/workflow-templates|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents/catalog|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents/catalog|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents/stewardship|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/agents/stewardship|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-credentials|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/model-credentials|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/custom-providers|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/custom-providers|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/external-scorers|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/external-scorers|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/connectors|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/connectors|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/registries/:registryId/entries|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/registries/:registryId/entries|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/bundles|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/bundles|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/bundles/:bundleId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/mcp-servers/bundles/:bundleId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/webhooks|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/webhooks|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/siem|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/siem|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/admission|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/admission|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/git-connections|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/git-connections|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/pm-connections|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/pm-connections|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/deploy-targets|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/deploy-targets|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines/placements|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines/placements|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines/executors/:executorId/attestations|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/engines/executors/:executorId/attestations|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation/imports|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation/imports|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation/imports/:importId|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/cost-consolidation/imports/:importId|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/spend-monitor|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/spend-monitor|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/billing|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/billing|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/optimization|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/optimization|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance-packs|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance-packs|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance-packs/imports|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/compliance-packs/imports|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/trust-publishing|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/trust-publishing|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/resources|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/resources|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/findings|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/findings|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/certificates|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/certificates|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/patches|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/patches|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/backups|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/infrastructure/backups|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/privacy|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/privacy|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/privacy/requests|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/privacy/requests|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/organization|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/organization|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/retention|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/retention|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/licensing|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/licensing|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/licensing/verifications|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/licensing/verifications|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/data-key|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/data-key|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/scheduler|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/scheduler|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/enforcement-posture|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/enforcement-posture|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/execution|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/execution|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/setup|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/setup|dark",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/first-run|light",
+      "findings": {}
+    },
+    {
+      "category": "axe",
+      "key": "/admin/first-run|dark",
+      "findings": {}
+    }
+  ]
+}

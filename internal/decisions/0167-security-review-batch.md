@@ -572,7 +572,7 @@ Q10 replaces the hand-written error-to-text helpers from #413 (`safeErrorText`, 
 
 ## Amendment 2026-11-07 — published secrets need loopback or an opt-in; the bootstrap credential retires (S-02)
 
-Finding S-02 of the [2026-11-07 whole-build review](../reviews/2026-11-07-whole-build-review.md) (high): §5 above refused
+Finding S-02 of the [2026-11-07 whole-build review](../reviews/codexreviews.md) (high): §5 above refused
 the published `dev-bootstrap` token and `aaaa…` data key only when `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` was set. The
 base compose never forwarded `REGULAIT_HSTS`, so `--profile tls`, `hosted` and `tunnel` booted with both published values.
 The bootstrap credential is a full admin with no expiry that skips MFA and the IP envelope, and it kept working after a
