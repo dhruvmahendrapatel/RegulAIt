@@ -130,20 +130,31 @@ The header must be exactly:
 3. `iss` and `aud` match exactly.
 4. `exp`, `nbf` and `iat` hold, with at most 30 s of leeway.
 5. The DPoP proof matches `cnf.jkt` (unless the audience is `bearer`).
-6. The `status` bit is 0, using a list fetched at most `ttl` seconds ago (the list sets `ttl`, 60 s by default). A
-   verifier that cannot read the list within its own grace window fails closed.
+6. The `status` entry is 0 (VALID), using a list fetched at most `ttl` seconds ago (the list sets `ttl`, 60 s by
+   default). The list is a `statuslist+jwt`, ES256, from the same issuer and JWKS, with `sub` equal to its URI. 1
+   (INVALID) and 2 (SUSPENDED) are both refused. A verifier that cannot read a usable list fails closed.
 
 A verifier may also enforce `scope` and `regulait_budget` itself.
 
 ### 5. Revocation and the kill switch reach outside verifiers
 
-RegulAIt publishes one signed status list per period (a JWT signed by the same issuer). A credential's bit is set when
-any of these happens:
+RegulAIt publishes signed IETF Token Status Lists (a `statuslist+jwt` signed by the same issuer, ES256). Each list
+covers one block of 65,536 status indexes: a credential's list id is `floor(status_index / 65536)` and its `idx` the
+remainder, so no list is ever re-cut. Entries are two bits wide. A credential's entry stops being 0 (VALID) when any of
+these happens:
 - its grant, or any ancestor grant, is revoked (`revokeDelegationGrant` cascades);
 - an agent in its chain is halted;
 - a workload identity in its chain is suspended or revoked;
 - the org dial goes to `halted`;
 - an admin revokes it by `jti`.
+
+A revocation (by `jti`, of a grant on the path, or of an identity) makes it 1 (INVALID), which is permanent. A
+reversible stop (a halted agent, the `halted` dial, a suspended identity, a disabled sponsor, a placement that no
+longer holds) makes it 2 (SUSPENDED), and lifting the stop makes it VALID again, as the delegated token itself would
+be. Nothing is copied onto the credential row except an admin revocation: each list is computed when it is fetched,
+from the row and from each grant's live chain judged by the delegation's own `loadLiveChain`, so every kill path is
+covered without a hook in it. A replica reuses a signed list for 10 s, which bounds what the public, unauthenticated
+route costs; a revocation by `jti` drops that replica's copy at once. The list token's `exp` is twice its `ttl`.
 
 The short lifetime bounds the window for a verifier that cannot fetch the list. The `halted` dial also stops all
 issuance at once.
@@ -180,10 +191,15 @@ The `regulait_*` claims are private names (RFC 7519 §4.3), held until a standar
 
 - `jose` signs and verifies, as it already does for every RegulAIt token.
 - `oidc-provider` already hosts `/oauth/token`; the new token type is a token-exchange handler there.
-- **Status list (slice 2), corrected 2026-11-19:** `@sd-jwt/jwt-status-list` (Apache-2.0, OpenWallet Foundation
-  `sd-jwt-js`, 0.19.0, released 2026-07) implements the IETF Token Status List for JWTs, compression included. Slice 2
-  uses it, pinned and listed in `THIRD_PARTY.md`, instead of hand-encoding the bitstring. The earlier note that no
-  library existed was wrong.
+- **Status list (slice 2), corrected again 2026-11-20.** The 2026-11-19 note chose `@sd-jwt/jwt-status-list`. On
+  install it proved unusable:
+  - it is deprecated, in favour of `@owf/token-status-list` (0.8.0, Apache-2.0). That package is pre-1.0, publishes an
+    alpha most days and brings a CBOR and COSE closure that a JWT list does not need;
+  - both deflate through `pako` (2.x and 3.x), licensed "MIT AND Zlib", which the workspace licence gate refuses.
+
+  The format's only algorithm is ZLIB DEFLATE (RFC 1950), which the Node standard library provides (`node:zlib`). The
+  bit packing around it is ours (`apps/gateway/src/token-status-list.ts`, about 60 lines), and its tests pin the
+  draft's own encoded examples byte for byte. Re-check when a maintained package without `pako` exists.
 - **Approaches compared (owner build rule 9).** A GitHub search on 2026-11-19 covered "token status list",
   "sd-jwt", "verifiable credentials" and "agent identity credential".
   - *A W3C VC framework* (`decentralized-identity/veramo`, Apache-2.0, active): not adopted. It brings a DID and
@@ -192,8 +208,8 @@ The `regulait_*` claims are private names (RFC 7519 §4.3), held until a standar
   - *SD-JWT VC* (`@sd-jwt/sd-jwt-vc`, same project): not adopted for the token. The holder has nothing optional to
     disclose, since the scope is already projected to the audience, and SD-JWT parsing is not yet common in API
     gateways.
-  - *Chosen:* `jose` for signing and verifying, and `@sd-jwt/jwt-status-list` for revocation. Both are maintained,
-    permissively licensed and work air-gapped.
+  - *Chosen:* `jose` for signing and verifying, and `node:zlib` with our bit packing for the status list (above).
+    Both are maintained, permissively licensed and work air-gapped.
 
 ## Audience lifecycle (owner build rule 12)
 
@@ -202,7 +218,9 @@ An audience is `enabled` or `disabled`, derived from `disabled_at` and declared 
 registration with its own step-up, and the audience URI may be registered again once disabled: the URI is unique
 only among enabled rows (a partial unique index). The disabled row keeps its issued rows. Minting and the disable
 route both read that table. The issued credential's
-lifecycle (issued → revoked) is declared with revocation in slice 2.
+lifecycle is declared beside it in `ISSUED_CREDENTIAL_TRANSITIONS`: `issued` → `revoked` (by an admin, by `jti`;
+free, audited, terminal). Expiry is derived from `expires_at`. The status-list value is derived from that state and
+the grant's live chain (`agentCredentialStatusValue`), never stored.
 
 ## Consequences
 
@@ -219,12 +237,36 @@ lifecycle (issued → revoked) is declared with revocation in slice 2.
    - `mintAgentCredential`: the projection, every mint-time check through the delegation's own `loadLiveChain`
      (which already covers the kill switch and halted agents), the issued-credential record and the audit;
    - the offline reference verifier `verifyAgentCredential`.
-2. **1b:** the `requested_token_type` branch in `POST /oauth/token`. The caller's own delegated `at+jwt` is the
-   `subject_token`; the request goes through the endpoint's DPoP preflight and replay claims, and the result calls
-   `mintAgentCredential`.
-3. **2:** the status list (`agent_credentials_issued.status_index` is already allocated), revocation and kill-switch
-   propagation to the list, the verifier guide, and a reference verifier test against agentgateway's and Kong's JWT
-   configuration shapes.
+2. **1b (built on `builder/e3-agent-credential-1b`):** the `requested_token_type` branch in `POST /oauth/token`.
+   - **Form.** The form is strict (`agentCredentialExchangeRequestSchema`):
+     - `subject_token`: the caller's own delegated `at+jwt`, with `subject_token_type` set to `access_token`;
+     - `resource`: the registered https audience;
+     - `requested_token_type=urn:regulait:params:oauth:token-type:agent-credential`;
+     - the usual client authentication.
+     No scope can be asked for: the scope is the grant's, projected through the audience's scope map.
+   - **Checks before any claim** (in the client-assertion hook, R11 rule 1):
+     - a DPoP proof signed by the key the subject token is bound to, so only its holder can exchange it;
+     - an enabled audience;
+     - the subject token verifies (`verifyHeldDelegatedToken`, shared with the child exchange): signature, stored
+       row, binding and live chain;
+     - its leaf actor is the authenticated workload identity.
+   - **Then:**
+     - the request's DPoP `jti` is claimed, so one proof mints once;
+     - `mintAgentCredential` re-checks everything and refuses rather than narrows;
+     - the response is `issued_token_type` = the agent-credential type, with `token_type` `DPoP` (`Bearer` only for
+       a `bearer` audience).
+   - **Refusals** carry an `agent_credential_*` `error_code`. Every request is audited as `agent_credential`
+     (`agent-credential-exchange-issued` or `-refused`), beside the mint's own issuance row.
+3. **2 (built on `builder/e3-agent-credential-2`):**
+   - every credential carries `status.status_list` (the row, and so its index, is written before signing, in one
+     transaction with the audit);
+   - `GET /agent-credentials/status/:listId` (public) serves the signed list, computed as §5 says;
+   - `GET /v1/agent-credentials/issued` (admin, paginated) and `POST /v1/agent-credentials/issued/:jti/revoke`
+     (admin, free, audited `agent-credential-revoked`). Their screen is a known UI gap, posted on #453;
+   - the reference verifier `verifyAgentCredential` now requires a status-list fetcher and fails closed;
+   - the verifier guide is `docs/api/AGENT_CREDENTIAL_VERIFIER.md`;
+   - tests model agentgateway's `jwtAuthentication` provider and Kong's `jwt` plugin with `jose`. They show that neither
+     reads the status list, which is why the guide puts that check at the upstream.
 
 **Owner questions (built with the secure default):**
 - Should `sub` default to the directory identifier for audiences inside the customer's own estate? Built pairwise.

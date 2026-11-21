@@ -193,6 +193,7 @@ import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
+import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -439,6 +440,8 @@ export interface BuildAppOptions {
    * resolved for every directive read, which is production; null = no signer (the directive route answers 503).
    * Code-only: never env or admin input. */
   directiveSigner?: DirectiveSigner | null;
+  /** ADR-0338 TEST SEAM ONLY (code, never env or admin input): vendor control members and the credential resolver */
+  vendorAgentControl?: VendorAgentControlDeps;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -572,6 +575,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerResourceRuleRoutes } from "./resource-rule-routes.js";
 import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
@@ -641,6 +645,7 @@ import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
+import { registerContextGraphRoutes } from "./context-graph-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
@@ -662,10 +667,18 @@ import {
   registerEndpointAddonRemovalRoutes,
   type DirectiveSigner,
 } from "./endpoint-addon-removal.js";
+import {
+  applyVendorAgentControlDecision,
+  precheckVendorAgentControlDecision,
+  registerVendorAgentControlRoutes,
+  vendorAgentControlApprovalLabels,
+  type VendorAgentControlDeps,
+} from "./vendor-agent-control.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -4677,6 +4690,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
     );
+    // ADR-0338: what a vendor agent control action asks the approver to approve
+    const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4758,6 +4776,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "remediation" ? governanceRemediationLabelFor(r.stageId) : null) ??
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5260,6 +5279,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckEndpointAddonRemovalDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0338 — a vendor agent control action: never the requester, only an admin in the pool (no override), and an
+    // `approval_decide` step-up bound to {approvalId, decision, argumentsDigest}
+    if (row.objectType === "vendor_agent_control") {
+      const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5593,6 +5618,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // only while the suggestion is in shadow and its rule still matches the bound digest (else stale). Denied = rejected.
       if (updated.objectType === "rule_step_switch") {
         await applyRuleStepSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+        // slice 4d: the same queue item may switch a published decision table instead (each hook ignores the other's)
+        await applyDecisionTableSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5658,6 +5685,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // the approver's step-up is spent here, with those writes. Denied = nothing is ever sent.
       if (updated.objectType === "endpoint_addon_removal") {
         await applyEndpointAddonRemovalDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0338: approved = the action may be executed once by its requester; denied = nothing is ever sent. The
+      // approver's step-up is spent here, with the move.
+      if (updated.objectType === "vendor_agent_control") {
+        await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -5947,6 +5979,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
+  registerDecisionTableSwitchRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6269,6 +6302,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0251 (P-01): admin routes for the governed core's resource approval rules and rate limits
+  registerResourceRuleRoutes(app, db);
   // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
   registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
@@ -6328,6 +6363,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
   // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
   registerSaasEntitlementRoutes(app, db);
+  registerContextGraphRoutes(app, db);
   // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
   // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
   registerAgentRegistryRoutes(app, db);
@@ -6376,11 +6412,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
+  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
+  // production until slice 1b; both come only through the code-only test seam below
+  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
+  registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);

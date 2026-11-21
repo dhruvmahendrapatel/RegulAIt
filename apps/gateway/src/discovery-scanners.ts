@@ -145,6 +145,12 @@ export interface ScanObservation {
   os?: "macos" | "windows" | "linux";
   /** Optional: the package ecosystem (npm, pypi…); a catalogue row scoped to an ecosystem matches only it */
   ecosystem?: string;
+  /**
+   * ADR-0336 slice 4, evidence `agent_config` only: the id of the vendored secret rule (`VENDORED_SECRET_RULES`) that
+   * matched a field of a staged agent's configuration; `location.path` names the field and `subject` is the staged
+   * record's external id. It carries no value, excerpt, offset or hash, and nothing else may ride with it.
+   */
+  secretRule?: string;
 }
 
 /**
@@ -276,7 +282,7 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   // ADR-0337 (E18): entitlement_m365, entitlement_google_workspace (Salesforce and Slack follow in slice 2)
   ...SAAS_ENTITLEMENT_SCANNERS,
   // ADR-0314 (G6) and ADR-0336 (E17): the agent_registry family, built from the one agent platform adapter list
-  // (agent_registry_entra, agent_registry_gemini, agent_registry_agentcore, agent_registry_copilot_studio)
+  // (agent_registry_entra, agent_registry_gemini, agent_registry_agentcore, agent_registry_copilot_studio, agent_registry_agentforce, agent_registry_openai, agent_registry_n8n)
   ...AGENT_PLATFORM_SCANNERS,
 ]);
 

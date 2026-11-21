@@ -8,5 +8,5 @@
 - **Fail closed:** a static ruleset blocks every governed site until a signed (EdDSA), unexpired, per-user policy
   verifies against keys pinned in managed storage. DLP on the shared `dlp.secret.*` rules in RE2 at send time;
   account rules from the profile identity; breach events tied to user, device and a keyed conversation ref.
-- **Left:** the admin screens (11 KNOWN_UI_GAPS on #453), retention, inventory feed, surface (b) (browser-driving
-  agents, PR 2).
+- **Left:** the admin screens (11 KNOWN_UI_GAPS on #453), retention, inventory feed. Surface (b)
+  (browser-driving agents) is superseded by ADR-0364, lane E45 (owner decision 2026-11-21).

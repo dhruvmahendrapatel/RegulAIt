@@ -338,3 +338,34 @@ sent to the vendor.
 ## Numbering
 
 ADR 0338 is the number reserved for builder lane E19.
+
+## As built (slice 1) — 2026-11-20
+
+Slice 1 (PR #1096) ships the vendor-neutral framework. The decision text above is unchanged; this section records where
+the build departs from it and why.
+
+- **Slice 1 is split into 1 and 1b.** Lane E17's adapter code is not on main yet. So slice 1 ships the switch, the
+  `vendor_agent_actions` table, the routes, the approval kind and the external-write operations, and leaves out the
+  control credential and the Copilot Studio `control` member. In production no registry offers a control and no
+  control credential resolves, so every request answers `409 control_not_offered` or `409 no_control_credential`.
+  Slice 1b adds the `discovery_credentials` columns `purpose`, `credential_mode = delegated` and `expires_at`, the
+  owner-decision-1 opt-in, the credential loader and the Copilot Studio member.
+- **Approver selection (section 4.2).** A request names its approver, a second active admin. That approver must be in
+  the `loadApprovalPool` pool, the ADR-0331 pattern. An `approval_rules` role pool with a quorum above 1 is not wired
+  for this kind yet. The decide precheck still refuses the requester and anyone outside the pool.
+- **The adapter contract (section 3) is gateway-local.** `VendorAgentControl` is in
+  `apps/gateway/src/vendor-agent-control-contract.ts`, not `@regulait/shared`, so the AER-018 external-effects test
+  classifies its writes. It has two write methods, `apply` (operation `vendor_agent_control.apply`) and `reverse`
+  (`vendor_agent_control.reverse`), so that each classified operation is one contract method. The vocabulary
+  (actions, states, outcomes), the machine and the guard stay in `@regulait/shared`.
+- **The credential is part of the digest.** The approval's arguments digest also covers the control credential's row
+  id. A credential revoked or replaced after approval therefore fails execute with `approval_payload_mismatch`, as
+  section 4.3 requires.
+- **The dial exemption is a declared list.** It is `NARROWING_WRITE_OPERATIONS = ["vendor_agent_control.apply"]` in
+  `external-effects.ts`, pinned by the barrier matrix row.
+- **Execution recovery (section 4.3), from the #1096 review:**
+  - `prior_state` is written in its own transaction before the vendor call.
+  - One deadline signal covers the prior read, the call and the observed read, so the whole sequence ends inside the
+    lease (deadline + 60 s).
+  - A settle reads the state. The target state means `succeeded`. Any other known state means `failed / not_applied`,
+    so an agent is never left unactionable when the prior state is missing. Only an unreadable state stays `unknown`.

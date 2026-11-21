@@ -9,6 +9,10 @@
  *                                                              registration (audience, algorithm, binding, lifetime,
  *                                                              scope map); audited
  *   POST /v1/agent-credentials/audiences/:audienceId/disable   admin, free (tightening), audited
+ *   GET  /agent-credentials/status/:listId                     public (slice 2): the signed IETF Token Status List
+ *   GET  /v1/agent-credentials/issued                          admin: issued credentials (ADR-0226 list contract)
+ *   GET  /v1/agent-credentials/issued/export.xlsx              admin: the same list as an Excel file (audited)
+ *   POST /v1/agent-credentials/issued/:jti/revoke              admin, free (tightening), audited
  *
  * Default-deny: no audience, no credential. Issuance itself is the token endpoint's (slice 1b); this module never
  * mints. The public routes are listed in route-classes.ts (auth-exempt and NON_ADMIN) like the other issuers' metadata.
@@ -18,19 +22,86 @@ import { z } from "zod";
 import {
   AGENT_CREDENTIAL_DISCOVERY_PATH,
   AGENT_CREDENTIAL_JWKS_PATH,
+  AGENT_CREDENTIAL_STATUS_LIST_ID,
+  AGENT_CREDENTIAL_STATUS_PATH,
   AGENT_CREDENTIAL_STEP_UP_KEY,
   AGENT_CREDENTIAL_TTL_DEFAULT_SECONDS,
   agentCredentialAudienceCreateSchema,
   agentCredentialDiscoveryDocument,
   type AgentCredentialAudienceCreate,
 } from "@regulait/shared";
-import { agentCredentialAudiences, and, agentCredentialAudienceScopes, agents, auditLog, connectors, desc, eq, inArray, isNull, mcpServers, sql, type Db } from "@regulait/db";
-import { AUDIENCE_TRANSITIONS, agentCredentialIssuer, audienceIssues, audienceState } from "./agent-credential.js";
+import { agentCredentialAudiences, and, agentCredentialAudienceScopes, agentCredentialsIssued, agents, auditLog, connectors, desc, eq, inArray, isNotNull, isNull, mcpServers, sql, type Db } from "@regulait/db";
+import {
+  AUDIENCE_TRANSITIONS,
+  agentCredentialIssuer,
+  agentCredentialStatusList,
+  audienceIssues,
+  audienceState,
+  ISSUED_CREDENTIAL_STATES,
+  issuedCredentialState,
+  revokeAgentCredential,
+} from "./agent-credential.js";
+import type { ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import { jwksDocument, publishedSigningKeys } from "./identity-signing-keys.js";
 import { requireStepUp } from "./step-up.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const audienceParam = z.object({ audienceId: z.string().uuid() }).strict();
+const listParam = z.object({ listId: z.string().regex(AGENT_CREDENTIAL_STATUS_LIST_ID) }).strict();
+const jtiParam = z.object({ jti: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
+const revokeBody = z.object({ reason: z.string().trim().min(1).max(500) }).strict();
+/** the issued list's own filters (ADR-0226: the contract's paging, sort and count params come beside them) */
+const issuedFilters = z
+  .object({
+    audienceId: z.string().uuid().optional(),
+    grantId: z.string().uuid().optional(),
+    state: z.enum(ISSUED_CREDENTIAL_STATES).optional(),
+  })
+  .strict();
+type IssuedRow = typeof agentCredentialsIssued.$inferSelect;
+const issuedView = (r: IssuedRow, now: number) => ({
+  jti: r.jti,
+  audienceId: r.audienceId,
+  grantId: r.grantId,
+  statusIndex: r.statusIndex,
+  state: issuedCredentialState(r),
+  expired: r.expiresAt.getTime() <= now,
+  issuedAt: r.issuedAt.toISOString(),
+  expiresAt: r.expiresAt.toISOString(),
+  revokedAt: r.revokedAt?.toISOString() ?? null,
+});
+type IssuedView = ReturnType<typeof issuedView>;
+
+/**
+ * ADR-0226 list contract for issued credentials. `jti` is text, not a uuid, so no sort seeks by keyset: every sort
+ * pages by offset (bounded by the contract's ceiling), with `jti` as the stable tie-breaker.
+ */
+export const AGENT_CREDENTIALS_ISSUED_LIST: ListSpec<IssuedView> = {
+  id: "agent-credentials-issued",
+  sorts: {
+    issued: { expr: agentCredentialsIssued.issuedAt },
+    expires: { expr: agentCredentialsIssued.expiresAt },
+  },
+  columns: {
+    jti: { label: "Credential", value: (r) => r.jti },
+    audience: { label: "Audience", value: (r) => r.audienceId },
+    grant: { label: "Grant", value: (r) => r.grantId },
+    state: { label: "State", value: (r) => r.state },
+    issued: { label: "Issued", value: (r) => r.issuedAt },
+    expires: { label: "Expires", value: (r) => r.expiresAt },
+    revoked: { label: "Revoked", value: (r) => r.revokedAt },
+  },
+  filters: ["audienceId", "grantId", "state"],
+  defaultSort: { col: "issued", dir: "desc" },
+  idCol: agentCredentialsIssued.jti,
+};
+
+const STATUS_ERRORS = {
+  issuer_not_configured: { status: 404, detail: "the agent credential issuer needs REGULAIT_PUBLIC_URL" },
+  unknown_list: { status: 404, detail: "no such status list" },
+  signing_key_unavailable: { status: 503, detail: "no active ES256 signing key" },
+} as const;
 
 /** the step-up an audience registration needs: bound to all of it, so a grant for one registration cannot make another */
 export function agentCredentialAudienceStepUpArgs(body: AgentCredentialAudienceCreate) {
@@ -65,6 +136,57 @@ export function registerAgentCredentialRoutes(app: FastifyInstance, db: Db): voi
     const es = jwksDocument(await publishedSigningKeys(db, undefined, "ES256")).keys;
     const ed = jwksDocument(await publishedSigningKeys(db, undefined, "Ed25519")).keys;
     return reply.header("cache-control", "public, max-age=60").type("application/jwk-set+json").send(JSON.stringify({ keys: [...es, ...ed] }));
+  });
+
+  // public, signed, short-lived: the cache bounds what an unauthenticated GET costs (one computation per replica per
+  // AGENT_CREDENTIAL_STATUS_CACHE_SECONDS); a verifier refetches within the list's own `ttl`
+  app.get(AGENT_CREDENTIAL_STATUS_PATH, async (req, reply) => {
+    const p = listParam.safeParse(req.params);
+    if (!p.success) return reply.status(404).send({ error: "unknown_list", detail: "no such status list" });
+    const out = await agentCredentialStatusList(db, Number(p.data.listId));
+    if (!out.ok) return reply.status(STATUS_ERRORS[out.code].status).send({ error: out.code, detail: STATUS_ERRORS[out.code].detail });
+    return reply.header("cache-control", "public, max-age=10").type("application/statuslist+jwt").send(out.token);
+  });
+
+  // admin only (the default gate); the WHERE carries just the filters
+  const issuedList: ContractList<IssuedView, z.infer<typeof issuedFilters>> = {
+    spec: AGENT_CREDENTIALS_ISSUED_LIST,
+    filters: issuedFilters,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ row: agentCredentialsIssued, _cursorAt: q.cursorAt })
+          .from(agentCredentialsIssued)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        const now = Date.now();
+        return rows.map((r) => ({ ...issuedView(r.row, now), _cursorAt: r._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(agentCredentialsIssued).where(where),
+      idOf: (r) => r.jti,
+    },
+    where: (_req, f) => {
+      const conds = [
+        ...(f.audienceId ? [eq(agentCredentialsIssued.audienceId, f.audienceId)] : []),
+        ...(f.grantId ? [eq(agentCredentialsIssued.grantId, f.grantId)] : []),
+        ...(f.state === "revoked" ? [isNotNull(agentCredentialsIssued.revokedAt)] : f.state === "issued" ? [isNull(agentCredentialsIssued.revokedAt)] : []),
+      ];
+      return conds.length ? and(...conds) : undefined;
+    },
+  };
+  app.get("/v1/agent-credentials/issued", async (req, reply) => answerListPage(db, req, reply, issuedList));
+  app.get("/v1/agent-credentials/issued/export.xlsx", async (req, reply) => answerListExport(db, req, reply, issuedList));
+
+  app.post("/v1/agent-credentials/issued/:jti/revoke", async (req, reply) => {
+    const p = jtiParam.safeParse(req.params);
+    if (!p.success) return badRequest(reply, p.error);
+    const b = revokeBody.safeParse(req.body ?? {});
+    if (!b.success) return badRequest(reply, b.error);
+    const out = await revokeAgentCredential(db, { jti: p.data.jti, actorUserId: actor(req), reason: b.data.reason });
+    if (!out) return reply.status(404).send({ error: "unknown_credential", detail: "no unrevoked credential with that jti" });
+    return { jti: out.jti, state: "revoked", revokedAt: out.revokedAt.toISOString() };
   });
 
   app.get("/v1/agent-credentials/audiences", async () => {
