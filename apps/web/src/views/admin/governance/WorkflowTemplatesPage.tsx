@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import type {
   AssignmentRule,
@@ -159,6 +160,13 @@ export default function WorkflowTemplatesPage() {
                         : "no assignment rule routes here — reachable only via compliance cascade or an admin's explicit pick"}
                   </div>
                 </div>
+                {!tpl.retiredAt && !isIntakeName(tpl.name) && (
+                  // ADR-0341: the visual builder edits a draft of this template; intake templates change through
+                  // the decision-regression gate, so the builder does not offer them
+                  <Link to={`/admin/workflow-templates/${encodeURIComponent(tpl.id)}/builder`} aria-label={`Edit in builder: ${tpl.name}`}>
+                    Edit in builder
+                  </Link>
+                )}
                 {!tpl.retiredAt && (
                   <Button size="sm" onClick={() => setRetire(tpl)}>
                     retire

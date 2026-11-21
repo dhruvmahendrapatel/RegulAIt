@@ -1,0 +1,247 @@
+/* ADR-0341 — the pipeline builder. Tokens only, so both themes follow (ADR-0196). */
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+@media (min-width: 1100px) {
+  .layout {
+    grid-template-columns: 220px minmax(0, 1fr) 320px;
+    align-items: start;
+  }
+}
+
+.pane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+}
+.status {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.statusOk {
+  color: var(--text);
+}
+
+/* ---- palette ---- */
+.paletteGroup {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0-5);
+}
+.paletteCaption {
+  margin: var(--s1) 0 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.paletteItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-half);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s1) var(--s1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: grab;
+}
+.paletteItem:hover {
+  background: var(--surface-2);
+}
+.paletteItem:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+.paletteLabel {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+.paletteDesc {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+/* ---- canvas ---- */
+.canvas {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.canvas :global(.react-flow) {
+  --xy-background-color: var(--surface-1);
+  --xy-edge-stroke: var(--border-strong);
+  --xy-controls-button-background-color: var(--surface-2);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--text);
+  --xy-controls-button-color-hover: var(--text);
+  --xy-controls-button-border-color: var(--border);
+  --xy-attribution-background-color: var(--surface-1);
+}
+.canvas :global(.react-flow__attribution a) {
+  color: var(--text-dim);
+}
+.canvas :global(.react-flow__arrowhead polyline) {
+  stroke: var(--text-dim);
+  fill: var(--text-dim);
+}
+.canvas :global(.react-flow__node) {
+  border-radius: var(--radius-md);
+}
+.canvas :global(.react-flow__node:focus-visible) {
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+.edge :global(.react-flow__edge-path) {
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
+}
+.edgeRollback :global(.react-flow__edge-path) {
+  stroke-dasharray: 6 4;
+}
+.canvasLoading {
+  display: grid;
+  place-items: center;
+  min-height: 200px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.node {
+  box-sizing: border-box;
+  width: 220px;
+  height: 72px;
+  padding: var(--s1) var(--s1-5);
+  border: 1px solid var(--border-strong);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-half);
+  cursor: grab;
+}
+.nodeIssue {
+  border-left-color: var(--danger);
+}
+.nodeSelected {
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.nodeType {
+  display: flex;
+  align-items: center;
+  gap: var(--s0-5);
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.nodeIndex {
+  font-family: var(--font-mono, monospace);
+}
+.nodeId {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nodeMeta {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---- outline ---- */
+.outline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0-5);
+}
+.outlineRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.outlineRowSelected {
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.outlineName {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.outlineIssues {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+/* ---- issues and properties ---- */
+.issues {
+  margin: 0;
+  padding-left: var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0-5);
+  font-size: var(--text-sm);
+}
+.issueLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  min-height: 24px;
+}
+.props {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1-5);
+}
+.code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+}
+.fieldError {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+.dim {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  margin: 0;
+}

@@ -195,6 +195,18 @@
     "limit": "4.5 kB"
   },
   {
+    "name": "chunk: PipelineBuilderPage",
+    "path": "dist/assets/PipelineBuilderPage-????????.js",
+    "gzip": true,
+    "limit": "10.6 kB"
+  },
+  {
+    "name": "chunk: PipelineCanvas",
+    "path": "dist/assets/PipelineCanvas-????????.js",
+    "gzip": true,
+    "limit": "3.8 kB"
+  },
+  {
     "name": "chunk: PmAndDecisions",
     "path": "dist/assets/PmAndDecisions-????????.js",
     "gzip": true,
@@ -583,6 +595,12 @@
     "path": "dist/assets/registry.module-????????.js",
     "gzip": true,
     "limit": "2.6 kB"
+  },
+  {
+    "name": "chunk: runGraphLayout",
+    "path": "dist/assets/runGraphLayout-????????.js",
+    "gzip": true,
+    "limit": "74.8 kB"
   },
   {
     "name": "chunk: runs",
