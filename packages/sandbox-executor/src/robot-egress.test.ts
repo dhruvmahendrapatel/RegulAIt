@@ -704,3 +704,13 @@ describe("capEgressLog (code review 8: head AND tail; CodeQL alert 81: linear tr
     expect(Date.now() - t1).toBeLessThan(1000);
   });
 });
+
+describe("dockerReason (why the proxy did not start, bounded)", () => {
+  it("keeps the first non-empty line, printable ASCII only, at most 300 characters", async () => {
+    const { dockerReason } = await import("./docker-backend.js");
+    expect(dockerReason("\n  docker: Error response from daemon: invalid mount config\nmore\n")).toBe("docker: Error response from daemon: invalid mount config");
+    expect(dockerReason("")).toBe("no output");
+    expect(dockerReason("a\u0007béc")).toBe("a?b?c");
+    expect(dockerReason("x".repeat(1000)).length).toBe(300);
+  });
+});

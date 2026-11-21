@@ -444,6 +444,18 @@ export function capEgressBytes(head: Buffer, tail: Buffer, total: number, max: n
 }
 
 /** a log within `max` bytes: as it is, or its head and tail with a marker between (`capEgressBytes`) */
+/** the first line of a failed docker command's output, printable ASCII only, at most 300 characters */
+export function dockerReason(out: string): string {
+  const line = out.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "no output";
+  let clean = "";
+  for (const ch of line) {
+    const c = ch.charCodeAt(0);
+    clean += c >= 0x20 && c < 0x7f ? ch : "?";
+    if (clean.length >= 300) break;
+  }
+  return clean;
+}
+
 export function capEgressLog(text: string, max: number = ROBOT_EGRESS_LOG_MAX_BYTES): string {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= max) return text;
@@ -1198,9 +1210,11 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       await writeFile(ports, egressPortsFile(targets), { mode: 0o600, flag: "wx" });
       const user = await this.proxyUser(dir, [file, ports]);
       const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: `${this.executorTag}/${name}`, user, runtime: this.egressProxyRuntime, executor: this.executorTag });
-      const started = await this.docker(args);
+      const started = await this.dockerCapture(args, 4096);
       made.proxy = true;
-      if (started !== 0) throw new DockerBackendError("the run's egress proxy did not start");
+      // the daemon's own reason, bounded and on one line: the arguments it can echo are ids and paths we chose
+      // (no secret is ever on this command line), and without it an operator cannot tell why the proxy did not start
+      if (started.code !== 0) throw new DockerBackendError(`the run's egress proxy did not start: ${dockerReason(started.out)}`);
       if ((await this.docker(["network", "connect", this.egressUplink, proxy])) !== 0) throw new DockerBackendError("the run's egress proxy was not connected to the uplink");
       const state = (await this.api(`/containers/${proxy}/json`)) as { State?: { Running?: unknown } };
       if (state.State?.Running !== true) throw new DockerBackendError("the run's egress proxy is not running");
