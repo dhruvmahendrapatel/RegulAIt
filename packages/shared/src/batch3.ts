@@ -70,6 +70,15 @@ export const MCP_PROTOCOL_METHOD_GRANTS: Readonly<
 export const MCP_UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const;
 export type McpUpstreamTransport = (typeof MCP_UPSTREAM_TRANSPORTS)[number];
 
+/**
+ * ADR-0364: what `mcp_servers.transport` may hold. The org's enable-list (`mcp_upstream_transports`) is still
+ * `MCP_UPSTREAM_TRANSPORTS` only: `first_party` is never enabled by a setting. It names a server the gateway
+ * itself serves in-process (no socket, no url from a request), and only for a row on the gateway's fixed
+ * first-party list (`mcp-first-party.ts`).
+ */
+export const MCP_SERVER_TRANSPORTS = [...MCP_UPSTREAM_TRANSPORTS, "first_party"] as const;
+export type McpServerTransport = (typeof MCP_SERVER_TRANSPORTS)[number];
+
 /** G4: the `url` a stdio row carries (`mcp_servers_transport_shape`). It is not
  * a reachable destination, so any path that forgets to branch on transport
  * fails the egress check (fails closed). */

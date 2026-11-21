@@ -53,6 +53,8 @@ the instance's snapshotted definition.
   - the snapshot still passes `validateDefinition`;
   - `replayHistory` replays it `ok`, in recorded order, and every step rests in the recorded status;
   - the final state equals the recorded one in full (not only the parts `replayHistory` compares).
+  - one history whose first two events share a commit timestamp and are stored swapped still replays `ok` (the
+    tie search recovers the applied order); the same swap with distinct timestamps diverges.
 
   Compile-time lists make the coverage test ask for a new fixture whenever an event kind or a resting status is added
   to the kernel.

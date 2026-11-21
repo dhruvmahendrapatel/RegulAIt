@@ -1,0 +1,1 @@
+{"session_id":"thr_1","transcript_path":null,"cwd":"/work","hook_event_name":"PreToolUse","model":"m","permission_mode":"default","turn_id":"turn_1","tool_name":"mcp__shadow__read","tool_use_id":"call_2","tool_input":{"path":"secret-argument"}}
