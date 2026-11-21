@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 import { parse as parseToml } from "smol-toml";
 import {
   canonicalPolicyJson,
+  isGatewayHost,
+  MANAGED_VENDOR_CONFIG_PATHS,
+  managedVendorCoverage,
+  managedVendorOfConfigPath,
   compileClaudeCode,
   compileCodex,
   compileCopilot,
@@ -90,5 +94,50 @@ describe("managedServerKey", () => {
     expect(managedServerKey("My Docs!", S1)).toMatch(/^[a-z0-9_-]+$/);
     expect(managedServerKey("My Docs", S1)).not.toBe(managedServerKey("my-docs", S2));
     expect(managedServerKey("***", S1)).toBe("server-11111111");
+  });
+});
+
+describe("drift helpers (slice 2)", () => {
+  it("maps each managed vendor's MCP config path, on every OS prefix, and nothing else", () => {
+    expect(managedVendorOfConfigPath(".claude.json")).toBe("claude-code");
+    expect(managedVendorOfConfigPath("src/app/.mcp.json")).toBe("claude-code");
+    expect(managedVendorOfConfigPath("Library/Application Support/Code/User/mcp.json")).toBe("github-copilot");
+    expect(managedVendorOfConfigPath("Code\\User\\settings.json")).toBe("github-copilot");
+    expect(managedVendorOfConfigPath(".codex/config.toml")).toBe("openai-codex");
+    expect(managedVendorOfConfigPath(".cursor/mcp.json")).toBe("cursor");
+    // NEGATIVE: hosts no bundle governs, and look-alike names
+    expect(managedVendorOfConfigPath("Library/Application Support/Claude/claude_desktop_config.json")).toBeNull();
+    expect(managedVendorOfConfigPath(".codeium/windsurf/mcp_config.json")).toBeNull();
+    expect(managedVendorOfConfigPath("not.claude.json")).toBeNull();
+    expect(managedVendorOfConfigPath("x.cursor/mcp.json")).toBeNull();
+  });
+
+  it("matches the gateway host case-insensitively, with or without its default port, and nothing else", () => {
+    expect(isGatewayHost("gw.example.com", "https://GW.example.com/base")).toBe(true);
+    expect(isGatewayHost("gw.example.com:443", "https://gw.example.com")).toBe(true);
+    expect(isGatewayHost("gw.example.com:8443", "https://gw.example.com:8443")).toBe(true);
+    // NEGATIVE
+    expect(isGatewayHost("gw.example.com:8443", "https://gw.example.com")).toBe(false);
+    expect(isGatewayHost("gw.example.com.evil.test", "https://gw.example.com")).toBe(false);
+    expect(isGatewayHost("gw.example.com", "not a url")).toBe(false);
+  });
+});
+
+describe("vendor coverage (#902 review)", () => {
+  it("is collected only when every config file has an enabled catalogue path, partial for some, not_collected for none", () => {
+    const cov = new Map(
+      managedVendorCoverage([".claude.json", ".mcp.json", ".claude/settings.json", ".cursor/mcp.json", "Library/Application Support/Code/User/mcp.json", ".codex"]).map((c) => [c.vendor, c]),
+    );
+    expect(cov.get("claude-code")!.status).toBe("collected");
+    expect(cov.get("cursor")!.status).toBe("collected");
+    expect(cov.get("github-copilot")).toMatchObject({ status: "partial", collectedPaths: ["Code/User/mcp.json"] });
+    // NEGATIVE: a directory row does not cover the file under it
+    expect(cov.get("openai-codex")).toMatchObject({ status: "not_collected", missingPaths: [".codex/config.toml"] });
+    expect(managedVendorCoverage([]).every((c) => c.status === "not_collected")).toBe(true);
+  });
+
+  it("names every MANAGED_VENDOR_CONFIG_PATHS entry exactly once", () => {
+    const all = managedVendorCoverage([]).flatMap((c) => c.missingPaths);
+    expect(all.sort()).toEqual(Object.values(MANAGED_VENDOR_CONFIG_PATHS).flat().sort());
   });
 });
