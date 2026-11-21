@@ -774,12 +774,12 @@ that link to be read-only.
   use_case_conditions, use_case_drafts, use_case_feedback, use_case_idempotency_keys, user_agent_policies,
   user_model_credentials, vendor_account_aliases, webauthn_challenges, webauthn_credentials. Some (agents, connectors,
   mcp_servers, ai_vendors) carry an owner column on fleet objects; each batch confirms the key before writing a policy.
-- **Project-scoped (31):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
+- **Project-scoped (32):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
   config_canary_observations, conversations, copilot_queries, cost_events, delegation_grants, engine_runs, eval_runs,
-  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, policy_simulation_flips,
-  processing_records, project_context_items, project_members, prompts, redteam_runs, spend_anomalies,
-  spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs, usage_events,
-  virtual_keys, workflow_instances.
+  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, paid_call_holds (ADR-0313),
+  policy_simulation_flips, processing_records, project_context_items, project_members, prompts, redteam_runs,
+  spend_anomalies, spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs,
+  usage_events, virtual_keys, workflow_instances.
 - **Team-scoped (5):** approval_rules, data_scope_rules, model_rate_limits, rate_limits, team_members.
 - **Actor-stamped (49) and deployment-wide (191):** every other table in `public`. To regenerate every list from a
   migrated database, classify each table by its columns, in this order: `project_id`, then `team_id`, then an owner

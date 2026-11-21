@@ -659,6 +659,7 @@ import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
+import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
@@ -6401,6 +6402,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerCostOutcomeRoutes(app, db);
   // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)
   registerBudgetAlertRoutes(app, db);
+  // ADR-0313: paid-call prices and holds (admin-only through the default gate; deleting a price is a step-up)
+  registerPaidCallRoutes(app, db);
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.

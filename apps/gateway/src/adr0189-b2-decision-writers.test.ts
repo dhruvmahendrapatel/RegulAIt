@@ -52,6 +52,7 @@ const DECISION_WRITERS = [
   "model-call-consent.ts", // ADR-0251: a model call held for approval (insert(auditLog) on the chained handle)
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
+  "paid-calls.ts", // ADR-0313: a paid call refused or queued for want of budget (insert(auditLog) on the chained handle)
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",

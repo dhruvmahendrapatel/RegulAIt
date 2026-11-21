@@ -2052,6 +2052,9 @@ export const auditLog = pgTable(
         // ADR-0312: the cost-per-outcome recorder ran (manual refresh) and an admin read the outcome roll-up. Plain
         // text column — no DDL.
         "cost_outcome",
+        // ADR-0313: a paid-call price (created, deleted) and a paid call's hold (reserved, refused, settled, released).
+        // Plain text column — no DDL.
+        "paid_call",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -20157,6 +20160,86 @@ export const vendorAgentActions = pgTable(
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
+// ===== ADR-0313 (lane E2, G9): paid-tool and agent-payment budgets ===================================================
+/**
+ * ADR-0313 (migration `pending/paid_call_budgets.sql`, numbered at merge) — a PAID CALL's price. A row turns a tool
+ * (or every tool of a server) or a connector into a paid call: each call must first reserve `max_settle_usd` against the
+ * attributed project budget and/or the run's cap (default-deny: no budget envelope, no call), and settles at the
+ * reported charge (never above the hold) or `price_usd`. Exactly one subject. Admin-written; deleting one is a step-up.
+ */
+export const paidCallPrices = pgTable(
+  "paid_call_prices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    mcpToolId: uuid("mcp_tool_id").references(() => mcpTools.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    /** the quoted price of one call, settled when the upstream reports no charge */
+    priceUsd: doublePrecision("price_usd").notNull(),
+    /** the most one call may settle at, and so what a call reserves (x402's maxAmountRequired) */
+    maxSettleUsd: doublePrecision("max_settle_usd").notNull(),
+    /** how long an unsettled hold counts before the sweeper releases it */
+    holdTtlSeconds: integer("hold_ttl_seconds").notNull().default(900),
+    note: text("note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("paid_call_prices_server_uq").on(t.mcpServerId).where(sql`${t.mcpServerId} IS NOT NULL`),
+    uniqueIndex("paid_call_prices_tool_uq").on(t.mcpToolId).where(sql`${t.mcpToolId} IS NOT NULL`),
+    uniqueIndex("paid_call_prices_connector_uq").on(t.connectorId).where(sql`${t.connectorId} IS NOT NULL`),
+    check(
+      "paid_call_prices_subject_check",
+      sql`num_nonnulls(${t.mcpServerId}, ${t.mcpToolId}, ${t.connectorId}) = 1`,
+    ),
+    check("paid_call_prices_amount_check", sql`${t.priceUsd} > 0 AND ${t.maxSettleUsd} >= ${t.priceUsd} AND ${t.maxSettleUsd} <= 10000`),
+    check("paid_call_prices_ttl_check", sql`${t.holdTtlSeconds} BETWEEN 60 AND 86400`),
+  ],
+);
+export type PaidCallPriceRow = typeof paidCallPrices.$inferSelect;
+
+/**
+ * ADR-0313 — ONE RESERVATION. Written in the reserving transaction under the budget envelope's advisory lock, so
+ * concurrent paid calls can never together exceed the budget. `held` counts against the envelope until it is settled
+ * (by the call's usage row, which then carries the spend) or released (the call failed, or the hold expired).
+ * Never deleted: a hold is the evidence of what was authorised.
+ */
+export const paidCallHolds = pgTable(
+  "paid_call_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    priceId: uuid("price_id").references(() => paidCallPrices.id, { onDelete: "set null" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    orchestrationRunId: uuid("orchestration_run_id").references(() => orchestrationRuns.id, { onDelete: "set null" }),
+    subjectKind: text("subject_kind", { enum: ["mcp_tool", "connector"] }).notNull(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** 3NF exception, deliberate (point-in-time evidence): the tool name the call was authorised for */
+    toolName: text("tool_name"),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "set null" }),
+    heldUsd: doublePrecision("held_usd").notNull(),
+    state: text("state", { enum: ["held", "settled", "released"] }).notNull().default("held"),
+    settledUsd: doublePrecision("settled_usd"),
+    usageEventId: uuid("usage_event_id").references(() => usageEvents.id, { onDelete: "set null" }),
+    releaseReason: text("release_reason", { enum: ["call_failed", "expired", "not_executed"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("paid_call_holds_project_held_idx").on(t.projectId).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_run_held_idx").on(t.orchestrationRunId).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_expiry_idx").on(t.expiresAt).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_created_idx").on(t.createdAt),
+    check(
+      "paid_call_holds_state_check",
+      sql`CASE ${t.state} WHEN 'held' THEN ${t.settledUsd} IS NULL AND ${t.releaseReason} IS NULL WHEN 'settled' THEN ${t.settledUsd} IS NOT NULL AND ${t.settledUsd} >= 0 AND ${t.settledUsd} <= ${t.heldUsd} AND ${t.releaseReason} IS NULL WHEN 'released' THEN ${t.settledUsd} IS NULL AND ${t.releaseReason} IS NOT NULL ELSE false END`,
+    ),
+    check("paid_call_holds_amount_check", sql`${t.heldUsd} > 0`),
+  ],
+);
+export type PaidCallHoldRow = typeof paidCallHolds.$inferSelect;
+// ===== end ADR-0313 =================================================================================================
 
 // ===== ADR-0358 (lane E39): AI adoption analytics =====
 /**
