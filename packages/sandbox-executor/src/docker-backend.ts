@@ -26,7 +26,7 @@
  * (on the release line only, then fd 3; never in the environment, argv, labels, a log or a disk).
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, chown, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import path from "node:path";
@@ -170,7 +170,39 @@ export interface DockerRunInput {
    * other member is the run's egress proxy. Absent = `--network none`. Never `host`, `bridge` or another container's.
    */
   network?: string | null;
+  /**
+   * Security N-D: the executor tag (`executorTag`) labelled on the sandbox as `org.regulait.executor=<tag>`, so the
+   * reconciler of THIS executor removes only what it made. The backends always pass it.
+   */
+  executor?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Security N-D: which executor made a labelled resource
+// ---------------------------------------------------------------------------
+
+/** the label naming the executor that made a sandbox, a proxy or a run network */
+export const EXECUTOR_LABEL = "org.regulait.executor" as const;
+/** an executor tag: 32 lowercase hex characters (label-, filter- and path-safe) */
+export const EXECUTOR_TAG = /^[0-9a-f]{32}$/;
+
+/**
+ * Security N-D: this executor's tag on its Docker daemon. From a stable identity (the executor's
+ * `REGULAIT_EXECUTOR_IDENTIFIER`, so a restarted executor reclaims what its previous run left behind) it is the first
+ * 32 hex characters of the identity's SHA-256 (the identity itself is never written to a label or a path). Without
+ * one it is random for this process: the reconciler then removes only this process's own leftovers, never another
+ * executor's (non-destructive; a crashed predecessor's leftovers stay until an operator removes them).
+ */
+export function executorTag(identity: string | null | undefined): string {
+  if (identity === null || identity === undefined || identity === "") return randomBytes(16).toString("hex");
+  return createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 32);
+}
+
+const executorLabelArgs = (executor: string | null | undefined): string[] => {
+  if (executor === null || executor === undefined) return [];
+  if (!EXECUTOR_TAG.test(executor)) throw new DockerBackendError("the executor tag is not 32 hex characters");
+  return ["--label", `${EXECUTOR_LABEL}=${executor}`];
+};
 
 // ---------------------------------------------------------------------------
 // ADR-0364 S3: a robot run's per-run egress (pure builders)
@@ -242,9 +274,9 @@ export const BRIDGE_INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4" as c
  * without an IPv4 address (Docker reserves no gateway), so the network's only addresses are its containers' (the
  * proxy at its fixed address, the sandbox). IPv6 is refused (`--ipv6=false`, checked again after create).
  */
-export function egressNetworkCreateArgs(network: string): string[] {
+export function egressNetworkCreateArgs(network: string, executor?: string | null): string[] {
   if (!EGRESS_NETWORK_NAME.test(network)) throw new DockerBackendError("not a robot run's internal network name");
-  return ["network", "create", "--internal", "--driver", "bridge", "--ipv6=false", "--opt", `${BRIDGE_INHIBIT_IPV4}=true`, "--label", "org.regulait.sandbox=1", network];
+  return ["network", "create", "--internal", "--driver", "bridge", "--ipv6=false", "--opt", `${BRIDGE_INHIBIT_IPV4}=true`, "--label", "org.regulait.sandbox=1", ...executorLabelArgs(executor), network];
 }
 
 /** what `GET /networks/{name}` must show for a run's network before its proxy starts: null, or what is wrong */
@@ -293,9 +325,11 @@ export interface ProxyRunInput {
   network: string;
   /** the proxy's address on it (`egressProxyAddress`) */
   ip: string;
-  /** the Docker volume holding the run ACL directories, and this run's sub-directory */
+  /** the Docker volume holding the run ACL directories, and this run's sub-directory (`<executor tag>/<sandbox name>`) */
   aclVolume: string;
   aclSubpath: string;
+  /** Security N-D: the executor tag, labelled on the proxy (`org.regulait.executor=<tag>`) */
+  executor?: string | null;
   /** `uid:gid` the proxy runs as (the ACL file's owner; never root) */
   user: string;
   /** item 17: the Docker runtime the proxy runs under, named explicitly (default `runc`) */
@@ -308,7 +342,9 @@ export function proxyRunArgs(input: ProxyRunInput): string[] {
   if (!EGRESS_NETWORK_NAME.test(input.network)) throw new DockerBackendError("not a robot run's internal network name");
   if (!isPinnedImageRef(input.image)) throw new DockerBackendError("the egress proxy image must be pinned by digest (sha256:<64 hex>)");
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(input.aclVolume)) throw new DockerBackendError("the ACL volume is not a Docker volume name");
-  if (!SANDBOX_NAME.test(input.aclSubpath)) throw new DockerBackendError("the ACL sub-path is not ours");
+  // Security N-D: `<executor tag>/<sandbox name>` (a bare sandbox name is the pre-N-D layout)
+  const sub = input.aclSubpath.split("/");
+  if (sub.length > 2 || !SANDBOX_NAME.test(sub.at(-1)!) || (sub.length === 2 && !EXECUTOR_TAG.test(sub[0]!))) throw new DockerBackendError("the ACL sub-path is not ours");
   const user = /^(\d{1,10}):(\d{1,10})$/.exec(input.user);
   if (!user || user[1] === "0") throw new DockerBackendError("the egress proxy never runs as root");
   const runtime = input.runtime ?? "runc";
@@ -358,6 +394,7 @@ export function proxyRunArgs(input: ProxyRunInput): string[] {
     "org.regulait.sandbox=1",
     "--label",
     "org.regulait.egress-proxy=1",
+    ...executorLabelArgs(input.executor),
     "--mount",
     `type=volume,src=${input.aclVolume},dst=${SMOKESCREEN_ACL_DIR},readonly,volume-subpath=${input.aclSubpath}`,
     ...PROXY_BLANKED_ENV.flatMap((name) => ["--env", `${name}=`]),
@@ -517,6 +554,7 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     "none",
     "--label",
     "org.regulait.sandbox=1",
+    ...executorLabelArgs(input.executor),
     // review H2: the init is the executor's, read-only, and it is the entry point (the image cannot replace it)
     "--mount",
     `type=volume,src=${input.initVolume},dst=${STDIO_SANDBOX_INIT_DIR},readonly`,
@@ -822,10 +860,17 @@ export interface DockerBackendOptions {
   egressProxyRuntime?: string | null;
   /**
    * Code review 7: how often the reconciler removes labelled sandboxes, proxies, run networks and ACL directories that
-   * no live sandbox of this executor owns (default 5 minutes; 0 = only at the first preflight). One executor per
-   * Docker daemon: another executor's live sandboxes on the same daemon would look orphaned.
+   * THIS executor made and no live sandbox of it owns (default 5 minutes; 0 = only at the first preflight). Security
+   * N-D: only resources labelled with this executor's tag (`org.regulait.executor`) and ACL directories under its own
+   * `<ACL dir>/<tag>/` are touched, so several executors may share a Docker daemon and an ACL volume. Resources with
+   * no executor label (made before N-D) are left alone.
    */
   reconcileIntervalMs?: number;
+  /**
+   * Security N-D: this executor's stable identity on its Docker daemon, hashed into its tag (`executorTag`). Unset here =
+   * `REGULAIT_EXECUTOR_IDENTIFIER`; unset there too = a random tag for this process.
+   */
+  executorId?: string | null;
   /** a bound on every short docker CLI call (create, rm, kill, logs, ps, …; default 60 s); a call over it is killed */
   dockerTimeoutMs?: number;
   /** test seams */
@@ -888,7 +933,11 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     this.egressUplink = opt(options.egressUplinkNetwork, process.env.REGULAIT_ROBOT_EGRESS_NETWORK) ?? "bridge";
     this.egressRuntime = opt(options.egressRuntimeName, process.env.REGULAIT_EXECUTOR_EGRESS_RUNTIME);
     this.egressProxyRuntime = opt(options.egressProxyRuntime, process.env.REGULAIT_ROBOT_EGRESS_PROXY_RUNTIME) ?? "runc";
+    this.executorTag = executorTag(opt(options.executorId, process.env.REGULAIT_EXECUTOR_IDENTIFIER));
   }
+
+  /** Security N-D: the tag labelled on everything this executor makes; its reconciler removes nothing else */
+  readonly executorTag: string;
 
   private readonly egressProxyRuntime: string;
   /** code review 7: the sandboxes this executor process owns right now (named before anything of theirs exists) */
@@ -1019,18 +1068,22 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     };
     const names = (out: string) => out.split("\n").map((l) => l.trim()).filter((l) => l !== "");
     const done = { containers: 0, networks: 0, aclDirs: 0 };
-    const ps = await this.dockerCapture(["ps", "-a", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Names}}"], 1024 * 1024);
+    // Security N-D: only this executor's own resources are listed (both label filters must match); another executor's,
+    // and unlabelled ones from before N-D, are never touched
+    const mine = ["--filter", "label=org.regulait.sandbox=1", "--filter", `label=${EXECUTOR_LABEL}=${this.executorTag}`];
+    const ps = await this.dockerCapture(["ps", "-a", ...mine, "--format", "{{.Names}}"], 1024 * 1024);
     if (ps.code === 0) {
       for (const n of names(ps.out).filter((x) => !EGRESS_NETWORK_NAME.test(x) && orphan(x))) if ((await this.docker(["rm", "-f", n])) === 0) done.containers += 1;
     }
-    const nets = await this.dockerCapture(["network", "ls", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Name}}"], 1024 * 1024);
+    const nets = await this.dockerCapture(["network", "ls", ...mine, "--format", "{{.Name}}"], 1024 * 1024);
     if (nets.code === 0) {
       for (const n of names(nets.out).filter((x) => EGRESS_NETWORK_NAME.test(x) && orphan(x))) if ((await this.docker(["network", "rm", n])) === 0) done.networks += 1;
     }
     if (this.egressAclDir) {
-      for (const e of await readdir(this.egressAclDir, { withFileTypes: true }).catch(() => [])) {
+      const own = path.join(this.egressAclDir, this.executorTag);
+      for (const e of await readdir(own, { withFileTypes: true }).catch(() => [])) {
         if (!e.isDirectory() || !SANDBOX_NAME.test(e.name) || this.live.has(e.name)) continue;
-        await rm(path.join(this.egressAclDir, e.name), { recursive: true, force: true }).catch(() => undefined);
+        await rm(path.join(own, e.name), { recursive: true, force: true }).catch(() => undefined);
         done.aclDirs += 1;
       }
     }
@@ -1124,17 +1177,19 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       return log;
     };
     try {
-      if ((await this.docker(egressNetworkCreateArgs(network))) !== 0) throw new DockerBackendError("the run's internal network was not created");
+      if ((await this.docker(egressNetworkCreateArgs(network, this.executorTag))) !== 0) throw new DockerBackendError("the run's internal network was not created");
       made.network = true;
-      if (!egress) return { network, proxyUrl: null, teardown };
-      const targets = robotEgressSchema.parse(egress).targets;
       const net = (await this.api(`/networks/${network}`)) as { IPAM?: { Config?: Array<{ Subnet?: unknown }> } };
-      // internal, IPv4 only, no host address on it (code review 2): checked on what the daemon made, not assumed
+      // internal, IPv4 only, no host address on it (code review 2): checked on what the daemon made, not assumed.
+      // Security N-C: for a canary self-test too, so the self-test proves the network it attests (fail closed)
       const problem = egressNetworkProblem(net);
       if (problem) throw new DockerBackendError(problem);
+      if (!egress) return { network, proxyUrl: null, teardown };
+      const targets = robotEgressSchema.parse(egress).targets;
       const ip = egressProxyAddress(net.IPAM?.Config?.find((c) => typeof c.Subnet === "string" && c.Subnet.includes("."))?.Subnet);
       // the ACL and the ports file, from the offer's targets, written 0600 and owned by whoever the proxy runs as
-      const dir = path.join(this.egressAclDir!, name);
+      // Security N-D: under this executor's own sub-directory, so another executor's reconciler never sees it
+      const dir = path.join(this.egressAclDir!, this.executorTag, name);
       made.acl = dir;
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const file = path.join(dir, SMOKESCREEN_ACL_FILE);
@@ -1142,7 +1197,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       const ports = path.join(dir, SMOKESCREEN_PORTS_FILE);
       await writeFile(ports, egressPortsFile(targets), { mode: 0o600, flag: "wx" });
       const user = await this.proxyUser(dir, [file, ports]);
-      const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: name, user, runtime: this.egressProxyRuntime });
+      const args = proxyRunArgs({ name: proxy, image: this.egressImage!, network, ip, aclVolume: this.egressAclVolume!, aclSubpath: `${this.executorTag}/${name}`, user, runtime: this.egressProxyRuntime, executor: this.executorTag });
       const started = await this.docker(args);
       made.proxy = true;
       if (started !== 0) throw new DockerBackendError("the run's egress proxy did not start");
@@ -1248,6 +1303,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
         initVolume: this.options.initVolume,
         input,
         network: egressRun?.network ?? null,
+        executor: this.executorTag,
         ...this.runOptions(),
       });
     } catch (e) {

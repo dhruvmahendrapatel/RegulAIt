@@ -30,6 +30,7 @@ import {
   egressNetworkProblem,
   egressPortsFile,
   egressProxyAddress,
+  executorTag,
   isPinnedImageRef,
   proxyRunArgs,
   smokescreenArgs,
@@ -150,6 +151,31 @@ describe("the pure builders", () => {
     expect(() => proxyRunArgs({ name: PROXY, image: "smokescreen:latest", network: NET, ip: "172.30.5.2", aclVolume: "regulait-acl", aclSubpath: SANDBOX, user: "1:1" })).toThrow(/pinned/);
   });
 
+  it("Security N-D: the executor tag labels the sandbox, the proxy and the network, and scopes the ACL sub-path", () => {
+    const tag = executorTag("executor-a");
+    // stable for one identity, different for another, never the identity itself; random (and valid) without one
+    expect(tag).toMatch(/^[0-9a-f]{32}$/);
+    expect(executorTag("executor-a")).toBe(tag);
+    expect(executorTag("executor-b")).not.toBe(tag);
+    expect(executorTag(null)).toMatch(/^[0-9a-f]{32}$/);
+    expect(executorTag(null)).not.toBe(executorTag(null));
+    expect(egressNetworkCreateArgs(NET, tag).slice(-3)).toEqual(["--label", `org.regulait.executor=${tag}`, NET]);
+    const base = { name: SANDBOX, runtimeName: "runc", image: IMAGE, profile: ROBOT, canary: false, initVolume: "regulait-init", network: NET };
+    expect(valuesAfter(dockerRunArgs({ ...base, executor: tag }), "--label")).toEqual(["org.regulait.sandbox=1", `org.regulait.executor=${tag}`]);
+    const proxy = { name: PROXY, image: EGRESS_IMAGE, network: NET, ip: "172.30.5.2", aclVolume: "regulait-acl", aclSubpath: `${tag}/${SANDBOX}`, user: "65532:65532", executor: tag };
+    const args = proxyRunArgs(proxy);
+    expect(valuesAfter(args, "--label")).toEqual(["org.regulait.sandbox=1", "org.regulait.egress-proxy=1", `org.regulait.executor=${tag}`]);
+    expect(valueAfter(args, "--mount")).toBe(`type=volume,src=regulait-acl,dst=/etc/regulait-egress,readonly,volume-subpath=${tag}/${SANDBOX}`);
+    // a tag is 32 hex characters; a sub-path is `<tag>/<sandbox>` (or a bare sandbox name), nothing else
+    for (const bad of ["x", "", "A".repeat(32), `${tag},readonly=false`]) {
+      expect(() => egressNetworkCreateArgs(NET, bad), bad).toThrow(DockerBackendError);
+      expect(() => proxyRunArgs({ ...proxy, executor: bad }), bad).toThrow(DockerBackendError);
+    }
+    for (const bad of [`../${SANDBOX}`, `${tag}/../${SANDBOX}`, `${tag}/${tag}/${SANDBOX}`, `${tag}/`, `x/${SANDBOX}`]) {
+      expect(() => proxyRunArgs({ ...proxy, aclSubpath: bad }), bad).toThrow(/ACL sub-path/);
+    }
+  });
+
   it("the proxy's address is the internal subnet's second host; images are pinned by digest only", () => {
     expect(egressProxyAddress("172.30.5.0/24")).toBe("172.30.5.2");
     expect(egressProxyAddress("10.10.0.0/16")).toBe("10.10.0.2");
@@ -200,6 +226,11 @@ interface SeamOptions {
   logsScript?: string;
   /** a docker verb that never exits (the timeout) */
   hang?: string;
+  /**
+   * Security N-D: the daemon's labelled objects (all carry org.regulait.sandbox=1); `ps` / `network ls` list those
+   * matching every `--filter label=org.regulait.executor=<tag>` given, as the daemon does
+   */
+  daemon?: { containers: Array<{ name: string; executor?: string }>; networks: Array<{ name: string; executor?: string }> };
 }
 
 /** the docker seam: the real init for the sandbox's `docker run`, no-ops (or the configured failures) for the rest */
@@ -230,8 +261,12 @@ function seam(rig: Rig, opts: SeamOptions = {}) {
       if (opts.logsScript) return spawn(process.execPath, ["-e", opts.logsScript], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
       return noop(0, '{"allow":true,"requested_hostport":"portal.example.com:443","msg":"CANONICAL-PROXY-DECISION"}\n');
     }
-    if (args[0] === "ps") return noop(0, opts.ps ?? "");
-    if (args[0] === "network" && args[1] === "ls") return noop(0, opts.networks ?? "");
+    const listed = (objs: Array<{ name: string; executor?: string }>) => {
+      const want = valuesAfter(args, "--filter").flatMap((f) => (f.startsWith("label=org.regulait.executor=") ? [f.slice("label=org.regulait.executor=".length)] : []));
+      return objs.filter((o) => want.every((w) => o.executor === w)).map((o) => `${o.name}\n`).join("");
+    };
+    if (args[0] === "ps") return noop(0, opts.daemon ? listed(opts.daemon.containers) : (opts.ps ?? ""));
+    if (args[0] === "network" && args[1] === "ls") return noop(0, opts.daemon ? listed(opts.daemon.networks) : (opts.networks ?? ""));
     return noop();
   };
 }
@@ -245,7 +280,7 @@ const api = (rig: Rig) => async (p: string) => {
   if (p.endsWith("/json")) return { Image: IMAGE, HostConfig: { Runtime: "runc", NetworkMode: run ? valueAfter(run, "--network") : "none" }, State: { OOMKilled: false } };
   return { cpu_stats: { throttling_data: { throttled_periods: 0 } } };
 };
-function runc(rig: Rig, opts: SeamOptions & { egressImage?: string | null; dockerTimeoutMs?: number } = {}) {
+function runc(rig: Rig, opts: SeamOptions & { egressImage?: string | null; dockerTimeoutMs?: number; executorId?: string } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "regulait-robot-"));
   return new RuncDockerBackend({
     runtimeName: "runc",
@@ -262,6 +297,7 @@ function runc(rig: Rig, opts: SeamOptions & { egressImage?: string | null; docke
     egressUplinkNetwork: "regulait-uplink",
     egressRuntimeName: null,
     reconcileIntervalMs: 0,
+    executorId: opts.executorId ?? "executor-under-test",
     ...(opts.dockerTimeoutMs !== undefined ? { dockerTimeoutMs: opts.dockerTimeoutMs } : {}),
     spawnDocker: seam(rig, opts),
     dockerApi: api(rig),
@@ -290,7 +326,12 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     const proxy = net.replace("regulait-egn-", "regulait-egp-");
     expect(verbs(rig.calls)).toEqual(["network create", "run proxy", "network connect", "run sandbox"]);
     const run = rig.calls.filter((c) => c[0] !== "ps" && !(c[0] === "network" && c[1] === "ls"));
-    expect(run[0]).toEqual(egressNetworkCreateArgs(net));
+    expect(run[0]).toEqual(egressNetworkCreateArgs(net, b.executorTag));
+    // Security N-D: the sandbox, the proxy and the network carry this executor's tag; the ACL is under its directory
+    expect(b.executorTag).toBe(executorTag("executor-under-test"));
+    expect(valuesAfter(sandboxRun, "--label")).toContain(`org.regulait.executor=${b.executorTag}`);
+    expect(valuesAfter(run[1]!, "--label")).toContain(`org.regulait.executor=${b.executorTag}`);
+    expect(valueAfter(run[1]!, "--mount")).toMatch(new RegExp(`volume-subpath=${b.executorTag}/regulait-sbx-[0-9a-f-]{36}$`));
     // the proxy alone joins the uplink
     expect(run[2]).toEqual(["network", "connect", "regulait-uplink", proxy]);
     expect(valuesAfter(sandboxRun, "--network")).toEqual([net]);
@@ -323,7 +364,7 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     expect(logAt).toBeGreaterThan(-1);
     expect(logAt).toBeLessThan(rmProxyAt);
     expect(await h.egressLog!()).toContain("CANONICAL-PROXY-DECISION");
-    expect(existsSync(path.join(rig.aclDir, sandboxRun[sandboxRun.indexOf("--name") + 1]!))).toBe(false);
+    expect(existsSync(path.join(rig.aclDir, b.executorTag, sandboxRun[sandboxRun.indexOf("--name") + 1]!))).toBe(false);
   }, 30_000);
 
   it("removes all three when the run is killed", async () => {
@@ -388,6 +429,20 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     const net = rig.calls.find((c) => c[0] === "network" && c[1] === "create")!.at(-1)!;
     expect(rig.calls.some((c) => c[0] === "network" && c[1] === "rm" && c[2] === net)).toBe(true);
   }, 30_000);
+
+  it("Security N-C: the canary self-test re-checks its network too; a bad one fails closed (no sandbox, network removed)", async () => {
+    for (const bad of [{ ...GOOD_NET, Options: {} }, { ...GOOD_NET, Internal: false }, { ...GOOD_NET, EnableIPv6: true }, { ...GOOD_NET, IPAM: { Config: [{ Subnet: "172.30.5.0/24", Gateway: "172.30.5.1" }] } }, null]) {
+      netAnswer = bad;
+      const rig = newRig();
+      try {
+        await expect(runc(rig).startCanary(ROBOT_L1, "hardened_container"), JSON.stringify(bad)).rejects.toThrow(DockerBackendError);
+      } finally {
+        netAnswer = GOOD_NET;
+      }
+      expect(verbs(rig.calls)).toEqual(["network create", "network rm"]);
+      expect(rig.calls.some((c) => c[0] === "run")).toBe(false);
+    }
+  });
 });
 
 describe("the network check, the reconciler and the docker timeout (code review 2, 7)", () => {
@@ -404,26 +459,82 @@ describe("the network check, the reconciler and the docker timeout (code review 
     }
   });
 
-  it("removes labelled sandboxes, proxies, run networks and ACL directories no live sandbox owns; nothing else", async () => {
+  it("removes this executor's labelled sandboxes, proxies, run networks and ACL directories no live sandbox owns; nothing else", async () => {
     const rig = newRig();
     const orphan = "regulait-sbx-99999999-2222-4333-8444-555555555555";
     const orphanProxy = "regulait-egp-88888888-2222-4333-8444-555555555555";
     const orphanNet = "regulait-egn-77777777-2222-4333-8444-555555555555";
-    mkdirSync(path.join(rig.aclDir, orphan));
-    mkdirSync(path.join(rig.aclDir, "keep-me"));
-    writeFileSync(path.join(rig.aclDir, "regulait-sbx-not-a-uuid"), "x");
-    const b = runc(rig, { ps: `${orphan}\n${orphanProxy}\npostgres\nregulait-sbx-not-a-uuid\n`, networks: `${orphanNet}\nbridge\nregulait-egn-x\n` });
+    // Security N-D: another executor's (labelled with its tag) and a pre-N-D one (no executor label)
+    const other = executorTag("another-executor");
+    const theirs = "regulait-sbx-66666666-2222-4333-8444-555555555555";
+    const theirProxy = "regulait-egp-66666666-2222-4333-8444-555555555555";
+    const theirNet = "regulait-egn-66666666-2222-4333-8444-555555555555";
+    const legacy = "regulait-sbx-55555555-2222-4333-8444-555555555555";
+    const legacyNet = "regulait-egn-55555555-2222-4333-8444-555555555555";
+    const mine = executorTag("executor-under-test");
+    mkdirSync(path.join(rig.aclDir, mine, orphan), { recursive: true });
+    mkdirSync(path.join(rig.aclDir, mine, "keep-me"));
+    writeFileSync(path.join(rig.aclDir, mine, "regulait-sbx-not-a-uuid"), "x");
+    mkdirSync(path.join(rig.aclDir, other, theirs), { recursive: true });
+    mkdirSync(path.join(rig.aclDir, legacy));
+    const b = runc(rig, {
+      daemon: {
+        containers: [
+          { name: orphan, executor: mine },
+          { name: orphanProxy, executor: mine },
+          { name: "postgres", executor: mine },
+          { name: "regulait-sbx-not-a-uuid", executor: mine },
+          { name: theirs, executor: other },
+          { name: theirProxy, executor: other },
+          { name: legacy },
+        ],
+        networks: [{ name: orphanNet, executor: mine }, { name: "bridge", executor: mine }, { name: "regulait-egn-x", executor: mine }, { name: theirNet, executor: other }, { name: legacyNet }],
+      },
+    });
+    expect(b.executorTag).toBe(mine);
     expect(await b.reconcileOrphans()).toEqual({ containers: 2, networks: 1, aclDirs: 1 });
     const rms = rig.calls.filter((c) => c[0] === "rm").map((c) => c.at(-1));
     expect(rms.sort()).toEqual([orphanProxy, orphan].sort());
     expect(rig.calls.filter((c) => c[0] === "network" && c[1] === "rm").map((c) => c[2])).toEqual([orphanNet]);
-    expect(existsSync(path.join(rig.aclDir, orphan))).toBe(false);
-    expect(existsSync(path.join(rig.aclDir, "keep-me"))).toBe(true);
-    expect(existsSync(path.join(rig.aclDir, "regulait-sbx-not-a-uuid"))).toBe(true);
-    // only labelled objects are listed
-    expect(rig.calls.find((c) => c[0] === "ps")).toEqual(["ps", "-a", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Names}}"]);
-    expect(rig.calls.find((c) => c[0] === "network" && c[1] === "ls")).toEqual(["network", "ls", "--filter", "label=org.regulait.sandbox=1", "--format", "{{.Name}}"]);
+    expect(existsSync(path.join(rig.aclDir, mine, orphan))).toBe(false);
+    expect(existsSync(path.join(rig.aclDir, mine, "keep-me"))).toBe(true);
+    expect(existsSync(path.join(rig.aclDir, mine, "regulait-sbx-not-a-uuid"))).toBe(true);
+    // another executor's sandbox, proxy, network and ACL survive; so do the unlabelled (pre-N-D) ones
+    for (const n of [theirs, theirProxy, legacy]) expect(rms, n).not.toContain(n);
+    expect(existsSync(path.join(rig.aclDir, other, theirs))).toBe(true);
+    expect(existsSync(path.join(rig.aclDir, legacy))).toBe(true);
+    // only objects labelled as ours AND with this executor's tag are listed
+    const filters = ["--filter", "label=org.regulait.sandbox=1", "--filter", `label=org.regulait.executor=${mine}`];
+    expect(rig.calls.find((c) => c[0] === "ps")).toEqual(["ps", "-a", ...filters, "--format", "{{.Names}}"]);
+    expect(rig.calls.find((c) => c[0] === "network" && c[1] === "ls")).toEqual(["network", "ls", ...filters, "--format", "{{.Name}}"]);
   });
+
+  it("Security N-D: another executor's reconciler, on the same daemon and ACL volume, removes only its own orphan", async () => {
+    const rig = newRig();
+    const a = runc(rig, { executorId: "executor-a" });
+    const h = await a.start(offer, ROBOT_L1, "hardened_container");
+    const sandboxRun = rig.calls.find((c) => c[0] === "run" && c[1] !== "-d")!;
+    const name = sandboxRun[sandboxRun.indexOf("--name") + 1]!;
+    const id = name.slice("regulait-sbx-".length);
+    const bOrphan = "regulait-sbx-44444444-2222-4333-8444-555555555555";
+    const b = runc(rig, {
+      executorId: "executor-b",
+      daemon: {
+        containers: [{ name, executor: a.executorTag }, { name: `regulait-egp-${id}`, executor: a.executorTag }, { name: bOrphan, executor: executorTag("executor-b") }],
+        networks: [{ name: `regulait-egn-${id}`, executor: a.executorTag }],
+      },
+    });
+    mkdirSync(path.join(rig.aclDir, b.executorTag, bOrphan), { recursive: true });
+    const before = rig.calls.length;
+    // executor b never saw a's live run: before N-D it would have removed it
+    expect(await b.reconcileOrphans()).toEqual({ containers: 1, networks: 0, aclDirs: 1 });
+    const removed = rig.calls.slice(before).filter((c) => c[0] === "rm" || (c[0] === "network" && c[1] === "rm"));
+    expect(removed).toEqual([["rm", "-f", bOrphan]]);
+    expect(existsSync(path.join(rig.aclDir, a.executorTag, name))).toBe(true);
+    expect(existsSync(path.join(rig.aclDir, b.executorTag, bOrphan))).toBe(false);
+    await h.kill();
+    await h.ended;
+  }, 30_000);
 
   it("runs at the first preflight, and never touches a live run's sandbox, proxy, network or ACL", async () => {
     const rig = newRig();
@@ -441,7 +552,7 @@ describe("the network check, the reconciler and the docker timeout (code review 
     const before = rig.calls.length;
     expect(await own.reconcileOrphans()).toEqual({ containers: 0, networks: 0, aclDirs: 0 });
     expect(rig.calls.slice(before).filter((c) => c[0] === "rm" || (c[0] === "network" && c[1] === "rm"))).toEqual([]);
-    expect(existsSync(path.join(rig.aclDir, name))).toBe(true);
+    expect(existsSync(path.join(rig.aclDir, b.executorTag, name))).toBe(true);
     own.options.spawnDocker = runSeam;
     await h.kill();
     await h.ended;
