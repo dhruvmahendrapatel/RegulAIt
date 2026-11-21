@@ -24,7 +24,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   auditLog,
   browserDevices,
@@ -48,6 +48,7 @@ import {
 import { BROWSER_EXTENSION_PATHS, browserPolicySchema } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { runBrowserCaptureRetentionSweep } from "./browser-capture-retention.js";
+import { REFUSAL_COALESCE_WINDOW_MS, RefusalCoalescer } from "./browser-governance-routes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
@@ -200,6 +201,16 @@ describe("ADR-0334 off by default", () => {
     expect(pol.statusCode).toBe(401);
     const issue = await app.inject({ method: "POST", url: "/v1/browser-governance/enrolment-tokens", headers: KEY, payload: { label: "x", deviceCap: 1 } });
     expect(issue.statusCode).toBe(409);
+  });
+
+  it("#1030: repeated unauthenticated register refusals write one audit row, not one each", async () => {
+    const since = new Date(Date.now() - 1000);
+    for (let i = 0; i < 5; i++) expect((await register(await newDevice(), `rgbe_${"b".repeat(64)}`)).statusCode).toBe(403);
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(sql`${auditLog.ruleId} = 'browser-extension-refused' and ${auditLog.at} >= ${since} and ${auditLog.detail}->>'code' = 'browser_governance_disabled'`);
+    expect(rows.length).toBeLessThanOrEqual(1);
   });
 
   it("turning it on needs a step-up bound to the change, and is audited as a relaxation", async () => {
@@ -560,5 +571,30 @@ describe("ADR-0334 enrolment and proofs", () => {
     expect(rev.statusCode).toBe(200);
     const after = await register(await newDevice(), res.json().managedConfig.enrolmentToken);
     expect(after.json()).toEqual({ error: "token_revoked" });
+  });
+});
+
+describe("#1030 RefusalCoalescer", () => {
+  it("writes the first refusal of a window, counts the rest, and flushes one summary when the window ends", async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: Array<{ code: string; route: string; suppressed: number }> = [];
+      const c = new RefusalCoalescer(async (code, route, suppressed) => {
+        flushed.push({ code, route, suppressed });
+      });
+      const t0 = Date.now();
+      expect(c.admit("invalid_token", "register", t0)).toBe(true);
+      expect(c.admit("invalid_token", "register", t0 + 1)).toBe(false);
+      expect(c.admit("invalid_token", "register", t0 + 2)).toBe(false);
+      // another code has its own window
+      expect(c.admit("invalid_body", "register", t0 + 3)).toBe(true);
+      expect(flushed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(REFUSAL_COALESCE_WINDOW_MS);
+      expect(flushed).toEqual([{ code: "invalid_token", route: "register", suppressed: 2 }]);
+      // a new window after the old one closed writes again
+      expect(c.admit("invalid_token", "register", t0 + REFUSAL_COALESCE_WINDOW_MS + 5)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
