@@ -193,6 +193,7 @@ import { registerFairnessRoutes } from "./fairness.js";
 import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
+import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -676,6 +677,7 @@ import {
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -5615,6 +5617,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // only while the suggestion is in shadow and its rule still matches the bound digest (else stale). Denied = rejected.
       if (updated.objectType === "rule_step_switch") {
         await applyRuleStepSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+        // slice 4d: the same queue item may switch a published decision table instead (each hook ignores the other's)
+        await applyDecisionTableSwitchDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
       // card chain HERE, inside the one decide path, so it inherits every
@@ -5974,6 +5978,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0327 (lane E12): rule-like AI step detection, admin-only via the default gate
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
+  registerDecisionTableSwitchRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6412,6 +6417,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
+  registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);

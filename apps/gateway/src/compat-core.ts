@@ -443,6 +443,8 @@ export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "xai",
   "google",
+  // ADR-0352: Vertex runs the same @ai-sdk/google implementation as "google"
+  "vertex",
   "mock",
 ]);
 
@@ -1130,7 +1132,7 @@ export async function executeCompatCall(
       ? await switchedRuleAnswer(db, { agentId: prepared.served.id, stepName: prepared.served.name, inputText: flatText })
       : null;
   if (ruleAnswer) {
-    const ruleStep = { suggestionId: ruleAnswer.suggestionId, switchId: ruleAnswer.switchId };
+    const ruleStep = ruleAnswer.ref;
     const governed = await executeGovernedDispatch(db, dataKey, {
       ...dispatchArgs,
       onText: undefined,
