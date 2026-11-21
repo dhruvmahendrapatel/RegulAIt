@@ -245,6 +245,13 @@ export interface GovernedProtocolCallArgs {
   /** the caller's own progress token, when it asked for progress */
   progressToken?: string | number | undefined;
   /**
+   * ADR-0311 decision 4 (slice 2): false = upstream `notifications/message` are never relayed (and no
+   * `protocol-relay` decision is made for them). The 2026-07-28 path passes false: that revision removed
+   * `logging/setLevel` and a server MUST NOT emit log messages for a request that did not set a per-request log
+   * level, which this gateway does not offer. Progress for the caller's own request is unaffected.
+   */
+  relayLogMessages?: boolean | undefined;
+  /**
    * ADR-0188 S4 — the delegation grant of a WORKLOAD caller (a delegated token, S5): the method is then
    * decided for the sponsor AND the stored chain, read fresh (decision 17). A grant that cannot be read
    * refuses, audited; it is never decided as the person alone.
@@ -723,6 +730,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
     // caller's own request stays tied to the org setting alone.
     const relayLogs =
       relaying &&
+      args.relayLogMessages !== false &&
       (method === "logging/setLevel" ||
         (await loggingRelayAllowed(db, { userId, serverId, serverRow, projectId, forMethod: method, principal: args.principal, delegationGrantId: args.delegationGrantId })));
     if (relayLogs) {
