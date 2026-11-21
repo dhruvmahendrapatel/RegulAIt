@@ -45,6 +45,17 @@ regexTarget = "secret"
 regexes = ['''^3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718$''']
 
 [[allowlists]]
+# ADR-0348: the first commit of the slice 3 race test (PR #923) named a red-team fixture probe with the literal
+# `probeKey: "adr0348-probe"`, which the generic-api-key rule reads as a key. It is a probe name, not a secret; the test
+# now builds the name at run time, but that commit stays in the PR's scanned range, so its exact value is listed here
+# for that one file only.
+description = "Red-team fixture probe name in the ADR-0348 slice 3 race test (not a secret)"
+condition = "AND"
+paths = ['''^apps/gateway/src/adr0348-slice3-races\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^adr0348-probe$''']
+
+[[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
 condition = "AND"
 paths = [
@@ -155,6 +166,13 @@ condition = "AND"
 paths = ['''^packages/shared/src/demo-intake/scenario-library\.ts$''']
 regexTarget = "secret"
 regexes = ['''^(hallucination|scope-drift|shadow-ai)-scenario-[0-9]+$''']
+
+[[allowlists]]
+description = "ADR-0352 (lane E33): a made-up AWS-style secret access key in the first commit of the vendor-adapter test (replaced by an obviously synthetic value in the next commit; it stays in branch history, which this scan reads). Never a real credential. Exact value, this one test file."
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0352-vendor-adapters\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^wJalrXUtnFEMI/K7MDENG\+bPxRfiCYADR0352KEY$''']
 
 [[allowlists]]
 description = "ADR-0220, ADR-0247: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
