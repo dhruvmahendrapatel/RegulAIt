@@ -1429,6 +1429,8 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     provider: served.provider ?? null,
     model: served.model ?? null,
+    // ADR-0354 slice 2: the in-process agent's session, so a block_session / disable response can end it
+    delegationGrantId: args.delegationGrantId ?? null,
     // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
     invocation: {
       input: args.input,

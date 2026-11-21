@@ -15553,7 +15553,7 @@ export const delegationGrants = pgTable(
     check("delegation_grants_expiry_check", sql`${t.expiresAt} > ${t.createdAt}`),
     check(
       "delegation_grants_revoked_check",
-      sql`(${t.revokedAt} IS NULL AND ${t.revokedReason} IS NULL) OR (${t.revokedAt} IS NOT NULL AND ${t.revokedReason} IS NOT NULL AND ${t.revokedReason} IN ('admin', 'cascade', 'identity_revoked', 'credential_revoked', 'sponsor_disabled', 'agent_halted', 'run_ended'))`,
+      sql`(${t.revokedAt} IS NULL AND ${t.revokedReason} IS NULL) OR (${t.revokedAt} IS NOT NULL AND ${t.revokedReason} IS NOT NULL AND ${t.revokedReason} IN ('admin', 'cascade', 'identity_revoked', 'credential_revoked', 'sponsor_disabled', 'agent_halted', 'run_ended', 'request_aborted', 'policy_response'))`,
     ),
     index("delegation_grants_path_gin").using("gin", t.path),
     index("delegation_grants_root_idx").on(t.rootGrantId),

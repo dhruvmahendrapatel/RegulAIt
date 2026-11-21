@@ -31,7 +31,10 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  agentResponseAuditFacts,
+  agentResponseBody,
   composeResourceDecision,
+  withAgentResponse,
   governedCoreErrorDecision,
   matchingResourceApprovalRulesWith,
   RESOURCE_RULE_IDS,
@@ -47,6 +50,8 @@ import {
 import { perCallResourceApprovalRuleEvaluator } from "@regulait/policy-kernel/resource-approval-rule-cedar";
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
 import { checkModelRateLimit } from "./model-rate-limits.js";
+import { actorForGrant } from "./in-process-delegation.js";
+import { applyAgentResponseEffects } from "./agent-response-effects.js";
 import {
   modelConsentState,
   queueModelConsent,
@@ -283,8 +288,9 @@ export interface GovernedResourceInput {
 export async function governedEvaluateResource(db: Db, input: GovernedResourceInput): Promise<GovernedResourceDecision> {
   try {
     const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, projectId: input.projectId, counts: false }));
+    // ADR-0354 slice 2: the governing policy's graduated response rides on the decision it produced (never changes it)
     const compose = (rateLimits: LoadedRateLimit[]) =>
-      composeResourceDecision({
+      withAgentResponse(composeResourceDecision({
         resource: input.resource,
         base: input.base,
         projectId: input.projectId,
@@ -295,7 +301,7 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
         abacDecision: r.abacDecision,
         approvedApprovalId: input.approvedApprovalId ?? null,
         canQueue: input.canQueue,
-      });
+      }), r.abacDecision?.response);
     const counted = async () => {
       const counts = await countWindows(db, input.userId, input.resource, r.rateLimits);
       return compose(r.rateLimits.map((l, i) => ({ ...l, currentCount: counts[i]! })));
@@ -325,6 +331,8 @@ export interface ModelGateRefusal {
   /** ADR-0251: the queued (202 `approval_pending`) or failing consent this answer names */
   approvalId?: string;
   auditLogId?: string | null;
+  /** ADR-0354: the graduated response, as the agent-facing projection (correct's alternative, a session that ended) */
+  agentResponse?: ReturnType<typeof agentResponseBody>;
 }
 
 /**
@@ -351,6 +359,8 @@ export async function governedModelGate(
     invocation?: Omit<ModelInvocation, "mode"> | undefined;
     provider?: string | null | undefined;
     model?: string | null | undefined;
+    /** ADR-0354 slice 2: the delegation grant an in-process agent's call is made under (its session), if any */
+    delegationGrantId?: string | null | undefined;
   },
 ): Promise<ModelGateRefusal | null> {
   const resource: GovernedResource = { type: "model", id: args.agentId, name: args.agentName, mode: args.mode };
@@ -409,6 +419,8 @@ export async function governedModelGate(
         mode: args.mode,
         ...(args.projectId ? { projectId: args.projectId } : {}),
         ...(decision.matchedApprovalRuleIds.length ? { matchedApprovalRuleIds: decision.matchedApprovalRuleIds } : {}),
+        // ADR-0354: every decision row records the response the agent was given
+        agentResponse: agentResponseAuditFacts(decision),
         receiptClass: "decision",
       },
       effect: "deny",
@@ -417,6 +429,13 @@ export async function governedModelGate(
       reason: decision.reason,
     })
     .returning({ id: auditLog.id });
+  // ADR-0354 slice 2: a block_session / disable response ends the in-process agent's session now it is recorded
+  if (decision.response?.endSession) {
+    const actor = args.delegationGrantId
+      ? await actorForGrant(db, args.delegationGrantId, { costKnown: true }).catch(() => null)
+      : null;
+    await applyAgentResponseEffects(db, { response: decision.response, actor, userId: args.userId, decisionAuditId: row?.id ?? null, surface: "model" });
+  }
   return {
     ok: false,
     status: coreError ? 503 : 403,
@@ -424,6 +443,7 @@ export async function governedModelGate(
     detail: decision.reason,
     ruleId: decision.ruleId,
     auditLogId: row?.id ?? null,
+    ...(decision.response ? { agentResponse: agentResponseBody(decision.response) } : {}),
   };
 }
 

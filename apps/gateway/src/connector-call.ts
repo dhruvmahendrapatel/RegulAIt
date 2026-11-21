@@ -42,7 +42,8 @@
  * dial is still refused, as before: the hold is defined for writes.
  */
 import { randomUUID } from "node:crypto";
-import type { GovernedActor } from "@regulait/policy-kernel";
+import { agentResponseAuditFacts, agentResponseBody, type GovernedActor } from "@regulait/policy-kernel";
+import { applyAgentResponseEffects } from "./agent-response-effects.js";
 import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import {
@@ -636,6 +637,8 @@ export async function executeGovernedConnectorCall(
           operation: body.operation,
           ...(body.object ? { object: body.object } : {}),
           projectId: projectId ?? null,
+          // ADR-0354: every decision row records the response the agent was given
+          agentResponse: agentResponseAuditFacts(decision),
           // ADR-0104/0105 forensic half: WHICH payload and WHICH policy, as
           // digests, whenever the write was under the dial's hold
           ...(binding ? { argumentsDigest: binding.argumentsDigest, approvalScope: "action", contextDigest: binding.contextDigest } : {}),
@@ -672,7 +675,12 @@ export async function executeGovernedConnectorCall(
 
     // A DENIED call bills nothing and executes nothing (mirror the model path).
     if (decision.effect === "deny") {
-      return out.status(403).send({ decision });
+      // ADR-0354 slice 2: a graduated refusal tells the agent how to proceed (correct) or that its session ended
+      // (block_session / disable), and ends that session now that the refusal is recorded
+      if (decision.response?.endSession) {
+        await applyAgentResponseEffects(db, { response: decision.response, actor: delegatedActor, userId, decisionAuditId, surface: "connector" });
+      }
+      return out.status(403).send({ decision, ...(decision.response ? { agentResponse: agentResponseBody(decision.response) } : {}) });
     }
 
     // ADR-0193 P1 — CONTENT TRUST, connector path (as on the MCP path): a write whose causal context already holds

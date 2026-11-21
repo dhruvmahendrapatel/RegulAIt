@@ -75,7 +75,8 @@ import { flattenFindings, guardrailOutcome, recordGuardrailDecision, resolveGuar
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, requireStepUp } from "./step-up.js";
 import { timeouts } from "./timeouts.js";
-import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
+import { agentResponseAuditFacts, agentResponseBody, evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
+import { applyAgentResponseEffects } from "./agent-response-effects.js";
 import { governedEvaluateResource } from "./governed-core.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
@@ -329,7 +330,7 @@ export type GovernedA2aCallOutcome =
       pii: { mode: string; action: string; outputHits: unknown[] } | null;
       guardrails: DispatchGuardrails | null;
     }
-  | { kind: "denied"; status: number; error: string; ruleId: string; reason: string; auditId: string }
+  | { kind: "denied"; status: number; error: string; ruleId: string; reason: string; auditId: string; agentResponse?: ReturnType<typeof agentResponseBody> }
   | { kind: "upstream_error"; status: 502; error: "a2a_upstream_error"; reason: string; auditId: string };
 
 /** the text of a reply: a message's text parts, or a task's artifacts and status message, capped */
@@ -408,7 +409,16 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
   }
   if (core.effect !== "allow" || !grantId) {
     const [status, error] = a2aRefusalStatus(core);
-    return deny(status, error, core.ruleId, core.reason, label, core.matchedApprovalRuleIds.length ? { matchedApprovalRuleIds: core.matchedApprovalRuleIds } : {});
+    const refused = await deny(status, error, core.ruleId, core.reason, label, {
+      ...(core.matchedApprovalRuleIds.length ? { matchedApprovalRuleIds: core.matchedApprovalRuleIds } : {}),
+      // ADR-0354: every decision row records the response the agent was given
+      agentResponse: agentResponseAuditFacts(core),
+    });
+    // ADR-0354 slice 2: an A2A call carries no agent session of ours, so block_session / disable is a recorded deny
+    if (core.response?.endSession && refused.kind === "denied") {
+      await applyAgentResponseEffects(db, { response: core.response, actor: null, userId: args.userId, decisionAuditId: refused.auditId, surface: "a2a" });
+    }
+    return refused.kind === "denied" && core.response ? { ...refused, agentResponse: agentResponseBody(core.response) } : refused;
   }
   const grant = { id: grantId };
 
@@ -865,6 +875,6 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
     if (out.kind === "allowed")
       return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId, withheld: out.withheld, ...(out.pii ? { pii: out.pii } : {}), ...(out.guardrails ? { guardrails: out.guardrails } : {}) };
-    return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
+    return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId, ...(out.agentResponse ? { agentResponse: out.agentResponse } : {}) } : {}) });
   });
 }

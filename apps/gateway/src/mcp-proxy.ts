@@ -84,6 +84,7 @@ import {
 } from "./mcp-egress.js";
 import { cancelUnattachedStdioSession, placeGovernedStdio, registerLinkedStdioSession, stdioPlacementContext, type GovernedStdioPlacement, type StdioSession } from "./executor-stdio.js";
 import { checkStdioClosure } from "./mcp-transports.js";
+import { applyAgentResponseEffects } from "./agent-response-effects.js";
 import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
@@ -1291,7 +1292,14 @@ async function executeGovernedToolCallInner(
       stdioHold.session = registerLinkedStdioSession(db, { offerId: linked.offerId, executorId: linked.executorId }, { command: stdioClosure.command, args: stdioClosure.args }, userId);
     }
 
-    if (decision.effect === "deny") return { kind: "denied", decision };
+    if (decision.effect === "deny") {
+      // ADR-0354 slice 2: a block_session / disable response ends the agent's session (and quarantines it) now that
+      // the refusal is recorded; a failure is audited and the call stays refused
+      if (decision.response?.endSession) {
+        await applyAgentResponseEffects(db, { response: decision.response, actor: delegatedActor, userId, decisionAuditId, surface: "mcp_tool" });
+      }
+      return { kind: "denied", decision };
+    }
 
     // ADR-0250 (review P-02) — THE PLAN-ONLY GATE, FORCED AT PROJECT LEVEL. A write tool on a project whose live
     // workflow instance rests at a planning stage is refused here, before any approval is queued and before the
@@ -2990,17 +2998,20 @@ export function mcpErrorForGovernanceOutcome(
     case "denied": {
       // ADR-0354: a `correct` refusal also tells the agent the approved route, as validated plain text in the
       // message and as structured error data. It carries no grant: the agent's retry is decided afresh.
-      const steer = outcome.decision.response?.kind === "correct" ? agentResponseBody(outcome.decision.response) : null;
+      // A block_session / disable refusal also tells the agent its session has ended, so it stops instead of retrying.
+      const graduated = outcome.decision.response ? agentResponseBody(outcome.decision.response) : null;
+      const steer = graduated?.response === "correct" ? graduated : null;
       return new McpError(
         ErrorCode.InvalidRequest,
         `Denied by policy: ${outcome.decision.reason}` +
-          (steer ? ` — ${steer.message ?? ""} Instead: ${steer.alternative ?? ""}` : ""),
+          (steer ? ` — ${steer.message ?? ""} Instead: ${steer.alternative ?? ""}` : "") +
+          (graduated?.sessionEnded ? " This agent session has ended; do not retry." : ""),
         // ADR-0186 decision 32: the connector route's 403 code, carried in the
         // error data (a JSON-RPC answer has no HTTP status of its own)
         outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID
           ? { error: CREDENTIAL_AUDIENCE_ERROR, status: 403 }
-          : steer
-            ? { [AGENT_RESPONSE_META_KEY]: steer }
+          : graduated
+            ? { [AGENT_RESPONSE_META_KEY]: graduated }
             : undefined,
       );
     }

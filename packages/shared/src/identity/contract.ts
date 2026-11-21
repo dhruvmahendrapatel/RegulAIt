@@ -187,6 +187,8 @@ export const DELEGATION_REVOKE_REASONS = [
   "run_ended",
   /** S5 review item 5 (migration 0188): the token request timed out after its grant was made */
   "request_aborted",
+  /** ADR-0354 slice 2: a `block_session` or `disable` policy response ended the agent's session */
+  "policy_response",
 ] as const;
 export type DelegationRevokeReason = (typeof DELEGATION_REVOKE_REASONS)[number];
 

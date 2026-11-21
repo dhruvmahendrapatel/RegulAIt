@@ -652,29 +652,12 @@ const versionBodySchema = z.object({
   guidance: z.unknown().optional(),
 });
 
-/**
- * ADR-0354 — the graduated responses whose side effect (end the session, quarantine the agent) is wired in a later
- * slice. Until then a policy naming one is refused at write time rather than stored and silently answered as a plain
- * deny: an admin must never believe a session is being ended when it is not.
- */
-const RESPONSES_NOT_YET_ENFORCED: ReadonlySet<string> = new Set(["block_session", "disable"]);
-
 type ResponseFields =
   | { ok: true; guidanceMessage: string | null; guidanceAlternative: string | null }
   | { ok: false; status: number; body: Record<string, unknown> };
 
 /** ADR-0354 — the response table's guidance rules for one policy version body, checked before anything is stored */
 export function responseFieldsOf(mode: string, guidance: unknown): ResponseFields {
-  if (RESPONSES_NOT_YET_ENFORCED.has(mode)) {
-    return {
-      ok: false,
-      status: 422,
-      body: {
-        error: "response_not_yet_enforced",
-        detail: `mode '${mode}' is declared (ADR-0354) but its side effect is not wired yet, so it cannot be stored. Use 'forbid' for now.`,
-      },
-    };
-  }
   const spec = AGENT_RESPONSE_TABLE[responseOfPolicyMode(mode as PolicyResponseMode)];
   if (spec.guidance === "none") {
     if (guidance !== undefined && guidance !== null) {

@@ -14,6 +14,7 @@
  * allow into a hold: it is consulted strictly after an entitlement allow (AER-017's order on the MCP path).
  */
 import type { AbacDecision, ExecutionPosture, RuleScope } from "./index.js";
+import type { AgentResponse } from "./agent-response.js";
 import { executionGate } from "./index.js";
 
 export type GovernedResourceType = "model" | "connector" | "a2a";
@@ -144,6 +145,8 @@ export interface GovernedResourceDecision {
   approverName?: string | null;
   /** the approval rules that matched (for the consent's context digest and the queue's quorum) */
   matchedApprovalRuleIds: string[];
+  /** ADR-0354 — set only when a graduated policy chose how to answer the agent; never changes `effect` */
+  response?: AgentResponse;
 }
 
 export const RESOURCE_RULE_IDS = {

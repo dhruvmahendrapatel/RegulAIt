@@ -1,7 +1,8 @@
 # ADR-0354: Graduated, agent-steering responses: advise, correct, block session, disable
 
-- **Status**: Proposed (lane E35, slice 1 built: the vocabulary, Cedar policy modes, advise and correct on the MCP
-  path; block session and disable are declared and refused at write time until slice 2 wires their side effects)
+- **Status**: Proposed (lane E35. Slice 1 built: the vocabulary, Cedar policy modes, advise and correct on the MCP
+  path. Slice 2 built: block session and disable side effects, and the response on the model, connector and A2A
+  paths. Slice 3, the endpoint adapters, follows lane E31.)
 - **Date**: 2026-11-17
 - **Index**: Graduated, agent-steering responses (advise, correct, block session, disable) on one vocabulary
 - **Builds on**: [ADR-0040](0040-abac-policy-as-code.md) (Cedar ABAC), [ADR-0251](0251-one-governed-decision-core.md)
@@ -129,6 +130,30 @@ avoid two lanes editing one struct, slice 3 maps a signed policy's graduated res
 merges, renders guidance only into each agent's documented plain-text fields (Claude Code `permissionDecisionReason`
 and `additionalContext`), and adds the decision-record fields E1 needs. E31's device rules and the gateway rules then
 share this vocabulary, which is the gap analysis's "one rule, every route" requirement for responses.
+
+### As built: slice 2 (2026-11-21)
+
+- **The session is the delegation grant.** For a delegated or in-process agent (ADR-0188), the agent's session is its
+  leaf delegation grant. `block_session` and `disable` revoke it with the new reason code `policy_response`
+  (`DELEGATION_REVOKE_REASONS`; migration `pending/abac_agent_responses_session_effects.sql` widens the CHECK). The
+  existing cascade revokes every grant under it. The agent's very next call, to any tool, is refused by the chain
+  check (`actor-chain-invalid`).
+- **Disable suspends the agent's workload identity, not the shared model.** Section 7 proposed `haltAgentInTx`. As
+  built, disable suspends the leaf workload identity instead (`active → suspended`, a conditional update that never
+  moves any other status). Halting the `agents` row would stop that model for every person and every agent; suspending
+  the identity stops only the agent that tripped the policy. The chain check already refuses a suspended identity.
+  Reinstating stays on `PATCH /v1/workload-identities/:id` with its `identity_manage` step-up. Like the
+  `kill_switch_narrowing_only` rule (#881), it applies under every dial, because it only narrows.
+- **No session, nothing broader.** A person's own call, or an A2A call (no agent session of ours), is refused as a
+  plain deny, and the outcome is audited as `response-no-session` with `sessionEnded: false`. The person's login is
+  never ended in its place.
+- **One module does it** (`apps/gateway/src/agent-response-effects.ts`). It runs after the decision row is written.
+  A failure is audited as `response-effect-failed` and the call stays refused.
+- **Surfaces.** The MCP refusal tells the agent its session ended ("do not retry", plus `sessionEnded` in the error
+  data). The governed core attaches the response to model, connector and A2A decisions (`withAgentResponse`). Their
+  refusal bodies carry `agentResponse`, and their decision rows carry `detail.agentResponse`. The model gate is given
+  the in-process agent's grant so its session can be ended there too.
+- **The write-time refusal of block_session and disable is lifted.**
 
 ## Open-source comparison (ADR-0176, owner rule 9)
 
