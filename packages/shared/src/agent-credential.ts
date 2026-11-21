@@ -8,11 +8,36 @@
  * grant already never exceeds its sponsor's entitlements or its parent's budget (ADR-0188 S3).
  */
 import { z } from "zod";
+import { CLIENT_ASSERTION_TYPE_JWT_BEARER, TOKEN_EXCHANGE_GRANT_TYPE, TOKEN_TYPE_ACCESS_TOKEN } from "./identity/contract.js";
 
 /** the issuer is `<public URL>` + this path; its metadata and keys live under it */
 export const AGENT_CREDENTIAL_ISSUER_PATH = "/agent-credentials";
 export const AGENT_CREDENTIAL_DISCOVERY_PATH = `${AGENT_CREDENTIAL_ISSUER_PATH}/.well-known/openid-configuration`;
 export const AGENT_CREDENTIAL_JWKS_PATH = `${AGENT_CREDENTIAL_ISSUER_PATH}/.well-known/jwks.json`;
+/** ADR-0315 §5 (slice 2): one IETF Token Status List per block of status indexes, served public and signed */
+export const AGENT_CREDENTIAL_STATUS_PATH = `${AGENT_CREDENTIAL_ISSUER_PATH}/status/:listId`;
+/** the entries in one status list; a credential's list is `floor(status_index / size)`, its `idx` the remainder */
+export const AGENT_CREDENTIAL_STATUS_LIST_SIZE = 65_536;
+/** two bits per entry: VALID, INVALID (terminal) and SUSPENDED (the chain may become live again) */
+export const AGENT_CREDENTIAL_STATUS_BITS = 2;
+/** the Token Status List values (draft-ietf-oauth-status-list §7.1). A verifier admits only VALID. */
+export const AGENT_CREDENTIAL_STATUS = Object.freeze({ VALID: 0, INVALID: 1, SUSPENDED: 2 } as const);
+export type AgentCredentialStatusValue = (typeof AGENT_CREDENTIAL_STATUS)[keyof typeof AGENT_CREDENTIAL_STATUS];
+/** the list's `ttl`: a verifier refetches at least this often and fails closed when it cannot */
+export const AGENT_CREDENTIAL_STATUS_TTL_SECONDS = 60;
+/** the status list token's header `typ` */
+export const AGENT_CREDENTIAL_STATUS_LIST_TYP = "statuslist+jwt";
+/** a status list id: a non-negative decimal integer without leading zeros */
+export const AGENT_CREDENTIAL_STATUS_LIST_ID = /^(0|[1-9][0-9]{0,15})$/;
+
+/** where a status index lives: its list id and the entry inside that list */
+export function agentCredentialStatusEntry(statusIndex: number): { listId: number; idx: number } {
+  return { listId: Math.floor(statusIndex / AGENT_CREDENTIAL_STATUS_LIST_SIZE), idx: statusIndex % AGENT_CREDENTIAL_STATUS_LIST_SIZE };
+}
+/** the public URI of one status list (also the list token's `sub`) */
+export function agentCredentialStatusListUri(issuer: string, listId: number): string {
+  return `${issuer}/status/${listId}`;
+}
 
 /** RFC 8693 `requested_token_type` for an agent credential */
 export const AGENT_CREDENTIAL_TOKEN_TYPE = "urn:regulait:params:oauth:token-type:agent-credential";
@@ -97,6 +122,8 @@ export interface AgentCredentialClaims {
   regulait_run?: string;
   regulait_budget?: { currency: "USD"; cap_micros: number; remaining_micros: number };
   cnf?: { jkt: string };
+  /** the credential's entry in an IETF Token Status List (slice 2) */
+  status: { status_list: { idx: number; uri: string } };
   iat: number;
   nbf: number;
   exp: number;
@@ -122,6 +149,7 @@ export function agentCredentialDiscoveryDocument(issuer: string): Record<string,
     regulait_typ: AGENT_CREDENTIAL_TYP,
     regulait_max_lifetime_seconds: AGENT_CREDENTIAL_TTL_MAX_SECONDS,
     regulait_leeway_seconds: AGENT_CREDENTIAL_LEEWAY_SECONDS,
+    regulait_status_list_ttl_seconds: AGENT_CREDENTIAL_STATUS_TTL_SECONDS,
     regulait_verifier_checks: [
       "alg equals the audience's pinned algorithm (never none, never chosen from the token)",
       "typ is at+jwt",
@@ -129,6 +157,40 @@ export function agentCredentialDiscoveryDocument(issuer: string): Record<string,
       "iss and aud match exactly",
       "exp, nbf and iat hold within the leeway",
       "a DPoP proof matches cnf.jkt unless the audience is bearer",
+      "the status_list entry is 0 (VALID) in a statuslist+jwt from this issuer, verified with the same JWKS and fetched within its ttl; fail closed when it cannot be read",
     ],
   };
 }
+
+/**
+ * ADR-0315 §3 (slice 1b): the `POST /oauth/token` form that exchanges the caller's own delegated access token for an
+ * agent credential at ONE registered audience. No scope is asked for: the credential's scope is the grant's,
+ * projected through the audience's scope map. Strict: any other field is refused.
+ */
+export const agentCredentialExchangeRequestSchema = z
+  .object({
+    grant_type: z.literal(TOKEN_EXCHANGE_GRANT_TYPE),
+    subject_token: z.string().min(1).max(16_384),
+    subject_token_type: z.literal(TOKEN_TYPE_ACCESS_TOKEN),
+    requested_token_type: z.literal(AGENT_CREDENTIAL_TOKEN_TYPE),
+    resource: z.string().url().max(512).refine((v) => v.startsWith("https://"), { message: "an https audience" }),
+    client_assertion_type: z.literal(CLIENT_ASSERTION_TYPE_JWT_BEARER).optional(),
+    client_assertion: z.string().min(1).max(16_384).optional(),
+    client_id: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+export type AgentCredentialExchangeRequest = z.infer<typeof agentCredentialExchangeRequestSchema>;
+
+/** the public `error_code` values the agent credential exchange may answer with (beside the delegation ones) */
+export const AGENT_CREDENTIAL_EXCHANGE_ERROR_CODES = [
+  "agent_credential_audience_unknown",
+  "agent_credential_audience_disabled",
+  "agent_credential_subject_invalid",
+  "agent_credential_subject_key_mismatch",
+  "agent_credential_subject_client_mismatch",
+  "agent_credential_grant_not_live",
+  "agent_credential_org_halted",
+  "agent_credential_agent_halted",
+  "agent_credential_budget_exhausted",
+  "agent_credential_scope_empty",
+] as const;

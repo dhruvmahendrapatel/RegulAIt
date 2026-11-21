@@ -111,6 +111,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "robot_version",
   // ADR-0331: removing an MCP server from endpoints, sent to no device until a second administrator approves it
   "endpoint_addon_removal",
+  // ADR-0338: disabling, quarantining or restoring an agent in its vendor platform (stageId = vendor-agent-action:<id>)
+  "vendor_agent_control",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -139,6 +141,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   rule_step_switch: "rule-like step switch",
   robot_version: "robot version review",
   endpoint_addon_removal: "MCP server removal from endpoints",
+  vendor_agent_control: "vendor agent disable, quarantine or restore",
 };
 
 /**

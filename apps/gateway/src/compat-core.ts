@@ -101,7 +101,7 @@ import {
   semanticCacheSavings,
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
-import { switchedRuleAnswer } from "./rule-step-serve.js";
+import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { abacPrincipalFromRequest } from "./abac-principal.js";
@@ -443,6 +443,8 @@ export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "xai",
   "google",
+  // ADR-0352: Vertex runs the same @ai-sdk/google implementation as "google"
+  "vertex",
   "mock",
 ]);
 
@@ -1130,7 +1132,7 @@ export async function executeCompatCall(
       ? await switchedRuleAnswer(db, { agentId: prepared.served.id, stepName: prepared.served.name, inputText: flatText })
       : null;
   if (ruleAnswer) {
-    const ruleStep = { suggestionId: ruleAnswer.suggestionId, switchId: ruleAnswer.switchId };
+    const ruleStep = ruleAnswer.ref;
     const governed = await executeGovernedDispatch(db, dataKey, {
       ...dispatchArgs,
       onText: undefined,
@@ -1140,21 +1142,13 @@ export async function executeCompatCall(
     });
     if (!governed.ok) return compatHoldStatus(governed);
     args.onText?.(governed.result.outputText);
-    await db.insert(costEvents).values({
+    await recordRuleStepSaving(db, {
       userId: prepared.userId,
-      objectType: "agent",
-      objectId: prepared.served.id,
-      technique: "rule_replacement",
       requestedAgentId: prepared.requested.id,
       servedAgentId: prepared.served.id,
-      baselineAgentId: prepared.served.id,
-      estimatedCostSavedUsd: ruleAnswer.avgCostPerRunUsd,
-      estimationBasis:
-        "rule-replacement: a switched rule-like step answered by its approved exact-match rule — the step's " +
-        "measured average AI cost per run over its scan window saved (null when no run was priced)",
-      ruleId: "rule-step-served",
-      projectId: prepared.projectId,
-      detail: { ...ruleStep, surface: `compat_${args.surface}` },
+      projectId: prepared.projectId ?? null,
+      ruleAnswer,
+      surface: `compat_${args.surface}`,
     });
     await db.insert(auditLog).values({
       userId: prepared.userId,
