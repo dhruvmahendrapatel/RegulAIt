@@ -78,7 +78,7 @@ using the adapters' existing fetch path, with no vendor SDK.
    - **These start nothing, and each is audited:** an unlinked actor, an actor linked to a disabled user, a delivery
      that names no actor, and the agent acting on itself.
    - **The template** is matched on that user's own roles and the project's classifications, through the same
-     helpers the start route now uses (`changeWithServerFacts`, `matchedTemplateIds`, `withRequiredTemplates`).
+     helpers the start route uses (`resolveServerChange`, `matchedTemplateIds`, `withCascadeTemplates`).
    - **The start** runs with `isAdmin: false`, so no admin-only path is reachable. Project attribution is checked
      against the user's own membership.
 4. **Once per work item.** `pm_assignment_starts` is unique on (connection, external id). Its claim is inserted in the

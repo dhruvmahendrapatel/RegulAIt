@@ -40,7 +40,7 @@ import {
 import type { NormalizedInboundEvent } from "@regulait/pm-provider";
 import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
-import { changeWithServerFacts, matchedTemplateIds, startWorkflowInstanceWithTemplates, withRequiredTemplates } from "./workflows.js";
+import { matchedTemplateIds, resolveServerChange, startWorkflowInstanceWithTemplates, withCascadeTemplates } from "./workflows.js";
 import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
 
 /** the system actor for refusals with no RegulAIt user to attribute them to (pm.ts uses the same id) */
@@ -225,15 +225,20 @@ export async function handleAssignmentEvent(
         throw new StartRefused("refused", { already: true, instanceId: existing?.instanceId ?? null });
       }
       const projectId = trigger.projectId ?? null;
-      const change = await changeWithServerFacts(tx, userId, projectId, {
-        description,
-        paths: [],
-        changeType: trigger.changeType,
-        environment: trigger.environment,
-        ...(trigger.targetSystem ? { targetSystem: trigger.targetSystem } : {}),
-      });
-      let templateIds = await matchedTemplateIds(tx, change);
-      if (projectId) templateIds = await withRequiredTemplates(tx, projectId, templateIds);
+      // the same server-side facts and §8.3 cascade as the start route (resolveServerChange)
+      const { change, cascadeTemplateIds } = await resolveServerChange(
+        tx,
+        userId,
+        {
+          description,
+          paths: [],
+          changeType: trigger.changeType,
+          environment: trigger.environment,
+          ...(trigger.targetSystem ? { targetSystem: trigger.targetSystem } : {}),
+        },
+        projectId,
+      );
+      const templateIds = withCascadeTemplates(await matchedTemplateIds(tx, change), cascadeTemplateIds);
       if (templateIds.length === 0) throw new StartRefused("no_workflow", { changeType: trigger.changeType });
       // never more than the user: isAdmin is false, so no admin-only path is reachable, and the project
       // attribution is checked against this user's own membership

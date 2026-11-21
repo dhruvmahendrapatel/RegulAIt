@@ -1,0 +1,12 @@
+{
+  "adr": "ADR-0317",
+  "lane": "L6",
+  "tracking": "ADR-0317 (lane L6, G4): the brief is API-only; the assignment-trigger and identity-link screen is requested on #453. RAISED for the master's review",
+  "gaps": {
+    "GET /v1/pm/connections/:name/assignment-trigger": "reads a PM connection's assignment trigger (agent identity, change descriptor, on/off)",
+    "PUT /v1/pm/connections/:name/assignment-trigger": "sets the assignment trigger; turning it on is a settings_relax step-up",
+    "GET /v1/pm/connections/:name/identity-links": "lists which PM users are linked to which RegulAIt users on a connection",
+    "POST /v1/pm/connections/:name/identity-links": "links a PM user to a RegulAIt user (admin-managed, never self-asserted)",
+    "DELETE /v1/pm/connections/:name/identity-links/:linkId": "removes an identity link; that PM user's assignments start nothing"
+  }
+}

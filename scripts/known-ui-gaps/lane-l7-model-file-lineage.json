@@ -1,0 +1,8 @@
+{
+  "lane": "L7",
+  "tracking": "Lane L7 (P14 + P16): the brief is API-only; the lineage panel on the model-artifact screen is for the design builder on #453. RAISED for review: the master decides on the PR whether to keep this or build the screen first",
+  "gaps": {
+    "POST /v1/model-artifacts/:artifactId/lineage": "records how a model file was derived from its parent file(s): repackaged, converted, fine-tuned, quantized or merged (once per file, audited)",
+    "GET /v1/model-artifacts/:artifactId/lineage": "shows a model file's parents, ancestors and children (relatives the caller cannot see as a count)"
+  }
+}

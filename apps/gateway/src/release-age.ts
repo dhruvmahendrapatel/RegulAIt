@@ -38,6 +38,7 @@ import {
   type ReleaseAgeStatus,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { isFirstPartyServerUrl } from "./mcp-first-party.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -135,6 +136,13 @@ export async function serverReleaseStatus(
   now: Date = new Date(),
 ): Promise<ReleaseAgeStatus> {
   if (minDays <= 0) return releaseAgeStatus({ minDays, firstSeenAt: row.releaseSeenAt, now, overridden: false });
+  // ADR-0364: a first-party server the gateway serves in-process has no third-party release to wait out — its code is
+  // the installed gateway, and every tool it serves (a robot version) was approved in the queue on its exact content.
+  // A changed manifest there is a newly approved robot, not a new upstream release. Admission scanning still applies.
+  const [fp] = await db.select({ transport: mcpServers.transport, url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.id, row.id));
+  if (fp?.transport === "first_party" && isFirstPartyServerUrl(fp.url)) {
+    return releaseAgeStatus({ minDays, firstSeenAt: row.releaseSeenAt, now, overridden: true });
+  }
   const overridden = await hasReleaseOverride(db, "mcp_server", row.id, row.releaseDigest ?? REGISTRATION_RELEASE);
   return releaseAgeStatus({ minDays, firstSeenAt: row.releaseSeenAt, now, overridden });
 }

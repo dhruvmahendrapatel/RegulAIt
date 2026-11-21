@@ -1,0 +1,1 @@
+{"session_id":"s-1","cwd":"/work","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_9","tool_input":{"command":"sudo -u root sh -c 'rm -rf /tmp/secret-argument'"}}
