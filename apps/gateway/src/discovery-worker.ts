@@ -89,6 +89,8 @@ import {
   federationSourceSubject,
   type DiscoverySourceKind,
   normaliseGuid,
+  nextDiscoveryWriteScope,
+  discoveryWriteScopeFinal,
 } from "@regulait/shared";
 import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
@@ -638,7 +640,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
   // decision 7 (review of #403): a credential found to grant write access is never used again
-  if (cred?.writeScope === "refused") {
+  if (cred && discoveryWriteScopeFinal(cred.writeScope)) {
     return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
   }
   let secret: string | null = null;
@@ -747,7 +749,9 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   }
   if (leaseGone.signal.aborted) return "lease_lost";
 
-  if (result.credentialWriteScope === "write" && cred) {
+  // ADR-0336 decision 9: the credential's state moves only along DISCOVERY_WRITE_SCOPE_TRANSITIONS
+  const nextScope = cred ? nextDiscoveryWriteScope(cred.writeScope, result.credentialWriteScope) : null;
+  if (cred && nextScope === "refused") {
     // record the refusal on the credential (audited), so the source is blocked until it is replaced
     await db.update(discoveryCredentials).set({ writeScope: "refused" }).where(eq(discoveryCredentials.id, cred.id));
     await audit(db, "discovery_source", source.id, "discovery-credential-refused", "deny",
@@ -757,7 +761,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   if (result.credentialWriteScope === "write") {
     return fail("credential_has_write_scope", "the credential grants write access; a discovery credential must be read-only (ADR-0195 decision 7). Replace it.");
   }
-  if (result.credentialWriteScope === "read_only" && cred && cred.writeScope !== "read_only") {
+  if (cred && nextScope === "read_only") {
     await db.update(discoveryCredentials).set({ writeScope: "read_only" }).where(eq(discoveryCredentials.id, cred.id));
   }
 

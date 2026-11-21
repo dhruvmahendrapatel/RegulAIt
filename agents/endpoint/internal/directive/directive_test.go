@@ -44,10 +44,17 @@ func base() Directive {
 	}
 }
 
+// envelope signs as the gateway does: over SignatureDomain followed by the payload bytes
 func envelope(t *testing.T, priv ed25519.PrivateKey, payload []byte) []byte {
 	t.Helper()
+	return envelopeOver(t, priv, payload, append(append([]byte{}, SignatureDomain...), payload...))
+}
+
+// envelopeOver puts payload in the envelope with a signature over exactly signed
+func envelopeOver(t *testing.T, priv ed25519.PrivateKey, payload, signed []byte) []byte {
+	t.Helper()
 	b, _ := json.Marshal(enforce.Envelope{KeyID: keyID, Payload: base64.StdEncoding.EncodeToString(payload),
-		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload))})
+		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, signed))})
 	return b
 }
 
@@ -74,6 +81,12 @@ func TestVerify(t *testing.T) {
 		"bad server name":               mut(func(d *Directive) { d.Asset.ServerName = "a b" }),
 		"unknown identity kind":         mut(func(d *Directive) { d.Asset.IdentityKind = "unknown" }),
 		"too large":                     bytes.Repeat([]byte(" "), maxEnvelope+1),
+		// domain separation (#1033): a signature over the bare payload, as a policy is signed, is not a directive's
+		"signed as a policy": func() []byte { p, _ := json.Marshal(base()); return envelopeOver(t, priv, p, p) }(),
+		"another domain": func() []byte {
+			p, _ := json.Marshal(base())
+			return envelopeOver(t, priv, p, append([]byte("regulait.endpoint-directive/2\x00"), p...))
+		}(),
 	}
 	for name, raw := range refused {
 		k := keys
@@ -355,5 +368,14 @@ func TestGoldenPayloadVerifies(t *testing.T) {
 	d, code, err := Verify(envelope(t, priv, bytes.TrimSpace(raw)), keys, identity, at)
 	if err != nil || code != "" || d.Asset.PackageVersion != "2.1.0" || d.NotAfter.Sub(d.IssuedAt) != MaxValidity {
 		t.Fatalf("the golden payload does not verify: %v %q %+v", err, code, d)
+	}
+}
+
+// A directive's signature never verifies as a policy envelope (the bare-payload check every policy uses), so one
+// device-policy key can sign both (owner decision B4, #1033).
+func TestDirectiveSignatureIsNotAPolicySignature(t *testing.T) {
+	keys, priv := key(t)
+	if _, err := enforce.VerifyEnvelope(signedDirective(t, priv, base()), keys); !errors.Is(err, enforce.ErrUnverified) {
+		t.Fatalf("a directive's envelope verified as a policy: %v", err)
 	}
 }

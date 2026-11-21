@@ -153,6 +153,8 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -817,7 +819,10 @@ export async function executeGovernedToolCall(
       // withhold, that is the marker, not the payload.
       // ADR-0186 decision 32: arguments refused for carrying a credential are not stored
       inputText:
-        capture && traceInput.value && !(outcome.kind === "denied" && outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID)
+        capture && traceInput.value &&
+        !(outcome.kind === "denied" && (outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID ||
+          // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal
+          outcome.decision.ruleId === PRIVACY_RULE_IDS.dispatchRefused))
           ? toolPayloadPreview(traceInput.value, max)
           : null,
       outputText:
@@ -1518,6 +1523,17 @@ async function executeGovernedToolCallInner(
         };
       }
     }
+
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on the arguments that would reach the upstream (after any redaction). Still before the approval is
+    // consumed and before the upstream is contacted; answered as a policy denial so every caller reports it as one.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "mcp_tool", serverId, toolName },
+      projectId,
+      input: JSON.stringify(preparedPii?.effectiveArguments ?? args.arguments ?? null),
+    });
+    if (processingRefusal) return { kind: "denied", decision: processingRefusalDecision(processingRefusal) };
 
     // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
     // the other two for prompt-injection specifically: ADR-0034's amendment
