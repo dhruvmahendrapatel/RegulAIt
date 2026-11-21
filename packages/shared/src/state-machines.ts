@@ -12,6 +12,7 @@ import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exception
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
+import { FAIRNESS_BREACH_REVIEW_STATUSES, FAIRNESS_EVALUATION_STATUSES } from "./fairness-evaluation.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -802,6 +803,55 @@ export const PIPELINE_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `fairness_breach_reviews.status` (ADR-0346 decision 8). A breaching run opens one review in the Approvals Queue;
+ * an approver accepts it (time-boxed risk acceptance, at most 90 days) or rejects it; a later passing run
+ * supersedes it. A lapsed acceptance stays `accepted` with its end date in the past: time decides it, not a write. */
+export const FAIRNESS_BREACH_REVIEW_MACHINE = defineMachine({
+  id: "fairness_breach_review",
+  stored: "fairness_breach_reviews.status",
+  states: FAIRNESS_BREACH_REVIEW_STATUSES,
+  initial: ["pending"],
+  terminal: ["rejected", "superseded"],
+  transitions: {
+    accept: {
+      from: ["pending"],
+      to: "accepted",
+      by: ["approver"],
+      summary: "An approver accepted the breach with a reason and an end date; until then the run no longer holds the card.",
+    },
+    reject: {
+      from: ["pending"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "An approver refused to accept the breach; the run keeps holding the card.",
+    },
+    supersede: {
+      from: ["pending", "accepted"],
+      to: "superseded",
+      by: ["system"],
+      summary: "A later run on the card passed, so this breach no longer decides anything.",
+    },
+  },
+});
+
+/** `fairness_evaluations.status` (ADR-0346 decision 1). Archived, never deleted (its runs cite it); final, so the
+ * definition a run executed never changes under it. */
+export const FAIRNESS_EVALUATION_MACHINE = defineMachine({
+  id: "fairness_evaluation",
+  stored: "fairness_evaluations.status",
+  states: FAIRNESS_EVALUATION_STATUSES,
+  initial: ["active"],
+  terminal: ["archived"],
+  transitions: {
+    archive: {
+      from: ["active"],
+      to: "archived",
+      by: ["admin"],
+      summary: "An admin retired the evaluation; its schedule stops and its past runs stay as evidence.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 /** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
  * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
@@ -970,4 +1020,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
   [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
+  [FAIRNESS_BREACH_REVIEW_MACHINE.def.id]: FAIRNESS_BREACH_REVIEW_MACHINE,
+  [FAIRNESS_EVALUATION_MACHINE.def.id]: FAIRNESS_EVALUATION_MACHINE,
 } as Record<string, StateMachine<string, string>>);

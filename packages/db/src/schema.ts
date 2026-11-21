@@ -5588,6 +5588,13 @@ export const orgSettings = pgTable(
     fairnessPromotionGate: boolean("fairness_promotion_gate").notNull().default(false),
     /** ADR-0346 decision 9: the newest run the promotion gate accepts is at most this many days old (strict 90) */
     fairnessRunMaxAgeDays: integer("fairness_run_max_age_days").notNull().default(90),
+    /** ADR-0346 decision 9 (owner 2026-11-21; migration fairness_gate_risk_tiers): the ADR-0085 risk tiers whose model
+     * cards the promotion gate always covers, whatever `fairnessPromotionGate` says. Secure by default: the high-risk
+     * tiers (prohibited, high) are on. Turning a tier off is a stepped-up, audited settings relaxation. */
+    fairnessGateTierProhibited: boolean("fairness_gate_tier_prohibited").notNull().default(true),
+    fairnessGateTierHigh: boolean("fairness_gate_tier_high").notNull().default(true),
+    fairnessGateTierLimited: boolean("fairness_gate_tier_limited").notNull().default(false),
+    fairnessGateTierMinimal: boolean("fairness_gate_tier_minimal").notNull().default(false),
 
     /** ADR-0056 §5 amendment (lane L7, migration copilot_redteam_gate): a model may narrate a copilot answer only
      * while its latest copilot red-team run passed against the model it serves now (strict true; turning it off is a
@@ -19317,6 +19324,32 @@ export const fairnessBreachReviews = pgTable(
       "fairness_breach_reviews_decision_check",
       sql`(${t.status} = 'pending' AND ${t.decidedAt} IS NULL AND ${t.acceptedUntil} IS NULL) OR (${t.status} = 'accepted' AND ${t.decidedAt} IS NOT NULL AND ${t.acceptedUntil} > ${t.decidedAt} AND ${t.acceptedUntil} <= ${t.decidedAt} + interval '90 days') OR (${t.status} = 'rejected' AND ${t.decidedAt} IS NOT NULL AND ${t.acceptedUntil} IS NULL) OR (${t.status} = 'superseded' AND ${t.decidedAt} IS NOT NULL)`,
     ),
+  ],
+);
+
+/**
+ * ADR-0346 slice 2 (migration fairness_evaluation_engine_input): the input file the gateway placed for one fairlearn engine run,
+ * pinned when the task starts (the ADR-0242 subject-file pattern). The run's end counts the task's result only when it
+ * names exactly this sha256. One row per engine run; the evaluation is the one the run's config named.
+ */
+export const fairnessEngineInputs = pgTable(
+  "fairness_engine_inputs",
+  {
+    engineRunId: uuid("engine_run_id")
+      .primaryKey()
+      .references(() => engineRuns.id, { onDelete: "cascade" }),
+    evaluationId: uuid("evaluation_id")
+      .notNull()
+      .references(() => fairnessEvaluations.id, { onDelete: "restrict" }),
+    inputSha256: text("input_sha256").notNull(),
+    /** the prompts in the file (one gateway call each) */
+    rowCount: integer("row_count").notNull(),
+    placedAt: timestamp("placed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("fairness_engine_inputs_evaluation_idx").on(t.evaluationId),
+    check("fairness_engine_inputs_sha256_check", sql`${t.inputSha256} ~ '^[0-9a-f]{64}$'`),
+    check("fairness_engine_inputs_row_count_check", sql`${t.rowCount} BETWEEN 1 AND 2000`),
   ],
 );
 

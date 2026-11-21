@@ -16,7 +16,7 @@ export interface EngineImageLockEntry {
   publishedAt: string | null;
 }
 
-export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "garak" | "spikee" | "mcpscanner" | "skillscanner", Readonly<EngineImageLockEntry>>> = Object.freeze({
+export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "garak" | "spikee" | "mcpscanner" | "skillscanner" | "fairlearn", Readonly<EngineImageLockEntry>>> = Object.freeze({
   promptfoo: Object.freeze({
     repository: "ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo",
     manifestDigest: "sha256:c54fe2d821a46cd7a6ed68c09cac2b3713d99ae2cf705d4f6957c99c29db0be2",
@@ -58,6 +58,14 @@ export const ENGINE_IMAGES_LOCK: Readonly<Record<"promptfoo" | "modelscan" | "ga
     publishedAt: null,
   }),
   skillscanner: Object.freeze({
+    repository: null,
+    manifestDigest: null,
+    imageId: null,
+    publishGeneration: 0,
+    sourceCommit: null,
+    publishedAt: null,
+  }),
+  fairlearn: Object.freeze({
     repository: null,
     manifestDigest: null,
     imageId: null,

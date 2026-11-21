@@ -1,10 +1,9 @@
 <!-- fold: pending -->
 
-**E27 / ADR-0346 — fairness evaluation, remaining slices.** (2) the `fairlearn` sidecar engine (image, hash-pinned
-closure, licence gate, offline proof; off until its first signed publish), model-input dataset upload with the cascade
-PII check, the gateway cross-check against `computeFairness`, signed `fairness_run_evidence` and the `fairness_run`
-card-evidence kind (ADR-0189 format change), the ADR-0150 collector counting measured runs. (3) evaluation and
-schedule APIs, breach approvals through the one queue, the promotion gate at sign-off, the card fairness view with
-red-team `bias` results; routes as known UI gaps on #453. Owner question open: should a risk tier, not only a
-compliance tag, force the promotion gate? Note for slice 2: a card whose runs carry signed evidence cannot be deleted
-(RESTRICT); the card delete path must refuse it with a named 409.
+**E27 / ADR-0346 — fairness evaluation, remaining slice and follow-ups.** (3) evaluation and schedule APIs (a definition
+looser than the strict defaults behind a `settings_relax` step-up), breach approvals through the one Approvals Queue
+(time-boxed acceptance, the ADR-0348 machine), the promotion gate at sign-off, and the card fairness view with
+red-team `bias` results and which evidence kind a pack found; routes as known UI gaps on #453. Then: the first signed
+publish of the `fairlearn` image (CI). Answered by the owner 2026-11-21: `libgomp` is a narrow pinned exception
+(ADR-0346 decision 13), and the high-risk tiers force the promotion gate by default (decision 9 amended); slice 3's
+gate and settings route use the new `fairness_gate_tier_*` settings and `fairnessGateRequirement`.

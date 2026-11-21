@@ -49,8 +49,8 @@ set -euo pipefail
 
 engine="${1:-}"
 mode="${2:-}"
-case "$engine" in promptfoo | modelscan | garak | spikee | mcpscanner | skillscanner) ;; *)
-  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner> build | repro <out.json> | push <repository> <out.json>" >&2
+case "$engine" in promptfoo | modelscan | garak | spikee | mcpscanner | skillscanner | fairlearn) ;; *)
+  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|fairlearn> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;
 esac
