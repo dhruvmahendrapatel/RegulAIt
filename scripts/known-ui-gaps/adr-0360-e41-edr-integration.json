@@ -1,0 +1,15 @@
+{
+  "adr": "ADR-0360",
+  "lane": "E41",
+  "tracking": "ADR-0360 slice 2 (lane E41): API-only under the lane brief rule 3; the EDR connection, device signal and isolation screens are requested on #453 (Governed Designer)",
+  "gaps": {
+    "POST /v1/discovery/sources/:sourceId/edr-connections": "creates a read-only EDR connection (credential sealed, never returned; webhook secret shown once; audited)",
+    "GET /v1/discovery/sources/:sourceId/edr-connections": "lists a source's EDR connections (no secrets)",
+    "PUT /v1/edr-connections/:connectionId/settings": "enables or disables an EDR connection, and turns isolation on (settings_relax step-up, audited) or off",
+    "POST /v1/edr-connections/:connectionId/sync": "pulls the EDR's device risk and open alerts into the device signals now",
+    "GET /v1/discovery/sources/:sourceId/edr-signals": "lists each enrolled device's latest EDR risk and alert counts (pseudonyms only, paged)",
+    "POST /v1/edr-connections/:connectionId/isolations": "asks to isolate one device through the EDR (waits for a second admin)",
+    "GET /v1/edr-isolations": "lists isolation requests with their declared lifecycle and allowed next steps",
+    "POST /v1/edr-isolations/:requestId/:event": "approves or rejects an isolation or a release (another admin, fresh step-up; audited)"
+  }
+}

@@ -103,7 +103,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 
 - Every base image is pinned by digest: `python:3.12-slim-trixie@sha256:4840d514…`, `node:22-trixie-slim@sha256:be1e2a3d…`
   for the licence gate, `python:3.12-trixie@sha256:cad37dd2…` to build yara-python (all CPython 3.12.16), and
-  `golang:1.27-trixie@sha256:af1bfc26…` (Go 1.27.3) to rebuild skill-scanner's CEL helper.
+  `golang:1.27-trixie@sha256:f18c3d73…` (Go 1.27.4; was `af1bfc26…`, Go 1.27.3, until CVE-2026-97054) to rebuild skill-scanner's CEL helper.
 - The closure comes from our lockfile (`requirements.txt`): every wheel is pinned by sha256 and installed with
   `--require-hashes --no-deps --only-binary :all:`. That is 110 wheels for mcp-scanner and 99 for skill-scanner,
   resolved for cp312 manylinux x86_64. pip is removed from the image.
@@ -119,7 +119,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
     lockfiles override filelock to 4.2.9. garak already ships filelock 4.x with litellm; the smoke scans prove both
     engines still run.
   - skill-scanner's wheel bundles a Go CEL helper built with Go 1.27.1, whose standard library carries four advisories.
-    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.3 (`golang:1.27-trixie`, pinned
+    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.4 (`golang:1.27-trixie`, pinned
     by digest) and the flags of its packaging script. `cel-helper.py` swaps it in and rewrites the four
     build-describing fields of its manifest, which skill-scanner checks at every start. The module downloads are
     checked against the sdist's `go.sum` and happen at build time only.
@@ -441,6 +441,44 @@ set by the image and validated, fail closed).
   `@regulait/engine-runner` (`src/job-exchange.ts`, `src/worker-selftest.ts`); the admission scan keeps only its done
   file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
   own copies and move onto these helpers next (PENDING).
+
+### L4.5 Publish (§6.3, 2026-11-17)
+
+Both images are now publishable by the existing pipeline, exactly as spikee was made publishable (ADR-0245). Nothing
+is published by this change: CI's `engine-images.yml` publishes, signs keylessly and records them on its next run on
+main, and the lock-update branch is merged by a person.
+
+- **The published set.** `mcpscanner` and `skillscanner` join `ENGINE_IDS` (`scripts/engine-images-lock.mjs`), so the
+  publish gate plans them (`never published` until their first publish), the lock validates them and the lock bot
+  records them. `UNPUBLISHED_ENGINE_IDS` (`scripts/engine-images-gate.mjs`) is now empty; the reproducible-build
+  check still covers both. `scripts/build-engine-image.sh push` no longer refuses them.
+- **The lock.** `engines/images.lock.json` carries an all-null entry for each with `publishGeneration` 0, and the
+  generated `packages/shared/src/engines/images-lock.ts` and the compose defaults were regenerated with
+  `node scripts/engine-images-lock.mjs --write`.
+- **The manifest.** Each engine reads `imageDigest`, `taskImage` and its generation step (`1 + publishGeneration`)
+  from `ENGINE_IMAGES_LOCK`, as spikee does. The generation is unchanged (1) while the entry is null. The null digest
+  still keeps both engines un-enableable until a signed publish is recorded (secure by default): no runner passes the
+  self-test (`image_not_built`) and no task is placed (`taskImage` null). The `unverified` line now says the engine is
+  publishable with no publish recorded; skillscanner's yara-x line cites owner decision Q3 instead of "awaiting".
+- **Compose.** `engine-mcpscanner` and `engine-skillscanner` runners (profile `engines`) merge the hardened
+  `x-engine-runner` template on the internal `engines` network, digest-pinned by one variable each
+  (`REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `_DIGEST`, defaults written from the lock: all-zero until a publish, so
+  nothing starts), with their own state volume and two tmpfs exchange volumes (16 MiB jobs: the job directory holds
+  only `subject.json`; 64 MiB results: frames, one report of at most 3 MiB and the self-test). The environment is
+  what `packages/engine-admission-scan/src/main.ts` reads: the gateway URL, a per-engine enrolment token, the image
+  reference and digest, `REGULAIT_ADMISSION_ENGINE` (the same value the image sets) and the jobs and results
+  directories. Build-only `engine-<id>-image` services (profile `engine-images`) build each Dockerfile, as the other
+  engines'. There is no per-engine executor configuration: the executor starts a task by the manifest's `taskImage`.
+- **Also mirrored from spikee:** Dependabot pip entries for both engine directories and both in the base-image
+  digest group.
+- **Already in place, so unchanged:** the build-and-compare matrix (`engine-images-build.yml`), the publish workflow's
+  path filter (`packages/engine-admission-scan/**`), and the image-level Trivy and SBOM scan in `security.yml`,
+  which discovers every `engines/*/Dockerfile`.
+- **Not mirrored:** the air-gapped bundle (`scripts/build-image-bundle.sh --with-engines`) and the installer's bundled
+  tags still name promptfoo, modelscan and garak only, as for spikee: adding an engine with no recorded publish
+  would make `--with-engines` fail. They join the bundle with spikee once the first publish is recorded.
+- **Still open:** the first publish itself (CI), the §6.4 sandbox-limit proof, re-recording the report fixtures with
+  the published image, and the Q5 tuning on the `anthropics/skills` corpus.
 
 ## Owner decisions (2026-11-15)
 
