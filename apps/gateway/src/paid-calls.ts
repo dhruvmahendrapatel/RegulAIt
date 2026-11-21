@@ -54,6 +54,7 @@ import {
   projectSpendUsd,
 } from "./projects.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { timeouts } from "./timeouts.js";
 import { requireStepUp } from "./step-up.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { type ListSpec } from "./list-contract.js";
@@ -123,6 +124,21 @@ export interface ReserveArgs {
   projectId: string | null;
   runId: string | null;
   subject: { kind: "mcp_tool"; serverId: string; toolName: string } | { kind: "connector"; connectorId: string };
+}
+
+/** slack on top of a call's deadline, so a hold outlives the slowest call that can still settle against it */
+export const PAID_HOLD_DEADLINE_MARGIN_SECONDS = 60;
+
+/**
+ * The shortest life a hold may have: the longest the call it covers can run, plus a margin. A hold that expired while
+ * its call was still running would stop counting against the budget before the call bills, and concurrent calls could
+ * then overspend it (R4 #1143 [1]). An MCP call is bounded by its connect and call-tool deadlines; a connector invoke
+ * has no deadline of its own, so the request deadline and the guarded-fetch default bound it.
+ */
+export function paidHoldFloorSeconds(kind: ReserveArgs["subject"]["kind"]): number {
+  const t = timeouts();
+  const callMs = kind === "mcp_tool" ? t.mcpConnectMs + t.mcpCallToolMs : Math.max(t.requestTimeoutMs, t.outboundDefaultMs);
+  return Math.ceil(callMs / 1000) + PAID_HOLD_DEADLINE_MARGIN_SECONDS;
 }
 
 async function openHoldsUsd(tx: Db, where: ReturnType<typeof eq>, since: Date | null): Promise<number> {
@@ -258,7 +274,8 @@ export async function reservePaidCall(db: Db, a: ReserveArgs): Promise<PaidCallR
         toolName: a.subject.kind === "mcp_tool" ? a.subject.toolName.slice(0, 256) : null,
         connectorId: a.subject.kind === "connector" ? a.subject.connectorId : null,
         heldUsd: hold,
-        expiresAt: sql`now() + make_interval(secs => ${a.price.holdTtlSeconds})`,
+        // never shorter than the call it covers can run (paidHoldFloorSeconds), whatever the price's TTL says
+        expiresAt: sql`now() + make_interval(secs => ${Math.max(a.price.holdTtlSeconds, paidHoldFloorSeconds(a.subject.kind))})`,
       })
       .returning({ id: paidCallHolds.id });
     await auditPaid(tx, a.userId, PAID_CALL_RULE_IDS.reserved, "allow", `paid call reserved $${hold.toFixed(6)}`,
@@ -314,10 +331,13 @@ export async function settlePaidCall(
   db: Db,
   r: { holdId: string; userId: string; amountUsd: number; usageEventId: string | null; capped: boolean; reported: boolean },
 ): Promise<void> {
-  await db
+  const moved = await db
     .update(paidCallHolds)
     .set({ state: "settled", settledUsd: r.amountUsd, usageEventId: r.usageEventId, releaseReason: null, settledAt: sql`now()` })
-    .where(and(eq(paidCallHolds.id, r.holdId), inArray(paidCallHolds.state, paidHoldStatesInto("settled")), sql`${paidCallHolds.heldUsd} >= ${r.amountUsd}`));
+    .where(and(eq(paidCallHolds.id, r.holdId), inArray(paidCallHolds.state, paidHoldStatesInto("settled")), sql`${paidCallHolds.heldUsd} >= ${r.amountUsd}`))
+    .returning({ id: paidCallHolds.id });
+  // the audit never claims a settlement that did not happen (an already-settled hold moves nothing)
+  if (!moved.length) return;
   await auditPaid(db, r.userId, r.capped ? PAID_CALL_RULE_IDS.chargeCapped : PAID_CALL_RULE_IDS.settled, "allow",
     r.capped ? `paid call settled at its hold $${r.amountUsd.toFixed(6)}: the upstream reported more than was authorised`
       : `paid call settled at $${r.amountUsd.toFixed(6)}${r.reported ? " (upstream-reported charge)" : " (quoted price)"}`,

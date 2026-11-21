@@ -7,8 +7,8 @@
 -- upstream is contacted; it settles with the call's usage row (never above the hold) or is released.
 --
 -- Secure by default (ADR-0180): no budget envelope means no paid call; over budget is a refusal routed to the
--- approvals queue. The deployment is single-tenant and both tables are admin-read registers like `usage_events`, so
--- there is no tenant column for RLS. Holds are never deleted. No functions or triggers. No row of an RLS table is read
+-- approvals queue. RLS (ADR-0234): paid_call_holds has project_id, so it is project-scoped and joins that batch with
+-- usage_events (admin-only routes read it until then); paid_call_prices is deployment-wide. Holds are never deleted. No functions or triggers. No row of an RLS table is read
 -- or written here.
 
 CREATE TABLE IF NOT EXISTS "paid_call_prices" (

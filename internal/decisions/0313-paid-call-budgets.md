@@ -61,7 +61,11 @@ built in our own ledger. No new dependency.
 
 6. **Release.** A call that fails upstream releases its hold (`call_failed`), and so does an MCP call that leaves
    without billing (in its `finally`). Any hold left open is released by the `paid-call-hold-sweeper` job at its TTL.
-   Until then it still counts against its budget, which is the safe direction. Holds are never deleted: the app role
+   Until then it still counts against its budget, which is the safe direction. A hold never expires before its call can
+   finish: its life is the price's `hold_ttl_seconds` or the call's deadline plus 60 s, whichever is longer
+   (`paidHoldFloorSeconds`: an MCP call's connect and call-tool deadlines; a connector invoke's request and
+   guarded-fetch deadlines). Otherwise a long call's hold would stop counting before it bills, and concurrent calls
+   could overspend (R4 on #1143). Holds are never deleted: the app role
    has no DELETE or TRUNCATE on them. The hold lifecycle is one declared table (owner rule 12),
    `PAID_HOLD_TRANSITIONS` in `paid-calls.ts`: `held → settled | released`, `released → settled` (a late settlement of
    a swept hold still records the real charge), `settled` final. Settle, release, the sweeper and the list filter all
@@ -73,8 +77,9 @@ built in our own ledger. No new dependency.
    stricter and is audited. Deleting one relaxes governance, so it needs a `settings_relax` step-up and is audited as a
    relaxation. The four routes are admin-only, `internal` in the OpenAPI registry, and API-only, with screens tracked
    on #453 (`scripts/known-ui-gaps/adr-0313-e2-paid-call-budgets.json`; the price DELETE is listed in
-   `DELIBERATELY_API_ONLY` until then). Both tables are single-tenant admin registers like `usage_events`, so they have no RLS
-   tenant column.
+   `DELIBERATELY_API_ONLY` until then). RLS (ADR-0234): `paid_call_holds` carries `project_id`, so it is
+   project-scoped and is listed in ADR-0234's project-scoped batch beside `usage_events`; until that batch lands it is
+   read only through these admin-only routes. `paid_call_prices` has no owner column, so it is deployment-wide.
 
 8. **3NF.** Every reference is a foreign key. `paid_call_holds.tool_name` is point-in-time evidence (the name the call
    was authorised for) and carries an exception comment. `held_usd` and `settled_usd` are facts of the hold, not

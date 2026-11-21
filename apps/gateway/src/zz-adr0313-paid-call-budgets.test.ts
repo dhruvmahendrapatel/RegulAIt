@@ -24,6 +24,7 @@ import {
   paidCallHolds,
   paidCallPrices,
   runMigrations,
+  sql,
   usageEvents,
   type Db,
 } from "@regulait/db";
@@ -34,7 +35,17 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
-import { PAID_CALL_CHARGE_META_KEY, PAID_HOLD_STATES, PAID_HOLD_TRANSITIONS, paidHoldStatesInto, settlementAmount, sweepExpiredPaidCallHolds } from "./paid-calls.js";
+import {
+  PAID_CALL_CHARGE_META_KEY,
+  PAID_HOLD_STATES,
+  PAID_HOLD_TRANSITIONS,
+  paidHoldFloorSeconds,
+  paidHoldStatesInto,
+  reservePaidCall,
+  settlementAmount,
+  settlePaidCall,
+  sweepExpiredPaidCallHolds,
+} from "./paid-calls.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -352,5 +363,56 @@ describe("ADR-0313 the hold lifecycle is one declared table (owner rule 12)", ()
     expect(paidHoldStatesInto("settled")).toEqual(["held", "released"]);
     expect(paidHoldStatesInto("released")).toEqual(["held"]);
     expect(paidHoldStatesInto("held")).toEqual([]);
+  });
+});
+
+describe("ADR-0313 a hold lasts as long as its call can (R4 #1143)", () => {
+  // a price with the shortest TTL the API accepts, on a server of its own so no other test's price is touched
+  async function shortTtlPrice(fraction: number) {
+    const org = await loadOrgSettings(db);
+    const blockAt = org.budgetHardBlockPct / 100; // the block line of a $1 budget
+    const srv = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `p313-slow-${randomUUID().slice(0, 8)}-${RUN}`, url: "http://127.0.0.1:9/" } });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const slowId = srv.json().id as string;
+    const pr = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/paid-call-prices",
+      payload: { mcpServerId: slowId, priceUsd: Number((fraction * blockAt).toFixed(6)), holdTtlSeconds: 60 },
+    });
+    expect(pr.statusCode, pr.body).toBe(201);
+    const [row] = await db.select().from(paidCallPrices).where(eq(paidCallPrices.id, pr.json().price.id as string));
+    return { row: row!, slowId };
+  }
+
+  it("[1] a hold outlives its price's TTL while its call can still run, and keeps refusing a second reservation", async () => {
+    const floor = paidHoldFloorSeconds("mcp_tool");
+    expect(floor).toBeGreaterThan(60); // the default MCP call deadline is longer than the shortest TTL
+    const { row, slowId } = await shortTtlPrice(0.6); // one hold fits under the block line, two do not
+    const p = await mkProject(1);
+    const args = { price: row, userId, projectId: p, runId: null, subject: { kind: "mcp_tool" as const, serverId: slowId, toolName: "slow" } };
+    const first = await reservePaidCall(db, args);
+    expect(first.ok).toBe(true);
+    const holdId = (first as { holdId: string }).holdId;
+    const [h] = await db.select().from(paidCallHolds).where(eq(paidCallHolds.id, holdId));
+    expect((h!.expiresAt.getTime() - h!.createdAt.getTime()) / 1000).toBeGreaterThanOrEqual(floor - 1);
+    // 61 s on: past the price's 60 s TTL, while a 120 s tool call is still running and has billed nothing yet
+    await db.update(paidCallHolds)
+      .set({ createdAt: sql`created_at - interval '61 seconds'`, expiresAt: sql`expires_at - interval '61 seconds'` })
+      .where(eq(paidCallHolds.id, holdId));
+    const second = await reservePaidCall(db, args);
+    expect(second).toMatchObject({ ok: false, error: "paid_call_over_budget" });
+    expect(await holdsFor(p)).toHaveLength(1);
+  });
+
+  it("[2] settling a hold twice records one settlement", async () => {
+    const { row, slowId } = await shortTtlPrice(0.1);
+    const p = await mkProject(1);
+    const r = await reservePaidCall(db, { price: row, userId, projectId: p, runId: null, subject: { kind: "mcp_tool", serverId: slowId, toolName: "slow" } });
+    expect(r.ok).toBe(true);
+    const holdId = (r as { holdId: string }).holdId;
+    const settle = () => settlePaidCall(db, { holdId, userId, amountUsd: row.priceUsd, usageEventId: null, capped: false, reported: false });
+    await settle();
+    await settle();
+    const audits = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "paid-call-settled"), eq(auditLog.objectId, holdId)));
+    expect(audits).toHaveLength(1);
   });
 });
