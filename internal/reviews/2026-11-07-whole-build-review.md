@@ -190,3 +190,122 @@ After those: generate the ADR index and compile STATE from per-session fragments
 ---
 
 *Evidence line numbers are at 6a06dc1. Process counts come from git history between 2026-10-17 and 2026-11-07, and from issue #453 and PR #605 as read on 2026-11-07. Items marked UNVERIFIED were reported by a review pass but not independently re-read in code.*
+
+
+---
+
+# Addendum — consolidated product, code and usability feedback (2026-11-21)
+
+> **Separate review snapshot.** The report above is preserved as the 2026-11-07 review of `main` at `6a06dc1`. This addendum consolidates the independent reviews posted to [coordination issue #453](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453) on 2026-11-21, plus targeted feedback on PRs #778, #1077 and #1078. Findings are **not all confirmed bugs**: explicitly distinguish verified source observations from proposals and runtime tests still required. No implementation, CI execution, screenshot validation, merge or deployment is implied by this document.
+
+## Evidence and scope
+
+- Source inspected: selected React/TypeScript page files on `main`, AI registry on `chatgpt/ai-use-cases`, and changes in #1075/#1077/#1078/#1154. A recursive tree identified **130** `apps/web/src/views/**/*Page.tsx` files; **43 distinct page areas** were addressed in review comments (including two open-PR-only screens), but only selected page source and component interfaces were inspected. This is **not** an exhaustive audit of all routes, functions, APIs, roles, modals or browser behaviors.
+- Consolidated comments: [Phase 1](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7064126646), [Phase 2](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7064131409), [Phase 3](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7064216933), [Phase 4](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7064222193), [initial code review](https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7064075813).
+- Targeted PR comments: [#778](https://github.com/dhruvmahendrapatel/RegulAIt/pull/778#issuecomment-7064077412), [#1077](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1077#issuecomment-7064077846), [#1078](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1078#issuecomment-7064078344).
+- Reference benchmarks: [NN/g ten heuristics](https://www.nngroup.com/articles/ten-usability-heuristics/), [WCAG 2.2](https://www.w3.org/TR/WCAG22/), [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework), [Microsoft Conditional Access planning](https://learn.microsoft.com/en-us/entra/identity/conditional-access/plan-conditional-access), [Microsoft Defender Cloud Apps discovery](https://learn.microsoft.com/en-us/defender-cloud-apps/policies-cloud-discovery), [Credo AI](https://www.credo.ai/product), [OneTrust AI governance](https://www.onetrust.com/solutions/ai-governance/). Competitor marketing is a benchmark, **not** independently validated capability parity.
+
+## Priority findings requiring validation or fixes
+
+| ID | Priority | Source | Observation / risk | Acceptance criterion |
+|---|---|---|---|---|
+| CR-01 | High | #778 `UseCasesPage.tsx` | Lifecycle stage keys `proposed` and `under_review` differ from filter key `in_review`. **Source-observed mismatch; API semantics not verified.** | Contract-test every displayed status against gateway counts; unknown must not silently become zero; totals and denominators must be accurate. |
+| CR-02 | High | #1077 `EndpointPolicyPage.tsx` | “To approve” is derived from loaded infinite-query pages, possibly undercounting unvisited pages. | Server-authoritative count or explicitly “loaded” label; test multiple pages. |
+| CR-03 | Medium | #1078 `BrowserGovernancePage.tsx` | Mode radio uses `aria-disabled` while busy without native disabling. | No conflicting in-flight mutations; tested rapid changes, refusal and retry; accessible disabled semantics. |
+| CR-04 | Medium | #1078 site rule modal | Editing a denied site initializes “Allow” as default. | Require explicit choice for permission relaxation; display before/after, scope and confirmation. |
+| CR-05 | High release gate | #1075/#1077/#1078 | Inspected heads passed build/browser/mock/CodeQL checks, but screenshot-pack checks were skipped. | Reviewed light/dark captures at 390/1024/1440; keyboard, zoom, empty/error/denied/step-up states. |
+| CR-06 | Medium | #1077/#1078 | PR descriptions reference temporary `@/tmp/claude-...` files. | Replace with self-contained change summary, contract/role matrix, test evidence and limitations. |
+| CR-07 | Medium | #1154 | Expected ~3 kB bundle saving measured at only **310 bytes**. | Use measured bundle delta and route-level budget, not estimated gains or blanket ceiling increases. |
+| CR-08 | High process | #453 / security work | Earlier security findings were discussed but not reverified as currently open. | For every high-severity item: current-state reproduction, owner, fix or explicit risk acceptance, independent validation and regression test. |
+
+## Page-by-page UX, utility and completeness register
+
+These are **recommendations and test cases**, not blanket assertions of missing backend features.
+
+### Governance and control operations
+
+| Page / file | Current capability observed | Improvement / validation target |
+|---|---|---|
+| Enforcement posture — `admin/settings/EnforcementPosturePage.tsx` | Hardened/current control matrix, strict defaults and audited relaxations | Per-control business impact, scope, owner/expiry, dry-run and blocked-workload preview before hardening. |
+| Execution control — `admin/settings/ExecutionControlPage.tsx` | Normal/read-only/require-approval/halted modes; agent/tool halts | Explain what changes for in-flight runs; scope, impact preview, staged activation, expiry/rollback and concurrent transition tests. |
+| Review policy — `admin/governance/ReviewPolicyPage.tsx` | Reviewer roles, tier requirements, risk acceptors, impact preview | Risk-adaptive routing, reviewer capacity, absence/delegation and separation-of-duties checks. |
+| Executive posture — `admin/governance/PosturePage.tsx` | Red-team, audit, ownership, certification, SoD, use-case and spend cards | Decision-first KPIs, freshness, reliable denominators, fewer top-level cards and drilldowns. |
+| Inbox — `inbox/InboxPage.tsx` | Evidence drawer, approve/deny, signed decisions, annotations | Actionable prioritization, due/overdue, complete counts, accessible focus, safe bulk triage and refusal recovery. |
+| AI registry — #778 `admin/governance/UseCasesPage.tsx` | KPI tiles, server filters/search, export, registration, preview and retirement | Validate lifecycle keys, whole-population counts, filtered empty states, keyboard and responsive action parity. |
+| Guardrails — `admin/governance/GuardrailsPage.tsx` | Effective rules, defaults, scoped overrides, sample tests and recent decisions | Before/after policy diff, per-detector false positives, simulation, governed time-limited overrides and explainable denial. |
+| Risk register — `admin/governance/RisksPage.tsx` | Human judgments separated from computed evidence | Risk tolerance, treatment owner, evidence freshness, acceptance expiry and control/incident linkage. |
+| Shadow AI — `admin/governance/ShadowAiPage.tsx` | Findings, triage, coverage and imports | Simplify Discover→Decide→Remediate, disclose evidence blind spots, source provenance, confidence and safe disposition. |
+| Intake wizard — `admin/governance/IntakeWizardPage.tsx` | Describe/classify/suggestions/questionnaire/stack/review, similar-record prompts | Adaptive questions, draft recovery, transparent suggestions, duplicate handling and stage dropoff measurement. |
+| Review workbench — `admin/governance/ReviewWorkbenchPage.tsx` | SLA, workload, routing and bulk triage | Validate whether SLA escalation runs independently or on queue reads; show evaluation time, due dates and reviewer load. |
+| Audit log — `admin/governance/AuditLogPage.tsx` | Audit entries, export, chain integrity, receipts and governed prune | Complete export semantics, retention and prune impact preview, recovery limitations and plain-language verification. |
+| ABAC policies — `admin/governance/AbacPoliciesPage.tsx` | Policy authoring, schema, versions, deactivation | Subject/resource/action simulator, matched-rule trace, shadow evaluation and version diff. |
+| Approvals admin — `admin/governance/ApprovalsAdminPage.tsx` | Queue, saved views, approver delegations | Unified queue semantics, delegation scope/expiry and independent approver/SOD safeguards. |
+| Decision regression — `admin/governance/DecisionRegressionPage.tsx` | Golden cases, run history, policy impact preview | Reusable before/after simulator for guardrails, ABAC and review policy; show newly allowed/denied and coverage gaps. |
+| Discovery sources — `admin/governance/DiscoverySourcesPage.tsx` | Scanner kinds, source configuration, credentials | Health, freshness, actual coverage, permission scope, test connection, monitoring-only rollout. |
+| Agent inventory — `admin/governance/InventoryPage.tsx` | Granted vs observed, dependencies, owners and linked risks | Prioritize observed-but-unapproved, orphaned, dormant and missing-owner findings with evidence and remediation links. |
+| Model risk — `admin/governance/ModelRiskPage.tsx` | Model cards, enforcement, expiring signoffs, retesting | Separate catalog/assessments/policy, make enforcement consequences clear and support lightweight low-risk evidence. |
+
+### Compliance, privacy and operational assurance
+
+| Page / file | Current capability observed | Improvement / validation target |
+|---|---|---|
+| Compliance packs — `admin/compliance/CompliancePacksPage.tsx` | Pack versions, diff, scorecard, authoring | Explain pack vs profile, version impact, denominator and stale evidence; preview activation. |
+| Compliance profiles — `admin/compliance/ComplianceProfilesPage.tsx` | Lifecycle, project classification, cascade preview | Effective-policy diff, conflict precedence, references to retired profiles and scoped relaxation expiry. |
+| Data subject requests — `admin/compliance/DataSubjectRequestsPage.tsx` | Request intake, queue and store findings | Verification, legal holds, deadlines, actual downstream completion evidence and status timeline. |
+| Framework imports — `admin/compliance/FrameworkImportsPage.tsx` | Source inventory and import plan | Local override conflict preview, provenance, drift, dry-run and rollback. |
+| Infrastructure — `admin/compliance/InfrastructurePage.tsx` | Resources, policies, backup verification, remediation approver | Verified restore/backup status, last tested time, affected scope and high-impact approval evidence. |
+| Records of processing — `admin/compliance/ProcessingRecordsPage.tsx` | Register/edit records and data categories | Lineage, legal basis, retention, owner and proportional step-up for widening vs routine corrections. |
+
+### Evaluation, assurance and intelligence
+
+| Page / file | Current capability observed | Improvement / validation target |
+|---|---|---|
+| Evaluations — `admin/governance/EvalsPage.tsx` | Scorer semantics, datasets, run results | Comparable score versions, sample size, quality regression and release decision drilldown. |
+| Fairness testing — `admin/governance/FairnessTestingPage.tsx` | Datasets, thresholds, runs | Cohort quality, uncertainty, sensitive-data privacy and justified threshold tuning. |
+| Red-teaming — `admin/governance/RedTeamPage.tsx` | Libraries, suites, attack-class limitations, runs | Coverage/freshness, severity clusters, reproducible failures and links into regression tests. |
+| Data lineage — `admin/governance/LineagePage.tsx` | Trace, census and traversal | Source→destination narrative, declared vs observed, missing edges and change impact. |
+| Dependency graph — `admin/governance/DependencyGraphPage.tsx` | Thin wrapper around separate graph component | **Inspect underlying graph component** for dense-graph usability, keyboard alternative and filtering; wrapper alone insufficient. |
+| Governance alerts — `admin/governance/GovernanceAlertsPage.tsx` | Alert queue, SLA/tickets, monitor thresholds | Noise reduction, deduplication, expiry/reopen, owner and evidence; protect mandatory high-severity signals. |
+| Content trust — `admin/governance/ContentTrustPage.tsx` | Trust floor, source tiers, provenance | Decision explanation, conflicting sources, missing provenance and remediation. |
+| Model policy — `admin/governance/ModelPolicyPage.tsx` | Model bindings and features | Effective precedence, simulation and version migration. |
+| Regulatory intelligence — `admin/governance/RegulatoryIntelligencePage.tsx` | Filterable feed and framework status | Jurisdiction, applicability, effective date, verified source and distinction between update vs obligation. |
+| Access recommendations — `admin/governance/RecommendationsPage.tsx` | Advisory findings by grant/rule | Freshness, blast radius, false-positive feedback and governed remediation, not unreviewed auto-revocation. |
+| Simulation/access preview — `admin/governance/SimulationPage.tsx` | Decision preview and proposed-policy blast radius | Consistent subject/action/resource input and old→new decision trace shared with regression. |
+| SoD rules — `admin/governance/SodRulesPage.tsx` | Toxic combinations, escalation and overrides | Business explanation, compensating control, independent approver and time-bounded exception. |
+
+### Open-PR-only areas
+
+| Page / PR | Current capability observed | Improvement / validation target |
+|---|---|---|
+| Endpoint policy — #1077 | Device groups, exceptions and approval flows | Authoritative approval totals, effective policy per device, exception expiry and proposed-vs-current rule diff. |
+| Browser governance — #1078 | Policy modes, sites, token enrollment and events | Disable concurrent changes, no permissive default for denied sites, clear capture privacy/retention, safe one-time secret reveal. |
+| Discovery app links / MCP removal — #1075 | Discovery linkage and governed remediation | Match provenance/confidence, freshness, reversible vs irreversible consequences and independent second approval. |
+
+## Security without unnecessary friction — proposed policy framework
+
+**Design proposal only; verify backend support before implementation.** Introduce **Standard / Regulated / Custom** control profiles, inheritable by org/team/agent/device as applicable. Every tunable control should disclose current effective policy, why it exists, scope, false-positive impact, approver, duration/expiry, evidence and rollback. Simulate changes before enforcement; support report-only/monitor-only rollout where the actual control supports it.
+
+| Action class | Default interaction | Guardrail |
+|---|---|---|
+| Read-only, low-risk | No repeated step-up | Existing session authorization and audit as appropriate |
+| Routine reversible edit | Inline save/undo, confirmation only when consequential | Server authorization and version conflict handling |
+| Sensitive policy relaxation | Before/after diff, reason, scoped and expiring exception, step-up | Risk policy and auditable approver |
+| Destructive or broad action | Scope/impact preview, explicit confirmation, independent approval when required | Recovery/rollback and immutable evidence |
+| Emergency halt | Fast, obvious action with clear outcome | Authorized scope, audit, recovery and post-event review |
+
+**Non-negotiable floor:** no configurable bypass for authentication, authorization, tenant isolation, secret protection or audit integrity. Avoid UI-only bypasses and avoid adding step-up to every low-risk click. Test session-bound short-lived step-up reuse only with backend threat modeling and policy support.
+
+## Competitive and usability conclusions
+
+- Position the product around **Discover → Assess → Govern → Monitor → Remediate** with shared owner, policy, evidence and action context, not isolated feature screens.
+- Match competitors on explainable discovery and lifecycle governance while differentiating on **low-friction, risk-proportionate controls**, observed-versus-approved visibility, integrated simulation and traceable decisions.
+- Standardize empty/loading/error/denied/refused/step-up states, terminology, counts, freshness, exports and keyboard/mobile behavior. Distinguish **unknown**, **not measured**, **not applicable** and genuine **zero**.
+- Treat a passing build or browser test as necessary but insufficient for UX approval; screenshot packs and user-task tests must be explicit evidence.
+
+## Required follow-through and acceptance matrix
+
+For **every route, tab, section, drawer, modal and action**, inventory: persona; user goal; component; API; server authorization and step-up; data source/denominator/freshness; current/expected behavior; happy/loading/empty/error/denied/conflict/retry states; accessibility and mobile screenshots; friction count; severity; owner; regression test; PR and final disposition.
+
+Prioritize **CR-01/CR-02** data correctness, **CR-03/CR-04** unsafe UI defaults and concurrency, **CR-05** visual verification, and **CR-08** current security closure. Then address cross-page control explanations, workflow simplification and risk-based tuning. Report each item as **confirmed defect / source concern / usability hypothesis / product proposal**. Never claim a proposed feature already exists, a skipped screenshot job passed, or an unresolved security finding remains open without current verification.
+
+**Status:** consolidated recommendations filed for review; **no merge, deployment or security-relaxation approval**.
