@@ -1,0 +1,16 @@
+{
+  "adr": "ADR-0345",
+  "lane": "E26",
+  "tracking": "ADR-0345 \u00a79 slice 3b: the jurisdiction admin APIs; the jurisdictions screen and the use-case geography panel belong to a design builder and are posted on #453",
+  "gaps": {
+    "GET /v1/jurisdictions": "lists the jurisdictions with their obligations (paged)",
+    "POST /v1/jurisdictions": "adds a jurisdiction (audited)",
+    "PATCH /v1/jurisdictions/:code": "renames a jurisdiction or changes its parent or global flag; narrowing needs a settings_relax step-up",
+    "DELETE /v1/jurisdictions/:code": "removes a jurisdiction no use case or child names, with its obligations; needs a settings_relax step-up",
+    "POST /v1/jurisdictions/:code/obligations": "adds an obligation citing a live ADR-0158 feed entry for this jurisdiction",
+    "PATCH /v1/jurisdictions/obligations/:obligationId": "changes an obligation's tier floor; lowering or clearing it needs a settings_relax step-up",
+    "DELETE /v1/jurisdictions/obligations/:obligationId": "removes an obligation; needs a settings_relax step-up",
+    "GET /v1/use-cases/:useCaseId/jurisdictions": "shows a use case's declared jurisdictions and what they resolve to (scope, obligations, tier floor)",
+    "PUT /v1/use-cases/:useCaseId/jurisdictions": "replaces a use case's declared jurisdictions; a change that narrows its scope needs a settings_relax step-up"
+  }
+}

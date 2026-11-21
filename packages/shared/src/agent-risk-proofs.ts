@@ -22,6 +22,7 @@
  * Every proof result is an ADR-0180 `MeasurementState` (`pass | fail | insufficient | not_run`): nothing but `pass` is
  * a pass. A tenant cannot edit the catalogue; it can only relax a proof's schedule (audited, `agent_risk_proof_settings`).
  */
+import { z } from "zod";
 import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type MetricSpec } from "./assurance.js";
 import { canonicalJson } from "./audit-chain.js";
 import { validateMetricParams } from "./condition-metrics.js";
@@ -563,4 +564,58 @@ export function agentRiskProofEvidence(r: {
     finishedAt: r.finishedAt.toISOString(),
     detail: r.detail,
   });
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0345 §9 slice 3b: the jurisdiction admin APIs. Narrowing is a relaxation (the #1019 security review): deleting
+// an obligation or a jurisdiction, lowering or clearing a tier floor, removing a parent or the global flag, and any
+// change to a use case's declared jurisdictions that drops a jurisdiction, an obligation or the floor from its scope.
+// A use case with none declared has every jurisdiction in scope, so its FIRST declaration narrows it too.
+// ---------------------------------------------------------------------------
+
+const JURISDICTION_REASON = z.string().trim().min(1).max(2000);
+const JURISDICTION_CODE = z.string().max(40).regex(JURISDICTION_CODE_RE);
+const JURISDICTION_NAME = z.string().trim().min(1).max(120);
+const TIER_FLOOR = z.enum(["prohibited", "high", "limited", "minimal"]).nullable();
+
+export const createJurisdictionSchema = z
+  .object({ code: JURISDICTION_CODE, name: JURISDICTION_NAME, parentCode: JURISDICTION_CODE.nullable().default(null), global: z.boolean().default(false), reason: JURISDICTION_REASON })
+  .strict();
+/** `code` is immutable (#1036): it is the natural key every reference uses, so the route never changes it */
+export const updateJurisdictionSchema = z
+  .object({ name: JURISDICTION_NAME.optional(), parentCode: JURISDICTION_CODE.nullable().optional(), global: z.boolean().optional(), reason: JURISDICTION_REASON })
+  .strict()
+  .refine((v) => v.name !== undefined || v.parentCode !== undefined || v.global !== undefined, { message: "change at least one of name, parentCode or global" });
+export const createJurisdictionObligationSchema = z
+  .object({
+    regulatoryUpdateKey: z.string().max(120).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
+    agentRiskKey: z.enum(AGENT_RISK_KEYS),
+    tierFloor: TIER_FLOOR.default(null),
+    reason: JURISDICTION_REASON,
+  })
+  .strict();
+export const updateJurisdictionObligationSchema = z.object({ tierFloor: TIER_FLOOR, reason: JURISDICTION_REASON }).strict();
+export const jurisdictionReasonSchema = z.object({ reason: JURISDICTION_REASON }).strict();
+export const JURISDICTION_DECLARATIONS_MAX = 50;
+export const useCaseJurisdictionsSchema = z
+  .object({ codes: z.array(JURISDICTION_CODE).max(JURISDICTION_DECLARATIONS_MAX), reason: JURISDICTION_REASON })
+  .strict()
+  .refine((v) => new Set(v.codes).size === v.codes.length, { message: "each code may appear once" });
+
+const obligationKey = (o: JurisdictionObligationRow) => `${o.jurisdictionCode}\u0000${o.regulatoryUpdateKey}\u0000${o.agentRiskKey}`;
+
+/**
+ * What a change drops from a use case's geographic scope (empty = it only keeps or widens it): jurisdictions that leave
+ * scope, obligations that stop applying, and a lower or cleared tier floor. Any entry makes the change a relaxation.
+ */
+export function geographyNarrowing(before: GeographyResolution, after: GeographyResolution): string[] {
+  const out: string[] = [];
+  const nowIn = new Set(after.inScope);
+  for (const c of before.inScope) if (!nowIn.has(c)) out.push(`jurisdiction:${c}`);
+  const nowApplied = new Set(after.obligations.map(obligationKey));
+  for (const o of before.obligations) if (!nowApplied.has(obligationKey(o))) out.push(`obligation:${o.regulatoryUpdateKey}:${o.agentRiskKey}`);
+  if (before.tierFloor && (after.tierFloor === null || EU_AI_ACT_TIER_RANK[after.tierFloor] < EU_AI_ACT_TIER_RANK[before.tierFloor])) {
+    out.push(`tierFloor:${before.tierFloor}->${after.tierFloor ?? "none"}`);
+  }
+  return out;
 }

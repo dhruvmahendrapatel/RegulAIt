@@ -196,6 +196,27 @@ What exists already:
      `tier_floor`, removing a declared jurisdiction from a use case, or deleting a jurisdiction (which narrows scope
      for every undeclared use case) carries the `settings_relax` step-up and is audited in the same transaction. The
      same routes refuse a `regulatory_update_key` that is not in the ADR-0158 feed (#1019 security review).
+   - **Built in slice 3b** (`apps/gateway/src/jurisdiction-routes.ts`). All the routes are admin-only.
+     - **Jurisdictions:** list, add, rename or re-parent or mark global, and remove.
+       - A removal is refused (409) while a use case or a child jurisdiction names it.
+       - `code` is immutable (#1036): the update schema has no `code`. The foreign keys stay on `code`.
+       - A parent that would make a cycle is refused.
+     - **Obligations:** add, change the floor, and remove.
+       - A feed key must exist in `REGULATORY_UPDATES`, must not be withdrawn, and must name this jurisdiction
+         (#1037).
+     - **A use case's declared jurisdictions:** read (with what they resolve to), and replace.
+     - **Which edits are relaxations.** Each one below needs a `settings_relax` step-up bound to exactly what it
+       narrows. Widening needs none.
+       - removing a jurisdiction or an obligation;
+       - lowering or clearing a floor;
+       - dropping a parent (any ancestor it stops inheriting from) or the global flag;
+       - a declaration change that drops a jurisdiction, an obligation or the floor from the use case's resolved scope
+         (`geographyNarrowing` over `resolveGeography`). A use case with none declared has every jurisdiction in
+         scope, so its first declaration is a narrowing too.
+     - **Audit.** Every write is audited (`jurisdiction-*`, `use-case-jurisdictions-changed`) with before, after and
+       its reason, in its own transaction.
+     - **Screens.** The jurisdictions screen and the use-case geography panel are `KNOWN_UI_GAPS` for the design
+       builder on #453.
    - The review-policy routing (`tierKeyFor`, owned outside this lane) still reads the screened tier. Switching it
      to the effective tier is an owner question below, because it changes who signs existing use cases.
 

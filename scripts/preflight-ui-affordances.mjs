@@ -58,6 +58,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   // entries when the screen lands
   ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
   ["/v1/discovery/entitlements/apps/:x/agent-link", "unlinking a vendor app from its agent (audited, declared machine): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/jurisdictions/:x", "removing a jurisdiction no use case or child names, with its obligations (settings_relax step-up, audited). ADR-0345 §9 (lane E26) slice 3b: API-only until the jurisdictions screen on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  ["/v1/jurisdictions/obligations/:x", "removing a jurisdiction's obligation (settings_relax step-up, audited). ADR-0345 §9 (lane E26) slice 3b: API-only until the jurisdictions screen on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
   ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.

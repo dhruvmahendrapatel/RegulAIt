@@ -1907,6 +1907,9 @@ export const auditLog = pgTable(
         // ADR-0345 slice 2a: one agent-risk proof result (objectId null; detail.contentHash ties it to the
         // agent_risk_proof_results row written in the same transaction). Plain text column — no DDL.
         "agent_risk_proof",
+        // ADR-0345 §9 (slice 3b): an admin edit to a jurisdiction, one of its obligations, or a use case's declared
+        // jurisdictions (objectId null; detail names the code, obligation or use case). Plain text column — no DDL.
+        "jurisdiction",
         // ADR-0364 (lane E45 S2): a robot, one of its versions, or one of its secrets (objectId = the row; a secret's
         // audit carries its name, scope and last four characters, never the value). Plain text column — no DDL.
         "robot",
