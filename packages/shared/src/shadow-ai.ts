@@ -503,6 +503,8 @@ export interface Observation {
   os?: SignatureOs | null;
   /** ADR-0195: the package ecosystem (rows scoped to an ecosystem match only it) */
   ecosystem?: string | null;
+  /** ADR-0083 §2: the compiled catalogue version a repo scan matched against (repo_scan only) */
+  catalogVersion?: number | null;
   declaredProvider?: string | null;
   /**
    * ADR-0336 slice 4: a plaintext credential in a staged agent's configuration (evidence `agent_config`): the vendored
@@ -816,6 +818,8 @@ export type FindingEvidence = {
   /** ADR-0195 lane A6: presence signature ids, never the env-variable or CLI names */
   presence?: string[];
   actor?: string;
+  /** ADR-0083 §2: the compiled catalogue version a repo scan matched against */
+  catalogVersion?: number;
   /** the matched catalogue row's confidence when it is not high */
   signatureConfidence?: SignatureConfidence;
 };
@@ -871,6 +875,7 @@ export function correlateObservations(
       ...(o.names && o.names.length > 0 ? { names: o.names } : {}),
       ...(o.presence && o.presence.length > 0 ? { presence: o.presence } : {}),
       ...(o.actorPseudonym ? { actor: o.actorPseudonym } : {}),
+      ...(typeof o.catalogVersion === "number" ? { catalogVersion: o.catalogVersion } : {}),
       ...(c.signatureConfidence ? { signatureConfidence: c.signatureConfidence } : {}),
     };
     if (!existing) {
