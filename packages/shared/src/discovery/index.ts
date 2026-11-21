@@ -371,7 +371,8 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
   // ADR-0336: a Salesforce connected app's consumer key (its OAuth client id; not a secret)
   salesforce_consumer_key: /^[A-Za-z0-9._]{20,256}$/,
-  // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear)
+  // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear); ADR-0337's
+  // Salesforce reader reuses ADR-0336's salesforce_consumer_key shape above
   email: /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$/,
 };
 
@@ -479,8 +480,8 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
   // ADR-0337: a service-account key (the secret) with domain-wide delegation, impersonating one admin for the
   // read-only Reports scope; Google has no keyless delegation RegulAIt can use yet (federationUnsupportedReason)
   entitlement_google_workspace: { federated: {}, static: { adminSubject: { shape: "email", required: true } } },
-  // slice 2 builds these readers; until then the kinds exist and no scanner is registered ("not built yet")
-  entitlement_salesforce: { federated: {}, static: {} },
+  // ADR-0337: the JWT bearer flow; the secret is the connected app's private key (PEM), signed for `username`
+  entitlement_salesforce: { federated: {}, static: { clientId: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } } },
   entitlement_slack: { federated: {}, static: {} },
   // ADR-0314 (G6): the registry sources take the credentials of the cloud they read (federated by default)
   agent_registry_entra: {
