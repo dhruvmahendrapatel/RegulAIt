@@ -280,6 +280,44 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
   separate listings for those, which this slice does not read yet. A failed page ends an OpenAI run, because the run
   has one listing; nothing is then staged or marked absent.
 
+## Slice 4 as built
+
+- **Finding path:** the existing discovery observation path, with no new table, matcher or ADR.
+  - **Evidence kind:** the new `agent_config` (`DISCOVERY_EVIDENCE_KINDS`). The OpenAI and n8n kinds declare
+    `evidenceKinds: ["agent_config"]` and `subjectKinds: ["system"]`. Copilot Studio, Agentforce and the #855 registry
+    kinds declare none until they scan (#1130 R9 [3]).
+  - **Observation:** `{ evidenceKind: "agent_config", subjectKind: "system", subject: <staged record external id>,
+    location: { path: <field path> }, secretRule: <vendored rule id> }` and nothing else.
+  - **Worker checks** (`checkConfigSecret`):
+    - It refuses any extra field, a line or commit (an offset), an unknown or personal-data rule, and a credential
+      shape in the path or the subject. Refusals never echo the input.
+    - It sets the vendor from the adapter list.
+    - It refuses the run when a finding names a record that the same run did not stage.
+  - **Classification** (`classifyObservation`, branch 0): no catalogue row is involved. The result is the platform
+    vendor, severity `critical`, matched value = the rule id, and a reason that names the path and the rule.
+  - **Storage:** the finding is a `shadow_ai_findings` row like any other discovery finding.
+  - **Migration:** `pending/vendor_agent_platform_config_secrets.sql` widens `shadow_ai_imports_kind_ck`.
+- **Matcher:** `vendoredSecretSpans` over `VENDORED_SECRET_RULES`, filtered by `AGENT_CONFIG_SECRET_RULES_EXCLUDED`
+  (social security number, public OAuth client id, and, for a future pack refresh, credit card number, IBAN and
+  Ethereum address: not credentials). The allowed set is pinned in a test, so a refresh that adds a rule fails until
+  the rule is classified (#1130 R9 [1], S9 [2]).
+- **Paths:** a path segment taken from vendor text is kept only when it is a plain identifier with no credential
+  shape; otherwise it becomes its position, so a credential planted as a key cannot fail the run (#1130 S9 [1]). A
+  field whose path would still be refused (longer than 512 characters) is skipped and counted (#1130 R9 [2]). `ConfigSecretCollector` drops each
+  span at once and keeps the path and the rule only, at most 20 per agent and 1,000 per run (a count-only read outcome
+  beyond that); a field is scanned up to 256 KiB.
+- **Fields scanned (in memory, then dropped):** decision 4 says "each content field the adapter selects for hashing";
+  no adapter hashed content before this slice, so slice 4 introduces the scanned-field lists.
+  - **OpenAI:** `OPENAI_GPT_SCANNED_FIELDS`: a GPT configuration's `instructions`, `description` and
+    `conversation_starters`, and each custom action's `action_openapi_raw`. The listing already returns them, so
+    nothing more is fetched, and none of them is kept (`OPENAI_GPT_FIELDS` is unchanged).
+  - **n8n:** every string parameter of every node of an agent workflow (a system message, an HTTP tool's header value,
+    a code node's source), at most 2,000 per workflow and 8 deep. The path is built from node ids and parameter keys
+    only; a segment that is not a plain identifier becomes its position.
+  - **Copilot Studio and Agentforce:** not scanned in this slice. Their adapters select no content column (decision
+    4), so scanning would widen what is fetched from the vendor (`botcomponents.data`; planner and topic
+    `Description`). That widening is left as an owner question rather than done silently.
+
 ## Open-source check (ADR-0176)
 
 Searched 2026-11-16. Reused: `@azure/identity` (MIT, already used for Entra) for Dataverse tokens; `jose` (MIT,

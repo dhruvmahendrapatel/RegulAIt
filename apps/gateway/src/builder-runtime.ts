@@ -44,6 +44,7 @@
  * Spend: an agent message's `cost_usd` is the model cost of its turn; each
  * tool step carries its own measured cost; the monthly limit sums both.
  */
+import { MEMORY_DATA_PREAMBLE } from "./memory-governance.js";
 import { randomUUID } from "node:crypto";
 import {
   agentFallbacks,
@@ -328,15 +329,24 @@ export async function buildSystemPromptWithSkills(
     // the person running the turn decides which private skills it may carry
     skillsForRun(db, agent, userId),
     db
-      .select({ content: builderAgentMemory.content })
+      .select({ content: builderAgentMemory.content, createdByUserId: builderAgentMemory.createdByUserId, expiresAt: builderAgentMemory.expiresAt })
       .from(builderAgentMemory)
-      .where(eq(builderAgentMemory.agentId, agent.id))
+      // ADR-0347: an expired memory item is never read back into a prompt (database clock)
+      .where(and(eq(builderAgentMemory.agentId, agent.id), sql`${builderAgentMemory.expiresAt} > now()`))
       .orderBy(desc(builderAgentMemory.createdAt))
       .limit(20),
     box ? Promise.resolve(box) : resolveToolbox(db, agent, userId),
   ]);
   const parts: string[] = [configuredPrompt(agent, skills)];
-  if (memory.length) parts.push(`## Memory (newest first)\n${memory.map((m) => `- ${m.content}`).join("\n")}`);
+  if (memory.length) {
+    // ADR-0347: memory is quoted data with its provenance, never instructions
+    parts.push(
+      `## Memory (newest first)\n${MEMORY_DATA_PREAMBLE}\n` +
+        memory
+          .map((m) => `- [written by user ${m.createdByUserId ?? "removed"}; expires ${m.expiresAt.toISOString()}] ${JSON.stringify(m.content)}`)
+          .join("\n"),
+    );
+  }
   const tools = toolboxPrompt(toolbox);
   if (tools) parts.push(tools);
   return { prompt: parts.join("\n\n"), skills, withheld };
