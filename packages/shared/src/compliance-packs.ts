@@ -55,10 +55,16 @@ import { z } from "zod";
 import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2 } from "./isaca-pack.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs (`owasp-packs.ts`, type-only imports back)
 import { OWASP_PACKS } from "./owasp-packs.js";
+// ADR-0294 (P18 B5): the NIST AI 600-1 GAI-risk pack (`nist-ai-600-1-pack.ts`, type-only imports back)
+import { NIST_AI_600_1_PACK } from "./nist-ai-600-1-pack.js";
 // ADR-0295 (P18 B4): ISO/IEC 42001@2, 23894@1 and 42005@1, ID-only (`iso-packs.ts`, type-only imports back)
 import { ISO_PACKS } from "./iso-packs.js";
+// ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD privacy packs (`privacy-packs.ts`, type-only imports back)
+import { PRIVACY_PACKS } from "./privacy-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs (`sector-packs.ts`, type-only imports back)
 import { SECTOR_PACKS } from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 AI agent standard, ID-only (`aiuc-packs.ts`, type-only imports back)
+import { AIUC_PACKS } from "./aiuc-packs.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -88,12 +94,21 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   // ADR-0243 (P24): the OWASP MCP Top 10 and the OWASP Top 10 for LLM Applications (`owasp-packs.ts`)
   "owasp-mcp-top-10",
   "owasp-llm-top-10",
+  // ADR-0294 (P18 B5): NIST AI 600-1, the Generative AI Profile (`nist-ai-600-1-pack.ts`)
+  "nist-ai-600-1",
   // ADR-0295 (P18 B4): ISO/IEC 23894 and 42005, ID-only (`iso-packs.ts`)
   "iso-23894",
   "iso-42005",
+  // ADR-0296 part 2 (P18 B2): privacy laws on the ADR-0224 machinery (`privacy-packs.ts`)
+  "gdpr",
+  "ccpa",
+  "dpdp",
+  "lgpd",
   // ADR-0297 (P18 B6): sector packs (`sector-packs.ts`)
   "sr-11-7",
   "nyc-ll144",
+  // ADR-0319 (gap G11): the AIUC-1 AI agent standard (`aiuc-packs.ts`)
+  "aiuc-1",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -177,6 +192,10 @@ export const EVIDENCE_COLLECTORS = [
    * counted. Org-wide (a placement row carries no project): counted under an
    * org-scoped report only. Software-attested evidence (ADR-0190 decision 6). */
   "isolation_placements",
+  /** ADR-0345 (lane E26): agent-risk proof results in the period that PASSED and whose evidence still holds (hash,
+   * chained audit row, signature when signed). Scoped to the proofs whose risk cites the control being evaluated
+   * (`controlRef`, an ADR-0243 OWASP pack control). Org-wide: counted under an org-scoped report only. */
+  "agent_risk_proofs",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -1810,8 +1829,13 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ISACA_AI_AGENTS_PACK_V2,
   // ADR-0243 (P24): owasp-mcp-top-10@1, owasp-llm-top-10@1 (2025 edition) and @2 (2026 edition)
   ...OWASP_PACKS,
+  NIST_AI_600_1_PACK,
   // ADR-0295 (P18 B4): iso-42001@2 (every clause and Annex A), iso-23894@1, iso-42005@1
   ...ISO_PACKS,
+  // ADR-0296 part 2 (P18 B2): gdpr@1, ccpa@1, dpdp@1, lgpd@1
+  ...PRIVACY_PACKS,
   // ADR-0297 (P18 B6): sr-11-7@1 and nyc-ll144@1
   ...SECTOR_PACKS,
+  // ADR-0319 (gap G11): aiuc-1@1 (15 October 2026 release)
+  ...AIUC_PACKS,
 );

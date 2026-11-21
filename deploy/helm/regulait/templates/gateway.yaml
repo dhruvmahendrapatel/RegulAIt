@@ -1,0 +1,177 @@
+{{- include "regulait.validate" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "regulait.selector" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+{{- if not .Values.installSecrets.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "regulait.claim" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+  annotations:
+    # Losing this claim loses the install-generated receipt and identity keys.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [{{ .Values.installSecrets.accessMode }}]
+  {{- with .Values.installSecrets.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.installSecrets.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  # ADR-0343: N stateless replicas. Boot migrations take a cluster lock and the plain boot timers a leader lease, so
+  # replicas may start together. One replica keeps Recreate (its ReadWriteOnce claim cannot be mounted twice).
+  replicas: {{ .Values.replicas }}
+  {{- if gt (int .Values.replicas) 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  {{- else }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "regulait.labels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: {{ include "regulait.name" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # the drain delay, then up to 15 s for in-flight work (REGULAIT_SHUTDOWN_GRACE_MS), then a margin
+      terminationGracePeriodSeconds: {{ add (int .Values.highAvailability.drainDelaySeconds) 20 }}
+      {{- if gt (int .Values.replicas) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: {{ .Values.highAvailability.zoneSpread }}
+          labelSelector:
+            matchLabels:
+              {{- include "regulait.selector" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "regulait.selector" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+      {{- end }}
+      securityContext:
+        {{- include "regulait.podSecurity" . | nindent 8 }}
+      containers:
+        - name: gateway
+          image: {{ include "regulait.image" . }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: REGULAIT_DEPLOY_MODE
+              value: {{ .Values.mode | quote }}
+            - name: REGULAIT_VERSION
+              value: {{ .Values.version | quote }}
+            - name: SEED_DEMO
+              value: "0"
+            - name: NODE_ENV
+              value: production
+            - name: REGULAIT_INSTALL_SECRETS_DIR
+              value: /app/install-secrets
+            # ADR-0343: /ready answers 503 this long before the listener closes
+            - name: REGULAIT_DRAIN_DELAY_MS
+              value: {{ mul (int .Values.highAvailability.drainDelaySeconds) 1000 | quote }}
+            - name: REGULAIT_SHUTDOWN_GRACE_MS
+              value: {{ add (mul (int .Values.highAvailability.drainDelaySeconds) 1000) 15000 | quote }}
+            {{- include "regulait.secretEnv" . | nindent 12 }}
+            - name: REGULAIT_DATA_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secrets.name | quote }}, key: {{ .Values.secrets.dataKeyKey | quote }} }
+            - name: REGULAIT_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secrets.name | quote }}, key: {{ .Values.secrets.bootstrapTokenKey | quote }} }
+          securityContext:
+            {{- include "regulait.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: install-secrets, mountPath: /app/install-secrets, subPath: install-secrets }
+            - { name: install-secrets, mountPath: /app/audit-anchors, subPath: audit-anchors }
+          # /ready (ADR-0343) checks the database and turns 503 the moment a drain starts, so it gates traffic, not
+          # restarts. Liveness stays a TCP check: a database outage must not restart every replica at once.
+          readinessProbe:
+            httpGet: { path: /ready, port: 3000 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          livenessProbe:
+            tcpSocket: { port: 3000 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          startupProbe:
+            tcpSocket: { port: 3000 }
+            periodSeconds: 10
+            failureThreshold: 60
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: install-secrets
+          persistentVolumeClaim:
+            claimName: {{ include "regulait.claim" . }}
+{{- if gt (int .Values.replicas) 1 }}
+---
+# ADR-0343: a voluntary disruption (a node drain, an upgrade) takes at most one replica at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "regulait.name" . }}
+  labels:
+    {{- include "regulait.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "regulait.selector" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+{{- end }}

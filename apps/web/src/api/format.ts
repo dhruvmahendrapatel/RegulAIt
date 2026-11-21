@@ -14,6 +14,17 @@ export function ago(iso: string | null | undefined): string {
   return Math.floor(s / 86400) + "d ago";
 }
 
+/** a future instant in words ("in 12m", "in 3h", "in 2d"); "now" once it has passed (the forward twin of `ago`) */
+export function fromNow(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "—";
+  const s = (new Date(iso).getTime() - now) / 1000;
+  if (!Number.isFinite(s)) return "—";
+  if (s < 60) return s <= 0 ? "now" : "in under a minute";
+  if (s < 3600) return "in " + Math.floor(s / 60) + "m";
+  if (s < 86400) return "in " + Math.floor(s / 3600) + "h";
+  return "in " + Math.floor(s / 86400) + "d";
+}
+
 export function fmtDur(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   const s = ms / 1000;
@@ -176,3 +187,6 @@ export function approvalStageLabel(a: {
   if (sentinel) return sentinel[1]!.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
   return null;
 }
+
+/** a caught value as text for an error line: an Error's message, anything else as a string */
+export const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));

@@ -208,7 +208,7 @@ describe("graph cost estimation (§5.2)", () => {
 // ---------------------------------------------------------------------------
 // §5.1 Team-Lead entitlement-narrowing ceiling
 // ---------------------------------------------------------------------------
-import { computeNodeCeiling, computeNodeBudgetCeiling } from "./index.js";
+import { computeNodeCeiling, computeNodeBudgetCeiling, workerTurnCap } from "./index.js";
 
 const AG_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AG_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -311,5 +311,20 @@ describe("computeNodeBudgetCeiling (§5.2 Team-Lead sub-budget)", () => {
     expect(computeNodeBudgetCeiling(g, "child")).toBe(4);
     // the lead itself is bounded only by its own cap
     expect(computeNodeBudgetCeiling(g, "lead")).toBe(10);
+  });
+});
+
+describe("workerTurnCap (ADR-0021 worker caps; the ADR-0345 loop probe reads the same function)", () => {
+  const org = { defaultWorkerMaxTurns: 6, maxWorkerTurns: 20 };
+  it("uses the org default when none is declared, and the declared value when one is", () => {
+    expect(workerTurnCap(undefined, org)).toBe(6);
+    expect(workerTurnCap(null, org)).toBe(6);
+    expect(workerTurnCap(9, org)).toBe(9);
+  });
+  it("a worker seeded to loop is clamped to the org ceiling, and never below one turn", () => {
+    expect(workerTurnCap(Number.MAX_SAFE_INTEGER, org)).toBe(20);
+    expect(workerTurnCap(10_000, { defaultWorkerMaxTurns: 3, maxWorkerTurns: 5 })).toBe(5);
+    expect(workerTurnCap(0, org)).toBe(1);
+    expect(workerTurnCap(-4, org)).toBe(1);
   });
 });

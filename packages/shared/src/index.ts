@@ -691,6 +691,10 @@ export {
   usableRemoteUrl,
   pickRemote,
   localServerNameFor,
+  MCP_PAID_SIGNALS,
+  normalizeRepositorySubfolder,
+  paidSignalFor,
+  type McpPaidSignal,
   type McpRemoteTransportType,
   type McpRegistryEntryKind,
   type McpCatalogueReason,
@@ -700,6 +704,29 @@ export {
   type NormalizedRegistryEntry,
   type NormalizedRegistryPage,
 } from "./mcp-registry.js";
+export {
+  MCP_CATALOGUE_LISTING_KINDS,
+  MCP_CATALOGUE_DELIVERIES,
+  MCP_CATALOGUE_PRESETS,
+  MCP_CATALOGUE_PRESET_IDS,
+  MCP_CATALOGUE_BUNDLE_FORMAT,
+  MCP_CATALOGUE_BUNDLE_MAX_ENTRIES,
+  MCP_CATALOGUE_BUNDLE_MAX_BYTES,
+  MCP_COMMUNITY_LIST_MAX_ENTRIES,
+  mcpCatalogueBundleSchema,
+  mcpCatalogueBundleEntrySchema,
+  bundleEntriesUsable,
+  catalogueDedupeKey,
+  githubRepoKey,
+  githubRepoLocation,
+  parseCommunityList,
+  vettingFor,
+  type McpCatalogueListingKind,
+  type McpCatalogueDelivery,
+  type McpCatalogueVetting,
+  type McpCataloguePreset,
+  type McpCatalogueBundle,
+} from "./mcp-catalogue.js";
 
 /** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
  * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
@@ -2457,6 +2484,15 @@ export const updateOrgSettingsSchema = z
     /** ADR-0246 addendum: 'enforce' (strict default) gates every call to a server classified high-risk (offensive
      * tooling) on the policy template and the authorised-targets list; 'off' is a step-up, audited relaxation. */
     mcpHighRiskMode: z.enum(MCP_HIGH_RISK_MODES).optional(),
+    /** ADR-0230 owner decision 2026-11-15: SAP business server defaults. The approval quorum seeded on a mark
+     * (default 2; never below 1, and the requester never approves their own write); below 2 is a relaxation. */
+    sapApprovalQuorum: z.number().int().min(1).max(10).optional(),
+    /** SAP writes per user per hour on the seeded write-only limit (default 10); higher is a relaxation */
+    sapWriteRatePerHour: z.number().int().min(1).max(1000).optional(),
+    /** false (default) refuses an SAP write with no project; true is a relaxation */
+    sapUnattributedWritesAllowed: z.boolean().optional(),
+    /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
+    sapReadsApproveFirst: z.boolean().optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -2504,6 +2540,9 @@ export const updateOrgSettingsSchema = z
     privacyOpsEnabled: z.boolean().optional(),
     /** ADR-0224: days from a data-subject request's receipt to its due date (1–90; 30 is the strict default) */
     dsrSlaDays: z.number().int().min(1).max(90).optional(),
+    /** ADR-0090 amendment (lane L11, owner 2026-11-15): hours before a certification campaign's due time that its
+     * deadline reminder is sent, 1 hour to 14 days (48 is the default) */
+    certificationReminderHours: z.number().int().min(1).max(14 * 24).optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.
@@ -3133,6 +3172,7 @@ export {
   auditContentHash,
   auditContentHashFor,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalAuditPayloadV2,
   type AuditChainVersion,
@@ -3486,6 +3526,9 @@ export {
   chatDecidable,
   alertMeetsThreshold,
   composeAlertCard,
+  composeCampaignDeadlineCard,
+  outlookMessageForCampaignDeadline,
+  type CampaignDeadlineNoticeInput,
   escapeAdaptiveMarkdown,
   composeApprovalCard,
   composeDecidedCard,
@@ -4603,6 +4646,8 @@ export {
   externalEvaluatorId,
   externalScorerCatalogEntry,
   owaspReferences,
+  canonicalOwaspId,
+  OWASP_LLM_2026_PREFIX,
   redteamEvaluatorId,
   scorerEvaluatorId,
   type CatalogEvaluator,
@@ -4934,8 +4979,12 @@ export * from "./isaca-pack.js";
 export * from "./iso-packs.js";
 // ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144 sector packs
 export * from "./sector-packs.js";
+// ADR-0319 (gap G11): the AIUC-1 ID-only pack
+export * from "./aiuc-packs.js";
 // ADR-0243 (P24): the OWASP MCP and LLM Top 10 packs
 export * from "./owasp-packs.js";
+export * from "./agent-risk-proofs.js";
+export * from "./nist-ai-600-1-pack.js";
 // ADR-0212 (P12 b): modality pricing
 export * from "./modality-pricing.js";
 
@@ -4946,6 +4995,8 @@ export {
   MODEL_DRIFT_MONITOR_RULE_ID,
   suggestedHaltFor,
   type AccountabilityMonitorRuleId,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
 } from "./governance-monitor.js";
 
 // ===== ADR-0186 (batch 4) — dual control, step-up, passkey-signed approvals,
@@ -4991,6 +5042,8 @@ export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
+// ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
+export * from "./saas-entitlements.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5006,6 +5059,8 @@ export * from "./trained-detectors.js";
 export * from "./guardrail-vendor-adapters.js";
 // ADR-0224 (P13 c): privacy operations — records of processing, data-subject requests, the processing limit
 export * from "./privacy-ops.js";
+// ADR-0296 part 2 (P18 B2): privacy-law presets and packs
+export * from "./privacy-packs.js";
 
 // ===== ADR-0215 (P5) — framework content imports and the imported regulatory feed =====
 export * from "./framework-imports.js";
@@ -5013,7 +5068,45 @@ export * from "./atlas-redteam-map.js";
 
 // ===== ADR-0221 (PENDING P4) — the supplier portal =========================
 export * from "./supplier-portal.js";
+// ===== ADR-0240 — one second factor (TOTP) for the supplier and auditor portals ==========
+export * from "./external-mfa.js";
 // ADR-0222 (P13(a)): fairness testing — the group metrics, thresholds and outcome (pure)
 export * from "./fairness.js";
+// ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
+export * from "./state-machine.js";
+export * from "./state-machines.js";
+export * from "./pipeline-steps.js";
+export * from "./kill-switch-guard.js";
+export * from "./vendor-agent-control.js";
+export * from "./robots.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
+// ADR-0334 (lane E16): the managed browser extension's contract (also the `@regulait/shared/browser-governance` subpath)
+export * from "./browser-governance/index.js";
+export { dlpRuleIds, matchDlp } from "./dlp-secret-re2.js";
+
+// ADR-0322: vendor usage/cost pull (catalogue, config and response schemas, normalisers)
+export * from "./vendor-usage.js";
+
+// ADR-0339 (lane E20): the agent risk score, recomputed on every change (pure; OWASP ids only)
+export * from "./agent-risk-score.js";
+// ADR-0339 slice 2 (lane E20): author vs runner and non-human identity links (pure vocabulary)
+export * from "./agent-identity.js";
+
+// ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
+export * from "./managed-settings.js";
+export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-actions.js";
+
+// ADR-0341: RFC 6902 patches for diff views
+export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+
+// ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
+export * from "./sensitivity-labels.js";
+
+// ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
+export * from "./fairness-evaluation.js";
+
+// ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
+export * from "./custom-classifiers.js";
+export * from "./agent-credential.js";

@@ -52,6 +52,8 @@ export const MCP_SERVER_MATCHED_ON = "mcpServer";
 /** the opt-in kinds the agent collects only when its org policy names them (contract.OptInKinds) */
 export const ENDPOINT_OPT_IN_KINDS = [MCP_CONFIG_KIND] as const;
 const UNNAMED = "(unnamed)";
+/** the identifier shapes an endpoint reports for a package, a host, a command or a name (never free text; ADR-0332 reuses it) */
+export const ENDPOINT_IDENTITY_RE = /^[A-Za-z0-9@[][A-Za-z0-9@._~/:+[\]-]{0,254}$/;
 const SECRET_TYPES_MAX = 32;
 
 // ---------------------------------------------------------------------------
@@ -290,11 +292,14 @@ const listQuery = z
   })
   .strict();
 
+/** an admin-typed server identity: the shapes the agent reports for a package, a host or a command (never free text) */
+export const mcpIdentityInput = z.string().regex(ENDPOINT_IDENTITY_RE);
+
 const linkBody = z
   .object({
     identityKind: z.enum(ENDPOINT_MCP_LINK_IDENTITY_KINDS),
     // the shapes the agent reports for a package, a host or a command (never free text)
-    identity: z.string().regex(/^[A-Za-z0-9@[][A-Za-z0-9@._~/:+[\]-]{0,254}$/),
+    identity: z.string().regex(ENDPOINT_IDENTITY_RE),
     mcpServerId: z.string().uuid(),
   })
   .strict();

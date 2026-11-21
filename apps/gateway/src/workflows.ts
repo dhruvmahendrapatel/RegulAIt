@@ -26,7 +26,10 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  assertCompensationStatus,
+  closePrSupersededByMerge,
   initialState,
+  isCompensating,
   matchTemplates,
   mergeDefinitions,
   transition,
@@ -129,6 +132,7 @@ import {
   scrubAuditText,
   retireTemplateSchema,
   startInstanceSchema,
+  type changeDescriptorSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
 } from "@regulait/shared";
@@ -256,7 +260,10 @@ async function applyEvent(
     const entersExecutable =
       state.status === "awaiting_execution" &&
       (prior.status !== "awaiting_execution" || prior.currentStageIndex !== state.currentStageIndex);
-    const bumpEntry = isReopen || entersExecutable;
+    // ADR-0340: entering a compensation stage (a manual one rests at awaiting_trigger) is a new stage entry too, so
+    // a forward executor still running from before the cancel can never commit into the compensation
+    const entersCompensation = isCompensating(state) && prior.currentStageIndex !== state.currentStageIndex;
+    const bumpEntry = isReopen || entersExecutable || entersCompensation;
     if (isReopen || bumpEntry) {
       const ctx = { ...(instance.context as Record<string, unknown>) };
       let changed = false;
@@ -292,7 +299,11 @@ async function applyEvent(
     const round = instance.round + (isReopen ? 1 : 0);
     const stageEntry = instance.stageEntry + (bumpEntry ? 1 : 0);
 
-    await tx
+    // ADR-0340 (rule 12): a compensation phase implies the instance status (the lifecycle table); a state that
+    // disagrees is refused before it is written. The UPDATE is guarded on the status and stage entry read under the
+    // lock, so the move it writes is exactly the one computed from that row.
+    assertCompensationStatus(def, state);
+    const written = await tx
       .update(workflowInstances)
       .set({
         state,
@@ -302,7 +313,15 @@ async function applyEvent(
         updatedAt: new Date(),
         ...(context ? { context } : {}),
       })
-      .where(eq(workflowInstances.id, instance.id));
+      .where(
+        and(
+          eq(workflowInstances.id, instance.id),
+          eq(workflowInstances.status, instance.status),
+          eq(workflowInstances.stageEntry, instance.stageEntry),
+        ),
+      )
+      .returning({ id: workflowInstances.id });
+    if (written.length !== 1) throw new WorkflowStateError(`instance ${instance.id} moved while '${event.kind}' was applied`);
     await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
     const isDenial = event.kind === "approval_denied" || event.kind === "abort";
@@ -400,6 +419,30 @@ async function applyEvent(
           : `stage '${priorStage.id}' failed; no automatic retry was scheduled: ${why[sent.reason]}`,
       });
     }
+    // ADR-0340: the saga's own record, beside the event that started, finished or abandoned it
+    for (const effect of effects) {
+      if (effect.kind !== "compensation_started" && effect.kind !== "compensation_completed" && effect.kind !== "compensation_abandoned") continue;
+      await tx.insert(auditLog).values({
+        userId: auditUserId,
+        objectType: "workflow",
+        objectId: instance.id,
+        detail: {
+          ...(systemActor ? { actor: systemActor } : {}),
+          cause: effect.cause,
+          fromStageId: state.compensation?.fromStageId ?? null,
+          ...(effect.kind === "compensation_abandoned" ? { notRun: effect.notRun } : { plan: effect.plan }),
+        },
+        effect: effect.kind === "compensation_abandoned" ? "deny" : "allow",
+        ruleId: `workflow:${effect.kind.replace("_", "-")}`,
+        ruleChain: [],
+        reason:
+          effect.kind === "compensation_started"
+            ? `${effect.cause === "aborted" ? "cancelled" : "denied"}: compensating ${effect.plan.length} stage(s) in reverse order (${effect.plan.join(", ")}) before the instance ends ${effect.cause}`
+            : effect.kind === "compensation_completed"
+              ? `every compensation ran (${effect.plan.join(", ")}); the instance ends ${effect.cause}`
+              : `compensation abandoned by an operator; never completed: ${effect.notRun.join(", ") || "none"}; the instance ends ${effect.cause}`,
+      });
+    }
     // AER-049: the archive is on the trail with the values — what an earlier
     // round shipped stays traceable from the audit alone.
     if (archivedEffects.length > 0) {
@@ -444,12 +487,14 @@ async function applyEvent(
     // live engine runs with it (cancelled, key revoked, approval superseded);
     // a re-open cancels those of the rounds it left behind. Same transaction
     // as the transition, under the instance row lock.
-    const endsInstance = ["completed", "denied", "aborted", "rolled_back"].includes(state.status);
+    // ADR-0340: a cancel or denial that starts compensating ends the FORWARD work the same way
+    const endsInstance =
+      ["completed", "denied", "aborted", "rolled_back"].includes(state.status) || effects.some((e) => e.kind === "compensation_started");
     if (endsInstance || isReopen) {
       const { cancelEngineRunsOfInstance } = await import("./engine-runs.js");
       await cancelEngineRunsOfInstance(tx, instance.id, actorUserId, {
         ...(endsInstance ? {} : { beforeRound: round }),
-        cause: endsInstance ? `workflow_${state.status}` : "workflow_reopened",
+        cause: endsInstance ? (isCompensating(state) ? "workflow_compensating" : `workflow_${state.status}`) : "workflow_reopened",
       });
     }
 
@@ -638,8 +683,15 @@ export async function applyWorkflowApprovalDecision(
   const instanceId = approvalRow.instanceId;
 
   if (decision === "denied") {
-    await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
-    return null;
+    const denied = await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
+    // ADR-0340: a denial that starts compensating runs the first compensation once the decision is durable
+    if (!denied.effects.some((e) => e.kind === "execute_stage")) return null;
+    return async (db) => {
+      const run = await runGitExecutions(db, instanceId, denied.effects, deciderUserId, dataKey);
+      const extra = await mirrorAfterExecutor(db, instanceId, deciderUserId);
+      const warning = { ...(run.refused ? { executorRefusal: run.refused } : {}), ...(extra ?? {}) };
+      return Object.keys(warning).length ? { executionWarning: warning } : undefined;
+    };
   }
   // ADR-0168 — send back for information: ONE approver's return sends the
   // instance back to its artifact stage whatever the quorum (a return is a
@@ -1970,11 +2022,17 @@ async function runGitExecutions(
       const [target] = stage.connection
         ? await db.select().from(deployTargets).where(eq(deployTargets.name, stage.connection))
         : [];
-      // the deployment to reverse: the newest recorded deploy in context
-      const deployKeys = Object.keys(context).filter((k) => k.startsWith("deploy:"));
+      // the deployment to reverse: the newest recorded deploy in context. ADR-0340: a COMPENSATION reverses the
+      // deploy of the stage it compensates, and only that; with no record of it nothing was deployed to undo.
+      const deployKeys = stage.compensates !== undefined
+        ? (context[`deploy:${stage.compensates}`] === undefined ? [] : [`deploy:${stage.compensates}`])
+        : Object.keys(context).filter((k) => k.startsWith("deploy:"));
       const priorDeploy = deployKeys.length
-        ? (context[deployKeys[deployKeys.length - 1]!] as { deployId?: string; target?: string })
+        ? (context[deployKeys[deployKeys.length - 1]!] as { deployId?: string; target?: string; dryRun?: boolean })
         : undefined;
+      if (stage.compensates !== undefined && context[`rollback:${stage.id}`] === undefined && (!priorDeploy || priorDeploy.dryRun === true)) {
+        context[`rollback:${stage.id}`] = { compensates: stage.compensates, nothingRecorded: true, ...(priorDeploy?.dryRun ? { dryRun: true } : {}) };
+      }
       let rbErr: string | null = null;
       try {
         if (context[`rollback:${stage.id}`] === undefined) {
@@ -2108,7 +2166,52 @@ async function runGitExecutions(
       );
 
       const change = instance.change as { description: string };
-      if (stage.action === "create_branch") {
+      if (stage.action === "delete_branch" || stage.action === "close_pr") {
+        // ADR-0340: a COMPENSATION undoes what this instance's forward stage recorded for the current round (the
+        // branch, the pull request). Nothing recorded means nothing ran to undo: the stage succeeds with that on
+        // its record. The provider calls are idempotent (a branch already gone, a PR already closed answers
+        // false), so a compensation re-run after a failure is safe; a MERGED pull request refuses (closing cannot
+        // undo a merge), the stage fails and waits for /advance like any failed stage.
+        const recordKey = `compensation:${stage.id}`;
+        if (context[recordKey] === undefined) {
+          if (stage.action === "delete_branch") {
+            const branch = typeof context.branch === "string" ? context.branch : null;
+            const res = branch
+              ? await runExternalWrite(
+                  db,
+                  "git.delete_branch",
+                  () => provider.deleteBranch(stage.repo!, branch),
+                  effectAudit((r) => ({ repo: stage.repo, branch, deleted: r.deleted, compensates: stage.compensates })),
+                )
+              : null;
+            context[recordKey] = { action: stage.action, compensates: stage.compensates, branch, changed: res?.deleted ?? false, ...(branch ? {} : { nothingRecorded: true }) };
+          } else {
+            const prId = context.prId === undefined || context.prId === null ? null : String(context.prId);
+            // a pull request this instance merged, whose merge its own revert already undid in this saga, has
+            // nothing left to close: closing a merged pull request throws on every provider, so without this the
+            // saga would fail on every retry. Only a provider that says MERGED supersedes it; a PR merged by
+            // anyone else, or with no revert, still fails honestly.
+            const superseded =
+              prId !== null &&
+              closePrSupersededByMerge(def, instance.state as InstanceState, stage.id) &&
+              (await provider.getPullRequest(stage.repo!, prId)).state === "merged";
+            if (superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: false, superseded: "merged" };
+            }
+            const res = prId && !superseded
+              ? await runExternalWrite(
+                  db,
+                  "git.close_pull_request",
+                  () => provider.closePullRequest(stage.repo!, prId),
+                  effectAudit((r) => ({ repo: stage.repo, prId, closed: r.closed, compensates: stage.compensates })),
+                )
+              : null;
+            if (!superseded) {
+              context[recordKey] = { action: stage.action, compensates: stage.compensates, prId, changed: res?.closed ?? false, ...(prId ? {} : { nothingRecorded: true }) };
+            }
+          }
+        }
+      } else if (stage.action === "create_branch") {
         // AER-049: a round after the first works on a FRESH branch named for
         // its round (`<base>-r<round>`) — the earlier round's branch (and its
         // PR, merged or not) is history, never reused. Round 0 keeps the
@@ -2843,11 +2946,26 @@ export async function runStageRetryJob(
 export async function createWorkflowTemplateValidated(
   db: Db,
   body: { name: string; definition?: unknown },
+  actorUserId: string | null = null,
 ): Promise<
   | { ok: true; row: typeof workflowTemplates.$inferSelect }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const definition = validateDefinition(body.definition);
+  const refused = await checkWorkflowTemplateReferences(db, definition);
+  if (refused) return refused;
+  return insertWorkflowTemplate(db, body.name, definition, actorUserId);
+}
+
+/**
+ * ADR-0341: the gateway-side checks of a kernel-valid definition (what the kernel cannot see: retired datasets,
+ * registry agents, user ids, nested run graphs), shared by the create path and the builder's validate and publish.
+ * Null = the definition may be stored; otherwise the refusal to send.
+ */
+export async function checkWorkflowTemplateReferences(
+  db: Db,
+  definition: WorkflowDefinition,
+): Promise<{ ok: false; status: number; body: Record<string, unknown> } | null> {
   // ADR-0208 G9: a new quality gate may not bind a retired eval dataset (bindings name the dataset by NAME)
   const retiredBound = await retiredEvalDatasetNames(db, evalDatasetNamesBoundBy(definition));
   if (retiredBound.length > 0) {
@@ -2932,11 +3050,39 @@ export async function createWorkflowTemplateValidated(
       return { ok: false, status: 422, body: { error: "invalid_approver" } };
     }
   }
-  const [row] = await db
-    .insert(workflowTemplates)
-    .values({ name: body.name, definition })
-    .returning();
-  return { ok: true, row: row! };
+  return null;
+}
+
+async function insertWorkflowTemplate(
+  db: Db,
+  name: string,
+  definition: WorkflowDefinition,
+  actorUserId: string | null,
+): Promise<{ ok: true; row: typeof workflowTemplates.$inferSelect }> {
+  // ADR-0283 owner decision (2026-11-15): no stage retries unless its template
+  // says so; a template that turns automatic retry on is audited, by stage and
+  // policy, in ONE transaction with the insert (a savepoint when the caller
+  // already holds one), so a retry-enabled template never exists unaudited.
+  const retried = definition.stages.filter((st) => st.retry);
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(workflowTemplates)
+      .values({ name, definition })
+      .returning();
+    if (retried.length === 0) return created!;
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? SYSTEM_IDENTITY,
+      objectType: "workflow_template",
+      objectId: created!.id,
+      detail: { templateName: name, stages: retried.map((st) => ({ stageId: st.id, type: st.type, retry: st.retry })) },
+      effect: "allow",
+      ruleId: "workflow:template-stage-retry-enabled",
+      ruleChain: [],
+      reason: `template '${name}' turns on automatic retry for ${retried.map((st) => `'${st.id}'`).join(", ")} (capped by each stage's retry policy)`,
+    });
+    return created!;
+  });
+  return { ok: true, row };
 }
 
 /** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
@@ -3081,6 +3227,59 @@ export async function gitConnectionUse(
     .where(and(notInArray(workflowInstances.status, [...TERMINAL_INSTANCE_STATUSES]), naming(workflowInstances.definition)))
     .orderBy(workflowInstances.id);
   return { templates: tpl.length, instances: inst.length, templateNames: tpl.slice(0, 20).map((t) => t.name), instanceIds: inst.slice(0, 20).map((i) => i.id) };
+}
+
+/**
+ * The server-side half of a workflow start, shared by every route that starts an instance for a person
+ * (`POST /v1/workflows/instances` and `POST /v1/pipeline-runs`, ADR-0232), so the attributes that decide which stages
+ * and sign-offs apply can never drift between them:
+ * ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
+ * (never from the request body) and passed on the change descriptor so a
+ * role-scoped assignment rule can only ever fire for a genuine role holder.
+ * The kernel stays subject-free — it just matches these strings.
+ * ADR-0038: distinct — a role held both directly and via an IdP group
+ * mapping is two assignment rows and one role name.
+ * ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
+ * 5th: a change's data sensitivity is the set of compliance classification
+ * tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
+ * effectiveCompliancePolicy cascades from. That is the only
+ * server-authoritative sensitivity signal in the model, and it means the
+ * dim cannot be asserted by a client. No project, or a project with no
+ * classifications, yields [] — a sensitivity-scoped rule then simply does
+ * not fire (matches as absent; never an invented sensitivity).
+ * targetSystem is a legitimate client-supplied change attribute;
+ * initiatorRoles and dataSensitivities are authoritative server truth.
+ * Neither could ever reach here from a client — changeDescriptorSchema
+ * accepts neither — but rebuild explicitly.
+ *
+ * `cascadeTemplateIds` is the §8.3 cascade: a classified project's required templates, unioned in by the caller with
+ * `withCascadeTemplates` (it can force a workflow even when no assignment rule matches).
+ */
+export async function resolveServerChange(
+  db: Db,
+  userId: string,
+  clientChange: z.infer<typeof changeDescriptorSchema>,
+  projectId: string | null,
+): Promise<{
+  change: z.infer<typeof changeDescriptorSchema> & { initiatorRoles: string[]; dataSensitivities: string[] };
+  cascadeTemplateIds: string[];
+}> {
+  const initiatorRoleRows = await db
+    .select({ name: roles.name })
+    .from(roleAssignments)
+    .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+    .where(eq(roleAssignments.userId, userId));
+  const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
+  const dataSensitivities = projectId ? await projectClassifications(db, projectId) : [];
+  const cascadeTemplateIds = projectId ? await requiredTemplateIdsFor(db, projectId) : [];
+  return { change: { ...clientChange, initiatorRoles, dataSensitivities }, cascadeTemplateIds };
+}
+
+/** the §8.3 cascade union: the chosen templates first, in order, then each required template not already chosen */
+export function withCascadeTemplates(templateIds: readonly string[], cascadeTemplateIds: readonly string[]): string[] {
+  const out = [...templateIds];
+  for (const id of cascadeTemplateIds) if (!out.includes(id)) out.push(id);
+  return out;
 }
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
@@ -3414,7 +3613,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
     if (!isIntakeTemplateName(body.name)) {
-      const result = await createWorkflowTemplateValidated(db, body);
+      const result = await createWorkflowTemplateValidated(db, body, req.authCtx.userId ?? null);
       if (!result.ok) return reply.status(result.status).send(result.body);
       return reply.status(201).send(result.row);
     }
@@ -3427,7 +3626,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       raw: req.body,
       candidate: { name: body.name, definition: (body.definition ?? {}) as Record<string, unknown> },
       actorUserId: req.authCtx.userId ?? null,
-      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
+      write: (tx, resolved) => createWorkflowTemplateValidated(tx, { name: body.name, definition: resolved!.definition }, req.authCtx.userId ?? null).then((r) => (r.ok ? { ok: true as const, value: r.row } : r)),
     });
     if (!gated.ok) return reply.status(gated.status).send(gated.body);
     return reply.status(201).send({ ...gated.value, ...(gated.decisionRegression ? { decisionRegression: gated.decisionRegression } : {}) });
@@ -3540,34 +3739,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
 
-    // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
-    // (never from the request body) and passed on the change descriptor so a
-    // role-scoped assignment rule can only ever fire for a genuine role holder.
-    // The kernel stays subject-free — it just matches these strings.
-    const initiatorRoleRows = await db
-      .select({ name: roles.name })
-      .from(roleAssignments)
-      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
-      .where(eq(roleAssignments.userId, userId));
-    // ADR-0038: distinct — a role held both directly and via an IdP group
-    // mapping is two assignment rows and one role name.
-    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
-    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
-    // 5th: a change's data sensitivity is the set of compliance classification
-    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
-    // effectiveCompliancePolicy cascades from. That is the only
-    // server-authoritative sensitivity signal in the model, and it means the
-    // dim cannot be asserted by a client. No project, or a project with no
-    // classifications, yields [] — a sensitivity-scoped rule then simply does
-    // not fire (matches as absent; never an invented sensitivity).
-    const dataSensitivities = body.projectId
-      ? await projectClassifications(db, body.projectId)
-      : [];
-    // targetSystem is a legitimate client-supplied change attribute;
-    // initiatorRoles and dataSensitivities are authoritative server truth.
-    // Neither could ever reach here from a client — changeDescriptorSchema
-    // accepts neither — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles, dataSensitivities };
+    // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
+    // start path (resolveServerChange)
+    const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
 
     // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
     // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
@@ -3620,10 +3794,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // templates are unioned in with no manual per-control setup (and can
     // force a workflow even when no assignment rule matches). The existing
     // §4 union/strictest merge keeps every added sign-off stage.
-    if (body.projectId) {
-      const required = await requiredTemplateIdsFor(db, body.projectId);
-      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
-    }
+    templateIds = withCascadeTemplates(templateIds, cascadeTemplateIds);
     if (templateIds.length === 0) {
       // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
       // rule, installed above): say who can fix it
@@ -4205,9 +4376,36 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
-    const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
+    // ADR-0340: ending a compensation early (the rest of the undo never runs) is an admin's act. Decided under the
+    // instance lock, so an abort racing the start of a compensation cannot slip past it.
+    const isAdmin = req.authCtx.isAdmin;
+    let refusedAbandon = false;
+    const applied = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId, async (tx) => {
+      const [row] = await tx.select({ state: workflowInstances.state }).from(workflowInstances).where(eq(workflowInstances.id, loaded.instance.id));
+      refusedAbandon = !isAdmin && row !== undefined && isCompensating(row.state as InstanceState);
+      return !refusedAbandon;
+    });
+    if (refusedAbandon) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "workflow",
+        objectId: loaded.instance.id,
+        detail: { instanceId: loaded.instance.id },
+        effect: "deny",
+        ruleId: "workflow:compensation-abandon-refused",
+        ruleChain: [],
+        reason: "only an admin may end a compensation early; the compensations keep running",
+      });
+      return reply.status(403).send({
+        error: "compensation_abandon_requires_admin",
+        detail: "this instance is compensating (undoing what it ran); only an admin may abandon the rest of the compensation",
+      });
+    }
+    // a cancel that starts compensating runs the first compensation now, as the actor who cancelled
+    const executed = await runExecutors(loaded.instance.id, applied.effects, req.authCtx.userId);
     const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
-    return { ...(extra ?? {}), status: state.status };
+    const [fresh] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, loaded.instance.id));
+    return { ...(extra ?? {}), ...refusalField(executed), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   // §5 dashboard: one instance in full…

@@ -376,7 +376,7 @@ export default function PosturePage() {
           </span>
         }
       />
-      <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
+      <QueryGate query={q}>
         {d && (
           <div className={v.stack}>
             <p className={v.faint} data-testid="posture-scope">

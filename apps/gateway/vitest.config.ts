@@ -36,6 +36,10 @@ export default defineConfig({
       // yet numbered (packages/db/migrations/pending/) are applied in their provisional order. A long-lived database
       // refuses them.
       REGULAIT_MIGRATIONS_UNASSIGNED: "apply",
+      // ADR-0234 batch 7b: the suite's database login is a superuser, which the boot refuses as the runtime login.
+      // A test that boots the real gateway (startGateway) takes the loud, audited dev opt-in; the runtime-login suite
+      // tests the refusal itself with this unset.
+      REGULAIT_DEV_PRIVILEGED_DB_LOGIN: "1",
       // ADR-0031 item 4: the HTTP rate limiter is ON by default in a real
       // deployment (see rate-limit.ts). The suite drives thousands of requests
       // from one address in seconds — auth.test.ts alone deliberately fails
@@ -52,6 +56,13 @@ export default defineConfig({
       // the loop construct a Scheduler directly; scheduler.test.ts asserts the
       // empty-environment default is on.
       REGULAIT_SCHEDULER: "off",
+      // ADR-0167 amendment (S-02): the bootstrap token RETIRES once an active
+      // admin exists. Hundreds of files build an app with BOOT, create users,
+      // and keep using BOOT, so the suite relaxes it EXPLICITLY here, as it
+      // does the rate limiter. dev-secrets-s02.test.ts builds apps with
+      // `bootstrapAfterAdmin: false` and asserts the empty-environment default
+      // retires the token, so the shipping posture is still covered.
+      REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
       // REGULAIT_DATABASE_SSL is deliberately NOT set here: its default is
       // `require`, and the environment that points the suite at a Postgres
       // without TLS (CI, the local gate) says `disable` itself.

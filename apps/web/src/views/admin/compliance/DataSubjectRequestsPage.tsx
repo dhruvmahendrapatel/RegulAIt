@@ -234,7 +234,7 @@ function RequestModal(props: { id: string; onClose: () => void }) {
               <strong>Where the person's data was found</strong>
               <Findings located={r.located} />
               <p className={v.hint}>
-                Only these four stores are searched, for the identifier exactly as typed. Data in other systems, in
+                Only these five stores are searched, for the identifier exactly as typed. Data in other systems, in
                 message metadata, or written in another format is not found.
               </p>
             </div>

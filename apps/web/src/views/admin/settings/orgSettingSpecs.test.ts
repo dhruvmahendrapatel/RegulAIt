@@ -93,8 +93,8 @@ describe("the batch-4, batch-5 and identity rows mirror @regulait/shared", () =>
 
   it("the step-up action copy counts every action kind", () => {
     const count = BATCH4_SPECS.stepUpActions!.control.kind === "set" ? BATCH4_SPECS.stepUpActions!.control.options.length : 0;
-    expect(count).toBe(9);
-    expect(BATCH4_SPECS.stepUpActions!.strict.startsWith("All nine:")).toBe(true);
+    expect(count).toBe(10);
+    expect(BATCH4_SPECS.stepUpActions!.strict.startsWith("All ten:")).toBe(true);
   });
 
   it("the vocabularies are the shared ones, in the same order", async () => {
@@ -128,6 +128,8 @@ describe("the remaining rows follow the gateway's strictness registry", () => {
     expect(CORE_SPECS.canaryObservationRetentionDays!.strictDefault).toBe(90);
     expect(CORE_SPECS.approvalBulkMaxItems!.strictDefault).toBe(25);
     expect(CORE_SPECS.approvalBulkSensitiveBlocked!.strictDefault).toBe(true);
+    expect(CORE_SPECS.mcpBundlesEnabled!.strictDefault).toBe(false);
+    expect(CORE_SPECS.mcpBundlesEnabled!.isRelaxed(true)).toBe(true);
   });
   it("null (never expires / no ceiling) is a relaxation; a shorter lifetime is not", () => {
     for (const key of ["approvalTtlHours", "apiKeyDefaultTtlDays", "apiKeyMaxTtlDays"]) {
@@ -154,6 +156,19 @@ describe("the remaining rows follow the gateway's strictness registry", () => {
     expect(needsStepUp(mode, { hosted: 400 }, {})).toBe(false);
     expect(needsStepUp(mode, { hosted: 100 }, { hosted: 400 })).toBe(true);
     expect(needsStepUp(mode, {}, { hosted: 400 })).toBe(true);
+  });
+  it("privacy operations (ADR-0224 addendum): the limit ships off, and only turning it off again is a step-up", () => {
+    const limit = CORE_SPECS.privacyOpsEnabled!;
+    expect(limit.strictDefault).toBe(false);
+    expect(needsStepUp(limit, true, false)).toBe(false);
+    expect(needsStepUp(limit, false, true)).toBe(true);
+    const sla = CORE_SPECS.dsrSlaDays!;
+    expect(sla.strictDefault).toBe(30);
+    expect(sla.control).toMatchObject({ kind: "int", min: 1, max: 90 });
+    expect(needsStepUp(sla, 45, 30)).toBe(true);
+    expect(needsStepUp(sla, 14, 30)).toBe(false);
+    // looser than what is stored is a step-up even under the default
+    expect(needsStepUp(sla, 20, 14)).toBe(true);
   });
   it("the warn window never asks for a step-up (exempt in the registry)", () => {
     expect(needsStepUp(CORE_SPECS.mrmExpiryWarnDays!, 0, 30)).toBe(false);

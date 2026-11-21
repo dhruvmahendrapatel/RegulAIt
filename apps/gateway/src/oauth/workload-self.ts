@@ -51,6 +51,7 @@ import { databaseNow } from "../delegation.js";
 import { currentIssuerSigner, ISSUER_JWS_ALG, signingKeyAccepts } from "../identity-signing-keys.js";
 import { loadOrgSettings } from "../org-settings.js";
 import { endpointAgentContext } from "../endpoint-agent.js";
+import { browserDeviceLive } from "../browser-device.js";
 
 /** the one control-plane resource a self token of `kind` names (an absolute URL under the issuer) */
 export function selfResource(issuer: string, kind: WorkloadSelfKind): string {
@@ -148,6 +149,7 @@ export async function storedSelfToken(
   if (row?.revokedAt && row.subjectIdentityId) {
     const [subject] = await db.select({ kind: workloadIdentities.kind }).from(workloadIdentities).where(eq(workloadIdentities.id, row.subjectIdentityId));
     if (subject?.kind === "endpoint_agent" && !(await endpointAgentContext(db, row.subjectIdentityId)).ok) return fail("device_revoked");
+    if (subject?.kind === "browser_extension" && !(await browserDeviceLive(db, row.subjectIdentityId))) return fail("device_revoked");
   }
   if (
     !row ||
@@ -177,7 +179,7 @@ export async function storedSelfToken(
   if (revoked) return fail("credential_revoked");
   const [identity] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.id, row.subjectIdentityId));
   // ADR-0195 SD4b: a revoked endpoint agent identity is a revoked device (the agent stops, it never retries)
-  if (identity?.kind === "endpoint_agent" && identity.status === "revoked") return fail("device_revoked");
+  if ((identity?.kind === "endpoint_agent" || identity?.kind === "browser_extension") && identity.status === "revoked") return fail("device_revoked");
   if (!identity || identity.status !== "active") return fail("identity_not_active");
   if (identity.identifier !== claims.client_id) return fail("client_id_mismatch");
   const kind = identity.kind as string;
@@ -199,6 +201,8 @@ export async function storedSelfToken(
   }
   // ADR-0195 SD4b: the identity's device must still exist and not be revoked, read now
   if (kind === "endpoint_agent" && !(await endpointAgentContext(db, identity.id)).ok) return fail("device_revoked");
+  // ADR-0334: likewise a browser extension's device
+  if (kind === "browser_extension" && !(await browserDeviceLive(db, identity.id))) return fail("device_revoked");
   return { ok: true, subject: { identity, authCredentialId: row.authCredentialId, jti: row.jti, runner } };
 }
 

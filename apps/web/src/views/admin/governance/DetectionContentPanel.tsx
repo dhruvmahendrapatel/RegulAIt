@@ -7,7 +7,7 @@ interface Pack { id: string; source: string; repo: string; commit: string; sha25
 export function DetectionContentPanel() {
   const query = useQuery({ queryKey: ["admin", "detection-content"], retry: false, queryFn: () => api.get<{ packs: Pack[]; outboundAudienceEnforced?: boolean }>("/v1/detection-content") });
   return <Card title="Vendored detection content" info={<p>Pinned upstream data runs through the local detector. Enabled packs can still have coverage gaps; excluded rules are listed below.</p>}>
-    <QueryGate loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()}>
+    <QueryGate query={query}>
       {Array.isArray(query.data?.packs) ? <div className={v.stack}>
         <p>{query.data!.outboundAudienceEnforced === true ? "Credential audience restrictions are enforced on outbound requests." : query.data!.outboundAudienceEnforced === false ? "Credential audience restrictions are not installed on outbound requests." : "Outbound credential audience enforcement is not reported."}</p>
         {query.data!.packs.map((pack) => <div key={pack.id}>

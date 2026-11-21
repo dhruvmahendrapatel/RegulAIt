@@ -390,7 +390,7 @@ export default function InventoryPage() {
           </Card>
 
         {openId && (
-          <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+          <QueryGate query={detail}>
             {d && (
               <Card
                 title={`Dependencies: ${d.agent.name}`}

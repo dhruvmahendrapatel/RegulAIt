@@ -147,7 +147,7 @@ async function sessionWithStepUp(userId: string, args: StepUpCheckArgs) {
   const [session] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(sessionToken).digest("hex"),
+      tokenHash: hashToken(sessionToken),
       userId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

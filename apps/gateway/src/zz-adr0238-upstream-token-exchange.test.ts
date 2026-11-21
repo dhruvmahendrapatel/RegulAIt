@@ -18,6 +18,7 @@
  * Global state (M-068): the org settings it changes, the egress entries it adds, the admin's passkey, sessions and
  * step-up grants are put back in afterAll.
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import http from "node:http";
 import os from "node:os";
@@ -251,7 +252,7 @@ beforeAll(async () => {
     await db.execute(sql`UPDATE org_settings SET step_up_mode = ${prior!.mode}, step_up_actions = ${JSON.stringify(prior!.actions)}::jsonb WHERE id = ${ORG_SETTINGS_ID}`);
   });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
 
   // the issuer's ES256 key (the subject token is an ADR-0210 OIDC assertion)
@@ -323,7 +324,7 @@ beforeAll(async () => {
   const [sess] = await db
     .insert(authSessions)
     .values({
-      tokenHash: createHash("sha256").update(token).digest("hex"),
+      tokenHash: hashToken(token),
       userId: adminId,
       origin: "password",
       expiresAt: new Date(Date.now() + 3_600_000),

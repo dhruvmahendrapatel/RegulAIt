@@ -17,8 +17,10 @@
  *                          sent by the server, which no static scan can follow
  *                          (the evidence text is named and checked)
  *         KNOWN_UI_GAPS    TEMPORARY: a real capability with no screen yet.
- *                          Printed loudly on every run; the count is pinned and
- *                          may only go DOWN (KNOWN_UI_GAPS_MAX, and a test).
+ *                          One file per ADR and lane in scripts/known-ui-gaps/,
+ *                          printed loudly on every run. The count is computed
+ *                          from the entries and falls as screens land: an entry
+ *                          whose route now has a screen fails the run.
  *   or (c) still a 501 `notBuilt` stub (it does nothing, so it needs no screen).
  *
  * THE ROUTE LIST is `ROUTE_STABILITY` in apps/gateway/src/openapi-registry.ts:
@@ -35,7 +37,7 @@
  *
  * Exit 0 clean, 1 on a gap or a stale entry, 2 if it could not run.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { literalPathsIn, norm, scanNotBuilt, scanWeb, segmentMatch } from "./preflight-ui-affordances.mjs";
@@ -59,6 +61,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /ui", "shell: serves the SPA's index.html (the page itself, not a call it makes)"],
   ["GET /ui/*", { reason: "shell: serves the SPA's static assets and deep links", matches: 1 }],
   ["GET /health", "health: the load balancer / container liveness probe"],
+  ["GET /ready", "readiness: the orchestrator readiness probe; 503 while draining or degraded (ADR-0343)"],
   ["GET /v1/openapi.json", "docs: the published OpenAPI document (ADR-0053), read by SDK generators"],
   ["GET /v1/api/versioning", "docs: the published versioning/deprecation policy (ADR-0053), read by API clients"],
 
@@ -77,6 +80,9 @@ export const MACHINE_ONLY = new Map([
   ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
   ["GET /mcp-identity/.well-known/openid-configuration", "auth plumbing: the OIDC-profile MCP identity assertion issuer's discovery document, fetched by an upstream's validator (ADR-0210)"],
   ["GET /mcp-identity/.well-known/jwks.json", "auth plumbing: the OIDC-profile MCP identity assertion issuer's ES256 JWKS, fetched by an upstream's validator (ADR-0210)"],
+  ["GET /agent-credentials/.well-known/openid-configuration", "auth plumbing: the agent credential issuer's discovery document, fetched by a third-party enforcement point (ADR-0315)"],
+  ["GET /agent-credentials/.well-known/jwks.json", "auth plumbing: the agent credential issuer's JWKS, fetched by a third-party enforcement point to verify offline (ADR-0315)"],
+  ["GET /agent-credentials/status/:listId", "auth plumbing: the agent credential issuer's signed Token Status List, fetched by a third-party enforcement point to learn of a revocation (ADR-0315)"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
@@ -92,6 +98,7 @@ export const MACHINE_ONLY = new Map([
   ["GET /v1/models", "data plane: OpenAI-compatible model list for vendor SDKs"],
   ["POST /mcp/:serverId", "data plane: the governed MCP proxy endpoint MCP clients connect to"],
   ["GET /mcp/:serverId", "protocol plumbing: the Streamable HTTP SSE probe MCP clients send after initialize; answers 405 Allow: POST"],
+  ["DELETE /mcp/:serverId", "protocol plumbing: the Streamable HTTP session end; no session is issued, so it answers 405 Allow: POST (ADR-0311)"],
   ["GET /v1/prompts/resolve", "data plane: runtimes and SDKs resolve a prompt@tag reference at call time"],
   ["POST /v1/connectors/:connectorId/invoke", "data plane: an agent runtime invokes a connector through the governance gate"],
   ["POST /v1/a2a/agents/:agentId/messages", "data plane: a person's client or a worker calls a remote A2A agent through the governance gate (ADR-0219)"],
@@ -103,11 +110,14 @@ export const MACHINE_ONLY = new Map([
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
-  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
+  ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
+  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b; ADR-0331 added its signed removal directives and their outcomes; the ADR-0310 addendum its decision batches)", matches: 8 }],
+  ["* /v1/browser-extension/*", { reason: "browser extension channel: the managed extension's registration (bulk enrolment token) and its device-proof routes (policy, breach events, prompt capture) reach these, never a person (ADR-0334)", matches: 4 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
   ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
@@ -181,11 +191,11 @@ export const INDIRECT_UI_CALLS = new Map([
     ["GET /v1/virtual-keys/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/virtual-keys/:keyId/usage/export.xlsx", "apps/web/src/views/admin/identity/VirtualKeysPage.tsx"],
     ["GET /v1/admin/credentials/export.xlsx", "apps/web/src/views/admin/identity/CredentialsPage.tsx"],
-    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitiesPage.tsx"],
-    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/SsoPage.tsx"],
-    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatOpsPage.tsx"],
-    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentsPage.tsx"],
-    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicensingPage.tsx"],
+    ["GET /v1/workload-identities/export.xlsx", "apps/web/src/views/admin/identity/WorkloadIdentitySubpages.tsx"],
+    ["GET /v1/auth/link-requests/export.xlsx", "apps/web/src/views/admin/identity/LinkRequestsPage.tsx"],
+    ["GET /v1/chatops/identity-links/export.xlsx", "apps/web/src/views/admin/governance/ChatIdentityLinksPage.tsx"],
+    ["GET /v1/agents/export.xlsx", "apps/web/src/views/admin/integrations/AgentCatalogPage.tsx"],
+    ["GET /v1/licenses/verifications/export.xlsx", "apps/web/src/views/admin/settings/LicenceVerificationsPage.tsx"],
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
@@ -360,96 +370,88 @@ export const INDIRECT_UI_CALLS = new Map([
 
 /**
  * KNOWN UI GAPS — TEMPORARY. A real capability with no screen yet: listed so
- * CI stays green while the UI work is scheduled, NEVER as an exemption. Each
- * entry says what the route does (so the screen can be designed) and a
- * tracking note. Closing one means building the screen; this run then fails
- * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
+ * CI stays green while the UI work is scheduled, NEVER as an exemption.
+ *
+ * ONE FILE PER ADR AND LANE, in `scripts/known-ui-gaps/` (ADR-0252 addendum,
+ * owner 2026-11-19). Each file is JSON:
+ *
+ *   { "adr": "ADR-NNNN", "lane": "E44", "tracking": "… #453 …",
+ *     "gaps": { "VERB /path": "what the route does", … } }
+ *
+ * `adr` is optional (a lane with no ADR); `lane` is the lane that owns the
+ * entries; `tracking` names the tracking issue or ADR; each gap says what the
+ * route does, one route per line, so the screen can be designed. A PR that
+ * adds API-only routes adds its own file (or lines to its own lane's file), so
+ * two such PRs never edit the same line and merge without a conflict (M-118).
+ *
+ * THE COUNT IS COMPUTED: it is the number of entries, and there is no
+ * hand-set ceiling. It still only falls as screens land: a route the UI now
+ * calls fails the run while its entry stays ("stale entry: delete it"), and a
+ * route with no screen and no entry fails as `no-ui`.
  */
-export const KNOWN_UI_GAPS = new Map([
-  ["GET /v1/usage-extractors", { does: "reads the org switch and every agent's active usage-mapping version", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["PUT /v1/usage-extractors/enabled", { does: "turns the usage extractor on (settings_relax step-up) or off", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["GET /v1/agents/:agentId/usage-extractor/versions", { does: "lists an agent's usage-mapping versions with each one's latest sample test", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/agents/:agentId/usage-extractor/versions", { does: "saves a new usage-mapping version (validated JSON pointers)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/test", { does: "tests a version against a sample response and the counts the admin expects", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/agents/:agentId/usage-extractor/versions/:versionId/activate", { does: "activates a version whose latest test passed (settings_relax step-up)", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/agents/:agentId/usage-extractor/deactivate", { does: "returns an agent to its adapter's built-in usage counts", tracking: "ADR-0241 (P21): the brief is API-only; the mapping editor is posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["GET /v1/mcp/definition-pins", { does: "lists the MCP servers with a tool, prompt or resource changed since approval (rug-pull queue)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["GET /v1/servers/:serverId/definition-pins", { does: "one server's pinned definitions with each changed item's RFC 6902 diff", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/servers/:serverId/definition-pins/approve", { does: "re-approves reviewed changed items against their digests (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["GET /v1/servers/:serverId/high-risk-policy", { does: "shows a server's offensive-tooling classification and whether its policy template is applied", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/servers/:serverId/high-risk-policy", { does: "applies the high-risk policy template: a quorum approval rule and a rate limit", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/servers/:serverId/risk-class", { does: "an admin marks a server high-risk by hand when the automatic classifier missed its neutrally-named offensive tools", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["GET /v1/mcp/authorised-targets", { does: "lists the authorised targets of high-risk MCP servers", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["POST /v1/mcp/authorised-targets", { does: "adds an authorised target (settings_relax step-up)", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  ["DELETE /v1/mcp/authorised-targets/:id", { does: "removes an authorised target", tracking: "ADR-0246 (P27): the brief is API-only; the review screens are posted on #453 for the Governed Designer. RAISED FROM 0 for review: the master decides on the PR whether to keep this or build the screen first" }],
-  // batch U4 (ui-gaps-details) closed the last 22. The entries below are the ADR-0236 (P11) MCP bundle routes:
-  // the owner decided on 2026-11-07 (#697) to ship them API-first while the Governed Designer builds the bundle
-  // screen requested on #453. Building that screen closes these and lowers KNOWN_UI_GAPS_MAX back to 0.
-  ["GET /v1/mcp-bundles", { does: "lists governed MCP bundles with the default-off setting, version and grant count (ADR-0236)", tracking: "#453" }],
-  ["POST /v1/mcp-bundles", { does: "creates a bundle at version 1 from exact (server, tool) pairs, with an optional approver for dangerous tools", tracking: "#453" }],
-  ["GET /v1/mcp-bundles/:bundleId", { does: "reads a bundle: its current tools and version history", tracking: "#453" }],
-  ["PATCH /v1/mcp-bundles/:bundleId", { does: "changes a bundle's description or its approver for dangerous tools", tracking: "#453" }],
-  ["DELETE /v1/mcp-bundles/:bundleId", { does: "archives a bundle: every grant of it confers nothing from then on", tracking: "#453" }],
-  ["PUT /v1/mcp-bundles/:bundleId/items", { does: "writes a new version of a bundle's tools (compare-and-set; adding a tool is a step-up)", tracking: "#453" }],
-  ["GET /v1/mcp-bundles/:bundleId/versions/:version", { does: "reads one immutable version of a bundle", tracking: "#453" }],
-  ["GET /v1/mcp-bundles/:bundleId/grants", { does: "lists who holds a bundle (user, role or team) and up to which scope tier", tracking: "#453" }],
-  ["POST /v1/mcp-bundles/:bundleId/grants", { does: "grants a bundle to a user, role or team up to a scope tier (read by default)", tracking: "#453" }],
-  ["DELETE /v1/mcp-bundles/:bundleId/grants/:grantId", { does: "revokes a bundle grant", tracking: "#453" }],
-  ["PUT /v1/mcp-tools/:toolId/dangerous", { does: "flags or clears a tool's dangerous scope tier (clearing is a step-up)", tracking: "#453" }],
-  // ADR-0261 (P37) adds six: the owner decided on 2026-11-07 to raise the cap by exactly these and ship the
-  // DefenseClaw ingest API-only, with the admin screen tracked on #453.
-  ["GET /v1/third-party-ingest/sources", { does: "lists third-party ingest sources (DefenseClaw), their state, credential issue time and the ingest limits", tracking: "#453" }],
-  ["POST /v1/third-party-ingest/sources", { does: "creates a DefenseClaw ingest source, off by default", tracking: "#453" }],
-  ["PUT /v1/third-party-ingest/sources/:sourceId/enabled", { does: "turns a source on (step-up, audited) or off (audited)", tracking: "#453" }],
-  ["POST /v1/third-party-ingest/sources/:sourceId/credential", { does: "issues or replaces the source's write-only rgti_ token, shown once (step-up, audited)", tracking: "#453" }],
-  ["POST /v1/third-party-ingest/sources/:sourceId/credential/revoke", { does: "revokes the source's ingest token (audited)", tracking: "#453" }],
-  ["GET /v1/third-party-ingest/sources/:sourceId/records", { does: "the newest third-party evidence a source delivered, each marked third-party with its linked findings", tracking: "#453" }],
-  // ADR-0303 (lane L11, P18 C6): five API-only SIEM destination routes; the admin screen is posted on #453.
-  ["GET /v1/siem/destinations", { does: "lists SIEM destinations, their state, cursor and lag (never the secret)", tracking: "#453" }],
-  ["POST /v1/siem/destinations", { does: "creates a SIEM destination, off by default; the Standard Webhooks secret is shown once", tracking: "#453" }],
-  ["PUT /v1/siem/destinations/:destinationId/enabled", { does: "turns a SIEM destination on (step-up, audited as a relaxation) or off (audited)", tracking: "#453" }],
-  ["POST /v1/siem/destinations/:destinationId/rotate-secret", { does: "rotates a SIEM destination's signing secret, shown once (step-up, audited)", tracking: "#453" }],
-  ["POST /v1/siem/destinations/:destinationId/recover", { does: "returns a dead-lettered or backing-off SIEM destination to delivery now (audited)", tracking: "#453" }],
-  // ADR-0313 (lane E2, G9): four API-only paid-call routes; the price and hold screens are posted on #453.
-  ["GET /v1/paid-call-prices", { does: "lists paid-call prices (MCP tool, MCP server or connector): price, reserved maximum and hold TTL", tracking: "#453" }],
-  ["POST /v1/paid-call-prices", { does: "makes a tool, server or connector a paid call that must reserve against a budget (audited)", tracking: "#453" }],
-  ["DELETE /v1/paid-call-prices/:priceId", { does: "removes a paid-call price, a relaxation (settings_relax step-up, audited)", tracking: "#453" }],
-  ["GET /v1/paid-call-holds", { does: "pages paid-call holds: held, settled (with the usage row) or released, and why", tracking: "#453" }],
-  // EXCEPTION (ADR-0255, P31, 2026-11-07): the P31 brief is "API and backend only; post the catalogue UI need on
-  // #453 for the Governed Designer", so these two routes ship with their screen owned by that lane. These two
-  // raise the cap by 2, visibly; the Designer's catalogue screen deletes both entries and lowers it by 2. Decided on #753
-  // (2026-11-14): keep the temporary gap; lane UI-C builds the catalogue screen after merge and lowers the cap.
-  [
-    "GET /v1/connector-catalogue",
-    {
-      does: "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
-      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
-    },
-  ],
-  [
-    "POST /v1/connector-catalogue/:pieceKey/enablement",
-    {
-      does: "enables (admin, step-up) or disables a curated piece, with a reason, audited",
-      tracking: "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453",
-    },
-  ],
-  ["GET /v1/reports/posture/assets", { does: "pages per-asset posture scores (agents or use cases) the caller can read, each with objectives and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
-  ["GET /v1/reports/posture/assets/:kind/:assetId", { does: "one agent's or use case's posture score, with its objectives, not-applicable list and ranked actions", tracking: "ADR-0214 amendment (P3): the brief is API-only; the per-asset score screen is posted on #453 (c6703277931) for the Governed Designer, and the owner chose the temporary gap on #705 (2026-11-07)" }],
-  ["GET /v1/servers/:serverId/token-exchange", { does: "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["PUT /v1/servers/:serverId/token-exchange", { does: "sets or changes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["DELETE /v1/servers/:serverId/token-exchange", { does: "removes an MCP server's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["GET /v1/connectors/:connectorId/token-exchange", { does: "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["PUT /v1/connectors/:connectorId/token-exchange", { does: "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-  ["DELETE /v1/connectors/:connectorId/token-exchange", { does: "removes a connector's upstream token exchange (settings_relax step-up, audited)", tracking: "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built" }],
-]);
+export const KNOWN_UI_GAPS_DIR = "scripts/known-ui-gaps";
+
+const GAP_FILE_KEYS = new Set(["adr", "lane", "tracking", "gaps"]);
+const GAP_FILE_NAME = /^(?:adr-\d{4}|lane)-[a-z0-9][a-z0-9-]*\.json$/;
+const GAP_LANE = /^[A-Za-z0-9][A-Za-z0-9()+.-]{0,23}$/;
+const GAP_REF = /ADR-\d{4}|#\d+/;
 
 /**
- * The ratchet. Equal to KNOWN_UI_GAPS.size, always: the run fails when the
- * list is longer (a new gap) AND when it is shorter (lower this to match), so
- * the number only ever goes down. The census test pins an upper bound too, so
- * raising it is a visible two-file diff.
+ * Reads the per-ADR gap files: `{ gaps, problems }`. `gaps` maps each route to
+ * `{ does, tracking, lane, adr, file }`, in file-name order; `problems` are
+ * census failures (a malformed file, a missing field, a route in two files).
+ * `files` is `[name, text]` pairs, so the tests can pass their own.
  */
-export const KNOWN_UI_GAPS_MAX = 52; // main's 43 (46 incl. ADR-0255 P31 +2, master decision on #753 2026-11-14; − 3 endpoint MCP config routes, #824) + ADR-0303 (lane L11) 5 SIEM destination routes awaiting #453 + ADR-0313 (lane E2) 4 paid-call routes awaiting #453
+export function parseKnownGapFiles(files) {
+  const gaps = new Map();
+  const problems = [];
+  const bad = (key, detail) => problems.push({ kind: "bad-entry", key, detail });
+  for (const [name, text] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    if (!GAP_FILE_NAME.test(name)) bad(name, "a gap file is named adr-NNNN-<lane>-<topic>.json (or lane-<lane>-<topic>.json with no ADR)");
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (e) {
+      bad(name, `not valid JSON: ${e.message}`);
+      continue;
+    }
+    if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+      bad(name, "a gap file is one JSON object");
+      continue;
+    }
+    for (const k of Object.keys(doc)) if (!GAP_FILE_KEYS.has(k)) bad(name, `unknown field '${k}'`);
+    const { adr, lane, tracking, gaps: entries } = doc;
+    if (adr !== undefined && !(typeof adr === "string" && /^ADR-\d{4}$/.test(adr))) bad(name, "`adr` is ADR-NNNN");
+    if (typeof adr === "string" && !name.startsWith(`${adr.toLowerCase()}-`)) bad(name, `the file name starts with its ADR (${adr.toLowerCase()}-)`);
+    if (adr === undefined && !name.startsWith("lane-")) bad(name, "a gap file with no `adr` is named lane-<lane>-<topic>.json");
+    if (typeof lane !== "string" || !GAP_LANE.test(lane)) bad(name, "a gap file names its owner `lane` (for example E44, L7, P31)");
+    if (typeof tracking !== "string" || !GAP_REF.test(tracking)) bad(name, "a gap file's `tracking` names its tracking issue (#NNN) or ADR (ADR-NNNN)");
+    if (entries === null || typeof entries !== "object" || Array.isArray(entries) || Object.keys(entries).length === 0) {
+      bad(name, "`gaps` maps at least one route to what it does; delete a file with none");
+      continue;
+    }
+    for (const [key, does] of Object.entries(entries)) {
+      if (typeof does !== "string" || does.trim().length < 8) bad(key, `${name}: a known gap says what the route does`);
+      if (gaps.has(key)) {
+        problems.push({ kind: "double-listed", key, detail: `a known gap in both ${gaps.get(key).file} and ${name}; keep one` });
+        continue;
+      }
+      gaps.set(key, { does, tracking, lane, adr, file: name });
+    }
+  }
+  return { gaps, problems };
+}
+
+/** the shipped gap files, read once */
+export function readKnownGapFiles(dir = path.join(root, KNOWN_UI_GAPS_DIR)) {
+  return readdirSync(dir)
+    .filter((f) => !f.startsWith("."))
+    .map((f) => [f, readFileSync(path.join(dir, f), "utf8")]);
+}
+
+const KNOWN = parseKnownGapFiles(readKnownGapFiles());
+export const KNOWN_UI_GAPS = KNOWN.gaps;
+export const KNOWN_UI_GAP_PROBLEMS = KNOWN.problems;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
@@ -563,9 +565,9 @@ export function census({
   superseded = SUPERSEDED,
   indirect = INDIRECT_UI_CALLS,
   knownGaps = KNOWN_UI_GAPS,
-  knownGapsMax = KNOWN_UI_GAPS_MAX,
+  knownGapProblems = KNOWN_UI_GAP_PROBLEMS,
 }) {
-  const failures = [];
+  const failures = [...knownGapProblems];
   const fail = (kind, key, detail) => failures.push({ kind, key, detail });
   const keyOf = (r) => `${r.method} ${r.path}`;
   const all = new Set(routes.map(keyOf));
@@ -613,7 +615,10 @@ export function census({
       counts.ui += 1;
       if (listedAs.length > 0) {
         const where = machine.length > 0 ? `machine-only (${machine[0]})` : listedAs[0];
-        fail("stale", key, `the UI calls it, but it is listed as ${where}; delete or narrow the entry`);
+        if (where === "known-gap") {
+          const file = knownGaps.get(key)?.file;
+          fail("stale", key, `stale entry: delete it. The UI calls it now, but it is still a known gap${file ? ` in ${KNOWN_UI_GAPS_DIR}/${file}` : ""}`);
+        } else fail("stale", key, `the UI calls it, but it is listed as ${where}; delete or narrow the entry`);
       }
       continue;
     }
@@ -652,13 +657,12 @@ export function census({
     fail("no-ui", key, "no screen calls it and no list explains why");
   }
 
-  if (knownGaps.size > knownGapsMax) {
-    fail("gap-ratchet", "KNOWN_UI_GAPS", `${knownGaps.size} entries but KNOWN_UI_GAPS_MAX is ${knownGapsMax}: build the screen instead of listing a new gap`);
-  } else if (knownGaps.size < knownGapsMax) {
-    fail("gap-ratchet", "KNOWN_UI_GAPS_MAX", `the list has ${knownGaps.size} entries: lower KNOWN_UI_GAPS_MAX (and the test's bound) to ${knownGaps.size}`);
-  }
+  // No ceiling: the count is the entries (ADR-0252 addendum). Each one still says what it does, where it is tracked
+  // and which lane owns it; parseKnownGapFiles checks the shipped files, and this checks any map a caller passes.
   for (const [key, entry] of knownGaps) {
-    if (!entry?.does || !entry?.tracking) fail("bad-entry", key, "a known gap needs `does` and `tracking`");
+    if (!entry?.does || typeof entry?.tracking !== "string" || !GAP_REF.test(entry.tracking) || typeof entry?.lane !== "string" || !GAP_LANE.test(entry.lane)) {
+      fail("bad-entry", key, "a known gap needs `does`, a `tracking` note naming its issue (#NNN) or ADR (ADR-NNNN), and its owner `lane`");
+    }
   }
   for (const [key, entry] of superseded) {
     if (!entry?.replacement || !entry?.reason) fail("bad-entry", key, "a superseded entry needs `replacement` and `reason`");
@@ -698,8 +702,8 @@ function main() {
   if (KNOWN_UI_GAPS.size > 0) {
     console.log("");
     console.log("!!".repeat(36));
-    console.log(`!! ${KNOWN_UI_GAPS.size} KNOWN UI GAPS — built capabilities with no screen yet (temporary; the count may only go down)`);
-    for (const [key, g] of KNOWN_UI_GAPS) console.log(`!!   ${key.padEnd(44)} ${g.does}  [${g.tracking}]`);
+    console.log(`!! ${KNOWN_UI_GAPS.size} KNOWN UI GAPS — built capabilities with no screen yet (temporary; one file per ADR and lane in ${KNOWN_UI_GAPS_DIR}/)`);
+    for (const [key, g] of KNOWN_UI_GAPS) console.log(`!!   ${key.padEnd(44)} ${g.does}  [lane ${g.lane}; ${g.tracking}]`);
     console.log("!!".repeat(36));
   }
 

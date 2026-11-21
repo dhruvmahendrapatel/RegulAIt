@@ -37,6 +37,7 @@ import {
   Input,
   IdChip,
   Select,
+  TabPanel,
   Tabs,
 } from "../../../ui/kit";
 import { DataList, type DataColumn } from "../../../ui/DataList";
@@ -59,6 +60,11 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+/** a person's role, status and sign-in method: one renderer each, shared by the list columns and the detail's status row */
+export const roleBadge = (u: AdminUser) => (u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>);
+export const statusBadge = (u: AdminUser) => (u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>);
+export const signInLabel = (u: AdminUser) => (u.hasPassword ? (u.mustChangePassword ? "one-time password" : "password") : "no password");
+
 /** ADR-0226: the users list's columns; the ids and sortable ones match the gateway's USERS_LIST */
 export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
   {
@@ -69,12 +75,12 @@ export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
     render: (u) => <span className={u.disabledAt ? v.faint : undefined}>{u.displayName || "—"}</span>,
   },
   { key: "email", header: "Email", main: true, sortable: true, render: (u) => u.email },
-  { key: "role", header: "Role", main: true, sortable: true, render: (u) => (u.isAdmin ? <Badge tone="primary">admin</Badge> : <Badge>member</Badge>) },
+  { key: "role", header: "Role", main: true, sortable: true, render: roleBadge },
   {
     key: "signIn",
     header: "Sign-in",
     main: true,
-    render: (u) => (u.hasPassword ? (u.mustChangePassword ? "one-time pw" : "password") : "no password"),
+    render: signInLabel,
   },
   { key: "mfa", header: "MFA", main: true, sortable: true, render: (u) => (u.totpEnabled ? "TOTP" : "—") },
   {
@@ -83,7 +89,7 @@ export const USER_COLUMNS: Array<DataColumn<AdminUser>> = [
     main: true,
     sortable: true,
     required: "Status is always shown",
-    render: (u) => (u.disabledAt ? <Badge tone="danger">disabled</Badge> : <Badge tone="ok">active</Badge>),
+    render: statusBadge,
   },
   { key: "created", header: "Created", main: true, sortable: true, render: (u) => ago(u.createdAt) },
   { key: "username", header: "Username", sortable: true, render: (u) => u.username ?? <span className={v.faint}>—</span> },
@@ -155,7 +161,8 @@ export default function UsersPage() {
 
   const issueKey = async (u: AdminUser) => {
     await act.run(async () => {
-      const issued = await api.post<{ token: string }>(`/v1/users/${u.id}/keys`, { name: "portal" });
+      // ADR-0167 amendment (S-02): a key for someone else is an identity_manage step-up
+      const issued = await withStepUp((h) => stepUpApi.post<{ token: string }>(`/v1/users/${u.id}/keys`, { name: "portal" }, h));
       setReveal({
         title: `API key for ${u.email}`,
         secret: issued.token,
@@ -392,6 +399,14 @@ function UserDetail(props: {
         </span>
       }
     >
+      {/* I-2: the person's standing facts stay above the tabs, so no tab hides a deactivation or the last-admin guard */}
+      <div className={v.row} role="group" aria-label="User status" style={{ marginBottom: "var(--s2)" }}>
+        {roleBadge(user)}
+        {statusBadge(user)}
+        <Badge tone="neutral">{`Sign-in: ${signInLabel(user)}`}</Badge>
+        <Badge tone="neutral">{user.totpEnabled ? "MFA: TOTP" : "MFA: not enrolled"}</Badge>
+        {lastAdmin && <Badge tone="warn">Last active admin: cannot be demoted or deactivated</Badge>}
+      </div>
       <Tabs
         tabs={[
           { id: "lifecycle", label: "Lifecycle" },
@@ -402,9 +417,12 @@ function UserDetail(props: {
         ]}
         active={tab}
         onChange={setTab}
+        idPrefix="user-detail"
+        label={`${user.displayName || user.email}: details`}
       />
+      {/* I-2: each tab names its panel; an opened panel stays mounted, so a half-typed name, username or revocation reason survives a switch */}
       <div style={{ marginTop: "var(--s2)" }}>
-        {tab === "lifecycle" && (
+        <TabPanel idPrefix="user-detail" id="lifecycle" active={tab} lazy>
           <div className={v.stack}>
             <RefusalNotice guidance={props.refusal} />
             <div className={v.row}>
@@ -472,11 +490,19 @@ function UserDetail(props: {
               }}
             />
           </div>
-        )}
-        {tab === "sessions" && <SessionsPanel userId={user.id} />}
-        {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
-        {tab === "roles" && <UserRoleProvenancePanel userId={user.id} />}
-        {tab === "overrides" && <OverridesPanel userId={user.id} />}
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="sessions" active={tab} lazy>
+          <SessionsPanel userId={user.id} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="passkeys" active={tab} lazy>
+          <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="roles" active={tab} lazy>
+          <UserRoleProvenancePanel userId={user.id} />
+        </TabPanel>
+        <TabPanel idPrefix="user-detail" id="overrides" active={tab} lazy>
+          <OverridesPanel userId={user.id} />
+        </TabPanel>
       </div>
     </Card>
   );

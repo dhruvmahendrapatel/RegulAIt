@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { changedInputs, CONTEXT_EXCLUDED, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
+import { changedInputs, CONTEXT_EXCLUDED, enginePackage, GateError, GENERATED_LOCK_MODULE, inputCommit, inputPathspecs, plan, readWorkspace, ROOT, ROOT_INPUTS, workspaceClosure } from "./engine-images-gate.mjs";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
-import { inputPathspecs as specsFor, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
+import { inputPathspecs as specsFor, REPRO_ENGINE_IDS, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
 
 const repoGit = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
 
@@ -14,7 +14,9 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
 
   it("each engine's closure is its package, the runner and shared (the shim stage builds exactly these)", () => {
-    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([`packages/engine-${id}`, "packages/engine-runner", "packages/shared"].sort());
+    // ADR-0242 §6.1: the two admission-scan images share one shim package
+    const pkgDir = (id) => (["mcpscanner", "skillscanner"].includes(id) ? "packages/engine-admission-scan" : `packages/engine-${id}`);
+    for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([pkgDir(id), "packages/engine-runner", "packages/shared"].sort());
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {
@@ -29,7 +31,8 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
   });
 
   it("every COPY source of every engine Dockerfile is an input (the build reads nothing the gate ignores)", () => {
-    for (const id of ENGINE_IDS) {
+    // the unpublished ADR-0242 images too: CI builds them twice and compares, so their inputs must be whole
+    for (const id of REPRO_ENGINE_IDS) {
       const covered = new Set(repoGit(["ls-files", "--", ...inputPathspecs(id, pkgs)]).split("\n").filter(Boolean));
       const dockerfile = readFileSync(path.join(ROOT, `engines/${id}/Dockerfile`), "utf8");
       const sources = [];
@@ -94,8 +97,11 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
     for (const f of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".dockerignore", "scripts/build-engine-image.sh", "scripts/other.mjs", ".github/workflows/engine-images.yml", "engines/images.lock.json", "engines/signatures/garak.sigstore.json"]) write(f);
     for (const id of ENGINE_IDS) {
       write(`engines/${id}/Dockerfile`);
-      pkg(`packages/engine-${id}`, `@regulait/engine-${id}`, { "@regulait/engine-runner": "workspace:*", "@regulait/shared": "workspace:*" });
-      write(`packages/engine-${id}/src/main.ts`);
+      // the package the engine's shim stage builds (ADR-0242: mcpscanner and skillscanner share one)
+      const name = enginePackage(id);
+      const pdir = `packages/${name.slice("@regulait/".length)}`;
+      pkg(pdir, name, { "@regulait/engine-runner": "workspace:*", "@regulait/shared": "workspace:*" });
+      write(`${pdir}/src/main.ts`);
     }
     pkg("packages/engine-runner", "@regulait/engine-runner", { "@regulait/shared": "workspace:*" });
     pkg("packages/shared", "@regulait/shared");
@@ -161,7 +167,7 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
 
   it("force publishes every engine; a never-published engine publishes", () => {
     expect(decide(base, { force: true }).publish).toEqual(ENGINE_IDS);
-    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base } } }, { changed: () => [] });
+    const r = plan({ engines: { promptfoo: { sourceCommit: null }, modelscan: { sourceCommit: base }, garak: { sourceCommit: base }, spikee: { sourceCommit: base }, mcpscanner: { sourceCommit: base }, skillscanner: { sourceCommit: base } } }, { changed: () => [] });
     expect(r.publish).toEqual(["promptfoo"]);
     expect(r.engines.promptfoo.reason).toBe("never published");
   });
@@ -204,14 +210,24 @@ describe("ENG-IMG publish gate: the decision, on a throwaway repository", () => 
   });
 });
 
-describe("ADR-0242 unpublished engines", () => {
-  it("have image inputs (their own directory, no workspace package) but are never planned for publish", () => {
-    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["mcpscanner", "skillscanner"]);
-    for (const id of UNPUBLISHED_ENGINE_IDS) {
+describe("ADR-0242 the admission-scan engines (L4.5: publishable, as spikee)", () => {
+  it("have image inputs (their own directory and the shared admission-scan shim) and are planned for publish like every locked engine", () => {
+    // L4.5 (2026-11-17): no engine is built without being publishable any more
+    expect(UNPUBLISHED_ENGINE_IDS).toEqual([]);
+    const pkgs = readWorkspace();
+    for (const id of ["mcpscanner", "skillscanner"]) {
       const specs = specsFor(id);
       expect(specs).toContain(`engines/${id}`);
-      expect(specs.some((s) => s.startsWith("packages/"))).toBe(false);
-      expect(ENGINE_IDS).not.toContain(id);
+      // ADR-0242 §6.1: the runner and task shim both images build
+      expect(workspaceClosure(id, pkgs)).toEqual(["packages/engine-admission-scan", "packages/engine-runner", "packages/shared"]);
+      for (const d of workspaceClosure(id, pkgs)) expect(specs).toContain(d);
+      expect(ENGINE_IDS).toContain(id);
+      expect(REPRO_ENGINE_IDS).toContain(id);
+      // never published yet: the gate plans the first publish (the lock entry is all null)
+      expect(plan({ engines: { [id]: { sourceCommit: null } } }, { changed: () => [] }).engines[id]).toEqual({ publish: true, reason: "never published", files: [] });
+      // never another engine's directory
+      const files = repoGit(["ls-files", "--", ...specs]).split("\n").filter(Boolean);
+      for (const other of REPRO_ENGINE_IDS.filter((o) => o !== id)) expect(files.filter((f) => f.startsWith(`engines/${other}/`))).toEqual([]);
     }
   });
 });

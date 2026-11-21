@@ -57,7 +57,7 @@ export function PackDetailCard(props: { packId: string; onClose: () => void }) {
         </Button>
       }
     >
-      <QueryGate loading={detail.isLoading} error={detail.error} onRetry={() => void detail.refetch()}>
+      <QueryGate query={detail}>
         {d ? (
           <div className={v.stack} data-testid="pack-detail">
             <p className={v.dim}>{d.pack.title}</p>
@@ -277,7 +277,7 @@ function PackReportView(props: { reportId: string }) {
   const totals = r?.payload.totals ?? {};
   return (
     <div className={v.stack} style={{ marginTop: "var(--s2)" }} data-testid="pack-report">
-      <QueryGate loading={report.isLoading} error={report.error} onRetry={() => void report.refetch()}>
+      <QueryGate query={report}>
         {r ? (
           <>
             <KV

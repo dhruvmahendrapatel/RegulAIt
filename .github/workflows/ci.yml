@@ -141,9 +141,12 @@ name: CI
 # ADR-0262 (owner decision 2026-11-07): FAST checks on a pull request, the FULL suite at merge time.
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
 #   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
-#                  the static pre-flights (migration guard, licence gate) and the gateway shards (web-only PRs too:
-#                  gateway tests read apps/web sources, #737 review). The web app changed: also the mocked SPA shards. Docs only: every job
-#                  is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
+#                  the static pre-flights (migration guard, licence gate) and the gateway shards. ADR-0323: a web-only
+#                  PR runs ONE gateway runner with only the tests that read apps/web sources, instead of the five
+#                  shards and their coverage check. The web app changed: also the mocked SPA shards. Docs only: every
+#                  job is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
+#                  A dependency, workflow, schema/migration or security-config change is a full run (ADR-0323).
+#                  Dry run: `node scripts/ci-plan.mjs <changed paths>` or `--base origin/main`.
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
 #   push to main   the docker build. The merge queue is where the full suite gates a merge.
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
@@ -188,7 +191,9 @@ jobs:
     outputs:
       full: ${{ steps.scope.outputs.full }}
       code: ${{ steps.scope.outputs.code }}
+      base: ${{ steps.scope.outputs.base }}
       web: ${{ steps.scope.outputs.web }}
+      gateway: ${{ steps.scope.outputs.gateway }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -242,7 +247,8 @@ jobs:
   build-and-test-base:
     name: build-and-test / build, packages, static pre-flights
     needs: scope
-    if: needs.scope.outputs.code == 'true'
+    # ADR-0323: also on a docs PR that changes what its checks read (the ADR index, fragments, PENDING.md, THIRD_PARTY.md)
+    if: needs.scope.outputs.base == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target (see the arithmetic above). Without the
     # gateway suite this job is install + `pnpm -r build` + the package suites.
@@ -342,9 +348,11 @@ jobs:
       # on a reasoned list in that script (machine-only by category,
       # superseded by a route the UI calls, an indirect call with its
       # evidence), or is a 501 stub. Real gaps sit in a TEMPORARY
-      # `KNOWN_UI_GAPS` list that this step prints loudly and whose count may
-      # only go down. A list entry that no longer matches fails the step, so
-      # the lists cannot rot.
+      # `KNOWN_UI_GAPS` list (one file per ADR and lane in
+      # scripts/known-ui-gaps/, ADR-0252 addendum) that this step prints
+      # loudly; its count is the number of entries. A list entry that no longer
+      # matches fails the step, so the lists cannot rot and the count falls as
+      # screens land.
       #
       # Two steps, and the census runs whenever the affordance step RAN (passed
       # or failed), so both reports always show in one run. Neither runs after a
@@ -413,8 +421,10 @@ jobs:
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     needs: scope
-    # ADR-0262 (PR trim): skipped only on a docs-only PR. A web-only PR still runs it: gateway tests read
-    # apps/web sources (step-up-posture-guard walks every product source, apps/web included).
+    # ADR-0262 (PR trim): skipped only on a docs-only PR. ADR-0323: on a web-only PR (`gateway` is 'false') the matrix
+    # is ONE runner, `web-readers`, which runs only the gateway tests that read apps/web sources or walk the repository
+    # (`node scripts/ci-scope.mjs --gateway-web-readers`; step-up-posture-guard walks every product source). Any other
+    # value of `gateway`, an empty one included, gives the five shards.
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
@@ -449,7 +459,8 @@ jobs:
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
         # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
-        shard: [1, 2, 3, 4, 5]
+        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full five.
+        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5]') }}
 
 
     services:
@@ -549,6 +560,7 @@ jobs:
         run: pnpm --filter "@regulait/gateway..." build
 
       - name: Gateway suite, shard ${{ matrix.shard }} of ${{ strategy.job-total }}
+        if: matrix.shard != 'web-readers'
         run: >-
           pnpm --filter @regulait/gateway exec vitest run --dir src
           --shard=${{ matrix.shard }}/${{ strategy.job-total }}
@@ -558,10 +570,25 @@ jobs:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
           REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
+      # ADR-0323: a web-only PR. The list is computed from the test sources on every run (no hand-kept list to rot);
+      # an empty list means the detector is broken, which fails the job.
+      - name: Gateway tests that read apps/web sources (web-only PR)
+        if: matrix.shard == 'web-readers'
+        run: |
+          set -euo pipefail
+          files="$(node scripts/ci-scope.mjs --gateway-web-readers)"
+          [ -n "$files" ] || { echo "::error::no gateway test was found that reads apps/web; the detector is broken"; exit 1; }
+          echo "Running $(wc -w <<<"$files") gateway test files that read outside apps/gateway"
+          # word splitting is wanted: one argument per file (paths have no spaces; ci-scope.test.mjs pins that)
+          # shellcheck disable=SC2086
+          pnpm --filter @regulait/gateway exec vitest run --dir src --reporter=default --reporter=github-actions $files
+        env:
+          REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
       # always (not on a cancelled run): the coverage job needs a failing
       # shard's report too, or it cannot say which files that shard ran
       - name: Shard report for the coverage check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard != 'web-readers' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gateway-report-${{ matrix.shard }}
@@ -616,8 +643,9 @@ jobs:
     name: gateway / every test file ran exactly once
     needs: [scope, gateway-tests]
     # runs when a shard failed too, so a red run still says whether the shards
-    # covered the suite; it does not run on a cancelled (superseded) run, or when the shards were skipped
-    if: ${{ !cancelled() && needs.scope.outputs.code == 'true' }}
+    # covered the suite; it does not run on a cancelled (superseded) run, when the shards were skipped, or on a
+    # web-only PR, where the one `web-readers` runner runs a chosen subset by design (ADR-0323)
+    if: ${{ !cancelled() && needs.scope.outputs.gateway == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -661,24 +689,27 @@ jobs:
   # `success()`, which would skip it) and checks each result itself.
   #
   # ADR-0262: a part is skipped only when its own scope output is false. The scope must have succeeded; the
-  # build and static pre-flights must succeed when code changed (else be skipped), and the gateway shards and their
-  # coverage check must succeed when code outside apps/web/** changed (else be skipped).
+  # build and static pre-flights and the gateway shard job must succeed when code changed (else be skipped), and the
+  # coverage check must succeed when code outside apps/web/** changed (`gateway`, ADR-0323; else be skipped).
   build-and-test:
     needs: [scope, build-and-test-base, gateway-tests, gateway-coverage]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      # ADR-0323: an output that is neither 'true' nor 'false' (empty, because the scope action did not declare it,
+      # or anything else) fails the aggregate. On #851 an undeclared `gateway` read as '' and let the coverage check
+      # skip on a full run; "not true" must never mean "a skip is allowed".
       - name: Every part of build-and-test passed
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           echo "$RESULTS" | jq -e '
-            def ok(want): if want == "true" then .result == "success" else .result == "skipped" end;
+            def ok(want): if want == "true" then .result == "success" elif want == "false" then .result == "skipped" else false end;
             .scope.outputs as $o |
             length == 4 and .scope.result == "success" and
-            (."build-and-test-base" | ok($o.code)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.code))' > /dev/null
+            (."build-and-test-base" | ok($o.base)) and (."gateway-tests" | ok($o.code)) and (."gateway-coverage" | ok($o.gateway))' > /dev/null
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.

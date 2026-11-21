@@ -33,6 +33,7 @@ const BuilderPromptsPage = screen(() => import("./screens/builder"), "BuilderPro
 const BuilderPromptDetailPage = screen(() => import("./screens/builder"), "BuilderPromptDetailPage");
 const BuilderPlaygroundPage = screen(() => import("./screens/builder"), "BuilderPlaygroundPage");
 const WebhooksPage = screen(() => import("./screens/admin-integrations"), "WebhooksPage");
+const SiemDeliveryPage = screen(() => import("./screens/admin-integrations"), "SiemDeliveryPage");
 const ModelsPage = lazy(() => import("./views/models/ModelsPage"));
 const RunsPage = screen(() => import("./screens/runs"), "RunsPage");
 const RunDetailPage = screen(() => import("./screens/runs"), "RunDetailPage");
@@ -48,17 +49,20 @@ const ProjectContextPage = screen(() => import("./screens/projects"), "ProjectCo
 const ContextGraphPage = screen(() => import("./screens/projects"), "ContextGraphPage");
 const ContextIndexPage = screen(() => import("./screens/projects"), "ContextIndexPage");
 const SpendPage = lazy(() => import("./views/spend/SpendPage"));
-const AccountPage = lazy(() => import("./views/account/AccountPage"));
+// P3 (#453): the Account area (the Account page + its full sessions and passkeys lists) as one lazy chunk owning its
+// nested <Routes> (views/account/AccountSubpages.tsx); the SPA route census follows it.
+const AccountArea = lazy(() => import("./views/account/AccountSubpages"));
 const UsersPage = screen(() => import("./screens/admin-identity-access"), "UsersPage");
 const RolesPage = screen(() => import("./screens/admin-identity-access"), "RolesPage");
 const TeamsPage = screen(() => import("./screens/admin-identity-access"), "TeamsPage");
 const ClientAccessPage = screen(() => import("./screens/admin-identity-access"), "ClientAccessPage");
-const SsoPage = screen(() => import("./screens/admin-identity-access"), "SsoPage");
+const SsoArea = screen(() => import("./screens/admin-identity-access"), "SsoArea");
 const ScimPage = screen(() => import("./screens/admin-identity-access"), "ScimPage");
 const CredentialsPage = screen(() => import("./screens/admin-identity-access"), "CredentialsPage");
+const AgentCredentialsPage = screen(() => import("./screens/admin-identity-access"), "AgentCredentialsPage");
 const GroupMappingsPage = screen(() => import("./screens/admin-identity-access"), "GroupMappingsPage");
 const VirtualKeysPage = screen(() => import("./screens/admin-identity-access"), "VirtualKeysPage");
-const WorkloadIdentitiesPage = screen(() => import("./screens/admin-identity-access"), "WorkloadIdentitiesPage");
+const WorkloadIdentitiesArea = screen(() => import("./screens/admin-identity-access"), "WorkloadIdentitiesArea");
 const RulesEnginePage = screen(() => import("./screens/admin-policies-gates"), "RulesEnginePage");
 const SimulationPage = screen(() => import("./screens/admin-policies-gates"), "SimulationPage");
 const AbacPoliciesPage = screen(() => import("./screens/admin-policies-gates"), "AbacPoliciesPage");
@@ -97,14 +101,14 @@ const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "Au
 const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
 const DiscoverySourcesArea = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesArea");
 const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
-const ChatOpsPage = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsPage");
+const ChatOpsArea = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsArea");
 const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
 const RegulAItLlmPage = screen(() => import("./screens/admin-integrations"), "RegulAItLlmPage");
 const TracesPage = screen(() => import("./screens/admin-approvals-audit"), "TracesPage");
 // ADR-0173 batch 2c (K)
 const MonitoringPage = screen(() => import("./screens/admin-overview"), "MonitoringPage");
 const WorkflowTemplatesPage = screen(() => import("./screens/admin-policies-gates"), "WorkflowTemplatesPage");
-const AgentsPage = screen(() => import("./screens/admin-integrations"), "AgentsPage");
+const AgentsArea = screen(() => import("./screens/admin-integrations"), "AgentsArea");
 const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
@@ -135,7 +139,7 @@ const OrganizationPage = screen(() => import("./screens/admin-settings"), "Organ
 const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
 const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
 const FirstRunPage = screen(() => import("./screens/admin-settings"), "FirstRunPage");
-const LicensingPage = screen(() => import("./screens/admin-settings"), "LicensingPage");
+const LicensingArea = screen(() => import("./screens/admin-settings"), "LicensingArea");
 const DataKeyPage = screen(() => import("./screens/admin-settings"), "DataKeyPage");
 const SchedulerPage = screen(() => import("./screens/admin-settings"), "SchedulerPage");
 const EnforcementPosturePage = screen(() => import("./screens/admin-settings"), "EnforcementPosturePage");
@@ -240,7 +244,7 @@ function ApplicationRoutes() {
         <Route path="/projects/:projectId/context/graph" element={<ContextGraphPage />} />
         <Route path="/context" element={<ContextIndexPage />} />
         <Route path="/spend" element={<SpendPage />} />
-        <Route path="/account" element={<AccountPage />} />
+        <Route path="/account/*" element={<AccountArea />} />
         {/* ADR-0182 (D4): outside RequireAdmin — anyone may report an incident
             or a problem; the server filters what each person may see */}
         <Route path="/incidents" element={<IncidentsPage />} />
@@ -261,17 +265,19 @@ function ApplicationRoutes() {
                 <Route path="roles" element={<RolesPage />} />
                 <Route path="teams" element={<TeamsPage />} />
                 <Route path="client-access" element={<ClientAccessPage />} />
-                <Route path="sso" element={<SsoPage />} />
+                <Route path="sso/*" element={<SsoArea />} />
                 <Route path="provisioning" element={<ScimPage />} />
                 <Route path="group-mappings" element={<GroupMappingsPage />} />
                 {/* ADR-0066 */}
                 <Route path="virtual-keys" element={<VirtualKeysPage />} />
                 {/* ADR-0175 A7 */}
                 <Route path="credentials" element={<CredentialsPage />} />
+                {/* ADR-0315 G7 */}
+                <Route path="agent-credentials" element={<AgentCredentialsPage />} />
                 {/* ADR-0188 S6 preview: routed but deliberately NOT in the navigation
                     (suites.tsx) until creating/revoking an identity and binding a
                     credential stop answering 501 — see the page's header comment */}
-                <Route path="workload-identities" element={<WorkloadIdentitiesPage />} />
+                <Route path="workload-identities/*" element={<WorkloadIdentitiesArea />} />
                 <Route path="rules" element={<RulesEnginePage />} />
                 <Route path="simulation" element={<SimulationPage />} />
                 <Route path="abac-policies" element={<AbacPoliciesPage />} />
@@ -332,9 +338,9 @@ function ApplicationRoutes() {
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
-                <Route path="chatops" element={<ChatOpsPage />} />
+                <Route path="chatops/*" element={<ChatOpsArea />} />
                 <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
-                <Route path="agents" element={<AgentsPage />} />
+                <Route path="agents/*" element={<AgentsArea />} />
                 <Route path="model-credentials" element={<ModelCredentialsPage />} />
                 <Route path="custom-providers" element={<CustomProvidersPage />} />
                 {/* ADR-0088 */}
@@ -343,6 +349,7 @@ function ApplicationRoutes() {
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
+                <Route path="siem" element={<SiemDeliveryPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />
                 <Route path="git-connections" element={<GitConnectionsPage />} />
                 <Route path="pm-connections" element={<PmConnectionsPage />} />
@@ -367,7 +374,7 @@ function ApplicationRoutes() {
                 <Route path="privacy/requests" element={<DataSubjectRequestsPage />} />
                 <Route path="organization" element={<OrganizationPage />} />
                 <Route path="retention" element={<RetentionPage />} />
-                <Route path="licensing" element={<LicensingPage />} />
+                <Route path="licensing/*" element={<LicensingArea />} />
                 {/* ADR-0063 */}
                 <Route path="data-key" element={<DataKeyPage />} />
                 {/* ADR-0064 */}

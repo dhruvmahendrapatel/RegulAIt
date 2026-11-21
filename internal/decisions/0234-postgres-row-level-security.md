@@ -206,6 +206,9 @@ the role split, because it is the only option that protects real boundaries insi
    | #614 | model_signing_keys, model_artifact_signatures, model_artifact_supply_chain_relaxations | none (deployment-wide evidence) unless a principal key appears |
    | #628 | model_drift_settings, model_drift_monitors, model_drift_reports, model_explainability_artefacts | none (deployment-wide), or 5 if they carry `project_id` |
    | #633 | fairness_datasets, fairness_runs | 5 if they carry `project_id`, else none |
+   | #862 (merged; ADR-0327, lane E12), slice 3b (`rule_step_shadows`) and slice 4a (`rule_step_switches`) | rule_step_settings, rule_step_suggestions, rule_step_shadows, rule_step_switches | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
+   | #892 (ADR-0339 slice 2, lane E20) | agent_identity_links, agent_authorship | none: `agent_identity_links` is actor-stamped (`decided_by_user_id`, also `staged_by_user_id`), `agent_authorship` deployment-wide (`author_user_id` is not a listed actor column); written by admin routes and insert triggers, read only by admin or the agent's owner |
+   | ADR-0327 addendum (lane E12, decision tables) | decision_tables, decision_table_versions | none (deployment-wide by the appendix rule: configuration bound to an agent and step, no project, team or owner column; admin-only routes; `created_by`, `author_user_id` and `decided_by` record who acted, not who may read) |
    | #604, #605, #627, #673 | no new tables (columns, guards and triggers only); a new column that names a user is checked against the table's batch | — |
 
    Deployment-wide (191) and actor-stamped (49) tables get no row policy: their rows are not owned by a principal. The
@@ -517,6 +520,179 @@ credential ran under `system_task`, which opens every approval and the whole led
   columns, so a column-limited SECURITY DEFINER lookup per route is a change across those handlers. It is tracked for
   batch 8 (the users-read narrowing), and until then the users read is the only table these routes reach beyond the
   ledger append.
+
+## As built (batch 7b): the runtime login cut-over (2026-11-14)
+
+**The runtime login.** Requests are served on a login that is a member of `regulait_app` and that no `SET ROLE` takes
+out of the policies (`runtimeLoginProblems`, `packages/db/src/runtime-login.ts`). Each of these is a named problem
+that refuses the boot:
+- it is a superuser, has BYPASSRLS or has CREATEROLE (which could grant it a privileged role);
+- it owns a table in `public` with row-level security on. The tables are read from `pg_class.relrowsecurity`, never
+  from a list kept in code (review finding B);
+- it is a MEMBER, directly or through other roles (`pg_has_role(..., 'MEMBER')`), of a role that is a superuser,
+  BYPASSRLS, CREATEROLE or the owner of such a table. A member may `SET ROLE` to that role, so membership in the
+  owner would reopen `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` (review finding A);
+- it is not a member of `regulait_app`, or does not inherit it;
+- `regulait_app` itself, which every RLS scope switches to, is any of the above or a member of such a role.
+
+A login with none of these cannot disable RLS (it owns no table and is a member of no owner), cannot bypass it (no
+BYPASSRLS, directly or by membership), and has no `SET ROLE` open to a role that could. That is now a property the boot
+check verifies, not an assumption.
+
+It is resolved in this order (`apps/gateway/src/runtime-login.ts`):
+1. `REGULAIT_RUNTIME_DATABASE_URL`, operator-managed (a secrets manager, a Kubernetes secret).
+2. The install-generated login. With `REGULAIT_INSTALL_SECRETS_DIR` set, the first boot takes a Postgres advisory lock
+   on the owner connection (two booting replicas make one login), creates the login, and only then writes
+   `<dir>/runtime-database-url`: a 0600 temporary file (O_EXCL, O_NOFOLLOW) in the 0700 directory, renamed into
+   place. A file therefore never names a login that does not exist; a boot that dies in between leaves a login no
+   file names, and the next boot re-keys it (finding D). Later boots read the file. The compose stack and the
+   installer already set the directory.
+   - **One login per database** (finding E): `regulait_runtime_<database>`, the name lowercased to `[a-z0-9_]`, with
+     an 8-hex digest of the real name when that changed it or it would pass 63 bytes (`runtimeLoginRoleFor`). Two
+     databases on one cluster never re-key each other's login. All DDL quotes it server side (`format('%I')`). It is
+     granted CONNECT on its own database only (PUBLIC's default CONNECT is the operator's to revoke).
+   - **Created or repaired** in one transaction: LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION
+     INHERIT, a member of `regulait_app` (on Postgres 16, `WITH INHERIT TRUE, SET TRUE`, which repairs a NOINHERIT
+     grant). For an existing login every other membership is revoked, whoever granted it (finding D). A login that
+     owns an RLS table is not repaired; the boot check refuses it.
+   - **The password never reaches the server in plaintext** (finding F). It is generated (32 random bytes, base64url)
+     and sent as a SCRAM-SHA-256 verifier computed in the gateway (`scramSha256Verifier`, RFC 5802 / RFC 7677: 4096
+     iterations, a 16-byte random salt), so `log_statement = ddl` or pgaudit records only the verifier. Open source
+     first (ADR-0176): `pg` implements only the client side of SCRAM and exports none of it, and the npm SCRAM
+     packages are unmaintained or under a licence we cannot ship, so this is `node:crypto`; a test logs in with the
+     password against a verifier made by it.
+   - A failure is a `RuntimeLoginProvisionError` with its own text (what the owner login needs), not the fitness
+     refusal (finding J).
+3. Neither: requests are served on the owner connection itself.
+
+**Boot.**
+- The migrations run on the owner (`DATABASE_URL`). The runtime login is then resolved and inspected, before an app
+  or a socket exists.
+- Boot refuses a login that is not fit, whichever way it was resolved (`RuntimeLoginBootError`, which names the fix).
+  Secure by default (ADR-0180).
+- A local or CI database's login is a superuser, so `REGULAIT_DEV_PRIVILEGED_DB_LOGIN=1` starts anyway, loudly and
+  audited: a banner, one `runtime-db-login-privileged` audit row per boot, and the posture line says RLS does not bind
+  requests. The gateway test suite sets it in `vitest.config.ts`, and the few boot tests with their own env set it
+  explicitly. The batch 7b suite tests the refusal with it unset.
+- The opt-in is itself refused when the environment says this is a deployment (finding G): `REGULAIT_DEPLOY_MODE` or
+  `REGULAIT_HSTS`, the same signal that refuses the published dev secrets (`networkFacingSignal`, `dev-secrets.ts`).
+  A deployed box boots only on a fit login.
+- The posture block gains `db login:`, which names the login and whether RLS binds it.
+
+**The owner keeps the ledger prune.** `audit_log` had no DELETE policy, and FORCE binds the owner too. The pending
+migration `rls_batch7b_runtime_cutover` therefore adds:
+- the closed reason `audit_retention`;
+- `audit_log_delete`, scoped `TO` the table's owner (read from `pg_class.relowner` in a `DO` block, since the
+  migrator's name is not known to a migration), for `audit_retention` or `migration` (finding H);
+- `audit_retention` on the ledger read.
+
+`runAuditPruneOnce` runs on the owner handle behind the runtime one (`owner-db.ts`; boot registers the pair) and sets
+the reason inside its own transaction. It is reached from a request path: the admin's `POST /v1/audit/prune` (and the
+retention timer). That request is authenticated and admin-gated as before; what changed is that its delete runs on
+the owner pool, and no other request path reaches that pool for the ledger.
+
+**A system reason is a convention, not a privilege boundary** (finding I). `regulait.system_context` is a session
+setting any login can set with `set_config`, so the runtime login could name `audit_retention`, `migration` or any
+other owner-only reason. The gateway never offers those reasons to a caller, but the boundary is elsewhere: the DELETE
+policy applies only to the table owner, and `regulait_app` (which the runtime login inherits) has no DELETE on the
+ledger (0272). A test names `audit_retention` on the runtime login and is refused. Every owner-only reason is to be
+read this way: it narrows what the owner's own jobs may touch; it never grants a non-owner anything.
+
+**CI on the runtime login.** The demo workflow's gateway now boots with the install secrets directory, so the
+Playwright journeys run on `regulait_runtime_<database>`. The start step fails unless the posture line says RLS is
+enforced (it greps the phrase, not the login's name).
+
+**Tests and checks.**
+- `zz-adr0234-rls-batch7b.test.ts` (31):
+  - `runtimeLoginProblems` table-driven, one named problem per row (superuser, BYPASSRLS, CREATEROLE, owns an RLS
+    table, member of the owner / a BYPASSRLS / a superuser / a CREATEROLE role, not a member, NOINHERIT, and
+    `regulait_app` itself privileged), and the all-clear case; the per-database role name;
+  - the SCRAM verifier: stored as sent, the password logs in, a wrong one does not;
+  - the refusal, the opt-in, and the opt-in refused under `REGULAIT_DEPLOY_MODE` and `REGULAIT_HSTS`;
+  - real probe roles, each in a rolled-back transaction with a unique name (roles are cluster-wide): a member of a
+    role owning an RLS table, an indirect member of a BYPASSRLS role, a member of a superuser role, CREATEROLE,
+    NOINHERIT, outside `regulait_app`, and `regulait_app` granted a BYPASSRLS role, each refused by name;
+  - the generated login and its file (0600, no temporary file left, a SCRAM verifier stored, CONNECT on its database);
+  - RLS binding it (zero unscoped rows, its own as a principal, all as a job, no `ALTER TABLE`);
+  - the real boot on it, with no opt-in, serving a bootstrap request and pruning a past-floor ledger row through
+    `POST /v1/audit/prune` on the owner pool;
+  - `audit_log_delete` names the table owner; an owner stand-in deletes only under `audit_retention`, a non-owner
+    with DELETE never, the runtime login never (permission denied even naming the reason);
+  - re-provisioning an existing login revokes an added BYPASSRLS membership and CREATEROLE.
+- A local `main.js` boot on a `demo:prepare`d database:
+  - posture `'regulait_runtime_<database>' (install-generated) … row-level security enforced`;
+  - bootstrap reads of users, approvals, audit, posture and projects return 200;
+  - a persona's password sign-in and session work.
+
+**Not in 7b.** The seed, first-admin and demo scripts still run as the migrator, which must be a superuser or table
+owner with RLS satisfied. On a non-superuser owner they need the `identity_provisioning` / `migration` scopes, which
+is recorded as a follow-up. CI's unit shards keep the superuser login with the opt-in; the demo job is the end-to-end
+check on the runtime login.
+
+## Amendment: the PM tables (lane L6, #828 review, 2026-11-15)
+
+**Decision (owner, 2026-11-15, relayed by the master session): every PM table is under row-level security.** The
+inventory below classed the PM tables as deployment-wide, with no policy. They carry no `org_id` (ADR-0041) and no
+owner column: a connection, its links, its inbound log and its import linkage are configuration an admin manages.
+So they follow the admin-managed pattern: an active admin principal (or the bootstrap token) through
+`regulait_rls_is_admin()`, plus a closed list of named reasons for the paths that run without one.
+Migration `pending/rls_pm_tables.sql` ENABLEs and FORCEs RLS on six tables:
+
+- `pm_connections`
+- `pm_links`
+- `pm_sync_events`
+- `pm_webhook_deliveries`
+- ADR-0289's `pm_project_initiatives`
+- ADR-0289's `pm_imported_work_items`
+
+**One new reason, `pm_sync`.** It covers the PM mirror and link work a request does for a principal who need not be
+an admin:
+
+- a run node's status, or a sign-off decision, mirrored to the linked work item;
+- a run or instance linked to an item;
+- a decision record;
+- the links read;
+- the governance-alert ticket lookups.
+
+It is entered as a principal step (`runAsPrincipalStepIfScoped`, through `asPmSync` in `pm.ts`), so the principal
+still writes its own audit rows. In any other scope it changes nothing. These enter it:
+
+- the five non-admin PM routes;
+- the exported mirror and alert-ticket helpers;
+- the stale-credential inventory's connection read. A remediation decided by a non-admin approver re-runs the
+  governance monitor in that approver's scope. Without the step, the PM credentials would vanish from the input and
+  their open episodes would clear (#828 re-review).
+
+The demo live check, a CLI with no principal, reads the connections as `system_task`. The `reencrypt` CLI and
+narrowing the route step to each handler's PM statements are PENDING follow-ups.
+
+**What each reason reaches:**
+
+| Reason | pm_connections | pm_links | pm_sync_events | pm_webhook_deliveries | import tables |
+|---|---|---|---|---|---|
+| admin principal, bootstrap | all | all | all | all | all |
+| `pm_sync` | read | all | read, append | none | none |
+| `approval_maintenance` (the PM webhook's scope since 7a) | read | all | read, append | all | none |
+| `system_task` (jobs, the delivery prune) | read | all | read, append | read, delete | none |
+| `migration` | all | all | all | all | all |
+| anything else (`public_ingest`, `credential_request`, …) | none | none | none | none | none |
+
+The chat approval callback shares `approval_maintenance`, so it could reach the same PM rows. It reads none.
+
+**The PM-delivery prune timer** now runs as `system_task`. The 7a census allow-list drops it, leaving the rate-limit
+prune as the only unscoped `boot.ts` timer. Foreign-key cascades are not subject to RLS, so deleting a connection as
+an admin still clears its dependent rows.
+
+**Tests.** `zz-adr0234-rls-pm.test.ts` checks, with no application filter:
+
+- every PM table is ENABLED and FORCED;
+- a non-admin principal reads, inserts, updates and deletes nothing;
+- an admin principal reaches every PM table;
+- each reason reaches exactly the row above;
+- a helper called for a non-admin principal enters `pm_sync` itself;
+- the prune works as `system_task`.
+
+The existing webhook, mirror, drift, alert-ticket and importer suites pass unchanged under the policies.
 
 ## Appendix: the inventory (2026-11-06, migrated head)
 

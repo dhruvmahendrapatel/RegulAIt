@@ -8,6 +8,7 @@
  * Global state (the execution mode, overrides, rules, connections) is put back
  * in afterAll (M-068).
  */
+import { hashToken } from "./token-hash.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,7 +92,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `b4a-scope-${RUN}@example.com`, displayName: "b4a scope", isAdmin: true } });
@@ -102,7 +103,7 @@ beforeAll(async () => {
   const token = "rgls_" + randomBytes(32).toString("hex");
   const [s] = await db
     .insert(authSessions)
-    .values({ tokenHash: createHash("sha256").update(token).digest("hex"), userId: id, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
+    .values({ tokenHash: hashToken(token), userId: id, origin: "password", expiresAt: new Date(Date.now() + 3_600_000), idleExpiresAt: new Date(Date.now() + 3_600_000), idleMinutes: 60 })
     .returning({ id: authSessions.id });
   created.sessions.push(s!.id);
   admin = { id, key: { authorization: `Bearer ${key.json().token}` }, token, auth: new SoftAuthenticator({ origin: ORIGIN }) };

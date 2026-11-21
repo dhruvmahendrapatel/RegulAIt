@@ -75,15 +75,29 @@ export default async function globalSetup() {
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY = file;
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY_ID = `e2e-receipt-${process.pid}-${Date.now()}`;
   }
+  // ADR-0234 batch 7b: the first boot creates the regulait_runtime_<database> login through the owner connection and serves
+  // every request on it, so the specs run with row-level security binding the gateway (never the privileged opt-in)
+  const installSecrets: Record<string, string> = {};
+  if (!process.env.REGULAIT_INSTALL_SECRETS_DIR && !process.env.REGULAIT_RUNTIME_DATABASE_URL) {
+    installSecrets.REGULAIT_INSTALL_SECRETS_DIR = mkdtempSync(path.join(tmpdir(), "regulait-e2e-install-"));
+  }
   const env = {
     ...process.env,
     ...receiptKey,
+    ...installSecrets,
     REGULAIT_EPHEMERAL_LICENSE: "1",
     REGULAIT_LICENSE_KEYRING: licenseKeyring,
     DATABASE_URL,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(PORT),
+    // ADR-0167 amendment (S-02): the fixture data key has no entropy, so the
+    // gateway accepts it only on a loopback-only listener. The suite reaches it
+    // on 127.0.0.1 anyway.
+    HOST: "127.0.0.1",
+    // S-02: the bootstrap token retires once an admin signs in; specs keep
+    // using BOOT after personas sign in, so the suite relaxes it explicitly.
+    REGULAIT_BOOTSTRAP_AFTER_ADMIN: "1",
     // Every spec performs a REAL UI sign-in against the same gateway from the
     // same IP. The production default for the credential bucket (10 per 300s)
     // was already at the suite tail's edge — the 112th spec tipped zz-vendors

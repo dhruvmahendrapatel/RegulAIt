@@ -6,8 +6,13 @@ wheel by version and sha256) and installed with `pip install --require-hashes --
 read from the pinned wheels and the sdist on 2026-11-07 (ADR-0242). `litellm` and `filelock` are overridden above the
 upstream pins for published advisories (ADR-0242 §3).
 
+**Owner-accepted licence terms (ADR-0242 owner decisions, 2026-11-15).** Q1: the garak acceptances (ADR-0187 decisions
+193 and 106: PSF-2.0, MPL-2.0, MIT-0, CNRI-Python, and numpy's terms) cover the same packages in this image; rows marked
+"accepted by owner, ADR-0187" rely on that.
+
 **Admission status: NOT ADMISSIBLE YET.** The image builds and passes its licence gate and offline smoke scan (measured
-locally, 2026-11-07), but it is not published: no digest is recorded in `engines/images.lock.json`, the image-level scan
+locally, 2026-11-07) and is publishable by the engine-images workflow (ADR-0242 L4.5, 2026-11-17), but no publish is
+recorded yet: its `engines/images.lock.json` entry is all null, the image-level scan
 (OS layer, vulnerabilities, licences) has not run in CI, and the closure's advisories have not been checked (phase 2,
 ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be enabled (ADR-0187 decision 3).
 

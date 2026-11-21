@@ -10,12 +10,19 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./offload": {
+      "types": "./dist/rule-induction-offload.d.ts",
+      "default": "./dist/rule-induction-offload.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --dir src"
+  },
+  "dependencies": {
+    "@regulait/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

@@ -81,7 +81,7 @@ export function OrgSettingsCard(props: {
         <p className={v.faint}>
           Each setting ships strict. Every change is audited (old → new); loosening one asks you to confirm it&rsquo;s you.
         </p>
-        <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
+        <QueryGate query={settings}>
           {stored ? (
             specs.map((spec) => (
               <SettingRow
