@@ -6,8 +6,8 @@
 - **Builds on**: ADR-0333 (lane E15, deterministic detection rules), ADR-0049
   (robust z-score spend anomalies), ADR-0060 (audit chain), ADR-0015 (deployment modes and data boundary), ADR-0242
   (engine sandbox), ADR-0180 (secure by default), ADR-0176 (open source first), ADR-0200 (engineering guidelines)
-- **Migration**: `pending/behaviour_baselines.sql` (slice 1) and `pending/behaviour_rule_suggestions.sql` (slice 2),
-  numbered at merge (ADR-0252)
+- **Migration**: `pending/behaviour_baselines.sql` (slice 1), `pending/behaviour_rule_suggestions.sql` (slice 2) and
+  `pending/goal_alignment.sql` (§7), numbered at merge (ADR-0252)
 
 ## Context
 
@@ -114,6 +114,58 @@ a later batch; it is a refactor outside this lane.
   gives: the state must be shared across replicas, survive a restart and stay exact against the audit chain. No
   streaming library keeps its state in our Postgres.
 
+### 7. Goal alignment, shadow mode (OWASP ASI01; owner backlog slice 2026-11-21)
+
+The last agentic-governance gap still unspecified (goal hijack): check that each tool call an agent makes fits the
+purpose it was deployed for. It is built here, in lane E40's ADR, because it reuses this ADR's cursor, shadow mode,
+finding lifecycle and SIEM path; its findings speak the steering vocabulary of the graduated-responses ADR in PR #960.
+
+- **A declared purpose is structured, not prose.** `agent_purpose_declarations` holds one purpose per workload
+  identity (ADR-0188, so builder and registry agents alike): a one-line statement for people, and whether the purpose
+  may write, run destructive writes, or reach the open world. `agent_purpose_tools` lists the tools it needs. Reads are
+  always in scope; every other action is off unless declared (ADR-0180), and destructive needs write (a CHECK). The
+  statement is validated and scanned like steering guidance (`parseAgentGuidance`, PR #960).
+- **Why structured.** A free-text purpose can be compared with a call only by a model. That would put a model's
+  judgement, and the call's content, in front of a model, which the slice brief rules out (local, explainable,
+  no data leaves). The structured form is deterministic and a finding can say exactly what differed.
+- **The check** (`apps/gateway/src/goal-alignment/check.ts`) judges a call against the purpose. The call's action
+  comes from the agent risk score's fail-closed classification (`classifyCallTargets`, ADR-0339): an unannotated MCP
+  tool reaches the open world, an unannotated write is destructive, and a tool missing from the registry counts as a
+  destructive, open-world write. Divergences, each mapped onto one response of PR #960's table (declared once,
+  `GOAL_STEERING`):
+
+| Divergence | Suggested response |
+|---|---|
+| `no_declared_purpose` | advise (declare one; nothing else can be judged) |
+| `tool_not_declared` | correct |
+| `write_not_declared` | correct |
+| `open_world_not_declared` | correct |
+| `destructive_not_declared` | block_session |
+
+  The finding keeps every divergence and names the strictest as primary.
+- **The sweep** (`goal-alignment-sweep`, every 60 s) uses the §3 leased-cursor pattern over `audit_log.seq` and reads
+  rows with an `actor_identity_id` on an MCP tool or a connector. Its first pass starts at the chain head, and the §4
+  `off` switch (one switch for both engines) moves it to the head without judging, so history is never judged against
+  a purpose declared later.
+- **Findings** (`goal_alignment_findings`): one per (UTC day, identity, primary divergence, target), with a call count,
+  the first and last audit seq, the observed action, and the declaration as judged (a point-in-time snapshot). A new
+  finding writes one chained audit row (`goal-divergence-observed`), so the ADR-0303 SIEM export carries it. Later calls
+  add to the count with no new row. Status uses §4's declared table.
+- **Shadow only.** The suggested response is a label, never applied: nothing here is in a decision path. Wiring a
+  suggestion into enforcement is a later decision for PR #960's policy modes (an admin turns a pattern into a policy)
+  and lane E52's containment trigger, which read these findings through the same stable shape.
+- **Declaring is audited, widening is a step-up.** A first declaration narrows (every call was a no-purpose finding
+  before it). Adding a tool or allowing an action on an existing purpose means fewer findings: a `settings_relax`
+  step-up bound to the exact change, audited as a relaxation (`agent-purpose-declared`).
+- **Options compared (ADR-0176, owner rule 9).** An LLM-as-judge alignment check (NeMo Guardrails' self-check rails,
+  Apache-2.0; Llama Guard-style classifiers) needs a model and sends the call to it, and its verdict is not
+  explainable as "declared X, did Y". Policy engines (OPA, Apache-2.0; Cedar, already ours) can express the rule but
+  add no fit beyond the declared table; PR #960 already uses Cedar for enforcement, which is where a suggestion goes when
+  an admin adopts it. Chosen: a deterministic declared-scope comparison, with no new dependency.
+- **Routes** (admin-only, API only, known UI gaps on #453): `GET|PUT /v1/goal-alignment/purposes/:identityId`,
+  `GET /v1/goal-alignment/findings`, `PUT /v1/goal-alignment/findings/:findingId/status`.
+- **Migration:** `pending/goal_alignment.sql` (numbered at merge, ADR-0252).
+
 ## Consequences
 
 - An admin sees, per user and per agent, what is normal and what departed from it, with numbers they can check.
@@ -127,3 +179,5 @@ a later batch; it is a refactor outside this lane.
 
 - Slice 1: `packages/shared/src/behaviour-baseline.ts` (the pure statistics), `apps/gateway/src/behaviour/` (rollup,
   evaluation, sweep job `behaviour-baseline-sweep`, routes).
+- §7 goal alignment: `apps/gateway/src/goal-alignment/` (the check, sweep job `goal-alignment-sweep`, routes) and
+  `classifyCallTargets` in `apps/gateway/src/agent-capabilities.ts`.

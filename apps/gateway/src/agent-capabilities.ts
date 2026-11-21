@@ -245,3 +245,38 @@ export async function registryAgentCapabilities(db: Db, agentId: string): Promis
     ...(await connectorCapabilities(db, conns.map((c) => ({ ...c, readOnly: connectorModes.get(c.id) === "read", askFirst: null })), shared)),
   ];
 }
+
+/**
+ * ADR-0359 §7 — classify the targets of tool calls (as the audit chain names them) with the same fail-closed rules,
+ * for the goal-alignment check. MCP tools are keyed `<serverId>\u0000<name>`, connectors by id. A target missing from
+ * the result is not in the registry; the caller treats it as a destructive, open-world write.
+ */
+export async function classifyCallTargets(
+  db: Db,
+  input: { mcp: ReadonlyArray<{ serverId: string; name: string }>; connectorIds: readonly string[] },
+): Promise<{ mcp: Map<string, AgentRiskCapability>; connectors: Map<string, AgentRiskCapability & { providerKind: string | null }> }> {
+  const serverIds = [...new Set(input.mcp.map((t) => t.serverId))];
+  const wanted = new Set(input.mcp.map((t) => `${t.serverId}\u0000${t.name}`));
+  const connectorIds = [...new Set(input.connectorIds)];
+  const [tools, conns] = await Promise.all([
+    serverIds.length
+      ? db.select({ id: mcpTools.id, serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind, dangerous: mcpTools.dangerous }).from(mcpTools).where(inArray(mcpTools.serverId, serverIds))
+      : Promise.resolve([] as ToolRow[]),
+    connectorIds.length
+      ? db.select({ id: connectors.id, name: connectors.name, providerKind: connectors.providerKind }).from(connectors).where(inArray(connectors.id, connectorIds))
+      : Promise.resolve([]),
+  ]);
+  const own = (tools as ToolRow[]).filter((t) => wanted.has(`${t.serverId}\u0000${t.name}`));
+  const byId = new Map(own.map((t) => [t.id, t]));
+  const mcp = new Map<string, AgentRiskCapability>();
+  for (const c of await toolCapabilities(db, own, () => null, () => false, new Map())) {
+    const t = byId.get(c.id)!;
+    mcp.set(`${t.serverId}\u0000${t.name}`, c);
+  }
+  const kinds = new Map(conns.map((c) => [c.id, c.providerKind]));
+  const out = new Map<string, AgentRiskCapability & { providerKind: string | null }>();
+  for (const c of await connectorCapabilities(db, conns.map((c) => ({ ...c, readOnly: false, askFirst: null })), new Map())) {
+    out.set(c.id, { ...c, providerKind: kinds.get(c.id) ?? null });
+  }
+  return { mcp, connectors: out };
+}

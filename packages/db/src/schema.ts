@@ -2102,6 +2102,9 @@ export const auditLog = pgTable(
         // ADR-0359 (lane E40): a behaviour finding, its status change, a day's evaluation summary or a mode change
         // (objectId = the finding when there is one). Plain text column — no DDL.
         "behaviour_baseline",
+        // ADR-0359 §7 (lane E40): a goal-alignment finding, its status change, or a purpose declaration (objectId = the
+        // finding or the workload identity). Plain text column — no DDL.
+        "goal_alignment",
       ],
     })
       .notNull()
@@ -20226,4 +20229,107 @@ export const behaviourAnomalyFindings = pgTable(
   ],
 );
 export type BehaviourAnomalyFindingRow = typeof behaviourAnomalyFindings.$inferSelect;
+
+// ADR-0359 §7 (lane E40): goal alignment (OWASP ASI01). An agent's DECLARED PURPOSE, keyed on its workload identity
+// (ADR-0188: builder and registry agents alike), and shadow findings for tool calls that do not fit it. The reason and
+// response lists are mirrored by `apps/gateway/src/goal-alignment/check.ts` (a test keeps them equal).
+export const agentPurposeDeclarations = pgTable(
+  "agent_purpose_declarations",
+  {
+    identityId: uuid("identity_id")
+      .primaryKey()
+      .references(() => workloadIdentities.id, { onDelete: "cascade" }),
+    statement: text("statement").notNull(),
+    /** reads are always in scope; every other action is off unless declared (ADR-0180) */
+    allowWrite: boolean("allow_write").notNull().default(false),
+    allowDestructive: boolean("allow_destructive").notNull().default(false),
+    allowOpenWorld: boolean("allow_open_world").notNull().default(false),
+    version: integer("version").notNull().default(1),
+    declaredBy: uuid("declared_by").references(() => users.id, { onDelete: "set null" }),
+    declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("agent_purpose_declarations_statement_check", sql`char_length(btrim(${t.statement})) BETWEEN 1 AND 500 AND ${t.statement} !~ '[<>[:cntrl:]]'`),
+    check("agent_purpose_declarations_destructive_check", sql`NOT ${t.allowDestructive} OR ${t.allowWrite}`),
+  ],
+);
+
+/** the tools a declared purpose needs. `ref_id` is FK-free (two target tables, as `builder_agent_tools`). */
+export const agentPurposeTools = pgTable(
+  "agent_purpose_tools",
+  {
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => agentPurposeDeclarations.identityId, { onDelete: "cascade" }),
+    targetKind: text("target_kind", { enum: ["mcp_tool", "connector"] }).notNull(),
+    refId: uuid("ref_id").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.identityId, t.targetKind, t.refId], name: "agent_purpose_tools_pk" }),
+    check("agent_purpose_tools_kind_check", sql`${t.targetKind} IN ('mcp_tool', 'connector')`),
+  ],
+);
+
+/** the goal-alignment sweep's leased cursor over `audit_log.seq` (one row) */
+export const goalAlignmentState = pgTable(
+  "goal_alignment_state",
+  {
+    id: integer("id").primaryKey().default(1),
+    cursorSeq: bigint("cursor_seq", { mode: "number" }),
+    leaseToken: uuid("lease_token"),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
+  },
+  (t) => [check("goal_alignment_state_singleton_check", sql`${t.id} = 1`)],
+);
+
+/**
+ * One finding per (UTC day, agent identity, primary divergence, target): repeated divergent calls add to `call_count`.
+ * POINT-IN-TIME SNAPSHOT (ADR-0200 exception): `target_name`, the observed action and `declared` are copied as they
+ * were when the call was judged, so a later rename or re-declaration never rewrites what was seen.
+ */
+export const goalAlignmentFindings = pgTable(
+  "goal_alignment_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day", { mode: "string" }).notNull(),
+    identityId: uuid("identity_id").notNull(),
+    /** the primary divergence (a code, never prose) and every divergence that applied */
+    divergence: text("divergence").notNull(),
+    divergences: text("divergences").array().notNull(),
+    suggestedResponse: text("suggested_response").notNull(),
+    targetKind: text("target_kind", { enum: ["mcp_tool", "connector"] }).notNull(),
+    /** mcp_tools.id or connectors.id; `unregistered:<server>:<tool>` for a tool missing from the registry */
+    targetKey: text("target_key").notNull(),
+    targetName: text("target_name").notNull(),
+    observedWrite: boolean("observed_write").notNull(),
+    observedDestructive: boolean("observed_destructive").notNull(),
+    observedOpenWorld: boolean("observed_open_world").notNull(),
+    /** the declaration as judged (null = none declared); schema: { version, statement, allowWrite, allowDestructive, allowOpenWorld, tools } */
+    declared: jsonb("declared").$type<Record<string, unknown> | null>(),
+    callCount: integer("call_count").notNull().default(1),
+    firstSeq: bigint("first_seq", { mode: "number" }).notNull(),
+    lastSeq: bigint("last_seq", { mode: "number" }).notNull(),
+    explanation: text("explanation").notNull(),
+    status: text("status", { enum: BEHAVIOUR_FINDING_STATUSES }).notNull().default("open"),
+    statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("goal_alignment_findings_day_uq").on(t.day, t.identityId, t.divergence, t.targetKind, t.targetKey),
+    index("goal_alignment_findings_status_created_idx").on(t.status, t.createdAt),
+    index("goal_alignment_findings_identity_idx").on(t.identityId, t.day),
+    check(
+      "goal_alignment_findings_divergence_check",
+      sql`${t.divergence} IN ('no_declared_purpose', 'tool_not_declared', 'write_not_declared', 'open_world_not_declared', 'destructive_not_declared')`,
+    ),
+    check("goal_alignment_findings_response_check", sql`${t.suggestedResponse} IN ('advise', 'correct', 'block_session')`),
+    check("goal_alignment_findings_kind_check", sql`${t.targetKind} IN ('mcp_tool', 'connector')`),
+    check("goal_alignment_findings_status_check", sql`${t.status} IN ('open', 'acknowledged', 'dismissed')`),
+    check("goal_alignment_findings_text_check", sql`char_length(${t.targetName}) <= 300 AND char_length(${t.targetKey}) <= 300 AND char_length(${t.explanation}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type GoalAlignmentFindingRow = typeof goalAlignmentFindings.$inferSelect;
 // ===== end ADR-0359 =====

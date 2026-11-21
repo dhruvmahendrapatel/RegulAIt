@@ -655,6 +655,7 @@ import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerBrowserGovernanceRoutes } from "./browser-governance-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerBehaviourRoutes } from "./behaviour/routes.js";
+import { registerGoalAlignmentRoutes } from "./goal-alignment/routes.js";
 import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
@@ -6391,6 +6392,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
   registerBehaviourRoutes(app, db); // ADR-0359 (E40): behaviour baselines, shadow mode (admin-only through the default gate)
+  registerGoalAlignmentRoutes(app, db); // ADR-0359 §7 (E40): goal alignment, shadow mode (admin-only through the default gate)
   registerDetectionRoutes(app, db); // ADR-0333 (E15): agent behaviour detection
   // ADR-0312: cost per outcome (the list is self-scoped and in NON_ADMIN_ROUTES; the roll-up and refresh are admin-only)
   registerCostOutcomeRoutes(app, db);

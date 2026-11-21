@@ -1136,6 +1136,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/behaviour/findings/:findingId": "internal",
   "PUT /v1/behaviour/findings/:findingId/status": "internal",
   "GET /v1/behaviour/baselines/:subjectKind/:subjectId": "internal",
+  // ADR-0359 §7 (E40): goal alignment
+  "GET /v1/goal-alignment/purposes/:identityId": "internal",
+  "PUT /v1/goal-alignment/purposes/:identityId": "internal",
+  "GET /v1/goal-alignment/findings": "internal",
+  "PUT /v1/goal-alignment/findings/:findingId/status": "internal",
   // ADR-0333 (E15): agent behaviour detection
   "GET /v1/detection/rule-pack": "internal",
   "PUT /v1/detection/rule-pack": "internal",
@@ -1769,6 +1774,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/behaviour/findings/:findingId": "audit",
   "PUT /v1/behaviour/findings/:findingId/status": "audit",
   "GET /v1/behaviour/baselines/:subjectKind/:subjectId": "audit",
+  "GET /v1/goal-alignment/purposes/:identityId": "audit",
+  "PUT /v1/goal-alignment/purposes/:identityId": "audit",
+  "GET /v1/goal-alignment/findings": "audit",
+  "PUT /v1/goal-alignment/findings/:findingId/status": "audit",
   "GET /v1/detection/rule-pack": "audit",
   "PUT /v1/detection/rule-pack": "audit",
   "GET /v1/detection/incidents": "audit",

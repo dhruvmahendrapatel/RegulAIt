@@ -661,6 +661,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "data_subject_tombstones.reason",
     // ADR-0359 (lane E40)
     "behaviour_anomaly_findings.explanation",
+    // ADR-0359 §7 (lane E40)
+    "agent_purpose_declarations.statement",
+    "goal_alignment_findings.explanation",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {

@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0359",
+  "lane": "E40",
+  "tracking": "ADR-0359 §7 (lane E40): API-only goal-alignment routes, awaiting the screens on #453",
+  "gaps": {
+    "GET /v1/goal-alignment/purposes/:identityId": "reads an agent identity's declared purpose (its tools and allowed actions), or none",
+    "PUT /v1/goal-alignment/purposes/:identityId": "declares or changes an agent's purpose (widening is a step-up relaxation; audited)",
+    "GET /v1/goal-alignment/findings": "pages goal-alignment findings (shadow), newest first, filtered by status, identity or divergence",
+    "PUT /v1/goal-alignment/findings/:findingId/status": "acknowledges or dismisses a goal-alignment finding (audited)"
+  }
+}

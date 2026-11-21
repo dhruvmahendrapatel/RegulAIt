@@ -307,6 +307,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.mrmRetestRuns, ["reason"]],
   // ADR-0359 (lane E40): a behaviour finding's generated sentence, which quotes the tool or destination key it saw
   [s.behaviourAnomalyFindings, ["explanation"]],
+  // ADR-0359 §7 (lane E40): an agent's declared purpose (admin prose) and a goal-alignment finding's generated sentence
+  [s.agentPurposeDeclarations, ["statement"]],
+  [s.goalAlignmentFindings, ["explanation"]],
   // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
   [s.endpointAddonRemovals, ["reason"]],
   // ADR-0338: the admin's reason for a vendor agent control action
