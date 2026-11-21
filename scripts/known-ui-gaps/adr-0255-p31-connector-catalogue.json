@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0255",
+  "lane": "P31",
+  "tracking": "ADR-0255 / P31: catalogue screen for the Governed Designer, requested on #453; decided on #753 (2026-11-14): keep the temporary gap, lane UI-C builds the catalogue screen after merge",
+  "gaps": {
+    "GET /v1/connector-catalogue": "lists the curated catalogue pieces (status, actions, upstream) and the community pieces available, not enabled (paginated, q filter)",
+    "POST /v1/connector-catalogue/:pieceKey/enablement": "enables (admin, step-up) or disables a curated piece, with a reason, audited"
+  }
+}
