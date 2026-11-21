@@ -509,6 +509,84 @@ main, and the lock-update branch is merged by a person.
   fixture names as an admission catch, param-exfiltration, is covered by the in-process scanner. This is measured,
   not a defect in our code, so no change follows from it.
 
+### L4.8 Q5 tuning (2026-11-21): measured, and no rule is narrowed
+
+Owner decision Q5 keeps the skill hold line at `medium` and asks for the noisy rules to be tuned against the
+`anthropics/skills` corpus, measured before and after. The product scans one `SKILL.md` per subject
+(`apps/gateway/src/admission-scan-runs.ts`, `skillMarkdown`), so the tuning target is SKILL.md only. The full-bundle
+figure is recorded for information.
+
+**How it was measured.** The image was built from the committed Dockerfile through a scratch copy that only adds this
+sandbox's TLS-proxy CA and, because Docker Hub answered 429, pulls the same pinned base digests through
+`mirror.gcr.io` (same `@sha256`, so the bytes are the same). Its in-image smoke scan and self-test passed, and its
+reports carry the committed `rulesSha256` (`1fce40df…`). The corpus was cloned read-only at `2c5958ec` and not
+vendored. Each of the 19 skills' `SKILL.md` was scanned alone in its own input directory with the driver, under
+`--network=none --read-only --cap-drop=ALL`, no new privileges and uid 10001. "Held" means a completed report with a
+finding at `medium` or above (`interpretAdmissionScanReport`; `info` is advice).
+
+**SKILL.md only, before (and after, since nothing changed): 1 of 19 held.**
+
+| Subject | Verdict | Holding rules (severity, hits) |
+|---|---|---|
+| academy-guide, algorithmic-art, brand-guidelines, canvas-design, claude-api, discernment-nudge, doc-coauthoring, frontend-design, internal-comms, mcp-builder, pdf, pptx, skill-creator, slack-gif-creator, theme-factory, web-artifacts-builder, webapp-testing, xlsx | pass | none |
+| docx | **held** | `compound_extract_execute` (high, 2 hits for one code block) |
+| `fixtures/bad` | **held** | `pipeline_taint_flow` (critical, high), `yara_prompt_injection_generic` (critical), `prompt_injection_ignore_instructions` (high), `correlated_network_execution_flow` (high), `yara_tool_chaining_abuse_generic` (medium) |
+| `fixtures/clean` | pass | none |
+
+**Full bundles, for information: 8 of 19 held and 2 failed, so 10 of 19 do not pass** (as §7.1 measured). Held:
+docx (`command_injection_os_system` critical, `compound_extract_execute` high, `data_exfil_env_vars` medium),
+skill-creator (`command_injection_os_system`), webapp-testing (`command_injection_shell_true`), slack-gif-creator
+(`resource_abuse_infinite_loop`), pptx and xlsx (`data_exfil_env_vars`), theme-factory (`low_analyzability`,
+`unanalyzable_binary`), web-artifacts-builder (`archive_file_detected`, `unanalyzable_binary`). canvas-design and
+claude-api fail on the driver's own 64-file input cap (`too many input files`), which is ours, not the engine's.
+These holds come from the skills' scripts and binaries. No product door uploads a bundle today, so no bundle rule is
+tuned here; each needs its own review when a bundle door is built.
+
+**The one false hold.** `docx`'s instructions say `unzip -q doc.docx -d unpacked/`, then
+`python scripts/merge_runs.py unpacked/`. The program run is the skill's own bundled script, and the archive is the
+user's document, so this is a false positive. But `compound_extract_execute` is also the only rule that holds a
+SKILL.md which tells the agent to extract an archive and run what came out of it. Four crafted probes were scanned
+with the same image:
+
+| Probe (code block in SKILL.md) | Default policy | With `COMPOUND_EXTRACT_EXECUTE` at LOW |
+|---|---|---|
+| `unzip -q tools.zip -d tools/` then `bash tools/install.sh` | held, by this rule only | **passes** |
+| `tar -xzf pack.tar.gz -C pack` then `python pack/setup.py` | held, by this rule only | **passes** |
+| `unzip helper.zip -d /tmp/h`, `chmod +x /tmp/h/run`, `/tmp/h/run` | held, by this rule only | **passes** |
+| `unzip -q tools.docx -d tools/` then `bash tools/install.sh` (a renamed zip) | held, by this rule only | **passes** |
+
+**Approaches compared** (skill-scanner 2.3.2's own policy mechanism read from its source as data: `ScanPolicy`
+overlays merged on the default, `severity_overrides`, scoped `suppressions` with `skills`/`paths` globs and an
+optional re-rate, `disabled_rules`, `rule_scoping`, `pipeline` knobs, and the CEL gates, which live in the packs and
+so behind our rules digest):
+
+1. **A committed upstream policy overlay that re-rates the rule** (`severity_overrides`, as upstream's `quiet` preset
+   does with "147 real skills (of 1.88M)" as its evidence, or a `suppressions` entry scoped to `paths: [SKILL.md]`).
+   Supported upstream, and it clears `docx`. Rejected: our subject is exactly one SKILL.md, so both forms are a
+   global demotion, and all four true-positive probes then pass. Scoping by `skills: [docx]` is narrower on paper,
+   but the skill name is the author's own frontmatter, so any skill could claim it. `disabled_rules` and
+   `rule_scoping.code_only` are the same global effect. Narrowing `pipeline.compound_fetch_exec_commands` would also
+   weaken `compound_fetch_execute`. The whole `quiet` preset was tried too: it also clears `docx`, but it drops the
+   known-bad fixture's `pipeline_taint_flow` hits from critical and high to low, which is the opposite of secure by
+   default.
+2. **A per-rule override in our driver's `summarise` step.** Two forms were checked. (a) Demote when upstream's
+   extraction facts lack `archive_path` (true for `doc.docx`, `book.xlsx`): evaded by renaming a zip, since the fourth
+   probe has the same facts as `docx`. (b) Demote when the program run lies outside the extraction directory: this
+   separates `docx` from the probes, but needs our own shell parsing of a code block that upstream only gives as a
+   truncated snippet, with every later line and every `cd`, `mv` or `cp` in between to reason about. That is a
+   hand-written re-implementation of an analyzer (an ADR-0176 finding) inside a security decision, for one subject.
+3. **Leave the rule as it is and record why** (chosen). The false hold is fail-safe and already has an audited way
+   out: the skill admit route (`settings_relax` step-up, a reason, a signed AI BOM snapshot), pinned to the digest.
+
+**Triage (owner rule).** Frequency 2 (1 of 19 corpus SKILL.md files; upstream's own count is 147 of 1.88M real
+skills), severity 2 (a false hold with an audited admit, never a false pass), so F×S = 4, below 5: no code change.
+It is a `triage-low` item for the master to file (this lane opens nothing on GitHub). The tuning is to be re-checked
+when skill-scanner ships a narrower knob or a CEL gate for this rule, or when a bundle door arrives (where the
+bundle holds above need the same treatment).
+
+Nothing changed: `rules.sha256`, `ADMISSION_SCAN_ENGINES.skillscanner`, the driver and the recorded report fixtures
+are as they were, and the known-bad fixture is still held.
+
 ## Owner decisions (2026-11-15)
 
 The owner answered the five open questions and the #843 placement question (relayed by the master orchestrator).
