@@ -29,7 +29,7 @@ export default function ReadSetupPage() {
   const { sourceId = "" } = useParams();
   const [flow, dispatch] = useReducer(readSetupReducer, { phase: "idle" } as Flow);
   const qc = useQueryClient();
-  const setup = useQuery({ queryKey: readSetupKey(sourceId), queryFn: () => fetchReadSetup(sourceId), retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2 });
+  const setup = useQuery({ queryKey: readSetupKey(sourceId), queryFn: () => fetchReadSetup(sourceId) });
   const sources = useQuery({
     queryKey: SOURCES_KEY,
     queryFn: () => api.get<{ sources: DiscoverySourceView[] }>("/v1/discovery/sources"),
