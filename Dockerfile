@@ -27,7 +27,7 @@
 # of the same Node 22 line carried none. Digest of node:22-trixie-slim as
 # published 2026-10-21T11:36Z (linux/amd64 + arm64 index): Node 22.23.4, for
 # the Node.js 2026-10-21 security release (CVE-2026-111497 and others).
-FROM node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS build
+FROM node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS build
 
 RUN corepack enable
 WORKDIR /app
@@ -65,7 +65,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..." \
  && rm -rf packages/mcp-vuln-fixtures
 
-FROM node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS runtime
+FROM node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS runtime
 LABEL org.regulait.build-stage="runtime (production dependencies only)"
 
 # ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH).
