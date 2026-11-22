@@ -283,6 +283,12 @@
     "limit": "3.8 kB"
   },
   {
+    "name": "chunk: ReadSetupPage",
+    "path": "dist/assets/ReadSetupPage-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
+  },
+  {
     "name": "chunk: ReasonedAction",
     "path": "dist/assets/ReasonedAction-????????.js",
     "gzip": true,
