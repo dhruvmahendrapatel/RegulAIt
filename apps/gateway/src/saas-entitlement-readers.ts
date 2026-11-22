@@ -24,9 +24,13 @@
  *    removes a grant it did not see), and revocations are applied explicitly.
  *
  * TARGETS (key=value fields on the source; documented in docs/deployment/SAAS_ENTITLEMENTS.md):
- *  - entitlement_m365              tenantId; scope: organisation-level = every app, include = client application ids
+ *  - entitlement_m365              tenantId, activityLogs? (on | off, default off: the guided Entra activity-log read,
+ *                                  owner decision 2026-11-22); scope: organisation-level = every app, include = client
+ *                                  application ids
  *  - entitlement_salesforce        environment (production | sandbox), myDomain (the org's My Domain URL, the only
- *                                  host the reader calls), orgId (00D…); scope: organisation-level = every connected
+ *                                  host the reader calls), orgId (00D…), orgTokens? (on | off, default off: the
+ *                                  org-wide OAuth token read, which needs Customize Application and the admin's
+ *                                  audited `salesforceOrgTokens` switch); scope: organisation-level = every connected
  *                                  app, include = connected app ids (0H4…)
  *  - entitlement_slack             enterpriseId (E…, Enterprise Grid org) or teamId (T…); scope: organisation-level
  *                                  = every app, include = Slack app ids
@@ -40,12 +44,12 @@ import {
   workspaceDelegatedClient,
 } from "@regulait/cloud-discovery";
 import { BodyTooLargeError, readBodyCapped } from "@regulait/cloud-discovery";
-import type { DiscoveryReadOutcome, SaasAppEntitlement, SaasEntitlementBatch, SaasScopeGrant } from "@regulait/shared";
-import { SAAS_ENTITLEMENT_LIMITS } from "@regulait/shared";
+import type { DiscoveryReadOutcome, SaasAppEntitlement, SaasAppUsage, SaasEntitlementBatch, SaasScopeGrant, SaasUsageObservation } from "@regulait/shared";
+import { SAAS_ENTITLEMENT_LIMITS, SALESFORCE_DEFAULT_READ, classifyGoogleApiMethod } from "@regulait/shared";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { salesforceJwtToken } from "./salesforce-jwt.js";
-import { salesforceMyDomain, salesforceMyDomainProblem, salesforceWritePermissions } from "./salesforce-org.js";
+import { SALESFORCE_ID, salesforceMyDomain, salesforceMyDomainProblem, salesforceWriteCheck } from "./salesforce-org.js";
 import {
   GRAPH_ORIGIN,
   GUID,
@@ -124,6 +128,7 @@ export const M365_PERMISSION_RESOURCES = Object.freeze([
 
 function m365TargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (!target.tenantId || !GUID.test(target.tenantId)) return "'tenantId' must be the Entra tenant's id (a GUID)";
+  if (target.activityLogs !== undefined && target.activityLogs !== "on" && target.activityLogs !== "off") return "'activityLogs' is 'on' (the guided Entra activity-log read) or 'off'";
   if (!scope.orgLevel && scope.include.some((x) => !GUID.test(x.trim()))) return "the scope names client application ids (GUIDs)";
   return null;
 }
@@ -289,14 +294,99 @@ async function runM365Entitlements(ctx: ScanContext): Promise<ScanResult> {
   if (unmatched > 0) outcomes.push({ read: "Microsoft Graph grants matched to applications", status: "skipped", detail: `${unmatched} grant(s) named a service principal that was not in the listing and are not reported` });
   if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
   const complete = !truncated && unmatched === 0 && !outcomes.some(cutShort);
+  const apps = [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] }));
+  // observed use (ADR-0337 §5): read after `complete` is decided, so a usage read that fails never makes the grant
+  // read partial; it only makes use unobservable
+  const usage = await readM365Usage(ctx, get, nextLink, values, new Set(apps.map((a) => a.externalId)), outcomes);
   const result = finish([], outcomes, token.write.scope);
-  const entitlements: SaasEntitlementBatch = {
-    platform: "m365",
-    tenant: ctx.source.target.tenantId!.toLowerCase(),
-    complete,
-    apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
-  };
+  const entitlements: SaasEntitlementBatch = { platform: "m365", tenant: ctx.source.target.tenantId!.toLowerCase(), complete, apps, usage };
   return { ...result, entitlements };
+}
+
+/** an instant a vendor reported, as ISO 8601, or null when it is not a time */
+const isoInstant = (v: unknown): string | null => {
+  const s = str(v, 40);
+  if (!s) return null;
+  const t = Date.parse(s);
+  return Number.isFinite(t) && t <= Date.now() + 86_400_000 ? new Date(t).toISOString() : null;
+};
+
+/** why a reader observes no use (ADR-0337 §5): the findings show it as "not assessable", never as "unused" */
+export const USAGE_NOT_OBSERVED = Object.freeze({
+  directory: "the Directory token listing carries no API activity and the opt-in asks for no Reports scope, so use is not observed",
+  salesforce:
+    "Salesforce token use is visible only through the admin's org-wide token opt-in, with Customize Application on the integration user; it was not read, so use is not observed",
+  slack: "Slack offers no read-only source of an app's API use (its access and integration logs need the write-capable admin scope), so use is not observed",
+});
+
+export const M365_USAGE_READ = "Microsoft Entra service principal sign-in activity";
+
+/**
+ * When each app last signed in (Graph beta `reports/servicePrincipalSignInActivities`: `AuditLog.Read.All`, a read
+ * permission, and Microsoft Entra ID P1 or P2). Per app, not per scope, and no split between reads and writes, so the
+ * coverage is `app`. Only a listing read to its end counts: an app missing from a cut-short listing may have signed in.
+ *
+ * Owner decision 2026-11-22: a guided setup, OFF by default. Nothing is asked of Graph until the source's
+ * `activityLogs` is `on`; the read then reports honestly what it saw of the setup (`activityLogState`): refused (not
+ * enabled), unreadable, enabled with no activity yet, or flowing. Until it flows, no app is judged unused.
+ */
+async function readM365Usage(
+  ctx: ScanContext,
+  get: (url: string) => Promise<unknown>,
+  nextLink: (body: unknown) => string | null,
+  values: (body: unknown, what: string) => unknown[],
+  held: ReadonlySet<string>,
+  outcomes: DiscoveryReadOutcome[],
+): Promise<SaasUsageObservation> {
+  if (ctx.source.target.activityLogs !== "on") {
+    outcomes.push({ read: M365_USAGE_READ, status: "skipped", detail: "activity logs are off for this source (the default); the guided setup turns them on" });
+    return { coverage: "none", windowStart: null, note: "Entra activity logs are off for this source (the default), so use is not observed; the guided setup turns them on", apps: [], activityLogState: "off" };
+  }
+  const lastUse = new Map<string, string>();
+  let entries = 0;
+  const before = outcomes.length;
+  const ok = await readListing(
+    ctx,
+    M365_USAGE_READ,
+    `${GRAPH_ORIGIN}/beta/reports/servicePrincipalSignInActivities?$top=999`,
+    outcomes,
+    (body) => {
+      for (const a of values(body, "sign-in activity")) {
+        entries++;
+        if (lastUse.size >= SAAS_ENTITLEMENT_LIMITS.apps) return ITEM_CAP;
+        const appId = str(atPath(a, "appId"), 64)?.toLowerCase();
+        const at = isoInstant(atPath(a, "lastSignInActivity.lastSignInDateTime"));
+        if (appId && at && held.has(appId)) lastUse.set(appId, at);
+      }
+      return nextLink(body);
+    },
+    get,
+  );
+  const outcome = outcomes[before];
+  if (outcome?.status === "denied") {
+    return {
+      coverage: "none",
+      windowStart: null,
+      note: "Entra refused the activity-log read: AuditLog.Read.All is not consented, or the tenant lacks Microsoft Entra ID P1 or P2; use is not observed",
+      apps: [],
+      activityLogState: "not_enabled",
+    };
+  }
+  if (!ok || !outcome || cutShort(outcome)) {
+    return { coverage: "none", windowStart: null, note: "Entra sign-in activity was not read to its end, so use is not observed", apps: [], activityLogState: "unreadable" };
+  }
+  if (entries === 0) {
+    // a tenant whose logs hold no activity at all has logs that are not flowing yet: judging every app unused from
+    // that would be wrong, so nothing is judged until activity appears
+    return { coverage: "none", windowStart: null, note: "Entra activity logs are readable but hold no sign-in activity yet, so use is not judged until they do", apps: [], activityLogState: "no_activity_yet" };
+  }
+  return {
+    coverage: "app",
+    windowStart: null,
+    note: "Entra service-principal sign-in activity: each app's last sign-in, per app, with no split between reads and writes",
+    apps: [...lastUse].map(([externalId, lastUseAt]) => ({ externalId, lastUseAt, lastReadAt: null, lastWriteAt: null })),
+    activityLogState: "flowing",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +539,8 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
   }
   if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
   outcomes.push({ read: "Google Workspace grants older than the window", status: "skipped", detail: `the Reports API shows grants authorised in the last ${lookback} days only; older grants are not seen, so nothing unseen is removed` });
+  // observed use (ADR-0337 §5): the token `activity` events, with the same read-only Reports scope
+  const usage = await readWorkspaceUsage(ctx, get, start, customer, keep, outcomes);
   // the token carries only the read-only Reports scope; whether the delegation allows more cannot be read, so unverified
   const result = finish([], outcomes, "unverified");
   const entitlements: SaasEntitlementBatch = {
@@ -457,8 +549,92 @@ async function runWorkspaceEntitlements(ctx: ScanContext): Promise<ScanResult> {
     complete: false,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
     revokedPrincipals,
+    usage,
   };
   return { ...result, entitlements };
+}
+
+export const WORKSPACE_USAGE_READ = "Google Workspace token activity events";
+
+/**
+ * Each app's latest read and latest write, from the Reports API's token `activity` events (one per API method an app
+ * called for a user; the `method_name` is classified by the frozen `classifyGoogleApiMethod`). Google records these
+ * events only on Enterprise and Education Standard or Plus and Cloud Identity Premium, so a tenant where the read saw
+ * none at all cannot be told from one that records none: its coverage is `none`, never "nothing was used".
+ *
+ * The listing comes newest first. When it is cut short at the item bound, the events read still cover a shorter,
+ * recent window, so the window start becomes the oldest event read rather than throwing the observation away.
+ */
+async function readWorkspaceUsage(
+  ctx: ScanContext,
+  get: (url: string) => Promise<unknown>,
+  start: string,
+  customer: string,
+  keep: ReadonlySet<string> | null,
+  outcomes: DiscoveryReadOutcome[],
+): Promise<SaasUsageObservation> {
+  const base = `${REPORTS_ORIGIN}/admin/reports/v1/activity/users/all/applications/token?eventName=activity&startTime=${encodeURIComponent(start)}&maxResults=1000${customer}`;
+  const perApp = new Map<string, SaasAppUsage>();
+  let events = 0;
+  let oldest: string | null = null;
+  const before = outcomes.length;
+  const ok = await readListing(
+    ctx,
+    WORKSPACE_USAGE_READ,
+    base,
+    outcomes,
+    (body) => {
+      const items = atPath(body, "items");
+      if (items !== undefined && !Array.isArray(items)) throw new ReadFailure("error", "the activity listing has no item list");
+      for (const item of (items as unknown[] | undefined) ?? []) {
+        if (events >= WIDER_MAX_ITEMS * 10) return ITEM_CAP;
+        const at = isoInstant(atPath(item, "id.time"));
+        const evs = atPath(item, "events");
+        if (!at || !Array.isArray(evs)) continue;
+        events += 1;
+        if (oldest === null || at < oldest) oldest = at;
+        for (const ev of evs) {
+          if (atPath(ev, "name") !== "activity") continue;
+          const clientId = eventParam(ev, "client_id").value;
+          if (!clientId || !GOOGLE_CLIENT_ID.test(clientId) || (keep && !keep.has(clientId.toLowerCase()))) continue;
+          const cls = classifyGoogleApiMethod(eventParam(ev, "method_name").value ?? "");
+          let u = perApp.get(clientId);
+          if (!u) {
+            if (perApp.size >= SAAS_ENTITLEMENT_LIMITS.apps) continue;
+            u = { externalId: clientId, lastUseAt: at, lastReadAt: null, lastWriteAt: null };
+            perApp.set(clientId, u);
+          }
+          if (at > u.lastUseAt) u.lastUseAt = at;
+          if (cls === "read" && (u.lastReadAt === null || at > u.lastReadAt)) u.lastReadAt = at;
+          if (cls === "write" && (u.lastWriteAt === null || at > u.lastWriteAt)) u.lastWriteAt = at;
+        }
+      }
+      const token = str(atPath(body, "nextPageToken"), 2048);
+      return token ? `${base}&pageToken=${encodeURIComponent(token)}` : null;
+    },
+    get,
+  );
+  const outcome = outcomes[before];
+  if (!ok || !outcome) {
+    return { coverage: "none", windowStart: null, note: "Google token activity events could not be read, so use is not observed", apps: [] };
+  }
+  if (events === 0) {
+    return {
+      coverage: "none",
+      windowStart: null,
+      note: "no Google token activity event was recorded in the window; Google records them only on Enterprise and Education Standard or Plus and Cloud Identity Premium, so use is not observed",
+      apps: [],
+    };
+  }
+  const cut = cutShort(outcome);
+  return {
+    coverage: "verb",
+    windowStart: cut && oldest ? oldest : new Date(Date.parse(start)).toISOString(),
+    note: cut
+      ? "Google token activity events, newest first, cut short at the item bound: use is observed from the oldest event read"
+      : "Google token activity events: each app's latest read and write, by API method name",
+    apps: [...perApp.values()],
+  };
 }
 
 /**
@@ -575,6 +751,7 @@ async function runWorkspaceDirectory(ctx: ScanContext, fetchImpl: typeof fetch, 
     complete,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
     revokedPrincipals: [],
+    usage: { coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.directory, apps: [] },
   };
   return { ...result, entitlements };
 }
@@ -602,6 +779,7 @@ function salesforceTargetProblem(target: Readonly<Record<string, string>>, scope
   const domain = salesforceMyDomainProblem(target);
   if (domain) return domain;
   if (!target.orgId || !SF_ORG_ID.test(target.orgId)) return "'orgId' must be the org's id (00D…)";
+  if (target.orgTokens !== undefined && target.orgTokens !== "on" && target.orgTokens !== "off") return "'orgTokens' is 'on' (the admin opt-in org-wide OAuth token read) or 'off'";
   if (!scope.orgLevel && scope.include.some((x) => !SF_APP_ID.test(x.trim()))) return "the scope names connected app ids (0H4…)";
   return null;
 }
@@ -648,14 +826,19 @@ async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> 
   };
 
   // 2. decision 7, the shared check (#890 R4 [1]): any write system permission (escalation ones included), else any
-  //    object-level write, refuses the credential before anything is read; both clear = read_only
+  //    object-level write, refuses the credential before anything is read; both clear = read_only. Owner decision
+  //    2026-11-22: with the source's `orgTokens` opt-in (allowed only by the audited org switch), Customize
+  //    Application alone is tolerated, and the credential is then recorded as `unverified`, never `read_only`
   const outcomes: DiscoveryReadOutcome[] = [];
   const PERMISSIONS = "Salesforce integration user permissions";
+  const orgTokens = t.orgTokens === "on";
+  let customizeApplication = false;
   try {
-    const held = await salesforceWritePermissions(get, soql, session.userId, "entitlement_salesforce");
-    if (held.length > 0) {
-      return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the integration user holds write permissions: ${held.join(", ").slice(0, 400)}` }] };
+    const check = await salesforceWriteCheck(get, soql, session.userId, "entitlement_salesforce", orgTokens ? ["PermissionsCustomizeApplication"] : []);
+    if (check.refused.length > 0) {
+      return { observations: [], credentialWriteScope: "write", readOutcomes: [{ read: "credential write scope", status: "denied", detail: `the integration user holds write permissions: ${check.refused.join(", ").slice(0, 400)}` }] };
     }
+    customizeApplication = check.tolerated.includes("PermissionsCustomizeApplication");
   } catch (err) {
     if (err instanceof ReadFailure) {
       outcomes.push({ read: PERMISSIONS, status: err.status, detail: `${err.message.slice(0, 200)}; nothing else was read` });
@@ -714,19 +897,104 @@ async function runSalesforceEntitlements(ctx: ScanContext): Promise<ScanResult> 
     },
     get,
   );
+  // 5. owner decision 2026-11-22: only with the audited opt-in AND Customize Application on the user, the org-wide
+  //    OAuth tokens: who holds a token for each connected app, and when each app was last used
+  let usage: SaasUsageObservation = { coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.salesforce, apps: [] };
+  if (orgTokens && !customizeApplication) {
+    outcomes.push({ read: SALESFORCE_TOKENS_READ, status: "skipped", detail: "the source asks for org-wide tokens, but the integration user does not hold Customize Application, so only its own tokens would be visible; not read" });
+  } else if (orgTokens) {
+    const read = await readSalesforceTokens(ctx, get, soql, nextRecords, records, drafts, outcomes);
+    if (read.truncated) truncated = true;
+    usage = read.usage;
+  }
   if (truncated) outcomes.push({ read: "entitlement batch size", status: "skipped", detail: "a per-app or per-grant bound was reached: the rest was not kept" });
-  // completeness is judged on the listings the graph depends on, before the by-design note below is added
+  // completeness is judged on the listings the graph depends on, before the by-design notes below are added
   const complete = !truncated && !outcomes.some(cutShort);
-  outcomes.push({ read: "Salesforce OAuth scopes and per-user tokens", status: "skipped", detail: "OAuth scopes are only in the Metadata API and org-wide tokens need Customize Application; both can change the org, so neither is read (ADR-0337 owner question)" });
-  // both checks passed: no write system permission and no object-level write, so read_only (as the Agentforce adapter)
-  const result = finish([], outcomes, "read_only");
+  // what this read cannot see, stated plainly (owner decision 2026-11-22)
+  outcomes.push({ read: "Salesforce OAuth scopes", status: "skipped", detail: SALESFORCE_DEFAULT_READ.cannotSee[0]! });
+  if (!orgTokens) outcomes.push({ read: SALESFORCE_TOKENS_READ, status: "skipped", detail: SALESFORCE_DEFAULT_READ.cannotSee[1]! });
+  // both checks passed: read_only (as the Agentforce adapter), unless the opt-in tolerated Customize Application
+  const result = finish([], outcomes, customizeApplication ? "unverified" : "read_only");
   const entitlements: SaasEntitlementBatch = {
     platform: "salesforce",
     tenant: sf15(session.orgId),
     complete,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
+    usage,
   };
   return { ...result, entitlements };
+}
+
+export const SALESFORCE_TOKENS_READ = "Salesforce org-wide OAuth tokens";
+
+/**
+ * Every user's OAuth token for every connected app (`OauthToken`; org-wide only with Customize Application). A token
+ * names its app by NAME, so a token is matched to a connected app only where that name is unique in the org; the
+ * rest are counted, not guessed. Each holder becomes a user-consent principal (a pseudonym) of a
+ * `connected_app:user_token` grant, and each app's latest `LastUsedDate` its last use (coverage `app`). Use is
+ * observed only when the listing was read to its end: an app missing from a cut-short listing may have been used.
+ */
+async function readSalesforceTokens(
+  ctx: ScanContext,
+  get: (url: string) => Promise<unknown>,
+  soql: (q: string) => string,
+  nextRecords: (body: unknown) => string | null,
+  records: (body: unknown, what: string) => unknown[],
+  drafts: ReadonlyMap<string, AppDraft>,
+  outcomes: DiscoveryReadOutcome[],
+): Promise<{ usage: SaasUsageObservation; truncated: boolean }> {
+  const byName = new Map<string, string | null>();
+  for (const [id, d] of drafts) {
+    const name = d.app.displayName;
+    if (name) byName.set(name, byName.has(name) ? null : id);
+  }
+  const lastUse = new Map<string, string>();
+  let unmatched = 0;
+  let truncated = false;
+  const pending: { draft: AppDraft; user: string; at: string | null }[] = [];
+  const before = outcomes.length;
+  const ok = await readListing(
+    ctx,
+    SALESFORCE_TOKENS_READ,
+    soql("SELECT AppName, UserId, LastUsedDate FROM OauthToken"),
+    outcomes,
+    (body) => {
+      for (const r of records(body, "OAuth token")) {
+        const name = label(atPath(r, "AppName"), SAAS_ENTITLEMENT_LIMITS.displayName);
+        const appId = name ? byName.get(name) : undefined;
+        const user = str(atPath(r, "UserId"), 18);
+        const draft = appId ? drafts.get(appId) : undefined;
+        if (!draft || !user || !SALESFORCE_ID.test(user)) {
+          unmatched++;
+          continue;
+        }
+        if (pending.length >= SAAS_ENTITLEMENT_LIMITS.apps * 10) return ITEM_CAP;
+        pending.push({ draft, user: sf15(user), at: isoInstant(atPath(r, "LastUsedDate")) });
+      }
+      return nextRecords(body);
+    },
+    get,
+  );
+  for (const p of pending) {
+    const principal = await ctx.pseudonymise("idp_user", p.user);
+    if (!addGrant(p.draft, { resource: "", scope: "connected_app:user_token", grantType: "delegated", consent: "user" }, principal)) truncated = true;
+    const id = p.draft.app.externalId;
+    if (p.at && (!lastUse.has(id) || Date.parse(p.at) > Date.parse(lastUse.get(id)!))) lastUse.set(id, p.at);
+  }
+  if (unmatched > 0) outcomes.push({ read: "Salesforce OAuth tokens matched to connected apps", status: "skipped", detail: `${unmatched} token(s) named no connected app of the listing, or a name two apps share, and are not reported` });
+  const outcome = outcomes[before];
+  if (!ok || !outcome || cutShort(outcome)) {
+    return { usage: { coverage: "none", windowStart: null, note: "the org-wide OAuth token listing was not read to its end, so use is not observed", apps: [] }, truncated };
+  }
+  return {
+    usage: {
+      coverage: "app",
+      windowStart: null,
+      note: "Salesforce OAuth tokens (admin opt-in): each connected app's latest token use, per app, with no split between reads and writes",
+      apps: [...lastUse].map(([externalId, lastUseAt]) => ({ externalId, lastUseAt, lastReadAt: null, lastWriteAt: null })),
+    },
+    truncated,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +1126,7 @@ async function runSlackEntitlements(ctx: ScanContext): Promise<ScanResult> {
     tenant: (t.enterpriseId ?? t.teamId)!,
     complete,
     apps: [...drafts.values()].filter((d) => d.grants.size > 0).map((d) => ({ ...d.app, grants: [...d.grants.values()] })),
+    usage: { coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.slack, apps: [] },
   };
   return { ...result, entitlements };
 }
