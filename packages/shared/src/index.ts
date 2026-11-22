@@ -659,6 +659,17 @@ export {
   type SkillAdmissionScan,
   type SkillScanInput,
 } from "./skill-admission.js";
+
+// ADR-0354 — the one validator for advise / correct guidance returned to an agent (plain text, admission-scanned)
+export {
+  AGENT_GUIDANCE_ALTERNATIVE_MAX,
+  AGENT_GUIDANCE_MESSAGE_MAX,
+  agentGuidanceSchema,
+  parseAgentGuidance,
+  type AgentGuidanceInput,
+  type AgentGuidanceResult,
+  type ValidAgentGuidance,
+} from "./agent-guidance.js";
 // ADR-0175 A5 — release-age cooldown (pure status + admin write shapes).
 export {
   RELEASE_AGE_RECOMMENDED_DAYS,
