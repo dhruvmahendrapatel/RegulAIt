@@ -194,6 +194,7 @@ import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
+import { registerRepetitiveAskRoutes } from "./repetitive-asks.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -707,6 +708,7 @@ import {
   registerCustomClassifierRoutes,
 } from "./custom-classifiers.js";
 import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
+import { registerAiAppRiskRoutes } from "./ai-app-risk.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -6005,6 +6007,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
   registerDecisionTableSwitchRoutes(app, db);
+  registerRepetitiveAskRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6580,6 +6583,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssuranceSettingsRoutes(app, db);
   // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
   registerSensitivityLabelRoutes(app, db);
+  // ADR-0363 slice 3: AI app risk attributes and the risk-ranked shadow-AI inventory (read-only; UI is a #453 gap)
+  registerAiAppRiskRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);

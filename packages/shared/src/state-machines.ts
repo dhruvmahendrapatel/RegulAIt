@@ -919,6 +919,24 @@ export const USE_CASE_MACHINE = defineMachine({
   },
 });
 
+/** `repetitive_ask_clusters.status` (ADR-0328). A scan inserts `suggested`; a rescan refreshes the evidence but never the
+ * status. Dismissal is final for that fingerprint. Slices 3 and 4 add the eval gate, shadow and switch states. */
+export const REPETITIVE_ASK_CLUSTER_MACHINE = defineMachine({
+  id: "repetitive_ask_cluster",
+  stored: "repetitive_ask_clusters.status",
+  states: ["suggested", "dismissed"],
+  initial: ["suggested"],
+  terminal: ["dismissed"],
+  transitions: {
+    dismiss: {
+      from: ["suggested"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the cluster; a cheaper model is never suggested for it again.",
+    },
+  },
+});
+
 /** `approvals.status`, the ONE Approvals Queue (GOVERNANCE_LAYER_SPEC §6). A pending entry is decided once
  * (approved, denied, or for an intake sign-off returned for information); an approved entry is spent by exactly one
  * retried call; an entry the world has moved past (a re-opened stage, an expiry, a changed policy context, a failed
@@ -1003,6 +1021,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
   // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
   [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
+  [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
   // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);

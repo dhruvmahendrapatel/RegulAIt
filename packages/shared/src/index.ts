@@ -5179,3 +5179,5 @@ export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
 // ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
 export * from "./content-inspection.js";
+// ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
+export * from "./ai-app-risk.js";

@@ -372,7 +372,7 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
   order (rate limit, ABAC forbid, approval).
 - **What the core cannot know.** The request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) read as
   unknown, false and absent (the strict values), and the delegation context is empty (the sponsor is evaluated as
-  `User`). Threading them from the routes is a follow-up (PENDING fragment).
+  `User`). Threading them from the routes is a follow-up (PENDING fragment). Done in slice 4b (below).
 - **ABAC `require_approval` on these call types refuses** (fail closed). Their consent binds approval rules and the
   execution dial only, so an ABAC hold could otherwise be released by a rule's approver, or queued with no consent
   bound to the policy version. Queueing it needs the policy version in the consent's context digest, as the MCP path
@@ -388,6 +388,37 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
 - **With hard windows (slice 3).** An ABAC `require_approval` refusal takes no rate slot: the window is counted
   without the lock, an exhausted window still refuses as the rate limit (it comes first in the order), and otherwise
   the call refuses as the ABAC hold.
+
+#### Slice 4b (2026-11-21): session facts and the actor chain reach the governed core
+
+P-01c item 2. The governed core's ABAC v5 request now carries what only a route or the stored grant knows, the same
+facts and defaults as a tool call:
+
+- **Session facts.** `principal.sessionOrigin`, `principal.mfaCompleted` and `context.clientIp` come from
+  `abacPrincipalFromRequest(req)` at the route. `GovernedRequestFacts` (`governed-core.ts`) carries them through
+  `loadResourceRestrictions` / `governedEvaluateResource` / `governedModelGate` into `assembleGovernedAbacRequest`.
+  The connector invoke route, the A2A message route, the native invoke route (every dispatch path in it), the
+  compat shims (read once in prepare), and the setup-assist, decompose, use-case intake and vendor questionnaire
+  routes supply them.
+- **Fail closed when a fact is missing.** A call with no request behind it (a worker loop, a builder turn, an eval,
+  a workflow review check) supplies none. Each then reads as its strict value: origin `unknown`, no second factor,
+  no address. A forbid conditioned on a missing fact therefore fires. It does not silently pass (ADR-0180).
+- **The actor chain.** A delegated call carries its stored chain: `actorForGrant`, read before the core's restrictions
+  on the connector path and inside the model gate. `context.actorChain` and `context.delegationDepth` follow
+  `abacDelegationContextOf`, the tool call's builder. Each actor is then evaluated as `Agent` (`evaluateAbacForChain`,
+  ADR-0188 decision 18). The call is refused by the sponsor's verdict first, else by the first actor whose verdict
+  is not a permit. An identity that cannot be read refuses (`abac-engine-error`). In the model gate, a grant that
+  cannot be read refuses (error is deny). A2A has no delegated path yet, so its chain is empty.
+- **Write-time guard narrowed.** `ABAC_GOVERNED_UNSUPPLIED_FACTS` keeps only `context.rateLimitUsagePct`, which the
+  core still does not compute for these calls. An `Agent`-scoped v5 policy on a governed action now validates.
+- **Tests.** In the kernel (`abac-v5.test.ts`), the session-fact and chain policies on governed actions now validate,
+  and a rate-usage policy is still refused. `zz-adr0251-abac-v5-session-facts.test.ts` (gateway, own scratch database)
+  covers:
+  - each session fact supplied, wrong and absent;
+  - the real invoke route reading an API-key call as `api_key`;
+  - depth and chain-membership policies on a two-hop chain, leaving the person's own call alone;
+  - an `Agent`-scoped forbid refusing a chain that contains the matching actor;
+  - an unreadable identity and an unreadable grant each refusing.
 
 #### Review #836 (2026-11-14)
 
