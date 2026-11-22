@@ -90,7 +90,7 @@ positive in the original report.
   build, and nothing is deleted. Anything that still imports them goes to the master first (slice 16).
 - **O-01: redo.** THIRD_PARTY.md is rebuilt from the current lockfile and manifests, with a CI preflight check. The old
   `builder/lane-b-third-party` branch is left untouched (slice 13).
-- **C-01 / P-07: ADR numbers assigned.** ADR-0380 is for C-01 (a shared API contract or openapi-typescript) and ADR-0381
+- **C-01 / P-07: ADR numbers assigned.** ADR number 0380 (reserved; the file is written in slice 17) is for C-01 (a shared API contract or openapi-typescript) and ADR number 0381
   is for P-07 (where compaction and dedup apply to provider-shaped compat calls). Each compares at least two approaches
   per ADR-0176 before choosing (slices 17 and 18).
 
@@ -121,8 +121,8 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 14 | `builder/codex-wave-concurrency` | P-05 (coordinated with E2) |
 | 15 | `builder/codex-guardrail-timeboxed-relax` | ADM-003 (owner answer; ADR-0181 addendum, new row kind) |
 | 16 | `builder/codex-archive-review-spikes` | C-07 (archive, nothing deleted) |
-| 17 | `builder/codex-adr0380-api-contract` | C-01 (ADR-0380 first) |
-| 18 | `builder/codex-adr0381-compat-optimisation` | P-07 (ADR-0381 first) |
+| 17 | `builder/codex-adr0380-api-contract` | C-01 (its reserved ADR number 0380, written first) |
+| 18 | `builder/codex-adr0381-compat-optimisation` | P-07 (its reserved ADR number 0381, written first) |
 
 **The master's pre-check (2026-11-22)** suggested triage-low for UIS-03, UIS-06, UIS-07, ADM-009 and S-07. On our
 rescoring each is at or above F×S 5 and the fix is small, so they stay ACCEPT-build. The master may overrule. Its
