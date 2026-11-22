@@ -136,3 +136,46 @@ job (the gateway does not double-challenge a federated login).
 - Deferred, recorded here: WebAuthn/passkeys; per-user session listing in the
   UIs (API exists: `GET /v1/users/:id/sessions`); SCIM deprovisioning; OIDC
   RP-initiated logout; remember-device for MFA.
+
+## Addendum — 2026-11-22: scrypt cost raised, asynchronous, rehash on sign-in (Codex review S-08)
+
+Decision 1 above is kept as written. Lane CX (Codex review response, PR #1186, row S-08) found two problems with it:
+
+- **The cost was below OWASP.** N=2^14, r=8, p=1 is below every equivalent minimum in the OWASP Password Storage Cheat
+  Sheet (N=2^17/p=1, 2^16/p=2, 2^15/p=3, 2^14/p=5). The claim "per OWASP" did not hold.
+- **The derivation blocked the event loop.** `scryptSync` ran on the main thread. ADR-0176 had already listed "password
+  hashing moved to async `scrypt`" under replace now.
+
+The owner chose the cost on 2026-11-22: raise scrypt to N=2^17, make hashing asynchronous, rehash on sign-in, check the
+memory limits and load-test the login path.
+
+As built:
+
+- **New hashes:** **N=2^17, r=8, p=1, keylen 64** (128 MiB per derivation; `maxmem` 256 MiB). They are computed with
+  asynchronous `crypto.scrypt` on the libuv thread pool. The format string and the 16-byte salt are unchanged.
+- **Concurrency:** at most **four** derivations run at once by default (owner, 2026-11-22), through `p-limit` 7.3.3
+  (MIT, pinned, no runtime download). The operator can set `REGULAIT_PASSWORD_HASH_CONCURRENCY` to an integer from 1 to
+  8; any other value falls back to 4. A sign-in burst therefore peaks at 512 MiB of scrypt memory. The image sets
+  `UV_THREADPOOL_SIZE=8`, so four derivations still leave libuv threads for file and DNS work. The memory limits allow
+  it: the Helm gateway limit is 2 GiB, the Compose gateway service has none, and the measured peak RSS is 712 MiB.
+- **Old hashes:** they keep verifying. A successful password sign-in re-hashes one written with other parameters
+  (`passwordNeedsRehash`). A failed sign-in never touches it. `passwordUpdatedAt` is not changed, because the password
+  itself is unchanged.
+- **Malformed hashes:** a stored hash whose parameters are not a power of two N ≤ 2^20 with 1 ≤ r, p ≤ 64 is refused.
+  The refusal costs the same dummy derivation as a missing hash. The old code threw on an oversized N.
+- **Timing equaliser:** the dummy derivation now uses the new cost. Until an account signs in once, verifying a legacy
+  hash is cheaper than the dummy. That timing difference shows only whether an account has a legacy hash, not whether
+  it exists, and it ends at the account's next sign-in.
+- **Load test** (4-core dev container, built gateway module, one process, `UV_THREADPOOL_SIZE=8`):
+
+  | Cap | One verification | 10 concurrent | 40 concurrent | Peak RSS | Event-loop lag |
+  | --- | --- | --- | --- | --- | --- |
+  | 2 | 392 ms | p95 1.89 s | p95 6.74 s | 459 MiB | 4 ms or less |
+  | 4 (default) | 410 ms | p95 1.02 s | p95 3.40 s | 712 MiB | 5 ms or less |
+
+  At the default that is about 12 password verifications per second per replica. The existing auth rate limit bounds
+  what one client can queue. The RSS figures include module load.
+- **Considered:** argon2 was rejected again for the same reason as above: it is a native dependency, and node:crypto
+  scrypt is memory-hard, OWASP-listed and air-gapped. For the concurrency cap, `p-limit` and `async-sema` (both MIT and
+  maintained) were compared, and `p-limit` was chosen because it reports active and pending counts. Relying on the
+  libuv pool alone would leave no thread for file and DNS work during a burst.

@@ -48,6 +48,12 @@ import {
 import { GUARDRAIL_MODES, type GuardrailMode } from "./guardrails.js";
 import { REDTEAM_CLASS_REFS } from "./evaluator-catalog.js";
 import { RED_TEAM_AGENTIC_ATTACK_CLASSES, type RedTeamAttackClass } from "./redteam.js";
+import type { StateDescription } from "./state-machine.js";
+import {
+  AUTONOMY_ENFORCEMENT_MACHINE,
+  type AutonomyEnforcementEvent,
+  type AutonomyEnforcementState,
+} from "./state-machines.js";
 
 // ---------------------------------------------------------------------------
 // Facts
@@ -535,4 +541,109 @@ export interface BuilderAgentAutonomyView {
   /** use cases this agent counts toward (same project) */
   useCases: Array<{ id: string; name: string; status: string }>;
   scope: string;
+  /** ADR-0180 addendum (E51): whether an unmet floor blocks this agent's runs now */
+  enforcement: AutonomyEnforcementView;
+}
+
+// ---------------------------------------------------------------------------
+// Enforcement at dispatch (ADR-0180 addendum, 2026-11-21, lane E51)
+// ---------------------------------------------------------------------------
+
+/** The classes whose unmet floor blocks dispatch. Below them a person is in the loop (assist) or on it (supervised),
+ * so an unmet floor stays a use-case condition and a monitor finding, as before. */
+export const AUTONOMY_ENFORCED_CLASSES = ["delegated", "autonomous"] as const satisfies readonly AutonomyClass[];
+
+export const autonomyClassBlocksOnUnmetFloor = (c: AutonomyClass): boolean =>
+  (AUTONOMY_ENFORCED_CLASSES as readonly AutonomyClass[]).includes(c);
+
+/** Audit rule ids of the dispatch gate and of the admin's enforcement change. */
+export const AUTONOMY_DISPATCH_RULE_IDS = {
+  /** a run refused: the agent is delegated or autonomous and a floor is unmet */
+  blocked: "builder-agent-autonomy-floor-unmet",
+  /** a run allowed with a floor unmet, because an admin relaxed the gate for this agent */
+  relaxed: "builder-agent-autonomy-floor-relaxed",
+  /** a run refused because the floors could not be checked (fail closed) */
+  unverifiable: "builder-agent-autonomy-floor-unverifiable",
+  /** an admin relaxed or restored the gate */
+  changed: "builder-agent-autonomy-enforcement-changed",
+} as const;
+
+/** The refusal codes a caller sees. */
+export const AUTONOMY_DISPATCH_ERRORS = {
+  blocked: "autonomy_floor_unmet",
+  unverifiable: "autonomy_floor_unverifiable",
+} as const;
+
+export type AutonomyDispatchVerdict =
+  | { kind: "allow" }
+  /** floors unmet, but an admin relaxed the gate: the run goes ahead and is audited */
+  | { kind: "allow_relaxed"; unmet: AutonomyFloorCheck[] }
+  | { kind: "deny"; unmet: AutonomyFloorCheck[]; detail: string };
+
+/**
+ * The gate's decision, pure. A `delegated` or `autonomous` agent with any unmet floor is refused unless its gate is
+ * `relaxed`; any other class, or every floor met, is allowed. An unknown enforcement value reads as `enforced`
+ * (fail closed).
+ */
+export function autonomyDispatchVerdict(input: {
+  agentName: string;
+  effective: AutonomyClass;
+  floors: readonly AutonomyFloorCheck[];
+  enforcement: string | null | undefined;
+}): AutonomyDispatchVerdict {
+  if (!autonomyClassBlocksOnUnmetFloor(input.effective)) return { kind: "allow" };
+  const unmet = input.floors.filter((f) => !f.met);
+  if (!unmet.length) return { kind: "allow" };
+  if (input.enforcement === "relaxed") return { kind: "allow_relaxed", unmet };
+  return {
+    kind: "deny",
+    unmet,
+    detail:
+      `builder agent '${input.agentName}' runs as ${input.effective}, and ${unmet.length} of its autonomy floor ` +
+      `control(s) ${unmet.length === 1 ? "is" : "are"} not in place: ${unmet.map((f) => f.label).join("; ")}. ` +
+      `Put them in place (see the agent's Autonomy panel), or ask an admin to relax the gate for this agent.`,
+  };
+}
+
+/** PUT /v1/builder/agents/:id/autonomy/enforcement (admin). A reason is required either way, for the audit. */
+export const autonomyEnforcementChangeSchema = z
+  .object({
+    event: z.enum(["relax", "restore"]),
+    reason: z.string().trim().min(1, "say why (reason)").max(ASSURANCE_LIMITS.maxAutonomyNoteChars),
+  })
+  .strict();
+export type AutonomyEnforcementChangeInput = z.infer<typeof autonomyEnforcementChangeSchema>;
+
+export interface AutonomyEnforcementView {
+  state: AutonomyEnforcementState;
+  /** true when, right now, an unmet floor refuses this agent's runs */
+  blocksDispatch: boolean;
+  relaxedBy: { id: string; name: string | null } | null;
+  relaxedAt: string | null;
+  reason: string | null;
+  /** the declared lifecycle: which events are allowed now, and why not */
+  lifecycle: StateDescription<AutonomyEnforcementState, AutonomyEnforcementEvent>;
+}
+
+/** the enforcement view of an agent; `viewerIsAdmin` = false says why a non-admin cannot change it */
+export function autonomyEnforcementView(input: {
+  state: string | null | undefined;
+  effective: AutonomyClass;
+  floors: readonly AutonomyFloorCheck[];
+  relaxedBy: { id: string; name: string | null } | null;
+  relaxedAt: Date | null;
+  reason: string | null;
+  viewerIsAdmin: boolean;
+}): AutonomyEnforcementView {
+  const state: AutonomyEnforcementState = input.state === "relaxed" ? "relaxed" : "enforced";
+  const verdict = autonomyDispatchVerdict({ agentName: "", effective: input.effective, floors: input.floors, enforcement: state });
+  const notAdmin = "only an admin can change whether unmet autonomy floors block this agent";
+  return {
+    state,
+    blocksDispatch: verdict.kind === "deny",
+    relaxedBy: state === "relaxed" ? input.relaxedBy : null,
+    relaxedAt: state === "relaxed" && input.relaxedAt ? input.relaxedAt.toISOString() : null,
+    reason: input.reason,
+    lifecycle: AUTONOMY_ENFORCEMENT_MACHINE.describe(state, input.viewerIsAdmin ? {} : { relax: notAdmin, restore: notAdmin }),
+  };
 }

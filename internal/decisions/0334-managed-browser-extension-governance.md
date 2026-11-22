@@ -89,9 +89,10 @@ The manifest is generated from the governed site catalogue at build time and pin
 `POST /v1/browser-extension/policy` returns the policy for the device and the profile account it names. The gateway
 computes it deterministically, in the governed core's order (ADR-0251):
 
-1. **A disabled person gets nothing** (`user_disabled`). A profile account that matches no RegulAIt user
-   (case-insensitive email) gets **the org-wide site rules**, account-domain rules included, and every such issue is
-   audited (`browser-policy-unmatched-account`, pseudonym only): owner decision B1.
+1. **A disabled person gets nothing** (`user_disabled`). **Neither does an account RegulAIt does not recognise**
+   (`account_not_recognised`): a profile account that matches no RegulAIt user (case-insensitive email), or a
+   signed-out profile, gets a policy that denies every site, audited as `browser-policy-unrecognised-account`
+   (pseudonym only). This reverses owner decision B1, which gave such an account the org-wide rules (§14).
 2. **The execution posture** (the kernel's `executionGate`, the same kill switch every governed call obeys) can only
    remove access: a halted, read-only or approval-required deployment denies every site (`execution_posture`). A prompt
    sends data out, so it counts as a write, and the browser has no per-call approval queue.
@@ -288,7 +289,7 @@ The security and code reviews at `4398879` asked for these; each is built and te
   are refused `invalid_body`. Issuing an enrolment token is a step-up. The `devices_enrolled` cap counter has its
   ADR-0200 exception comment.
 - **Filed as issues, not fixed here:** the `user_disabled` bypass through a personal account (it conflicts with owner
-  decision B1, so it is the owner's call); CORS and the gateway origin; audit flooding from bad-token registrations;
+  decision B1, so it is the owner's call; the owner reversed B1 on 2026-11-21, §14); CORS and the gateway origin; audit flooding from bad-token registrations;
   forged `block.html` events.
 
 ## 13. Extension hardening (2026-11-21: issues #1029, #1030 and #1031)
@@ -318,6 +319,24 @@ The security and code reviews at `4398879` asked for these; each is built and te
   time. The counter is per process, and a count still open when the process exits is lost. That is accepted, because
   the row bounds audit volume from unauthenticated callers and is not evidence of any one request.
 
+## 14. B1 reversed: an unrecognised account gets nothing (owner decision 2026-11-21, #1028)
+
+The #867 security review found that B1 let a disabled person around `user_disabled`. They enrol a new browser, or
+use one never bound to their work account, and sign it in with a personal account. That account matches no
+RegulAIt user, so B1 gave it the org-wide site rules. The owner reversed B1 on 2026-11-21 (relayed by the master),
+and because this is a security-checklist gap it is blocking under ADR-0180. As built:
+
+- `buildBrowserPolicy` allows a site only for a recognised, active RegulAIt user. A profile account that matches no
+  user, or no account at all, gets `account_not_recognised` on every site. A disabled user still gets
+  `user_disabled`.
+- The policy route audits each such issue as `browser-policy-unrecognised-account` (effect `deny`, pseudonym only,
+  and whether the profile was signed in). This replaces B1's `browser-policy-unmatched-account` allow row.
+- The block page says "Sign in with your work account".
+- No admin setting brings B1 back. A relaxation for, say, contractors with personal accounts would be its own
+  decision: a `settings_relax` step-up, off by default.
+- A regression test reproduces the bypass. With a site allowed and the admin disabled, a fresh device signed in with a
+  personal account, and a fresh signed-out device, both get every site denied.
+
 ## Consequences
 
 - The browser joins the gateway and the endpoint agent under one decision order, one audit chain and one set of
@@ -330,7 +349,7 @@ The security and code reviews at `4398879` asked for these; each is built and te
 
 ## Owner decisions (2026-11-15, relayed by the master on #867)
 
-- **B1:** a browser profile signed in with an account that matches no RegulAIt user gets the org-wide site rules, not
+- **B1 (reversed 2026-11-21, §14):** a browser profile signed in with an account that matches no RegulAIt user gets the org-wide site rules, not
   a block everywhere. It stays audited, and corporate-account rules stay enforced where the org requires them. (Built:
   section 4. A matched but disabled person still gets nothing.)
 - **B2:** captured prompts are kept 30 days by default, as an admin setting, and deleted automatically after that; a

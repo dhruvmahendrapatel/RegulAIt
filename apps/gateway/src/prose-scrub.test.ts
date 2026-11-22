@@ -511,6 +511,13 @@ describe("6. the covered / NOT-covered inventory", () => {
     "endpoint_addon_removals.reason",
     // ADR-0338: the admin's reason for a vendor agent control action
     "vendor_agent_actions.reason",
+    // ADR-0313: the admin's note on a paid-call price
+    "paid_call_prices.note",
+    // ADR-0366: a builder agent's halt reason and a containment's release reason
+    "builder_agents.halted_reason",
+    "agent_containments.release_reason",
+    "agent_containments.explanation",
+    "virtual_keys.halted_reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -613,6 +620,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
     // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
     "agent_identity_links.note",
     "agent_identity_links.decision_note",
@@ -681,6 +689,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "fairness_datasets.purge_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
+      // ADR-0313: a CHECK-constrained three-member release code
+      "paid_call_holds.release_reason",
       "risk_acceptances.compensating_controls",
       "trace_retention_holds.release_reason",
       "usage_events.stop_reason",

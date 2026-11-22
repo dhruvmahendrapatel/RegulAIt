@@ -209,6 +209,7 @@ the role split, because it is the only option that protects real boundaries insi
    | #862 (merged; ADR-0327, lane E12), slice 3b (`rule_step_shadows`) and slice 4a (`rule_step_switches`) | rule_step_settings, rule_step_suggestions, rule_step_shadows, rule_step_switches | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
    | #892 (ADR-0339 slice 2, lane E20) | agent_identity_links, agent_authorship | none: `agent_identity_links` is actor-stamped (`decided_by_user_id`, also `staged_by_user_id`), `agent_authorship` deployment-wide (`author_user_id` is not a listed actor column); written by admin routes and insert triggers, read only by admin or the agent's owner |
    | ADR-0327 addendum (lane E12, decision tables) | decision_tables, decision_table_versions | none (deployment-wide by the appendix rule: configuration bound to an agent and step, no project, team or owner column; admin-only routes; `created_by`, `author_user_id` and `decided_by` record who acted, not who may read) |
+   | ADR-0328 slice 2 (lane E12, repetitive asks) | repetitive_ask_settings, repetitive_ask_clusters, repetitive_ask_cluster_spans | none (deployment-wide by the appendix rule: a measured read model keyed by agent and fingerprint, no project, team or owner column; admin-only routes; `updated_by` and `dismissed_by` record who acted, not who may read) |
    | #604, #605, #627, #673 | no new tables (columns, guards and triggers only); a new column that names a user is checked against the table's batch | — |
 
    Deployment-wide (191) and actor-stamped (49) tables get no row policy: their rows are not owned by a principal. The
@@ -774,12 +775,12 @@ that link to be read-only.
   use_case_conditions, use_case_drafts, use_case_feedback, use_case_idempotency_keys, user_agent_policies,
   user_model_credentials, vendor_account_aliases, webauthn_challenges, webauthn_credentials. Some (agents, connectors,
   mcp_servers, ai_vendors) carry an owner column on fleet objects; each batch confirms the key before writing a policy.
-- **Project-scoped (31):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
+- **Project-scoped (32):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
   config_canary_observations, conversations, copilot_queries, cost_events, delegation_grants, engine_runs, eval_runs,
-  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, policy_simulation_flips,
-  processing_records, project_context_items, project_members, prompts, redteam_runs, spend_anomalies,
-  spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs, usage_events,
-  virtual_keys, workflow_instances.
+  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, paid_call_holds (ADR-0313),
+  policy_simulation_flips, processing_records, project_context_items, project_members, prompts, redteam_runs,
+  spend_anomalies, spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs,
+  usage_events, virtual_keys, workflow_instances.
 - **Team-scoped (5):** approval_rules, data_scope_rules, model_rate_limits, rate_limits, team_members.
 - **Actor-stamped (49) and deployment-wide (191):** every other table in `public`. To regenerate every list from a
   migrated database, classify each table by its columns, in this order: `project_id`, then `team_id`, then an owner
