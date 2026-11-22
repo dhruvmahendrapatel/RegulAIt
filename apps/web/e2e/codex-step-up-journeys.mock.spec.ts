@@ -195,4 +195,27 @@ test.describe("Codex review: protected integration writes complete through step-
     await su.expectResentOnce();
     expect(optionsFailures).toBe(1);
   });
+
+  test("R3 #1205: activating an ABAC version that relaxes the live one (block back to advise) completes through step-up", async ({ page }) => {
+    await mockApi(page);
+    const POLICY = "33333333-3333-4333-8333-333333333333";
+    const ISO = "2026-11-01T00:00:00Z";
+    const version = (n: number, mode: string) => ({ id: `v${n}`, policyId: POLICY, version: n, source: "forbid (principal, action, resource);", schemaVersion: "v3", mode, timezone: "UTC", approverUserId: null, testCases: null, authorUserId: null, createdAt: ISO });
+    const policy = { id: POLICY, name: "no-night-writes", description: null, enabled: true, activeVersionId: "v2", createdAt: ISO, activeVersion: 2, mode: "forbid", timezone: "UTC" };
+    await page.route("**/v1/abac/**", async (route) => {
+      const p = new URL(route.request().url()).pathname;
+      const method = route.request().method();
+      if (p === "/v1/abac/schema") return json(route, { engine: "cedar", versions: ["v3"], current: "v3", modes: ["forbid", "require_approval"], schemaText: "entity User;", abacCanGrant: false });
+      if (p === "/v1/abac/policies" && method === "GET") return json(route, { engine: "cedar", activeCount: 1, policies: [policy] });
+      if (p === `/v1/abac/policies/${POLICY}` && method === "GET") return json(route, { policy, versions: [version(2, "forbid"), version(1, "require_approval")] });
+      return route.fallback();
+    });
+    const su = await requireStepUpOn(page, { method: "POST", path: `/v1/abac/policies/${POLICY}/activate`, kind: "settings_relax" });
+    await page.goto("/ui/admin/abac-policies");
+    await page.getByRole("cell", { name: "no-night-writes" }).click();
+    await page.getByRole("button", { name: "Activate", exact: true }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ version: 1 });
+  });
 });
