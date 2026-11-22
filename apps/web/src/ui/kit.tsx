@@ -1529,7 +1529,8 @@ export function ErrorState(props: {
         {props.access ? "You don't have access to this view" : (props.title ?? "Couldn't load this view")}
       </div>
       <div className={s.emptyBody}>{props.message}</div>
-      {props.onRetry && (
+      {/* UIS-08: an access refusal answers the same on a retry, so it offers none */}
+      {props.onRetry && !props.access && (
         <Button size="sm" onClick={props.onRetry}>
           Retry
         </Button>

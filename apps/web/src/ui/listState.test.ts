@@ -15,9 +15,11 @@ import {
   pageUrl,
   prefsOf,
   rangeText,
+  readPlace,
   resolveColumns,
   saveColumnPrefs,
   savePageSize,
+  writePlace,
   toggleColumn,
   type ColumnMeta,
 } from "./listState";
@@ -169,5 +171,30 @@ describe("where you are", () => {
     expect(normalisePage({ items: [1], nextCursor: "c", nextOffset: null, total: 9, totalIsEstimate: false }, "runs")).toMatchObject({ items: [1], nextCursor: "c", total: 9 });
     expect(normalisePage({ runs: [1, 2] }, "runs")).toMatchObject({ items: [1, 2], nextCursor: null, nextOffset: null, total: null, totalIsEstimate: false });
     expect(normalisePage(null, "runs").items).toEqual([]);
+  });
+});
+
+describe("the place in the address (UIS-06)", () => {
+  const sortable = new Set(["created", "name"]);
+  const def = { key: "created", dir: "desc" } as const;
+
+  it("reads this list's own keys and ignores an unknown column, a bad offset or a malformed cursor", () => {
+    const q = new URLSearchParams("status=running&runs.sort=name&runs.dir=desc&runs.offset=20&runs.cursor=MjAyNi0xMHxy&other.sort=x");
+    expect(readPlace(q, "runs", sortable, def)).toEqual({ sort: { key: "name", dir: "desc" }, offset: 20, cursor: "MjAyNi0xMHxy" });
+    expect(readPlace(new URLSearchParams("runs.sort=secret&runs.offset=-5"), "runs", sortable, def)).toEqual({ sort: def, offset: 0, cursor: null });
+    expect(readPlace(new URLSearchParams("runs.offset=10&runs.cursor=a%20b"), "runs", sortable, def).cursor).toBeNull();
+    expect(readPlace(new URLSearchParams("runs.cursor=abc"), "runs", sortable, def).cursor).toBeNull();
+    expect(readPlace(new URLSearchParams("runs.offset=99999999"), "runs", sortable, def).offset).toBe(0);
+  });
+
+  it("writes only what differs from the first page under the default sort, and keeps the page's own parameters", () => {
+    const q = new URLSearchParams("status=running&users.sort=email");
+    const next = writePlace(q, "runs", { sort: { key: "name", dir: "asc" }, offset: 10, cursor: "Y3Vy" }, def)!;
+    expect(next.get("status")).toBe("running");
+    expect(next.get("users.sort")).toBe("email");
+    expect([next.get("runs.sort"), next.get("runs.dir"), next.get("runs.offset"), next.get("runs.cursor")]).toEqual(["name", "asc", "10", "Y3Vy"]);
+    const back = writePlace(next, "runs", { sort: def, offset: 0, cursor: null }, def)!;
+    expect(back.toString()).toBe("status=running&users.sort=email");
+    expect(writePlace(back, "runs", { sort: def, offset: 0, cursor: null }, def)).toBeNull();
   });
 });
