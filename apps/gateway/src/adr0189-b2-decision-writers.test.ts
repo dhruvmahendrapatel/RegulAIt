@@ -28,6 +28,7 @@ const DECISION_WRITERS = [
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
   "approval-signatures.ts", // approval decisions (objectType approval)
+  "autonomy.ts", // ADR-0180 addendum (E51): a builder agent's run refused (or let through relaxed) by the oversight gate (insert(auditLog) on the chained handle)
   "builder-runtime.ts", // builder turns
   "compaction.ts",
   "compat-core.ts", // the compat model surfaces

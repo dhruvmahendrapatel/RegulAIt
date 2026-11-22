@@ -194,6 +194,7 @@ import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
+import { registerRepetitiveAskRoutes } from "./repetitive-asks.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -682,6 +683,7 @@ import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory
 import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
+import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
@@ -700,6 +702,7 @@ import {
   registerCustomClassifierRoutes,
 } from "./custom-classifiers.js";
 import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
+import { registerAiAppRiskRoutes } from "./ai-app-risk.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -5981,6 +5984,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
   registerDecisionTableSwitchRoutes(app, db);
+  registerRepetitiveAskRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6431,6 +6435,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRobotRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
   registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0358 (lane E39): AI adoption analytics, admin-only aggregates
+  registerAdoptionAnalyticsRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -6552,6 +6558,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssuranceSettingsRoutes(app, db);
   // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
   registerSensitivityLabelRoutes(app, db);
+  // ADR-0363 slice 3: AI app risk attributes and the risk-ranked shadow-AI inventory (read-only; UI is a #453 gap)
+  registerAiAppRiskRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);

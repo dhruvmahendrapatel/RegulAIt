@@ -2190,6 +2190,9 @@ export const upsertComplianceProfileSchema = z.object({
    * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
    * existing profile is a loosening (step-up, rule-loosening.ts). */
   mrmRequired: z.boolean().nullable().optional(),
+  /** ADR-0347: the longest an agent memory write on a project carrying this tag may live, in hours. MIN-composed with
+   * the org's `agentMemoryTtlHours`, so it can only shorten it; raising or clearing it is a loosening (step-up). */
+  memoryTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -2303,7 +2306,13 @@ export const patchProjectMemberSchema = z.object({
 });
 
 export const contributeContextSchema = z.object({
-  key: z.string().min(1).max(128),
+  /** #905 security review [1]: a context key is an identifier, never free text. It is shown to workers inside the
+   * context frame, so quotes, newlines and spaces could forge a frame or its provenance. */
+  key: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9._:/-]+$/, "a context key uses letters, digits and . _ : / - only"),
   content: z.string().min(1).max(200_000),
   /** the accepted revision this write is based on; required once the key exists */
   baseRevision: z.number().int().positive().optional(),
@@ -2319,6 +2328,8 @@ export const contributeContextSchema = z.object({
    */
   producedByRunId: z.string().uuid().optional(),
   producedByNodeId: z.string().min(1).max(64).optional(),
+  /** ADR-0347: ask for a SHORTER expiry than the policy's, in hours; longer than the policy is refused */
+  expiresInHours: z.number().int().min(1).max(8760).optional(),
 });
 
 export const promoteContextSchema = z.object({
@@ -2528,6 +2539,10 @@ export const updateOrgSettingsSchema = z
     sapUnattributedWritesAllowed: z.boolean().optional(),
     /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
     sapReadsApproveFirst: z.boolean().optional(),
+    /** ADR-0347: hours an agent memory or shared-context write lives (default 24); longer is a relaxation */
+    agentMemoryTtlHours: z.number().int().min(1).max(8760).optional(),
+    /** ADR-0347: 'block' (default) refuses a flagged memory write; 'log' stores it and audits the hits (a relaxation) */
+    agentMemoryScanMode: z.enum(["block", "log"]).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -4903,6 +4918,16 @@ export {
 // ADR-0180 §5 (A8) — the agent autonomy class: derivation rules and control floors.
 export {
   AUTONOMY_AGENTIC_TEST_CLASSES,
+  AUTONOMY_DISPATCH_ERRORS,
+  AUTONOMY_DISPATCH_RULE_IDS,
+  AUTONOMY_ENFORCED_CLASSES,
+  autonomyClassBlocksOnUnmetFloor,
+  autonomyDispatchVerdict,
+  autonomyEnforcementChangeSchema,
+  autonomyEnforcementView,
+  type AutonomyDispatchVerdict,
+  type AutonomyEnforcementChangeInput,
+  type AutonomyEnforcementView,
   AUTONOMY_FLOORS,
   AUTONOMY_FLOOR_IDS,
   AUTONOMY_GUARDRAIL_DETECTORS,
@@ -5139,6 +5164,9 @@ export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-actions.js";
 
+// ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
+export * from "./adoption-analytics.js";
+
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 
@@ -5151,3 +5179,7 @@ export * from "./fairness-evaluation.js";
 // ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
 export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
+// ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
+export * from "./content-inspection.js";
+// ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
+export * from "./ai-app-risk.js";

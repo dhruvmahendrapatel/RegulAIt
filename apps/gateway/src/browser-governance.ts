@@ -4,8 +4,9 @@
  *  - Device authentication is NOT here: an extension is a workload identity of kind `browser_extension` and reaches
  *    the gateway with an S7 DPoP-bound self token (oauth/), the endpoint agent's pattern (ADR-0195 SD4b).
  *  - `buildBrowserPolicy`: the per-user decision for each catalogue site, deterministic, fail closed. The order is the
- *    governed core's (ADR-0251): a disabled person gets nothing (an unmatched account gets the org-wide rules, owner
- *    decision B1); the execution posture (the kernel's
+ *    governed core's (ADR-0251): a person who is not a recognised, active RegulAIt user gets nothing (an unmatched or
+ *    empty account is `account_not_recognised`, #1028, reversing owner decision B1; a disabled one `user_disabled`);
+ *    the execution posture (the kernel's
  *    `executionGate`, the same kill switch every governed call obeys) can only remove access; then the admin's site
  *    rule, where no rule means deny. Account domains are carried for the extension to check against the profile.
  *  - Signing is the shared device-policy signer's (`device-policy-signer.ts`, owner decision B4).
@@ -65,9 +66,10 @@ export interface BuildPolicyInput {
 
 /** The per-user policy. Every catalogue site appears once; anything not explicitly allowed is a deny with its reason. */
 export function buildBrowserPolicy(input: BuildPolicyInput): BrowserPolicy {
-  // owner decision B1 (2026-11-15): a profile account that matches no RegulAIt user gets the org-wide site rules
-  // (account-domain rules still apply, and the route audits the issue); a matched but disabled person gets nothing
-  const userDeny: BrowserDenyReason | null = input.user?.disabled ? "user_disabled" : null;
+  // #1028 (owner decision 2026-11-21, reversing B1): only a recognised, active RegulAIt user gets any site. A profile
+  // account that matches no user, or no account at all, gets nothing: otherwise a disabled person could sign a new
+  // browser in with a personal account and get the org-wide rules. Fail closed.
+  const userDeny: BrowserDenyReason | null = !input.user ? "account_not_recognised" : input.user.disabled ? "user_disabled" : null;
   // a prompt to an AI site sends data out: a write for the read-only dial, and no per-call approval queue exists here
   const stop = executionGate(input.posture, true, "an AI assistant site in the browser", false);
   const postureDeny: BrowserDenyReason | null = stop && stop.effect !== "allow" ? "execution_posture" : null;

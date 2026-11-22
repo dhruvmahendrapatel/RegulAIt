@@ -351,15 +351,19 @@ export type GovernedAbacTarget =
 /**
  * ADR-0251 slice 4 — the Cedar request for a model, connector or A2A call (actions `ModelInvoke`, `ConnectorCall`,
  * `A2aMessage`, schema v5). The sponsor and project facts come from `sponsorAndProjectFacts`, the same reader
- * `assembleAbacRequest` uses for a tool call. The governed core decides from below the routes, so it does not know the
- * request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`), its delegation chain or its rate
- * consumption, and it evaluates the sponsor as `User`. Those read as their strict values here, and a v5 policy that can
- * reach these calls is refused at write time if it reads any of them (review #836), so a forbid can never validate and
- * then silently never fire.
+ * `assembleAbacRequest` uses for a tool call.
+ *
+ * Slice 4b: the request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) come from the route that
+ * knows the request (`abacPrincipalFromRequest`), and `context.actorChain` / `delegationDepth` from the stored
+ * delegation chain, exactly as for a tool call. A call with no request behind it (a worker loop, a builder turn, an
+ * internal dispatch) supplies none, and each fact then reads as its STRICT value (origin "unknown", no second factor,
+ * no address, a person acting directly), so a forbid conditioned on a missing fact fires rather than silently
+ * passing (fail closed, ADR-0180). The rate-consumption figure is still not supplied (it reads 0), and a v5 policy
+ * that can reach these calls is refused at write time if it reads it (kernel `ABAC_GOVERNED_UNSUPPLIED_FACTS`).
  */
 export async function assembleGovernedAbacRequest(
   db: Db,
-  args: { userId: string; target: GovernedAbacTarget; projectId: string | null; at?: Date },
+  args: GovernedAbacCallArgs & { at?: Date },
 ): Promise<AbacRequest> {
   const { userId, target, projectId } = args;
   const [facts, resourceRow] = await Promise.all([
@@ -396,28 +400,52 @@ export async function assembleGovernedAbacRequest(
       : target.type === "connector"
         ? { ...shared, type: "Connector", providerKind: row.providerKind ?? "", operation: target.operation }
         : { ...shared, type: "RemoteAgent", skillId: target.skillId };
+  const principal = args.principal ?? null;
   return {
-    // the facts the core cannot know read as their strict values; a v5 policy that can reach this call may not read
-    // them at all (kernel ABAC_GOVERNED_UNSUPPLIED_FACTS refuses it at write time), so these never decide anything
-    principal: { ...facts.sponsor, sessionOrigin: "unknown", mfaCompleted: false },
+    // a missing session fact reads as its strict value (fail closed), the same defaults as a tool call
+    principal: { ...facts.sponsor, sessionOrigin: principal?.sessionOrigin ?? "unknown", mfaCompleted: principal?.mfaCompleted === true },
     governed,
-    context: { deployModes: facts.derived.deployModes, environments: facts.derived.environments, rateLimitUsagePct: 0, clientIp: null },
+    context: {
+      deployModes: facts.derived.deployModes,
+      environments: facts.derived.environments,
+      // not supplied for a governed call; a v5 policy that can reach one may not read it (refused at write time)
+      rateLimitUsagePct: 0,
+      clientIp: principal?.clientIp ?? null,
+    },
+    delegation: abacDelegationContextOf(args.actor ?? null),
     ...(args.at ? { at: args.at } : {}),
   };
+}
+
+/** ADR-0251 slice 4b — what the governed core knows about one model, connector or A2A call */
+export interface GovernedAbacCallArgs {
+  userId: string;
+  target: GovernedAbacTarget;
+  projectId: string | null;
+  /** the request's session facts, from the route (`abacPrincipalFromRequest`); absent = no request: strict values */
+  principal?: AbacPrincipalContext | null;
+  /** the stored delegation chain the call is made under (`actorForGrant`); absent = the person acting directly */
+  actor?: GovernedActor | null;
 }
 
 /**
  * ADR-0251 slice 4 — the ABAC verdict for a model, connector or A2A call: null when no active policy can apply to one
  * (no active v5 policy), so an install without such policies pays only the policy load. Pure evaluation errors fail
  * closed inside the engine (`abac-engine-error`).
+ *
+ * Slice 4b (ADR-0188 decision 18, as on a tool call): the sponsor is evaluated as `User`; then, for a delegated call,
+ * each actor of the chain is evaluated as `Agent` against the same policies. The call is refused by the sponsor's
+ * verdict first, else by the first actor whose verdict is not a permit (an identity that cannot be read refuses,
+ * `abac-engine-error`).
  */
-export async function evaluateAbacForGovernedCall(
-  db: Db,
-  args: { userId: string; target: GovernedAbacTarget; projectId: string | null },
-): Promise<AbacDecision | null> {
+export async function evaluateAbacForGovernedCall(db: Db, args: GovernedAbacCallArgs): Promise<AbacDecision | null> {
   const policies = (await loadActiveAbacPolicies(db)).filter((p) => hasGovernedActions(p.schemaVersion));
   if (policies.length === 0) return null;
-  return evaluateAbac(policies, await assembleGovernedAbacRequest(db, args));
+  const request = await assembleGovernedAbacRequest(db, args);
+  const sponsor = evaluateAbac(policies, request);
+  if (!sponsor || sponsor.effect !== "permit" || !args.actor) return sponsor;
+  const chain = await evaluateAbacForChain(db, args.actor, request, policies);
+  return chain.links.find((l) => l.abacDecision)?.abacDecision ?? sponsor;
 }
 
 // ---------------------------------------------------------------------------
