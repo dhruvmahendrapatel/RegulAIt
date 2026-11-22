@@ -438,6 +438,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // list and the link writes stay admin through the default gate.
   "GET /v1/agent-identity/:kind/:subjectId",
   "GET /v1/risks",
+  // CXR-REV-003: the register's Excel export reads the list's own WHERE (own risks for a non-admin)
+  "GET /v1/risks/export.xlsx",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
   "GET /v1/risks/scenarios",

@@ -105,8 +105,10 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // E46) context graph source unbind until the bindings screen on #453, and the two ADR-0251 (lane L1) resource-rule
     // removals until the screen on #453
     // ADR-0311 (lane E1): the MCP endpoint's session-end DELETE, a 405 protocol answer that deletes nothing
+    // CXR-REV-002 (ADR-0047 addendum): the report-definition DELETE, which archives and deletes nothing
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/mcp/:x",
+      "/v1/reports/definitions/:x",
       "/v1/mcp/authorised-targets/:x",
       "/v1/a2a/agents/:x/role-grants/:x",
       "/v1/a2a/agents/:x/revocations/:x",
