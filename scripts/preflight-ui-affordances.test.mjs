@@ -95,9 +95,9 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
-    // bundle routes left this list when the #453 bundle screen landed), lane L2 (ADR-0219 follow-up) remote-agent role grant and revocation
-    // removal until the controls on #453, the ADR-0230 A2 SAP business unmark until its
+    // real handlers, not stubs (the two ADR-0236 bundle routes left this list when the #453 bundle screen landed, and the
+    // ADR-0246 authorised-targets entry left with its screen, #823): lane L2 (ADR-0219 follow-up) remote-agent role grant
+    // and revocation removal until the controls on #453, the ADR-0230 A2 SAP business unmark until its
     // #453 screen, ADR-0312's spend-budget removal and ADR-0313's paid-call price removal until their #453 screens, ADR-0322 (lane E7) vendor usage credential
     // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
     // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
@@ -107,7 +107,6 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // ADR-0311 (lane E1): the MCP endpoint's session-end DELETE, a 405 protocol answer that deletes nothing
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/mcp/:x",
-      "/v1/mcp/authorised-targets/:x",
       "/v1/a2a/agents/:x/role-grants/:x",
       "/v1/a2a/agents/:x/revocations/:x",
       "/v1/endpoint-device-groups/:x",

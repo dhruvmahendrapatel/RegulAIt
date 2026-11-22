@@ -174,10 +174,18 @@ export function Field(props: {
   // cannot name is a control a screen reader cannot name either.
   const labelable = only !== null && isValidElement(only) &&
     (only.type === Input || only.type === Select || only.type === Textarea);
-  const single = labelable && isValidElement<{ id?: string }>(only) ? only : null;
+  const single =
+    labelable && isValidElement<{ id?: string; "aria-describedby"?: string; "aria-invalid"?: InputHTMLAttributes<HTMLInputElement>["aria-invalid"] }>(only)
+      ? only
+      : null;
 
   if (single) {
     const id = single.props.id ?? auto;
+    // UIS-02: the error is announced with the control, not only drawn under it: the control's aria-describedby names
+    // it (after any description the caller already gave), and the control reports aria-invalid while it shows
+    const errorId = `${auto}-error`;
+    const hasError = Boolean(props.error);
+    const describedBy = [single.props["aria-describedby"], hasError ? errorId : null].filter(Boolean).join(" ") || undefined;
     return (
       <div className={fieldClass(props.grow)} {...growAttr(props.grow)}>
         <div className={s.fieldLabelRow}>
@@ -190,8 +198,16 @@ export function Field(props: {
             </InfoButton>
           ) : null}
         </div>
-        {single.props.id ? single : cloneElement(single, { id })}
-        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+        {cloneElement(single, {
+          id,
+          "aria-describedby": describedBy,
+          "aria-invalid": hasError ? true : single.props["aria-invalid"],
+        })}
+        {hasError ? (
+          <span id={errorId} className={s.fieldError}>
+            {props.error}
+          </span>
+        ) : null}
       </div>
     );
   }
@@ -1287,8 +1303,21 @@ export function Modal(props: {
   wide?: boolean;
   /** near full screen — the expanded view of a contained card (X6) */
   full?: boolean;
+  /** UIS-09: a save is in flight; Escape, a backdrop click and the Close button leave the dialog open until it ends */
+  busy?: boolean;
+  /**
+   * UIS-09: the draft differs from what is saved. Escape, a backdrop click and the Close button then ask "Discard
+   * changes?" first (owner, 2026-11-22). A Cancel button the caller renders in `actions` stays the caller's to wire.
+   */
+  dirty?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [asking, setAsking] = useState(false);
+  const close = () => {
+    if (props.busy) return;
+    if (props.dirty) setAsking(true);
+    else props.onClose();
+  };
   useEffect(() => {
     if (!props.open) return;
     const dialog = ref.current;
@@ -1324,14 +1353,26 @@ export function Modal(props: {
       tabIndex={-1}
       ref={ref}
       onCancel={(event) => {
+        // a dialog nested in this one (the discard prompt) cancels itself; React would hand its cancel up to here
+        if (event.target !== event.currentTarget) return;
         event.preventDefault();
-        props.onClose();
+        close();
+      }}
+      onClose={(event) => {
+        // the browser closes a dialog itself on a repeated Escape with no click between (its cancel is then not
+        // cancelable): while busy or dirty it goes straight back up, otherwise the close is reported like any other
+        const dialog = event.currentTarget;
+        if (event.target !== dialog || !dialog.isConnected || dialog.open) return;
+        if (props.busy || props.dirty) {
+          dialog.showModal();
+          close();
+        } else props.onClose();
       }}
       onMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         const bounds = event.currentTarget.getBoundingClientRect();
         if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
-          props.onClose();
+          close();
         }
       }}
     >
@@ -1342,7 +1383,7 @@ export function Modal(props: {
           style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", background: "var(--surface-1)" }}
         >
           <span style={{ flex: 1 }}>{props.title}</span>
-          <Button size="sm" onClick={props.onClose}>
+          <Button size="sm" disabled={props.busy} onClick={close}>
             Close
           </Button>
         </div>
@@ -1351,6 +1392,21 @@ export function Modal(props: {
       )}
       {props.children != null && <div className={s.modalBody}>{props.children}</div>}
       {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
+      {/* nested, so it opens in the top layer above this dialog; closing it hands focus back inside this one */}
+      <ConfirmModal
+        open={asking}
+        title="Discard changes?"
+        body="What you changed here has not been saved."
+        cancelLabel="Keep editing"
+        focusCancel
+        confirmLabel="Discard"
+        danger
+        onCancel={() => setAsking(false)}
+        onConfirm={() => {
+          setAsking(false);
+          props.onClose();
+        }}
+      />
     </dialog>
   );
 }
@@ -1361,6 +1417,10 @@ export function ConfirmModal(props: {
   title: string;
   body?: ReactNode;
   confirmLabel?: string;
+  /** the label of the safe choice */
+  cancelLabel?: string;
+  /** the safe choice holds focus when the confirm opens */
+  focusCancel?: boolean;
   danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -1372,7 +1432,9 @@ export function ConfirmModal(props: {
       onClose={props.onCancel}
       actions={
         <>
-          <Button onClick={props.onCancel}>Cancel</Button>
+          <Button autoFocus={props.focusCancel} onClick={props.onCancel}>
+            {props.cancelLabel ?? "Cancel"}
+          </Button>
           <Button variant={props.danger ? "danger" : "primary"} onClick={props.onConfirm}>
             {props.confirmLabel ?? "Confirm"}
           </Button>
@@ -1529,7 +1591,8 @@ export function ErrorState(props: {
         {props.access ? "You don't have access to this view" : (props.title ?? "Couldn't load this view")}
       </div>
       <div className={s.emptyBody}>{props.message}</div>
-      {props.onRetry && (
+      {/* UIS-08: an access refusal answers the same on a retry, so it offers none */}
+      {props.onRetry && !props.access && (
         <Button size="sm" onClick={props.onRetry}>
           Retry
         </Button>

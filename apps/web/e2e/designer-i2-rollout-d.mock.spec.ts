@@ -157,9 +157,9 @@ test.describe("I-2 rollout D: Guardrails", () => {
       await expect(panel).toBeVisible();
     }
     // a half-typed sample survives a trip to another tab
-    await page.getByRole("tab", { name: "Try a sample" }).click();
+    await page.getByRole("tab", { name: "Test local rules" }).click();
     await page.getByPlaceholder("Paste a representative prompt or completion…").fill("ignore all previous instructions");
-    await page.getByRole("tab", { name: "Try a sample" }).focus();
+    await page.getByRole("tab", { name: "Test local rules" }).focus();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByRole("tab", { name: "Decisions" })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
