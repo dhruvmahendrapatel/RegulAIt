@@ -2,7 +2,7 @@ import {
   createHash,
   createHmac,
   randomBytes,
-  scryptSync,
+  scrypt,
 } from "node:crypto";
 import { oidcEmailVerifiedVia } from "./oidc-email-verified.js";
 import { deploymentBaseUrl } from "./public-url.js";
@@ -451,55 +451,66 @@ async function auditKeyRefusal(
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 // --- passwords (scrypt via node:crypto — memory-hard, zero deps) ------------
-// Parameters recorded in ADR-0025: N=2^14, r=8, p=1 → 16 MiB per verification,
-// interactive-login grade per the scrypt paper/OWASP; 64-byte derived key.
-// The format string carries the parameters so they can be raised later and
-// old hashes keep verifying (and can be flagged for rehash-on-login).
-const SCRYPT_N = 16384;
+// Parameters (ADR-0025 addendum, 2026-11-22, Codex review S-08): N=2^15, r=8,
+// p=3 → 32 MiB per derivation. That is one of OWASP's equivalent minimum
+// scrypt configurations (Password Storage Cheat Sheet: N=2^17/p=1, 2^16/p=2,
+// 2^15/p=3, 2^14/p=5). The earlier N=2^14, p=1 was below every one of them.
+// Derivation is asynchronous (libuv thread pool), so a login never blocks the
+// event loop. The format string carries the parameters: hashes written with
+// older parameters keep verifying and are re-hashed on the next successful
+// password sign-in (`passwordNeedsRehash`).
+const SCRYPT_N = 32768;
 const SCRYPT_R = 8;
-const SCRYPT_P = 1;
+const SCRYPT_P = 3;
 const SCRYPT_KEYLEN = 64;
+/** a stored hash is server-written, but refuse absurd parameters anyway so a
+ * corrupted row cannot make one verification allocate unbounded memory */
+const SCRYPT_MAX_N = 1 << 20;
+const SCRYPT_MAX_RP = 64;
 
-export function hashPassword(password: string): string {
-  const salt = randomBytes(16);
-  const key = scryptSync(password, salt, SCRYPT_KEYLEN, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    maxmem: 128 * SCRYPT_N * SCRYPT_R * 2,
+function scryptAsync(password: string, salt: Buffer | string, keylen: number, N: number, r: number, p: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, { N, r, p, maxmem: 128 * N * r * 2 }, (err, key) => (err ? reject(err) : resolve(key)));
   });
+}
+
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const key = await scryptAsync(password, salt, SCRYPT_KEYLEN, SCRYPT_N, SCRYPT_R, SCRYPT_P);
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+
+/** true when a stored hash was written with parameters other than the current
+ * ones and should be replaced after a successful verify */
+export function passwordNeedsRehash(stored: string | null | undefined): boolean {
+  const parts = stored?.split("$") ?? [];
+  if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+  return Number(parts[1]) !== SCRYPT_N || Number(parts[2]) !== SCRYPT_R || Number(parts[3]) !== SCRYPT_P;
 }
 
 /** constant-time verify; a null/malformed stored hash still burns a scrypt so
  * response timing cannot distinguish "no such user / no password" from "wrong
  * password". */
-export function verifyPassword(password: string, stored: string | null | undefined): boolean {
+export async function verifyPassword(password: string, stored: string | null | undefined): Promise<boolean> {
   const parts = stored?.split("$") ?? [];
-  if (parts.length !== 6 || parts[0] !== "scrypt") {
+  const burn = async (): Promise<false> => {
     // dummy derivation against a fixed salt — same cost, always false
-    scryptSync(password, "regulait-dummy-salt", SCRYPT_KEYLEN, {
-      N: SCRYPT_N,
-      r: SCRYPT_R,
-      p: SCRYPT_P,
-      maxmem: 128 * SCRYPT_N * SCRYPT_R * 2,
-    });
+    await scryptAsync(password, "regulait-dummy-salt", SCRYPT_KEYLEN, SCRYPT_N, SCRYPT_R, SCRYPT_P);
     return false;
-  }
+  };
+  if (parts.length !== 6 || parts[0] !== "scrypt") return burn();
   const [, nStr, rStr, pStr, saltB64, hashB64] = parts;
   const N = Number(nStr);
   const r = Number(rStr);
   const p = Number(pStr);
   const expected = Buffer.from(hashB64!, "base64");
-  if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || expected.length === 0) {
-    return false;
+  if (
+    !Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || expected.length === 0 ||
+    N < 2 || N > SCRYPT_MAX_N || (N & (N - 1)) !== 0 || r < 1 || r > SCRYPT_MAX_RP || p < 1 || p > SCRYPT_MAX_RP
+  ) {
+    return burn();
   }
-  const actual = scryptSync(password, Buffer.from(saltB64!, "base64"), expected.length, {
-    N,
-    r,
-    p,
-    maxmem: 128 * N * r * 2,
-  });
+  const actual = await scryptAsync(password, Buffer.from(saltB64!, "base64"), expected.length, N, r, p);
   return constantTimeEqual(actual, expected);
 }
 
@@ -1350,15 +1361,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!user) {
       // ADR-0030: the unknown-USERNAME path burns the same scrypt as the
       // unknown-email and wrong-password paths — one branch, no shortcut.
-      verifyPassword(body.password, null); // burn the same scrypt cost
+      await verifyPassword(body.password, null); // burn the same scrypt cost
       return fail(kind === "username" ? "unknown_username" : "unknown_email");
     }
     if (user.disabledAt) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return fail("user_disabled");
     }
     if (user.lockedUntil && user.lockedUntil.getTime() > now.getTime()) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return fail("locked_out");
     }
     // ADR-0174 (security review, finding 3): in break-glass mode only a
@@ -1371,20 +1382,23 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // resets it (which would let a correct guess wipe a brute-force trail) nor
     // advances it (password sign-in is closed to this account anyway).
     if (!localSignInAllowed(org, user)) {
-      verifyPassword(body.password, user.passwordHash); // same cost, result unused
+      await verifyPassword(body.password, user.passwordHash); // same cost, result unused
       await auditAuth(db, null, user.id, "local-sign-in-refused", "deny",
         `password sign-in refused for '${user.email}': local sign-in is break-glass only and this account is not a designated break-glass admin`,
         { phase: "login", email: user.email, method: "password", localSignIn: org.localSignIn, identifierKind: kind });
       return reply.status(401).send(UNIFORM_LOGIN_401);
     }
-    if (!verifyPassword(body.password, user.passwordHash)) {
+    if (!(await verifyPassword(body.password, user.passwordHash))) {
       return fail(user.passwordHash ? "wrong_password" : "no_password_set");
     }
 
-    // success: reset lockout state
+    // success: reset lockout state, and upgrade a hash written with older
+    // scrypt parameters while the plaintext is in hand (ADR-0025 addendum).
+    // passwordUpdatedAt is left alone: the password itself did not change.
+    const rehash = passwordNeedsRehash(user.passwordHash) ? await hashPassword(body.password) : null;
     await db
       .update(users)
-      .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
+      .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null, ...(rehash ? { passwordHash: rehash } : {}) })
       .where(eq(users.id, user.id));
 
     if (user.totpEnabled) {
@@ -1679,7 +1693,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       if (body.currentPassword === undefined) {
         // burn the same scrypt cost as a wrong password so the two are
         // indistinguishable by timing
-        verifyPassword("", null);
+        await verifyPassword("", null);
         await auditAuth(db, userId, userId, "password-change-rejected", "deny",
           `user '${user.email}' omitted the current password on a change attempt that requires it`,
           { phase: "change-password", email: user.email, why: "current_password_required", sessionOrigin: origin ?? null });
@@ -1688,7 +1702,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
           detail: "this account's current password must be supplied to set a new one",
         });
       }
-      if (!verifyPassword(body.currentPassword, user.passwordHash)) {
+      if (!(await verifyPassword(body.currentPassword, user.passwordHash))) {
         await auditAuth(db, userId, userId, "password-change-rejected", "deny",
           `user '${user.email}' failed the current-password check on a change attempt`,
           { phase: "change-password", email: user.email });
@@ -1703,7 +1717,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     await db
       .update(users)
-      .set({ passwordHash: hashPassword(body.newPassword), passwordUpdatedAt: new Date(), mustChangePassword: false })
+      .set({ passwordHash: await hashPassword(body.newPassword), passwordUpdatedAt: new Date(), mustChangePassword: false })
       .where(eq(users.id, userId));
     // revoke every OTHER session — a stolen session dies with the password.
     // (When the caller authenticated with an API key there is no current
@@ -1869,7 +1883,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(409).send({ error: "totp_not_enabled" });
     }
     // disabling MFA re-proves BOTH factors
-    if (!verifyPassword(body.password, user.passwordHash)) {
+    if (!(await verifyPassword(body.password, user.passwordHash))) {
       return reply.status(401).send({ error: "invalid_password_or_code" });
     }
     const secret = decryptSecret(opts.dataKey, user.totpSecretCiphertext);
@@ -1922,7 +1936,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await db
       .update(users)
       .set({
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPassword(password),
         passwordUpdatedAt: new Date(),
         mustChangePassword: true,
         failedLoginCount: 0,
@@ -2647,14 +2661,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(401).send(LINK_PROOF_401);
     };
     if (!user || user.disabledAt) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return failProof("user_unavailable");
     }
     if (user.lockedUntil && user.lockedUntil.getTime() > now.getTime()) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return failProof("locked_out");
     }
-    if (!verifyPassword(body.password, user.passwordHash)) return failProof("wrong_password");
+    if (!(await verifyPassword(body.password, user.passwordHash))) return failProof("wrong_password");
     let totpStepUsed: number | null = null;
     if (user.totpEnabled) {
       if (!body.code || !user.totpSecretCiphertext || !opts.dataKey) return failProof("code_missing");

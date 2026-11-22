@@ -136,3 +136,29 @@ job (the gateway does not double-challenge a federated login).
 - Deferred, recorded here: WebAuthn/passkeys; per-user session listing in the
   UIs (API exists: `GET /v1/users/:id/sessions`); SCIM deprovisioning; OIDC
   RP-initiated logout; remember-device for MFA.
+
+## Addendum — 2026-11-22: scrypt cost raised, asynchronous, rehash on sign-in (Codex review S-08)
+
+Decision 1 above is kept as written. Lane CX (Codex review response, PR #1186, row S-08) found two problems with it:
+
+- **The cost was below OWASP.** N=2^14, r=8, p=1 is below every equivalent minimum in the OWASP Password Storage Cheat
+  Sheet (N=2^17/p=1, 2^16/p=2, 2^15/p=3, 2^14/p=5). The claim "per OWASP" did not hold.
+- **The derivation blocked the event loop.** `scryptSync` ran on the main thread. ADR-0176 had already listed "password
+  hashing moved to async `scrypt`" under replace now.
+
+As built:
+
+- **New hashes:** **N=2^15, r=8, p=3, keylen 64** (32 MiB per derivation), computed with asynchronous `crypto.scrypt`
+  on the libuv thread pool. The format string and the 16-byte salt are unchanged.
+- **Old hashes:** they keep verifying. A successful password sign-in re-hashes one written with other parameters
+  (`passwordNeedsRehash`). A failed sign-in never touches it. `passwordUpdatedAt` is not changed, because the password
+  itself is unchanged.
+- **Malformed hashes:** a stored hash whose parameters are not a power of two N ≤ 2^20 with 1 ≤ r, p ≤ 64 is refused.
+  The refusal costs the same dummy derivation as a missing hash. The old code threw on an oversized N.
+- **Timing equaliser:** the dummy derivation now uses the new cost. Until an account signs in once, verifying a legacy
+  hash is cheaper than the dummy. That timing difference shows only whether an account has a legacy hash, not whether
+  it exists, and it ends at the account's next sign-in.
+- **Not chosen:** N=2^17, p=1 (128 MiB per login), which would need a concurrency cap on the login route. argon2 was
+  rejected again for the same reason as above: it is a native dependency, and node:crypto scrypt is memory-hard,
+  OWASP-listed and air-gapped. Owner question open (PR #1186, question 8): N=2^15/p=3 is the secure default built; the
+  owner may choose a higher cost.
