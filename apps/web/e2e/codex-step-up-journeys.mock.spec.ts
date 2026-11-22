@@ -87,6 +87,89 @@ test.describe("Codex review: protected integration writes complete through step-
     expect(su.attempts[1]!.body).toEqual({ ownerUserId: PERSON.id });
   });
 
+  // The step-up audit for this slice: identity deletes refused with a settings_relax "approver-pool takeover" step-up.
+  // Two of them used a raw fetch, so no prompt could ever answer them.
+  const ROLES = [{ id: "r1", name: "approvers", description: null }];
+  const TEAMS = [{ id: "t1", name: "team-17", defaultClassifications: [], members: [{ userId: "u-m", name: "Morgan Reyes" }] }];
+  const MAPPINGS = [{ id: "m1", source: "oidc", externalGroup: "eng-leads", roleId: "r1", roleName: "approvers", createdAt: "2026-11-01T00:00:00Z" }];
+  async function mockIdentity(page: Page, opts: { roleHeld?: boolean; teamOwnsContext?: boolean } = {}) {
+    await page.route("**/*", async (route) => {
+      const req = route.request();
+      const p = new URL(req.url()).pathname;
+      if (req.resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth"))) return route.continue();
+      const method = req.method();
+      let body: Record<string, unknown> = {};
+      try {
+        body = (req.postDataJSON() as Record<string, unknown>) ?? {};
+      } catch {
+        body = {};
+      }
+      if (p === "/auth/me" || p === "/v1/me") return json(route, ME);
+      if (p === "/v1/roles" && method === "GET") return json(route, { roles: ROLES });
+      if (p === "/v1/teams" && method === "GET") return json(route, { teams: TEAMS });
+      if (p === "/v1/group-role-mappings" && method === "GET") return json(route, { mappings: MAPPINGS });
+      if (p.startsWith("/v1/identity/asserted-groups") || p.startsWith("/v1/group-role-mappings/asserted")) return json(route, { assertedGroups: [], unmappedCount: 0 });
+      if (p === "/v1/roles/r1" && method === "DELETE") {
+        if (opts.roleHeld && !body.force) return json(route, { error: "role_held", holders: ["Morgan Reyes"] }, 409);
+        return json(route, { deleted: true });
+      }
+      if (p === "/v1/teams/t1" && method === "DELETE") {
+        if (opts.teamOwnsContext && !body.force) return json(route, { error: "team_owns_shared_context", items: 3 }, 409);
+        return json(route, { deleted: true });
+      }
+      if (p === "/v1/group-role-mappings/m1" && method === "DELETE") return json(route, { deleted: true });
+      if (p === "/v1/users") return json(route, { users: [] });
+      return json(route, {});
+    });
+  }
+
+  test("audit: deleting a role completes through step-up", async ({ page }) => {
+    await mockIdentity(page);
+    const su = await requireStepUpOn(page, { method: "DELETE", path: "/v1/roles/r1", kind: "settings_relax" });
+    await page.goto("/ui/admin/roles");
+    await page.getByRole("button", { name: "delete", exact: true }).click();
+    await page.getByRole("dialog", { name: /Delete role/ }).getByRole("button", { name: "Delete role" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+  });
+
+  test("audit: force-deleting a held role goes through the shared client and step-up", async ({ page }) => {
+    await mockIdentity(page, { roleHeld: true });
+    const su = await requireStepUpOn(page, { method: "DELETE", path: "/v1/roles/r1", kind: "settings_relax", when: (b) => (b as { force?: boolean } | null)?.force === true });
+    await page.goto("/ui/admin/roles");
+    await page.getByRole("button", { name: "delete", exact: true }).click();
+    await page.getByRole("dialog", { name: /Delete role/ }).getByRole("button", { name: "Delete role" }).click();
+    const force = page.getByRole("dialog", { name: /is still held/ });
+    await force.getByLabel("Reason").fill("Retiring the role after the approver pool moved to the new team.");
+    await force.getByRole("button", { name: "Force delete" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toMatchObject({ force: true });
+  });
+
+  test("audit: force-deleting a team that owns shared context completes through step-up", async ({ page }) => {
+    await mockIdentity(page, { teamOwnsContext: true });
+    const su = await requireStepUpOn(page, { method: "DELETE", path: "/v1/teams/t1", kind: "settings_relax", when: (b) => (b as { force?: boolean } | null)?.force === true });
+    await page.goto("/ui/admin/teams");
+    await page.getByRole("button", { name: "delete team", exact: true }).click();
+    await page.getByRole("dialog", { name: /Delete team/ }).getByRole("button", { name: "Delete team" }).click();
+    const force = page.getByRole("dialog", { name: /owns shared context/ });
+    await force.getByLabel("Reason").fill("The team is merged into team-18; its context moves with it.");
+    await force.getByRole("button", { name: "Force delete" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+  });
+
+  test("audit: removing a group-to-role mapping completes through step-up", async ({ page }) => {
+    await mockIdentity(page);
+    const su = await requireStepUpOn(page, { method: "DELETE", path: "/v1/group-role-mappings/m1", kind: "settings_relax" });
+    await page.goto("/ui/admin/group-mappings");
+    await page.getByRole("button", { name: "remove", exact: true }).click();
+    await page.getByRole("dialog", { name: /Remove the mapping/ }).getByRole("button", { name: "Remove mapping" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+  });
+
   test("ACC-001: a failed options read offers Try again, and the retry completes the proof", async ({ page }) => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "POST", path: `/v1/external-scorers/${SCORER.id}/enabled`, kind: "settings_relax" });
