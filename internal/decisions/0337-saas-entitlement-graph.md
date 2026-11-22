@@ -3,7 +3,7 @@
 - **Status**: Accepted (owner direction 2026-11-16, lane E18 brief: close the Obsidian gap analysis item "SaaS entitlement graph"; slice 1 built). Amended by the owner's decisions of 2026-11-17 on both slice 1 questions (§4 Google Directory opt-in, §6 agent links), built in slice 1
 - **Date**: 2026-11-16
 - **Index**: **SaaS entitlement graph: read-only `entitlement_*` discovery sources (M365 Graph, Google Workspace, Salesforce, Slack) store each agent's granted OAuth scopes and permissions in four 3NF tables, inside the run's fenced transaction with its audit row; a frozen, versioned scope classifier; usage comparison, unused-grant, excessive-scope, oversharing and public-exposure findings follow as recommendations through the approvals queue, never auto-revoked.**
-- **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1)
+- **Built in**: lane E18, branch `builder/e18-saas-entitlements` (slice 1), `builder/e18-saas-entitlements-s2` (slice 2)
 - **Migration**: `pending/saas_entitlement_graph.sql`, numbered at merge (ADR-0252)
 - **Related**: ADR-0195 (active discovery framework: sources, credentials, worker, pseudonyms), ADR-0235 (Entra consent
   discovery, the wider-source helpers reused here), ADR-0092 (access recommendations, the frozen rule-set discipline),
@@ -35,8 +35,8 @@ ADR-0235), each source also off until an admin enables it (a `settings_relax` st
 |---|---|---|
 | `entitlement_m365` | Microsoft 365 | Graph `servicePrincipals`, `oauth2PermissionGrants` (delegated, with consenting users), and `appRoleAssignedTo` on Microsoft Graph, Exchange Online and SharePoint Online (application permissions, role ids resolved through each resource's `appRoles`). Microsoft first-party apps are left out. (1) |
 | `entitlement_google_workspace` | Google Workspace | Admin SDK Reports `token` activity: `authorize` and `revoke` events, latest per user and app; or, as an admin opt-in, the Directory API's per-user token listing (§4). (1) |
-| `entitlement_salesforce` | Salesforce | connected app OAuth usage and permissions (2) |
-| `entitlement_slack` | Slack | installed apps and their scopes (2) |
+| `entitlement_salesforce` | Salesforce | `ConnectedApplication` (and whether any user may self-authorise it) and `SetupEntityAccess` (the profiles and permission sets an admin pre-authorised), through the JWT bearer flow as a read-only integration user. (2) |
+| `entitlement_slack` | Slack | `admin.apps.approved.list` (Enterprise Grid org or workspace): approved apps and their user and bot scopes. (2) |
 
 Reused unchanged: sources, schedules, leases, the encrypted credential (federated by default where the platform allows
 it; a static key is a step-up relaxation), the guarded fetch with throttle, backoff and digest, secret scrubbing,
@@ -122,6 +122,30 @@ in the existing approvals queue for a human decision, or feeds an ADR-0090 certi
 vendor to revoke. Where lane E17's vendor agent adapters (Copilot Studio, Agentforce) expose publication state, the
 public-exposure rule reads it through their interface rather than a second adapter.
 
+### 4a. Salesforce and Slack (slice 2)
+
+- **Slack:** an org-level token whose scopes (the `x-oauth-scopes` header of `auth.test`) are all `:read` scopes;
+  anything else refuses the credential before the app listing is read, and a token of another org or workspace is
+  refused. A user scope is a `delegated` grant, a bot scope an `application` grant; both are admin-approved (`tenant`).
+  `is_app_directory_approved` is kept as the publisher-verified flag.
+- **Salesforce:** read-only is only partly reachable. OAuth scopes of a connected app exist only in the Metadata API,
+  and the org-wide `OauthToken` listing (per-user grants, `LastUsedDate`, and a `DeleteToken` that can revoke) needs
+  Customize Application; both can change the org. The reader therefore reads, as an integration user holding View
+  Setup and Configuration, only the connected apps, whether "all users may self-authorise" each one (grant
+  `connected_app:self_authorize`, `tenant`) and which profiles and permission sets an admin pre-authorised (grant
+  `connected_app:preauthorized`, resource `profile:<name>` or `permission_set:<name>`). The V1 classifier does not
+  know these names, so they read as `unknown`, treated as `write`, which is right while the scopes behind them are not
+  visible. The integration user is checked with the same code as the Agentforce adapter (`salesforce-org.ts`, #890
+  R4 [1]): any write or escalation system permission on its session (`WRITE_SYSTEM_PERMISSIONS`: Modify All Data,
+  Modify Metadata, Customize Application, Author Apex, Manage Users, Assign Permission Sets, Manage Profiles and
+  Permission Sets, Manage Internal Users, Manage Roles, Manage Sharing, Reset Passwords), else Create, Edit, Delete or
+  Modify All on any object across its permission sets, refuses the credential before any app is read. Both clear
+  records `read_only`; a check that cannot be read reads nothing else (`unverified`). The token comes from the shared
+  JWT bearer helper (`salesforceJwtToken`, #890 R4 [2]): an RSA key of at least 2048 bits, a 2-minute assertion with a
+  fresh `jti`, posted only to the source's validated My Domain (target `environment` + `myDomain`); the vendor's
+  `instance_url` is ignored, and the org named by the token must be the target's `orgId`. The token query never
+  selects a token field.
+
 ### 6. Linking a vendor app to a RegulAIt agent (owner decision 2026-11-17)
 
 - **Auto-link on an exact identifier match.** An admin declares an agent's app id on one platform
@@ -159,7 +183,9 @@ and SaaS posture tools. No library maps entitlements across vendors into one mod
 (governance semantics). The Graph and Google API clients bring their own HTTP stacks and would need the same
 guarded-transport adaptation `@regulait/cloud-discovery` already does for the cloud SDKs, for a few GET calls that the
 bounded reader already covers; they are not added. `google-auth-library` (already pinned) signs the delegation JWT.
-`jsforce` and `@slack/web-api` are re-checked in slice 2.
+Slice 2 re-check: `jsforce` (MIT) and `@slack/web-api` (MIT) each wrap a few GET calls the bounded reader already makes,
+and each brings its own HTTP client around the guarded fetch, so neither is added; `jose` (already pinned) signs the
+Salesforce JWT bearer assertion.
 
 ## Consequences
 
@@ -167,7 +193,7 @@ bounded reader already covers; they are not added. `google-auth-library` (alread
   from one graph, with each read audited and every person pseudonymised.
 - Collision note: `discovery_sources_kind_check` and `discovery_runs_kind_check` are rewritten with the full kind list.
   A lane that adds discovery kinds and merges after this one must include these four kinds in its own list.
-- Follow-ups: slice 2 (Salesforce, Slack), slice 3 (usage and findings). The agent-link and app-listing routes came with
+- Follow-ups: slice 3 (usage and findings). The agent-link and app-listing routes came with
   the owner's 2026-11-17 decisions (§6), with route census and KNOWN_UI_GAPS entries pointing at #453. Keyless Google delegation (IAM Credentials `signJwt` under
   workload identity federation) would remove the static key.
 
@@ -177,3 +203,6 @@ bounded reader already covers; they are not added. `google-auth-library` (alread
    the scope can revoke, but RegulAIt never calls revoke outside the governed removal flow (§4, with a test).
 2. Linking a vendor app to an agent: **auto-link on an exact identifier match**, each auto-link audited and unlinkable by
    an admin; partial or fuzzy matches stay admin-only (§6).
+3. Salesforce: should an admin be allowed to grant the integration user Customize Application (org-wide OAuth tokens,
+   per-user grants and `LastUsedDate` usage) or metadata read (OAuth scopes), knowing both can also change the org?
+   Default: no; connected apps, self-authorisation and pre-authorisations only.

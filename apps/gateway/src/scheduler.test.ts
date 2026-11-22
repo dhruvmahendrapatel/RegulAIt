@@ -820,6 +820,8 @@ describe("every sweep is registered", () => {
         SCHEDULER_JOB_NAMES.costOutcomeRecorder,
         // ADR-0312 (pilot addendum): the spend-budget pass; driven end to end in zz-adr0312-cost-per-outcome.test.ts
         SCHEDULER_JOB_NAMES.spendBudgetAlerts,
+        // ADR-0313: expired paid-call holds; driven end to end in zz-adr0313-paid-call-budgets.test.ts
+        SCHEDULER_JOB_NAMES.paidCallHoldSweeper,
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,

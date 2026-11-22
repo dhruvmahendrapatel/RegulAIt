@@ -77,6 +77,8 @@ import {
   type AbacResourceAttrs,
 } from "@regulait/policy-kernel/abac";
 import type { AbacDecision, ActorAbacVerdict, ActorLinkFacts, GovernedActor } from "@regulait/policy-kernel";
+import { AGENT_RESPONSE_TABLE, isResponseRelaxation, responseOfPolicyMode, type PolicyResponseMode } from "@regulait/policy-kernel";
+import { parseAgentGuidance } from "@regulait/shared";
 import { projectClassifications } from "./projects.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { aiTrainingCurrentFor } from "./ai-literacy.js";
@@ -119,6 +121,8 @@ export async function loadActiveAbacPolicies(db: Db): Promise<AbacPolicy[]> {
       timezone: abacPolicyVersions.timezone,
       version: abacPolicyVersions.version,
       approverUserId: abacPolicyVersions.approverUserId,
+      guidanceMessage: abacPolicyVersions.guidanceMessage,
+      guidanceAlternative: abacPolicyVersions.guidanceAlternative,
     })
     .from(abacPolicies)
     .innerJoin(abacPolicyVersions, eq(abacPolicyVersions.id, abacPolicies.activeVersionId))
@@ -147,6 +151,10 @@ export async function loadActiveAbacPolicies(db: Db): Promise<AbacPolicy[]> {
     approverUserId: r.approverUserId,
     approverName: r.approverUserId ? (approverName.get(r.approverUserId) ?? null) : null,
     description: r.description,
+    // ADR-0354: the stored guidance (validated at write time, CHECK-bounded in the database)
+    guidance: r.guidanceMessage
+      ? { message: r.guidanceMessage, ...(r.guidanceAlternative ? { alternative: r.guidanceAlternative } : {}) }
+      : null,
   }));
 }
 
@@ -668,7 +676,51 @@ const versionBodySchema = z.object({
   timezone: z.string().trim().min(1).max(64).default("UTC"),
   approverUserId: z.string().uuid().nullish(),
   testCases: z.array(testCaseSchema).max(100).optional(),
+  /** ADR-0354 — advise and correct only: the static text returned to the agent (validated by parseAgentGuidance) */
+  guidance: z.unknown().optional(),
 });
+
+/**
+ * ADR-0354 — the graduated responses whose side effect (end the session, quarantine the agent) is wired in a later
+ * slice. Until then a policy naming one is refused at write time rather than stored and silently answered as a plain
+ * deny: an admin must never believe a session is being ended when it is not.
+ */
+const RESPONSES_NOT_YET_ENFORCED: ReadonlySet<string> = new Set(["block_session", "disable"]);
+
+type ResponseFields =
+  | { ok: true; guidanceMessage: string | null; guidanceAlternative: string | null }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+/** ADR-0354 — the response table's guidance rules for one policy version body, checked before anything is stored */
+export function responseFieldsOf(mode: string, guidance: unknown): ResponseFields {
+  if (RESPONSES_NOT_YET_ENFORCED.has(mode)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "response_not_yet_enforced",
+        detail: `mode '${mode}' is declared (ADR-0354) but its side effect is not wired yet, so it cannot be stored. Use 'forbid' for now.`,
+      },
+    };
+  }
+  const spec = AGENT_RESPONSE_TABLE[responseOfPolicyMode(mode as PolicyResponseMode)];
+  if (spec.guidance === "none") {
+    if (guidance !== undefined && guidance !== null) {
+      return { ok: false, status: 422, body: { error: "guidance_not_allowed", detail: `mode '${mode}' returns no guidance to the agent` } };
+    }
+    return { ok: true, guidanceMessage: null, guidanceAlternative: null };
+  }
+  const parsed = parseAgentGuidance(guidance);
+  if (!parsed.ok) return { ok: false, status: 422, body: { error: "invalid_guidance", errors: parsed.errors, findings: parsed.findings } };
+  const alt = parsed.guidance.alternative ?? null;
+  if (spec.alternative === "required" && !alt) {
+    return { ok: false, status: 422, body: { error: "alternative_required", detail: "a 'correct' policy must name the safe alternative the agent can take" } };
+  }
+  if (spec.alternative === "none" && alt) {
+    return { ok: false, status: 422, body: { error: "alternative_not_allowed", detail: `mode '${mode}' does not carry an alternative` } };
+  }
+  return { ok: true, guidanceMessage: parsed.guidance.message, guidanceAlternative: alt };
+}
 
 const createPolicySchema = versionBodySchema.extend({
   name: z.string().trim().min(1).max(200),
@@ -791,6 +843,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         detail: "a require_approval policy must name the approver its paused calls route to",
       });
     }
+    const response = responseFieldsOf(body.mode, body.guidance);
+    if (!response.ok) return reply.status(response.status).send(response.body);
     const [existing] = await db.select().from(abacPolicies).where(eq(abacPolicies.name, body.name));
     if (existing) return reply.status(409).send({ error: "policy_exists", policy: existing });
 
@@ -806,9 +860,11 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         version: 1,
         source: body.source,
         schemaVersion: body.schemaVersion,
-        mode: body.mode as "forbid" | "require_approval",
+        mode: body.mode as PolicyResponseMode,
         timezone: body.timezone,
         approverUserId: body.approverUserId ?? null,
+        guidanceMessage: response.guidanceMessage,
+        guidanceAlternative: response.guidanceAlternative,
         testCases: body.testCases ?? null,
         authorUserId: actor,
       })
@@ -837,6 +893,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
     if (body.mode === "require_approval" && !body.approverUserId) {
       return reply.status(422).send({ error: "approver_required" });
     }
+    const response = responseFieldsOf(body.mode, body.guidance);
+    if (!response.ok) return reply.status(response.status).send(response.body);
     const maxRows = await db
       .select({ max: sql<number>`coalesce(max(${abacPolicyVersions.version}), 0)` })
       .from(abacPolicyVersions)
@@ -850,9 +908,11 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         version: nextVersion,
         source: body.source,
         schemaVersion: body.schemaVersion,
-        mode: body.mode as "forbid" | "require_approval",
+        mode: body.mode as PolicyResponseMode,
         timezone: body.timezone,
         approverUserId: body.approverUserId ?? null,
+        guidanceMessage: response.guidanceMessage,
+        guidanceAlternative: response.guidanceAlternative,
         testCases: body.testCases ?? null,
         authorUserId: actor,
       })
@@ -913,11 +973,24 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
 
     const [previous] = policy.activeVersionId
       ? await db
-          .select({ version: abacPolicyVersions.version })
+          .select({ version: abacPolicyVersions.version, mode: abacPolicyVersions.mode })
           .from(abacPolicyVersions)
           .where(eq(abacPolicyVersions.id, policy.activeVersionId))
       : [];
     const rollingBack = previous != null && previous.version > target.version;
+    // ADR-0354 (ADR-0180): activating a version whose response restricts LESS than the live one (block → advise,
+    // forbid → require_approval) is a relaxation, so it is a settings_relax step-up bound to the exact change
+    const relaxes =
+      previous != null &&
+      policy.enabled &&
+      isResponseRelaxation(responseOfPolicyMode(previous.mode as PolicyResponseMode), responseOfPolicyMode(target.mode as PolicyResponseMode));
+    if (relaxes) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { abacPolicyId: policyId, values: { mode: { from: previous!.mode, to: target.mode }, version: target.version } },
+      });
+      if (!su.ok) return reply;
+    }
 
     await db
       .update(abacPolicies)
@@ -933,6 +1006,9 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         from: previous?.version ?? null,
         to: target.version,
         rollback: rollingBack,
+        // ADR-0354: the response before and after, and whether the change relaxed it (step-up above)
+        mode: { from: previous?.mode ?? null, to: target.mode },
+        relaxed: relaxes,
         // ADR-0059: whether anyone previewed WHO this would newly block, before
         // it went live. Recorded on every activation, previewed or not — the
         // omission has to be as legible as the preview.
