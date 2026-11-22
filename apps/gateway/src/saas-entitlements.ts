@@ -20,10 +20,12 @@ import {
   sql,
   auditLog,
   discoveryPseudonyms,
+  saasEntitlementAppUsage,
   saasEntitlementApps,
   saasEntitlementGrantPrincipals,
   saasEntitlementGrants,
   saasEntitlementScopes,
+  saasEntitlementUsageReads,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -56,7 +58,14 @@ export interface EntitlementPersistOutcome {
   principalsUnresolved: number;
   /** apps this run linked to an agent on an exact identifier match (each one audited) */
   autoLinked: number;
+  /** how finely this read observed use (ADR-0337 §5; `none` when the reader has no usage source) */
+  usageCoverage: "none" | "app" | "verb";
+  /** apps whose observed use this read recorded */
+  usageApps: number;
 }
+
+/** what a read without a usage block records: the findings then say "not assessable", never "unused" */
+export const NO_USAGE_SOURCE_NOTE = "this reader has no read-only usage source for its platform, so use is not observed";
 
 /** store one checked batch for one source and run, in the caller's transaction, with its audit row */
 export async function persistEntitlementBatch(
@@ -64,7 +73,7 @@ export async function persistEntitlementBatch(
   ctx: { runId: string; sourceId: string; sourceName: string },
   batch: SaasEntitlementBatch,
 ): Promise<EntitlementPersistOutcome> {
-  const out: EntitlementPersistOutcome = { apps: 0, scopes: 0, grants: 0, principals: 0, grantsRemoved: 0, principalsRemoved: 0, principalsUnresolved: 0, autoLinked: 0 };
+  const out: EntitlementPersistOutcome = { apps: 0, scopes: 0, grants: 0, principals: 0, grantsRemoved: 0, principalsRemoved: 0, principalsUnresolved: 0, autoLinked: 0, usageCoverage: "none", usageApps: 0 };
 
   // 1. apps (one row per source and vendor id)
   const appIdByExternal = new Map<string, string>();
@@ -203,7 +212,48 @@ export async function persistEntitlementBatch(
        AND NOT EXISTS (SELECT 1 FROM saas_entitlement_grant_principals p WHERE p.grant_id = g.id)`);
   out.grantsRemoved += empty.rowCount ?? 0;
 
-  // 6. an app whose vendor id exactly equals an identifier an admin declared for an agent is linked to it (audited)
+  // 6. observed use: the read's coverage replaces the source's last one; an app's times only move forward
+  const usage = batch.usage ?? { coverage: "none" as const, windowStart: null, note: NO_USAGE_SOURCE_NOTE, apps: [] };
+  out.usageCoverage = usage.coverage;
+  await t
+    .insert(saasEntitlementUsageReads)
+    .values({ sourceId: ctx.sourceId, coverage: usage.coverage, windowStart: usage.windowStart ? new Date(usage.windowStart) : null, note: usage.note, activityLogState: usage.activityLogState ?? null, recordedAt: sql`now()`, runId: ctx.runId })
+    .onConflictDoUpdate({
+      target: saasEntitlementUsageReads.sourceId,
+      set: { coverage: sql`excluded.coverage`, windowStart: sql`excluded.window_start`, note: sql`excluded.note`, activityLogState: sql`excluded.activity_log_state`, recordedAt: sql`excluded.recorded_at`, runId: sql`excluded.run_id` },
+    });
+  const usedIds = usage.apps.map((u) => u.externalId);
+  const usedAppId = new Map<string, string>();
+  for (const part of chunks(usedIds)) {
+    const rows = await t
+      .select({ id: saasEntitlementApps.id, externalId: saasEntitlementApps.externalId })
+      .from(saasEntitlementApps)
+      .where(and(eq(saasEntitlementApps.sourceId, ctx.sourceId), inArray(saasEntitlementApps.externalId, part)));
+    for (const r of rows) usedAppId.set(r.externalId, r.id);
+  }
+  // use of an app the graph does not hold (it holds no grant this source read) is not stored: nothing to judge
+  const usageRows = usage.apps.flatMap((u) => {
+    const appId = usedAppId.get(u.externalId);
+    return appId ? [{ appId, lastUseAt: new Date(u.lastUseAt), lastReadAt: u.lastReadAt ? new Date(u.lastReadAt) : null, lastWriteAt: u.lastWriteAt ? new Date(u.lastWriteAt) : null, updatedAt: sql`now()` }] : [];
+  });
+  for (const part of chunks(usageRows)) {
+    await t
+      .insert(saasEntitlementAppUsage)
+      .values(part)
+      .onConflictDoUpdate({
+        target: saasEntitlementAppUsage.appId,
+        set: {
+          // GREATEST ignores NULLs: a read that saw no write never erases an earlier one
+          lastUseAt: sql`GREATEST(${saasEntitlementAppUsage.lastUseAt}, excluded.last_use_at)`,
+          lastReadAt: sql`GREATEST(${saasEntitlementAppUsage.lastReadAt}, excluded.last_read_at)`,
+          lastWriteAt: sql`GREATEST(${saasEntitlementAppUsage.lastWriteAt}, excluded.last_write_at)`,
+          updatedAt: sql`excluded.updated_at`,
+        },
+      });
+  }
+  out.usageApps = usageRows.length;
+
+  // 7. an app whose vendor id exactly equals an identifier an admin declared for an agent is linked to it (audited)
   out.autoLinked = (await autoLinkApps(t, { sourceId: ctx.sourceId }, NIL_UUID)).length;
 
   await t.insert(auditLog).values({
@@ -216,7 +266,8 @@ export async function persistEntitlementBatch(
     ruleChain: [],
     reason:
       `entitlement read of '${ctx.sourceName}' (${batch.platform}, ${batch.complete ? "complete" : "partial: nothing unseen was removed"}): ` +
-      `${out.apps} app(s), ${out.grants} grant(s), ${out.principals} consenting user(s); ${out.grantsRemoved} grant(s) and ${out.principalsRemoved} user consent(s) removed`,
+      `${out.apps} app(s), ${out.grants} grant(s), ${out.principals} consenting user(s); ${out.grantsRemoved} grant(s) and ${out.principalsRemoved} user consent(s) removed; ` +
+      `use observed: ${out.usageCoverage === "none" ? "not observable" : `${out.usageApps} app(s), coverage ${out.usageCoverage}`}`,
   });
   return out;
 }

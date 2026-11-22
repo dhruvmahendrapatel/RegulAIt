@@ -423,6 +423,7 @@ test.describe("ADR-0187 X26: the Engines page", () => {
           isolationFloorRegulated: "microvm",
           isolationFloorMcpStdio: "user_space_kernel",
           isolationFloorEngineWorker: "user_space_kernel",
+          isolationFloorRobotBrowser: "user_space_kernel",
           executorAttestationMaxAgeMinutes: 120,
         },
       }),

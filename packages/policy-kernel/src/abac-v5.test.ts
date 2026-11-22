@@ -123,13 +123,18 @@ describe("ADR-0251 slice 4: evaluation", () => {
 });
 
 describe("ADR-0251 slice 4, review #836: a v5 policy that can reach a governed call may not read a fact the core does not supply", () => {
-  // each validates under strict Cedar, and each would never refuse a model, connector or A2A call (ADR-0180)
+  // validates under strict Cedar, and would never refuse a model, connector or A2A call (ADR-0180): the core has no
+  // rate-consumption figure for those calls
   const silent = [
+    'forbid (principal, action in [RegulAIt::Action::"ModelInvoke", RegulAIt::Action::"McpToolCall"], resource) when { context.rateLimitUsagePct > 80 };',
+    'forbid (principal, action, resource is RegulAIt::Connector) when { context.rateLimitUsagePct > 50 };',
+  ];
+  // slice 4b: the core now supplies the request's session facts and the delegation chain, so these validate
+  const supplied = [
     'forbid (principal is RegulAIt::User, action == RegulAIt::Action::"ModelInvoke", resource) when { principal.sessionOrigin == "api_key" };',
     'forbid (principal is RegulAIt::User, action == RegulAIt::Action::"ConnectorCall", resource) unless { principal.mfaCompleted };',
     'forbid (principal, action == RegulAIt::Action::"A2aMessage", resource) when { context.delegationDepth > 0 };',
     'forbid (principal, action, resource) when { context has clientIp && !context.clientIp.isInRange(ip("10.0.0.0/8")) };',
-    'forbid (principal, action in [RegulAIt::Action::"ModelInvoke", RegulAIt::Action::"McpToolCall"], resource) when { context.rateLimitUsagePct > 80 };',
     'forbid (principal, action, resource is RegulAIt::Model) when { context.actorChain.contains("a1") };',
     'forbid (principal is RegulAIt::Agent, action == RegulAIt::Action::"ModelInvoke", resource);',
   ];
@@ -139,23 +144,25 @@ describe("ADR-0251 slice 4, review #836: a v5 policy that can reach a governed c
       const r = abacEngine.validate(src, "v5");
       expect(r.ok, src).toBe(false);
       expect(r.errors[0]!.message, src).toContain("does not supply");
+      expect(r.errors[0]!.message, src).toContain("`context.rateLimitUsagePct`");
       expect(r.errors[0]!.help, src).toContain("McpToolCall");
     }
-    expect(abacEngine.validate(silent[0]!, "v5").errors[0]!.message).toContain("`principal.sessionOrigin`");
-    expect(abacEngine.validate(silent[6]!, "v5").errors[0]!.message).toContain("an Agent principal");
+  });
+
+  it("session facts and the delegation chain on a governed action validate (slice 4b supplies them)", () => {
+    for (const src of supplied) expect(abacEngine.validate(src, "v5").ok, src).toBe(true);
   });
 
   it("the same conditions scoped to MCP tool calls validate, and so does a governed policy on supplied facts", () => {
-    expect(abacEngine.validate('forbid (principal is RegulAIt::User, action == RegulAIt::Action::"McpToolCall", resource) when { principal.sessionOrigin == "api_key" };', "v5").ok).toBe(true);
-    expect(abacEngine.validate('forbid (principal, action, resource is RegulAIt::Tool) when { context.delegationDepth > 0 };', "v5").ok).toBe(true);
+    expect(abacEngine.validate('forbid (principal, action == RegulAIt::Action::"McpToolCall", resource) when { context.rateLimitUsagePct > 80 };', "v5").ok).toBe(true);
     expect(abacEngine.validate('forbid (principal is RegulAIt::User, action == RegulAIt::Action::"ModelInvoke", resource) when { !principal.isAdmin && resource.mode == "execute" };', "v5").ok).toBe(true);
     // v4 is untouched: its policies never run for a governed call
-    expect(abacEngine.validate('forbid (principal is RegulAIt::User, action, resource) when { principal.sessionOrigin == "api_key" };', "v4").ok).toBe(true);
+    expect(abacEngine.validate('forbid (principal, action, resource) when { context.rateLimitUsagePct > 80 };', "v4").ok).toBe(true);
   });
 
   it("the unsupplied list is the one the gateway's governed request leaves strict", () => {
-    expect(ABAC_GOVERNED_UNSUPPLIED_FACTS.principal).toEqual(["sessionOrigin", "mfaCompleted"]);
-    expect([...ABAC_GOVERNED_UNSUPPLIED_FACTS.context].sort()).toEqual(["actorChain", "clientIp", "delegationDepth", "rateLimitUsagePct"]);
+    expect(ABAC_GOVERNED_UNSUPPLIED_FACTS.principal).toEqual([]);
+    expect([...ABAC_GOVERNED_UNSUPPLIED_FACTS.context]).toEqual(["rateLimitUsagePct"]);
   });
 
   it("abacPolicyReachesGovernedActions: v5 scope decides; v1-v4 never reach; unparseable reads as reaching", () => {

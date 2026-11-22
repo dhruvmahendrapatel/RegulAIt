@@ -1,0 +1,8 @@
+{
+  "adr": "ADR-0348",
+  "lane": "E29",
+  "tracking": "ADR-0348 (lane E29): the brief is API-only; record screens read each record's `lifecycle` field, and a lifecycle reference screen is requested on #453 (lane brief rule 3, recorded in ADR-0348)",
+  "gaps": {
+    "GET /v1/state-machines": "lists every declared lifecycle state machine, or one machine and the transitions allowed from a given state, read-only, for agents and MCP tools"
+  }
+}
