@@ -71,33 +71,33 @@ positive in the original report.
   This replaces the N=2^15/p=3 default first proposed (slice 1).
 - **ACC-002: triage-low.** File the issue and do not build it.
 
+## Owner answers (2026-11-22, about 05:35 UTC, relayed by the master)
+
+- **CST-005: yes.** The server's DELETE for cost aliases and domain rules requires an audited reason, the same as create
+  (slice 7).
+- **CST-004: inclusive.** The consolidation "To" date covers that whole calendar day, and the resolved UTC window is shown
+  (slice 7).
+- **UIS-09 / UIW-05: yes.**
+  - An edit dialog with unsaved changes asks "Discard changes?" before Escape or a backdrop click closes it.
+  - Closing is also blocked while a save is in flight; slice 4 already has that.
+  - The dirty-draft prompt is added to slice 4. UIW-05 stays with E50.
+- **UIS-04: yes.** Clickable rows get a real link or button in the primary cell in place of `<tr role="link">`, and the
+  E2E specs change in the same PR (slice 10).
+- **S-08 cap: 4 per replica (512 MiB peak),** configurable through `REGULAIT_PASSWORD_HASH_CONCURRENCY` (1–8). The image
+  sets `UV_THREADPOOL_SIZE=8`. Checked against the Helm 2 GiB limit and the Compose gateway service, which has no
+  limit. Built in #1194.
+- **C-07: archive.** The 138 files under `apps/web/review` and `apps/web/spikes` move to an archive folder outside the
+  build, and nothing is deleted. Anything that still imports them goes to the master first (slice 16).
+- **O-01: redo.** THIRD_PARTY.md is rebuilt from the current lockfile and manifests, with a CI preflight check. The old
+  `builder/lane-b-third-party` branch is left untouched (slice 13).
+- **C-01 / P-07: ADR numbers assigned.** ADR-0380 is for C-01 (a shared API contract or openapi-typescript) and ADR-0381
+  is for P-07 (where compaction and dedup apply to provider-shaped compat calls). Each compares at least two approaches
+  per ADR-0176 before choosing (slices 17 and 18).
+
 ## Owner questions
 
-The secure default is built meanwhile wherever a slice depends on one. The numbers of answered questions are kept.
-
-1. *(answered above: ADM-003)*
-2. *(answered above: ACC-002)*
-3. *(answered above: REV-002)*
-4. **CST-005:** creating a cost alias or domain rule needs an audited reason, but deleting one does not, and deleting
-   re-attributes stored lines. Require a reason on the server DELETE too? *Default under ADR-0180: yes, built in the
-   cost slice unless the owner objects.*
-5. **CST-004:** should the consolidation "To" date include that whole calendar day, or stay an exclusive UTC instant
-   with a clear label? *Default: inclusive calendar day, with the resolved UTC window shown.*
-6. **UIS-09 / UIW-05:** should edit dialogs with unsaved changes ask before closing on Escape or a backdrop click?
-   *Default: block dismissal while a save is in flight, which is safe and needs no decision. The dirty-draft prompt
-   waits for the answer.*
-7. **UIS-04:** may clickable table rows change from `role="link"` on `<tr>` to a real link or button in the primary
-   cell? E2E specs that query rows by the link role would change. *Default: yes, with spec updates in the same PR.*
-8. *(answered above: S-08 at N=2^17)*. New question: the load test shows about 6 sign-ins per second per replica
-   with two derivations at once (256 MiB peak). Raise the cap to 4 (512 MiB peak, about twice the throughput)?
-   *Default: 2.*
-9. **C-07:** 138 files under `apps/web/review` and `apps/web/spikes` are outside type-checking. Archive, type-check or
-   delete them? Deletion needs the owner.
-10. **O-01:** revive the stale `builder/lane-b-third-party` branch, or redo THIRD_PARTY.md against the current
-    manifests with a preflight check? *Default: redo it, leaving the old branch untouched.*
-11. **C-01 / P-07:** both need a design decision first. C-01 needs the openapi-typescript or shared-contract ADR that
-    ADR-0176 calls for. P-07 needs to say where compaction and dedup fit provider-shaped compat calls. A new ADR number
-    is requested from the master.
+None are open. Every question this file raised has an answer above. New questions are added here as slices raise
+them, and slice 6's questions are listed with its PR.
 
 ## Build plan
 
@@ -108,7 +108,7 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 1 | `builder/codex-auth-hardening` | S-08, S-10 |
 | 2 | `builder/codex-step-up-journeys` | ADM-001, INT-001, ACC-001, plus an audit of settings_relax routes against their web call sites |
 | 3 | `builder/codex-guardrail-credential-honesty` | ADM-002, ADM-005, ADM-006, ADM-007, ADM-008, ADM-009, RUN-001 |
-| 4 | `builder/codex-kit-a11y` | UIS-01, UIS-02, UIS-03, UIS-07, UIS-09 (busy guard) |
+| 4 | `builder/codex-kit-a11y` | UIS-01, UIS-02, UIS-03, UIS-07, UIS-09 (busy guard and dirty-draft prompt) |
 | 5 | `builder/codex-datalist-state` | UIS-05, UIS-06, UIS-08 |
 | 6 | `builder/codex-reports-risks` | REV-001, REV-002 (archive, per the owner), REV-003, REV-004, REV-005 |
 | 7 | `builder/codex-cost-recovery` | CST-001, CST-002, CST-003, CST-004, CST-005 |
@@ -120,6 +120,9 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 13 | `builder/codex-oss-and-ledger` | O-01, O-03, O-04, O-02 (ADR-0176 text), P-06, P-09 |
 | 14 | `builder/codex-wave-concurrency` | P-05 (coordinated with E2) |
 | 15 | `builder/codex-guardrail-timeboxed-relax` | ADM-003 (owner answer; ADR-0181 addendum, new row kind) |
+| 16 | `builder/codex-archive-review-spikes` | C-07 (archive, nothing deleted) |
+| 17 | `builder/codex-adr0380-api-contract` | C-01 (ADR-0380 first) |
+| 18 | `builder/codex-adr0381-compat-optimisation` | P-07 (ADR-0381 first) |
 
 **The master's pre-check (2026-11-22)** suggested triage-low for UIS-03, UIS-06, UIS-07, ADM-009 and S-07. On our
 rescoring each is at or above F×S 5 and the fix is small, so they stay ACCEPT-build. The master may overrule. Its

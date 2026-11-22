@@ -457,14 +457,24 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 // Cheat Sheet first recommendation. The earlier N=2^14, p=1 was below every
 // OWASP equivalent. Derivation is asynchronous (libuv thread pool), so a login
 // never blocks the event loop, and at most SCRYPT_CONCURRENCY derivations run
-// at once (p-limit), so a login burst peaks at 256 MiB and leaves libuv's other
-// threads for file and DNS work; the rest queue. The format string carries the
+// at once (p-limit; default 4 per the owner, 2026-11-22), so a login burst
+// peaks at 512 MiB. The image sets UV_THREADPOOL_SIZE=8 so four derivations
+// still leave libuv threads for file and DNS work; the rest queue. The format string carries the
 // parameters: hashes written with older parameters keep verifying and are
 // re-hashed on the next successful password sign-in (`passwordNeedsRehash`).
 const SCRYPT_N = 131072;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
-const SCRYPT_CONCURRENCY = 2;
+/** concurrent password derivations per gateway process: an integer 1..8 in the
+ * environment, else 4. Never unbounded (each one holds 128 MiB). */
+export const PASSWORD_HASH_CONCURRENCY_ENV = "REGULAIT_PASSWORD_HASH_CONCURRENCY";
+export function passwordHashConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PASSWORD_HASH_CONCURRENCY_ENV]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return 4;
+  const n = Number(raw);
+  return n >= 1 && n <= 8 ? n : 4;
+}
+const SCRYPT_CONCURRENCY = passwordHashConcurrency();
 const scryptSlots = pLimit(SCRYPT_CONCURRENCY);
 /** derivations running now and waiting for a slot (tests and diagnostics) */
 export function passwordHashingLoad(): { active: number; pending: number; limit: number } {

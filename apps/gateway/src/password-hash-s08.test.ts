@@ -5,7 +5,7 @@
  */
 import { scryptSync, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { hashPassword, passwordHashingLoad, passwordNeedsRehash, verifyPassword } from "./auth.js";
+import { hashPassword, passwordHashConcurrency, passwordHashingLoad, passwordNeedsRehash, verifyPassword, PASSWORD_HASH_CONCURRENCY_ENV } from "./auth.js";
 
 /** a hash exactly as the pre-addendum code wrote it (N=2^14, r=8, p=1) */
 function legacyHash(password: string): string {
@@ -55,7 +55,7 @@ describe("S-08: password hashing cost and rehash", () => {
     }
   });
 
-  it("a burst of eight sign-ins runs at most two 128 MiB derivations at once and all complete", async () => {
+  it("a burst of eight sign-ins runs at most the configured number of 128 MiB derivations at once and all complete", async () => {
     const stored = await hashPassword("Rg1-burst");
     let peak = 0;
     const timer = setInterval(() => (peak = Math.max(peak, passwordHashingLoad().active)), 1);
@@ -73,6 +73,16 @@ describe("S-08: password hashing cost and rehash", () => {
     // recorded for the PR body, not asserted (machine-dependent)
     console.log(`[s08] 8 concurrent verifies at N=2^17: ${Date.now() - started} ms, peak ${peak} in flight`);
   }, 60_000);
+
+  it("the concurrency cap defaults to 4 (owner, 2026-11-22), accepts 1..8 and ignores anything else", () => {
+    expect(passwordHashConcurrency({})).toBe(4);
+    expect(passwordHashConcurrency({ [PASSWORD_HASH_CONCURRENCY_ENV]: "2" })).toBe(2);
+    expect(passwordHashConcurrency({ [PASSWORD_HASH_CONCURRENCY_ENV]: "8" })).toBe(8);
+    for (const bad of ["0", "9", "-1", "4.5", "lots", ""]) {
+      expect(passwordHashConcurrency({ [PASSWORD_HASH_CONCURRENCY_ENV]: bad })).toBe(4);
+    }
+    expect(passwordHashingLoad().limit).toBe(passwordHashConcurrency());
+  });
 
   it("does not block the event loop while deriving", async () => {
     let ticks = 0;

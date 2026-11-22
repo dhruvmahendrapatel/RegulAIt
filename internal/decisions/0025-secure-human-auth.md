@@ -153,9 +153,11 @@ As built:
 
 - **New hashes:** **N=2^17, r=8, p=1, keylen 64** (128 MiB per derivation; `maxmem` 256 MiB). They are computed with
   asynchronous `crypto.scrypt` on the libuv thread pool. The format string and the 16-byte salt are unchanged.
-- **Concurrency:** at most **two** derivations run at once, through `p-limit` 7.3.3 (MIT, pinned, no runtime
-  download). A sign-in burst therefore peaks at 256 MiB of scrypt memory and leaves libuv's other threads for file and
-  DNS work. Further requests queue.
+- **Concurrency:** at most **four** derivations run at once by default (owner, 2026-11-22), through `p-limit` 7.3.3
+  (MIT, pinned, no runtime download). The operator can set `REGULAIT_PASSWORD_HASH_CONCURRENCY` to an integer from 1 to
+  8; any other value falls back to 4. A sign-in burst therefore peaks at 512 MiB of scrypt memory. The image sets
+  `UV_THREADPOOL_SIZE=8`, so four derivations still leave libuv threads for file and DNS work. The memory limits allow
+  it: the Helm gateway limit is 2 GiB, the Compose gateway service has none, and the measured peak RSS is 712 MiB.
 - **Old hashes:** they keep verifying. A successful password sign-in re-hashes one written with other parameters
   (`passwordNeedsRehash`). A failed sign-in never touches it. `passwordUpdatedAt` is not changed, because the password
   itself is unchanged.
@@ -164,19 +166,15 @@ As built:
 - **Timing equaliser:** the dummy derivation now uses the new cost. Until an account signs in once, verifying a legacy
   hash is cheaper than the dummy. That timing difference shows only whether an account has a legacy hash, not whether
   it exists, and it ends at the account's next sign-in.
-- **Load test** (4-core dev container, built gateway module, one process):
+- **Load test** (4-core dev container, built gateway module, one process, `UV_THREADPOOL_SIZE=8`):
 
-  | Measure | Result |
-  | --- | --- |
-  | One verification | 277 ms |
-  | 10 concurrent | p50 1.05 s, p95 1.79 s |
-  | 40 concurrent | p50 3.6 s, p95 6.3 s |
-  | Derivations in flight at peak | 2 |
-  | Process RSS at peak | 460 MiB, module load included |
-  | Event-loop lag | 3 ms or less |
+  | Cap | One verification | 10 concurrent | 40 concurrent | Peak RSS | Event-loop lag |
+  | --- | --- | --- | --- | --- | --- |
+  | 2 | 392 ms | p95 1.89 s | p95 6.74 s | 459 MiB | 4 ms or less |
+  | 4 (default) | 410 ms | p95 1.02 s | p95 3.40 s | 712 MiB | 5 ms or less |
 
-  Throughput is about 6 password verifications per second per replica. The existing auth rate limit bounds what one
-  client can queue. Raising `SCRYPT_CONCURRENCY` to 4 would roughly double throughput, at a 512 MiB peak.
+  At the default that is about 12 password verifications per second per replica. The existing auth rate limit bounds
+  what one client can queue. The RSS figures include module load.
 - **Considered:** argon2 was rejected again for the same reason as above: it is a native dependency, and node:crypto
   scrypt is memory-hard, OWASP-listed and air-gapped. For the concurrency cap, `p-limit` and `async-sema` (both MIT and
   maintained) were compared, and `p-limit` was chosen because it reports active and pending counts. Relying on the
