@@ -199,6 +199,8 @@ export const AUTH_REFUSALS = [
   "engine_enrollment_invalid",
   "virtual_key_revoked",
   "virtual_key_expired",
+  // ADR-0366 slice 2: a rogue-agent containment halted the key (reversible by an approved release)
+  "virtual_key_halted",
   "api_key_expired",
   "api_key_revoked",
   // ADR-0167 amendment (S-02): the bootstrap token once an active admin exists
@@ -220,6 +222,7 @@ export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
     "this enrolment token is unknown, already used or expired — mint a new one on the Engines page",
   virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
   virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
+  virtual_key_halted: "this virtual key is halted by a containment — an administrator can release it after review",
   api_key_expired:
     "this API key has expired and authenticates nothing — an admin must issue a new one (an expiry cannot be extended)",
   api_key_revoked: "this API key has been revoked and authenticates nothing",
@@ -286,6 +289,7 @@ export async function authenticate(
     if (!resolved.ok) {
       if (resolved.reason === "revoked") return "virtual_key_revoked";
       if (resolved.reason === "expired") return "virtual_key_expired";
+      if (resolved.reason === "halted") return "virtual_key_halted";
       return null;
     }
     // ADR-0022: a deactivated owner's virtual keys stop authenticating for the

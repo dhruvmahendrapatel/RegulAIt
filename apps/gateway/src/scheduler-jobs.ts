@@ -137,6 +137,8 @@ export const SCHEDULER_JOB_NAMES = {
   costOutcomeRecorder: "cost-outcome-recorder",
   // ADR-0312 (pilot addendum): the five-minute spend-budget pass of the governance monitor (governance-monitor.ts)
   spendBudgetAlerts: "spend-budget-alerts",
+  // ADR-0313: releases paid-call holds left open past their TTL (paid-calls.ts)
+  paidCallHoldSweeper: "paid-call-hold-sweeper",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
   // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
@@ -875,6 +877,7 @@ import { detectionJobDefinitions } from "./detection/sweep.js";
 import { costOutcomeJobDefinitions } from "./cost-outcomes.js";
 import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
+import { paidCallJobDefinitions } from "./paid-calls.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
@@ -898,6 +901,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
     ...detectionJobDefinitions(), // ADR-0333: agent-detection-sweep
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
+    ...paidCallJobDefinitions(), // ADR-0313: paid-call-hold-sweeper
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
     ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
     ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
