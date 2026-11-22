@@ -200,7 +200,7 @@ export function changeCopy(c: Change, tradeOff?: string): { title: string; body:
   switch (c.kind) {
     case "activityLogs":
       return c.on
-        ? { title: "Ask for the activity log", body: "This source's reads will also ask Microsoft Entra for its sign-in activity log, so unused grants can be judged. It widens what the source reads; on an enabled source you will be asked to confirm it's you.", confirm: "Ask for the activity log", stepUp: true }
+        ? { title: "Ask for the activity log", body: "This source's reads will also ask Entra for its sign-in activity log, so unused grants can be judged. It widens what the source reads; on an enabled source you will be asked to confirm it's you.", confirm: "Ask for the activity log", stepUp: true }
         : { title: "Stop asking for the activity log", body: "Reads stop using the activity log, and no app is judged unused.", confirm: "Stop asking", stepUp: false };
     case "orgSwitch":
       return c.on

@@ -159,7 +159,7 @@ function M365View(props: { data: M365Setup; source: DiscoverySourceView | undefi
       <Card
         title="Activity log"
         actions={<Badge tone={copy.tone}>{copy.label}</Badge>}
-        caption={<span className={v.dim}>The Microsoft Entra sign-in activity log, used to judge which granted apps go unused. Off by default.</span>}
+        caption={<span className={v.dim}>The Entra sign-in activity log, used to judge which granted apps go unused. Off by default.</span>}
       >
         <div className={v.stack}>
           <p>{copy.detail}</p>
@@ -177,7 +177,7 @@ function M365View(props: { data: M365Setup; source: DiscoverySourceView | undefi
           )}
         </div>
       </Card>
-      <Card title="Setup checklist" caption={<span className={v.dim}>Done by a Microsoft Entra administrator, in this order. RegulAIt cannot tick these off: the state above is what the latest read observed.</span>}>
+      <Card title="Setup checklist" caption={<span className={v.dim}>Done by an Entra administrator, in this order. RegulAIt cannot tick these off: the state above is what the latest read observed.</span>}>
         <ol className={v.stack}>
           {a.steps.map((s) => (
             <li key={s.id}>
@@ -187,7 +187,7 @@ function M365View(props: { data: M365Setup; source: DiscoverySourceView | undefi
                 (a.consentUrl ? (
                   <p>
                     <a href={a.consentUrl} target="_blank" rel="noopener noreferrer">
-                      Open the admin consent page (Microsoft, opens in a new tab)
+                      Open the admin consent page (opens in a new tab)
                     </a>
                   </p>
                 ) : (
