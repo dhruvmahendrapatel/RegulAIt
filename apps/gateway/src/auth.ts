@@ -4,6 +4,7 @@ import {
   randomBytes,
   scrypt,
 } from "node:crypto";
+import pLimit from "p-limit";
 import { oidcEmailVerifiedVia } from "./oidc-email-verified.js";
 import { deploymentBaseUrl } from "./public-url.js";
 import { bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
@@ -451,17 +452,24 @@ async function auditKeyRefusal(
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 // --- passwords (scrypt via node:crypto — memory-hard, zero deps) ------------
-// Parameters (ADR-0025 addendum, 2026-11-22, Codex review S-08): N=2^15, r=8,
-// p=3 → 32 MiB per derivation. That is one of OWASP's equivalent minimum
-// scrypt configurations (Password Storage Cheat Sheet: N=2^17/p=1, 2^16/p=2,
-// 2^15/p=3, 2^14/p=5). The earlier N=2^14, p=1 was below every one of them.
-// Derivation is asynchronous (libuv thread pool), so a login never blocks the
-// event loop. The format string carries the parameters: hashes written with
-// older parameters keep verifying and are re-hashed on the next successful
-// password sign-in (`passwordNeedsRehash`).
-const SCRYPT_N = 32768;
+// Parameters (ADR-0025 addendum, 2026-11-22, Codex review S-08; owner's
+// choice): N=2^17, r=8, p=1 → 128 MiB per derivation, OWASP's Password Storage
+// Cheat Sheet first recommendation. The earlier N=2^14, p=1 was below every
+// OWASP equivalent. Derivation is asynchronous (libuv thread pool), so a login
+// never blocks the event loop, and at most SCRYPT_CONCURRENCY derivations run
+// at once (p-limit), so a login burst peaks at 256 MiB and leaves libuv's other
+// threads for file and DNS work; the rest queue. The format string carries the
+// parameters: hashes written with older parameters keep verifying and are
+// re-hashed on the next successful password sign-in (`passwordNeedsRehash`).
+const SCRYPT_N = 131072;
 const SCRYPT_R = 8;
-const SCRYPT_P = 3;
+const SCRYPT_P = 1;
+const SCRYPT_CONCURRENCY = 2;
+const scryptSlots = pLimit(SCRYPT_CONCURRENCY);
+/** derivations running now and waiting for a slot (tests and diagnostics) */
+export function passwordHashingLoad(): { active: number; pending: number; limit: number } {
+  return { active: scryptSlots.activeCount, pending: scryptSlots.pendingCount, limit: SCRYPT_CONCURRENCY };
+}
 const SCRYPT_KEYLEN = 64;
 /** a stored hash is server-written, but refuse absurd parameters anyway so a
  * corrupted row cannot make one verification allocate unbounded memory */
@@ -469,9 +477,13 @@ const SCRYPT_MAX_N = 1 << 20;
 const SCRYPT_MAX_RP = 64;
 
 function scryptAsync(password: string, salt: Buffer | string, keylen: number, N: number, r: number, p: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    scrypt(password, salt, keylen, { N, r, p, maxmem: 128 * N * r * 2 }, (err, key) => (err ? reject(err) : resolve(key)));
-  });
+  // maxmem: scrypt needs 128·N·r bytes; twice that leaves room for its working buffers
+  return scryptSlots(
+    () =>
+      new Promise<Buffer>((resolve, reject) => {
+        scrypt(password, salt, keylen, { N, r, p, maxmem: 128 * N * r * 2 }, (err, key) => (err ? reject(err) : resolve(key)));
+      }),
+  );
 }
 
 export async function hashPassword(password: string): Promise<string> {

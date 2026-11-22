@@ -6,7 +6,7 @@
  *
  * PASS CRITERIA, WRITTEN BEFORE THE RUN (M-023):
  *  1. wrong password on a legacy hash: 401, stored hash byte-identical.
- *  2. right password on a legacy hash: 200, stored hash now `scrypt$32768$8$3$`,
+ *  2. right password on a legacy hash: 200, stored hash now `scrypt$131072$8$1$`,
  *     and the new hash verifies the same password.
  *  3. a second sign-in does not rewrite a current hash.
  */
@@ -74,7 +74,7 @@ describe("S-08: rehash on successful password sign-in", () => {
     expect(res.statusCode, res.body).toBe(200);
     const after = await storedHash();
     expect(after).not.toBe(before);
-    expect(after!.startsWith("scrypt$32768$8$3$")).toBe(true);
+    expect(after!.startsWith("scrypt$131072$8$1$")).toBe(true);
     expect(await verifyPassword(PASSWORD, after)).toBe(true);
   });
 

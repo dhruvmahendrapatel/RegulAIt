@@ -146,10 +146,16 @@ Decision 1 above is kept as written. Lane CX (Codex review response, PR #1186, r
 - **The derivation blocked the event loop.** `scryptSync` ran on the main thread. ADR-0176 had already listed "password
   hashing moved to async `scrypt`" under replace now.
 
+The owner chose the cost on 2026-11-22: raise scrypt to N=2^17, make hashing asynchronous, rehash on sign-in, check the
+memory limits and load-test the login path.
+
 As built:
 
-- **New hashes:** **N=2^15, r=8, p=3, keylen 64** (32 MiB per derivation), computed with asynchronous `crypto.scrypt`
-  on the libuv thread pool. The format string and the 16-byte salt are unchanged.
+- **New hashes:** **N=2^17, r=8, p=1, keylen 64** (128 MiB per derivation; `maxmem` 256 MiB). They are computed with
+  asynchronous `crypto.scrypt` on the libuv thread pool. The format string and the 16-byte salt are unchanged.
+- **Concurrency:** at most **two** derivations run at once, through `p-limit` 7.3.3 (MIT, pinned, no runtime
+  download). A sign-in burst therefore peaks at 256 MiB of scrypt memory and leaves libuv's other threads for file and
+  DNS work. Further requests queue.
 - **Old hashes:** they keep verifying. A successful password sign-in re-hashes one written with other parameters
   (`passwordNeedsRehash`). A failed sign-in never touches it. `passwordUpdatedAt` is not changed, because the password
   itself is unchanged.
@@ -158,7 +164,20 @@ As built:
 - **Timing equaliser:** the dummy derivation now uses the new cost. Until an account signs in once, verifying a legacy
   hash is cheaper than the dummy. That timing difference shows only whether an account has a legacy hash, not whether
   it exists, and it ends at the account's next sign-in.
-- **Not chosen:** N=2^17, p=1 (128 MiB per login), which would need a concurrency cap on the login route. argon2 was
-  rejected again for the same reason as above: it is a native dependency, and node:crypto scrypt is memory-hard,
-  OWASP-listed and air-gapped. Owner question open (PR #1186, question 8): N=2^15/p=3 is the secure default built; the
-  owner may choose a higher cost.
+- **Load test** (4-core dev container, built gateway module, one process):
+
+  | Measure | Result |
+  | --- | --- |
+  | One verification | 277 ms |
+  | 10 concurrent | p50 1.05 s, p95 1.79 s |
+  | 40 concurrent | p50 3.6 s, p95 6.3 s |
+  | Derivations in flight at peak | 2 |
+  | Process RSS at peak | 460 MiB, module load included |
+  | Event-loop lag | 3 ms or less |
+
+  Throughput is about 6 password verifications per second per replica. The existing auth rate limit bounds what one
+  client can queue. Raising `SCRYPT_CONCURRENCY` to 4 would roughly double throughput, at a 512 MiB peak.
+- **Considered:** argon2 was rejected again for the same reason as above: it is a native dependency, and node:crypto
+  scrypt is memory-hard, OWASP-listed and air-gapped. For the concurrency cap, `p-limit` and `async-sema` (both MIT and
+  maintained) were compared, and `p-limit` was chosen because it reports active and pending counts. Relying on the
+  libuv pool alone would leave no thread for file and DNS work during a burst.

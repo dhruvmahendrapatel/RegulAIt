@@ -5,7 +5,7 @@
  */
 import { scryptSync, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { hashPassword, passwordNeedsRehash, verifyPassword } from "./auth.js";
+import { hashPassword, passwordHashingLoad, passwordNeedsRehash, verifyPassword } from "./auth.js";
 
 /** a hash exactly as the pre-addendum code wrote it (N=2^14, r=8, p=1) */
 function legacyHash(password: string): string {
@@ -15,12 +15,12 @@ function legacyHash(password: string): string {
 }
 
 describe("S-08: password hashing cost and rehash", () => {
-  it("writes N=2^15, r=8, p=3 (an OWASP equivalent minimum), never the old N=2^14/p=1", async () => {
+  it("writes N=2^17, r=8, p=1 (OWASP's first recommendation), never the old N=2^14/p=1", async () => {
     const stored = await hashPassword("Rg1-correct horse");
     const [scheme, n, r, p] = stored.split("$");
     expect(scheme).toBe("scrypt");
-    expect([Number(n), Number(r), Number(p)]).toEqual([32768, 8, 3]);
-    // control: the cost is at least OWASP's N=2^14/p=5 equivalent (N*p >= 81920)
+    expect([Number(n), Number(r), Number(p)]).toEqual([131072, 8, 1]);
+    // control: at least OWASP's cheapest equivalent (N=2^14, p=5: N*p >= 81920)
     expect(Number(n) * Number(p)).toBeGreaterThanOrEqual(81920);
   });
 
@@ -54,6 +54,25 @@ describe("S-08: password hashing cost and rehash", () => {
       expect(await verifyPassword("x", bad.join("$"))).toBe(false);
     }
   });
+
+  it("a burst of eight sign-ins runs at most two 128 MiB derivations at once and all complete", async () => {
+    const stored = await hashPassword("Rg1-burst");
+    let peak = 0;
+    const timer = setInterval(() => (peak = Math.max(peak, passwordHashingLoad().active)), 1);
+    const started = Date.now();
+    let results: boolean[];
+    try {
+      results = await Promise.all(Array.from({ length: 8 }, (_, i) => verifyPassword(i % 2 ? "Rg1-burst" : "wrong", stored)));
+    } finally {
+      clearInterval(timer);
+    }
+    expect(results).toEqual([false, true, false, true, false, true, false, true]);
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(passwordHashingLoad().limit);
+    expect(passwordHashingLoad()).toMatchObject({ active: 0, pending: 0 });
+    // recorded for the PR body, not asserted (machine-dependent)
+    console.log(`[s08] 8 concurrent verifies at N=2^17: ${Date.now() - started} ms, peak ${peak} in flight`);
+  }, 60_000);
 
   it("does not block the event loop while deriving", async () => {
     let ticks = 0;
