@@ -48,10 +48,10 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/roles` | signed-in | checked | checked | checked | CXR-IDM-001/002 mock-browser +source; group sync and proof completion pending |
 | `/admin/teams` | signed-in | checked | checked | checked | Source create/membership/classification/delete; populated runtime and full server gates pending |
 | `/admin/client-access` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/sso` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/sso/link-requests` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/sso` | signed-in | checked | checked | checked | CXR-SSO-002 stale policy mock-browser;003 maintenance source; provider/assurance runtime pending |
+| `/admin/sso/link-requests` | signed-in | checked | checked | checked | CXR-SSO-004 first-voter/self eligibility mock-browser; real linkage pending |
 | `/admin/provisioning` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/group-mappings` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/group-mappings` | signed-in | checked | checked | checked | CXR-SSO-001 conditional proof refusal mock-browser; actual sync/proof completion pending |
 | `/admin/virtual-keys` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/credentials` | signed-in | checked | checked | checked | CXR-ADM-007/008 source; real viewer API403 and explained UI denial |
 | `/admin/agent-credentials` | signed-in | checked | checked | checked | full task/roles pending |
@@ -119,8 +119,8 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/webhooks` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/siem` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/admission` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/git-connections` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/pm-connections` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/git-connections` | signed-in | checked | checked | checked | CXR-CON-001/002 mock-browser +source/compiled contracts; real credentials/provider pending |
+| `/admin/pm-connections` | signed-in | checked | checked | checked | CXR-CON-001/003/004 mock-browser +source/contracts; real webhook delivery pending |
 | `/admin/deploy-targets` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/engines` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/engines/placements` | signed-in | checked | checked | checked | full task/roles pending |

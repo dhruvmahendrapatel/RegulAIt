@@ -1,0 +1,90 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Local Chromium+synthetic mocked API contracts; no real identity/provider/cloud writes",
+  "testsPassed": 8,
+  "seconds": 8.0,
+  "matchedCards": 7,
+  "sourceOnlyNewCards": [
+    "CXR-SSO-003"
+  ],
+  "observations": {
+    "mapping-proof": {
+      "deletes": 1,
+      "proofOptionsRequests": 0,
+      "proofDialogs": 0,
+      "deleteMockedAndRefused": true
+    },
+    "stale-policy": {
+      "initialMfa": "admins",
+      "refetchedMfa": "all",
+      "reads": 2,
+      "formMfaAfterRefresh": "admins",
+      "postedMfa": "admins",
+      "postedPasswordMinLength": 14,
+      "postedKeys": [
+        "breakGlassUserIds",
+        "localSignIn",
+        "loginLockoutMinutes",
+        "loginLockoutThreshold",
+        "loginLockoutWindowMinutes",
+        "mfaRequired",
+        "passwordMinLength",
+        "passwordRequireClasses",
+        "sessionIdleMinutes",
+        "sessionLifetimeHours",
+        "ssoOnly"
+      ],
+      "policyWriteMockedAndRefused": true
+    },
+    "link-vote-capability": {
+      "ownAccount": false,
+      "existingApprovals": 1,
+      "requiredApprovals": 2,
+      "approveEnabled": true,
+      "currentPrincipalVoteProvenByMockedSuccess": true,
+      "posts": 1,
+      "reads": 2,
+      "realMutationSent": false
+    },
+    "link-own-account": {
+      "ownAccount": true,
+      "existingApprovals": 0,
+      "requiredApprovals": 2,
+      "approveEnabled": true,
+      "currentPrincipalVoteProvenByMockedSuccess": false,
+      "posts": 0,
+      "reads": 1,
+      "realMutationSent": false
+    },
+    "credential-guidance": {
+      "bitbucketHint": "Bitbucket Cloud: App password (or workspace access token) with Repositories read/write and Pull requests read/write.",
+      "bitbucketUsernamePasswordShapeExplained": false,
+      "jiraCompositeEmailTokenShapeExplained": false,
+      "jiraTokenInputVisible": true,
+      "mutationSent": false
+    },
+    "azure-missing-url": {
+      "baseUrlRequiredByForm": false,
+      "request": {
+        "provider": "azure_devops",
+        "baseUrlPresent": false
+      },
+      "createMockedAndRefused": true
+    },
+    "pm-webhook-path": {
+      "acceptedNameIncludesSlash": true,
+      "rawMultiSegmentPathVisible": true,
+      "encodedSingleSegmentPathVisible": false,
+      "createMocked": true,
+      "realSecretPublished": false
+    },
+    "pm-hidden-version": {
+      "versionControlHidden": true,
+      "request": {
+        "provider": "asana",
+        "apiVersion": 3
+      },
+      "createMockedAndRefused": true
+    }
+  }
+}
