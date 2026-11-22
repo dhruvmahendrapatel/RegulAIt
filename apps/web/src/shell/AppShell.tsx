@@ -5,7 +5,7 @@
  * ADR-0033 removed the legacy consoles entirely, so this shell is the whole
  * product surface — there are no outbound bridges left.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { pendingQueueQuery, pendingRows, queueTotal } from "../api/approvalQueue";
@@ -55,6 +55,22 @@ function writePinned(v: boolean) {
 /** how long the pointer must rest on the strip before it opens — a pass across
  *  it on the way to somewhere else must not throw a panel over the page */
 const HOVER_INTENT_MS = 160;
+
+/**
+ * UIS-01 — the phone drawer. At this width (the `@media (max-width: 960px)` block in shell.module.css; keep the two
+ * equal) the closed rail is only translated off screen, so it is also made inert: Tab never lands on a link nobody
+ * can see.
+ */
+const NARROW_QUERY = "(max-width: 960px)";
+function subscribeNarrow(cb: () => void): () => void {
+  const media = window.matchMedia(NARROW_QUERY);
+  media.addEventListener("change", cb);
+  return () => media.removeEventListener("change", cb);
+}
+const isNarrow = () => window.matchMedia(NARROW_QUERY).matches;
+
+/** UIS-03 — a modal native dialog (the kit Modal, a modal DetailDrawer) is open; a side-by-side drawer does not count */
+const modalDialogOpen = () => document.querySelector('dialog[open]:not([aria-modal="false"])') !== null;
 
 function isKeyboardFocus(el: Element): boolean {
   try {
@@ -110,6 +126,30 @@ export default function AppShell(props: { children: ReactNode }) {
   }, [clearHoverTimer]);
   useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
 
+  // UIS-01 — the phone drawer: closed means inert, and focus that was inside it (a route was chosen, the suite was
+  // switched) goes back to the hamburger rather than to the page's body. The attribute is set before paint.
+  const narrow = useSyncExternalStore(subscribeNarrow, isNarrow);
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
+  const railInert = narrow && !sideOpen;
+  useLayoutEffect(() => {
+    const rail = railRef.current;
+    if (!rail) return;
+    const hadFocus = rail.contains(document.activeElement);
+    rail.toggleAttribute("inert", railInert);
+    if (railInert && hadFocus) hamburgerRef.current?.focus();
+  }, [railInert]);
+  // Escape closes the open drawer from anywhere, unless a dialog or a control already used that Escape
+  useEffect(() => {
+    if (!narrow || !sideOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || modalDialogOpen()) return;
+      setSideOpen(false);
+      hamburgerRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [narrow, sideOpen]);
+
   // The topbar is clear over the field at the top of the page and frosts only
   // once content scrolls under it — a band where one is needed, none otherwise.
   const [scrolled, setScrolled] = useState(false);
@@ -146,6 +186,8 @@ export default function AppShell(props: { children: ReactNode }) {
       e.preventDefault();
       setSideOpen(true);
       setFocusOpen(true);
+      // the phone drawer is inert until the render above commits; it is opening, so it can take focus now
+      railRef.current?.removeAttribute("inert");
       filterRef.current?.focus();
     };
     document.addEventListener("keydown", onKey);
@@ -159,6 +201,8 @@ export default function AppShell(props: { children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "k" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      // UIS-03: the palette is not in the top layer, so over an open modal dialog it would open behind it
+      if (modalDialogOpen()) return;
       e.preventDefault();
       setMenuOpen(false);
       setPaletteOpen((o) => !o);
@@ -280,7 +324,8 @@ export default function AppShell(props: { children: ReactNode }) {
   };
 
   const onRailFocus = (e: FocusEvent<HTMLElement>) => {
-    if (isKeyboardFocus(e.target)) setFocusOpen(true);
+    // the phone drawer is opened by the hamburger alone; focus-open is the desktop rail's (ADR-0169)
+    if (!narrow && isKeyboardFocus(e.target)) setFocusOpen(true);
   };
   const onRailBlur = (e: FocusEvent<HTMLElement>) => {
     const next = e.relatedTarget as Node | null;
@@ -451,6 +496,7 @@ export default function AppShell(props: { children: ReactNode }) {
       <div className={s.mainCol}>
         <header className={s.topbar} data-scrolled={scrolled ? "true" : "false"}>
           <button
+            ref={hamburgerRef}
             className={`${s.iconBtn} ${s.hamburger}`}
             aria-label="Toggle navigation"
             aria-expanded={sideOpen}

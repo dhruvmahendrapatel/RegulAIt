@@ -174,10 +174,18 @@ export function Field(props: {
   // cannot name is a control a screen reader cannot name either.
   const labelable = only !== null && isValidElement(only) &&
     (only.type === Input || only.type === Select || only.type === Textarea);
-  const single = labelable && isValidElement<{ id?: string }>(only) ? only : null;
+  const single =
+    labelable && isValidElement<{ id?: string; "aria-describedby"?: string; "aria-invalid"?: InputHTMLAttributes<HTMLInputElement>["aria-invalid"] }>(only)
+      ? only
+      : null;
 
   if (single) {
     const id = single.props.id ?? auto;
+    // UIS-02: the error is announced with the control, not only drawn under it: the control's aria-describedby names
+    // it (after any description the caller already gave), and the control reports aria-invalid while it shows
+    const errorId = `${auto}-error`;
+    const hasError = Boolean(props.error);
+    const describedBy = [single.props["aria-describedby"], hasError ? errorId : null].filter(Boolean).join(" ") || undefined;
     return (
       <div className={fieldClass(props.grow)} {...growAttr(props.grow)}>
         <div className={s.fieldLabelRow}>
@@ -190,8 +198,16 @@ export function Field(props: {
             </InfoButton>
           ) : null}
         </div>
-        {single.props.id ? single : cloneElement(single, { id })}
-        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+        {cloneElement(single, {
+          id,
+          "aria-describedby": describedBy,
+          "aria-invalid": hasError ? true : single.props["aria-invalid"],
+        })}
+        {hasError ? (
+          <span id={errorId} className={s.fieldError}>
+            {props.error}
+          </span>
+        ) : null}
       </div>
     );
   }
@@ -1287,8 +1303,13 @@ export function Modal(props: {
   wide?: boolean;
   /** near full screen — the expanded view of a contained card (X6) */
   full?: boolean;
+  /** UIS-09: a save is in flight; Escape, a backdrop click and the Close button leave the dialog open until it ends */
+  busy?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const close = () => {
+    if (!props.busy) props.onClose();
+  };
   useEffect(() => {
     if (!props.open) return;
     const dialog = ref.current;
@@ -1325,13 +1346,21 @@ export function Modal(props: {
       ref={ref}
       onCancel={(event) => {
         event.preventDefault();
-        props.onClose();
+        close();
+      }}
+      onClose={(event) => {
+        // the browser closes a dialog itself on a repeated Escape with no click between (its cancel is then not
+        // cancelable): while busy it goes straight back up, otherwise the close is reported like any other
+        const dialog = event.currentTarget;
+        if (event.target !== dialog || !dialog.isConnected || dialog.open) return;
+        if (props.busy) dialog.showModal();
+        else props.onClose();
       }}
       onMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         const bounds = event.currentTarget.getBoundingClientRect();
         if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
-          props.onClose();
+          close();
         }
       }}
     >
@@ -1342,7 +1371,7 @@ export function Modal(props: {
           style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", background: "var(--surface-1)" }}
         >
           <span style={{ flex: 1 }}>{props.title}</span>
-          <Button size="sm" onClick={props.onClose}>
+          <Button size="sm" disabled={props.busy} onClick={close}>
             Close
           </Button>
         </div>

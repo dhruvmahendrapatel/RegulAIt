@@ -45,9 +45,10 @@ export function EditServerDialog(props: { server: McpServer; onClose: () => void
       open
       title={`Edit MCP server “${s.name}”`}
       onClose={props.onClose}
+      busy={act.busy}
       actions={
         <>
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" disabled={act.busy || !name.trim() || (name.trim() === s.name && !urlMoves)} onClick={save}>
             Save
           </Button>
@@ -104,9 +105,10 @@ export function ReplaceTokenDialog(props: { kind: "git" | "pm"; connection: { na
       open
       title={`Replace the token for “${c.name}”?`}
       onClose={props.onClose}
+      busy={act.busy}
       actions={
         <>
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" disabled={act.busy || !token} onClick={save}>
             Replace token
           </Button>
@@ -180,9 +182,10 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
       open
       title={`Edit git connection “${c.name}”`}
       onClose={props.onClose}
+      busy={act.busy}
       actions={
         <>
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" disabled={act.busy || (moves && !token)} onClick={save}>
             Save
           </Button>
@@ -278,17 +281,18 @@ export function RotateSecretDialog(props: { connection: PmConnection; onClose: (
       open
       title={`Rotate the webhook secret for “${c.name}”?`}
       onClose={props.onClose}
+      busy={act.busy}
       actions={
         inProgress ? (
           <>
-            <Button onClick={props.onClose}>Cancel</Button>
+            <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
             <Button variant="danger" disabled={act.busy} onClick={() => rotate(true)}>
               Rotate immediately
             </Button>
           </>
         ) : (
           <>
-            <Button onClick={props.onClose}>Cancel</Button>
+            <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
             <Button variant="primary" disabled={act.busy} onClick={() => rotate(false)}>
               Rotate secret
             </Button>
@@ -358,9 +362,10 @@ export function EditPmDialog(props: { connection: PmConnection; onClose: () => v
       open
       title={`Edit PM connection “${c.name}”`}
       onClose={props.onClose}
+      busy={act.busy}
       actions={
         <>
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
           <Button variant="primary" disabled={act.busy || !f.project || (moves && !token)} onClick={save}>
             Save
           </Button>
