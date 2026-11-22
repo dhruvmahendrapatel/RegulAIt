@@ -4,12 +4,12 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [latest findings](#deep-audit--iteration-6-2026-11-22), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
-- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; branch refreshed through main `da16d6bd23109d477102c0ec2a534f81d62a6917`. The reviewed UI and schema-validator functions are unchanged between these snapshots. New memory-governance behavior from main was not audited by this iteration.
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; branch refreshed through main `267e12e4951d14c3f71531f3eeba9ffb4eb63022`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
-- **Research:** primary documentation was retrieved on November 21; sources and limits are below.
-- **Deep audit:** six iterations, 69 feedback cards, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The current route census contains 150 screens. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
+- **Deep audit:** seven iterations, 70 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; current main has 151, with the added catalogue tracked separately. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1288,60 +1288,236 @@ Existing BP-01/03/04/09/10/12 and the parent's OAuth/secret-lifecycle research a
 
 **Not completed:** actual Git/PM provider connectivity, complete OAuth consent/device/callback flows elsewhere, all auth scopes or vendor credential kinds, actual secret rotation/delivery, external webhook retries, real URL-delimiter routing, full deletion transactions, complete PM sync/drift/import/remote state semantics, provider permission changes, native keyboard/mobile/screen-reader behavior and all concurrent edit/refusal races. Root may promote confidence only for matched runtime probes. The generic webhook reveal's limited provider-specific setup detail was considered but not promoted as a missing-documentation defect because the form already explains native mechanisms.
 
+## Deep audit — iteration 7, 2026-11-22: Claude reconciliation and a UI/UX improvement plan
+
+### What will improve the user experience most
+
+**Yes, the UI and UX can improve through consistent task completion rather than a replacement visual system.** Keep the existing brand, tokens, suite navigation and shared controls. Prioritise truthful status and recoverable outcomes, visible resource/authority context, scoped change review, stable lists/drafts, and then a task-led Home. The six UXP proposals below make that direction concrete with existing components, tradeoffs and acceptance journeys.
+
+The current record contains **70 numbered feedback cards** after one new Home defect, plus **six separately labelled design proposals**. The proposals are not six additional reproduced bugs. Product source is now main `267e12e4951d14c3f71531f3eeba9ffb4eb63022`, merged without losing newer builder work. New main capabilities were preserved; a build and selected feature checks do not mean every new backend function was independently audited.
+
+### Claude's response is received and reconciled
+
+Claude [responded on #1184](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7075781679), with full per-card reasoning in [codexreviews-response.md](codexreviews-response.md), merged by the master in #1186. Its declared assessed source is `da16d6bd23109d477102c0ec2a534f81d62a6917`. It covers **46 numbered cards plus RUN-001 and 39 historical rows**. The 23 cards from iterations 4–6 still need Claude's response; the new Home card and UXP proposals are additional feedback. Do not infer acceptance from a shared root cause alone.
+
+The response's 86-row summary is 53 planned fixes (including 8 narrowed), 13 earlier remedies described as fixed, 3 stale/superseded/false-positive rows, 6 triage/owner deferrals, 4 lane handoffs, 4 rejected historical/process recommendations, 2 process/docs items and 1 owner-approved archive. Its 47 card rows split into 41 ACCEPT-build, 3 triage-low and 3 delegated; these totals include RUN-001 and are not counts of distinct implementation PRs. The main discussion ledger now carries the actual response/score/slice/issue for each addressed card rather than leaving every row “awaiting response.” Source agreement, owner approval, a plan or green CI does not close a card.
+
+Our reasoned reconciliation below preserves disagreements and the owner's later resolved decisions. In particular, a response rejecting an old remediation does not erase the historical event. The 13 earlier remedy claims remain **independent current-head verification pending**. #1194 is still open at `d32d2896c6c7859785557ad41dc697999ef6a0dd`, with passing completed CI checks; this round is not its independent code/security review or an assertion that it merged.
+
+### Codex agreements, narrowing and remaining disagreement
+
+| Topic | Codex reconciliation | Decisive evidence / consequence |
+| --- | --- | --- |
+| ADM-003 temporary relaxation | **Agree with Claude's correction of control intent.** The existing assurance window is a red-team/demo mechanism, not an ordinary admin exception API to surface unchanged. The owner's desired administrative tuning is nevertheless now explicitly approved as a new feature. Preserve both facts. | ADR-0181 `strict-defaults.md:164–171,231–240` describes the red-team purpose, at-most60-minute window, preserved admin overrides and copied org modes. `guardrails.ts:556–562,794` supplies that contract. DecisionLog D-2026-11-22-01 requires a **new row kind**, bounded required expiry, step-up, audited grant/expiry and automatic reversion; existing window kinds/CHECKs remain untouched. Update card disposition to **narrowed; owner-approved new feature / fix proposed**, slice 15, not an already-existing missing-field repair. |
+| O-04 eval/playground schemas | **Both claims are true and should be kept together.** Our behavioral qualification remains correct: the scorer discloses its subset, so disagreement alone does not prove it violates a hidden full-schema promise. Claude is right that this does **not** settle the repository-policy obligation. | ADR-0176:84 explicitly says eval output schemas move to already-pinned Ajv instead of the handwritten subset. Agree the migration is required under that decision. Reuse hardened Ajv/RE2/bounds/offline-reference configuration, test parity, attribute historical results to their original scorer semantics and avoid rewriting stored evidence. Do not present warning-only as a substitute for the decided replacement or add another general validator. This does not require claiming the disclosed subset was a secret contract violation. |
+| S-08 hashing | **Accept stronger security classification.** Earlier wording as only a sensible follow-up understated the checklist/ADR obligation. | `auth.ts:454–501` still has N=16384/r8/p1 and `scryptSync`; ADR-0176:88 already requires async scrypt. The response identifies misleading “per OWASP” wording. D-2026-11-22-01 chooses N=2^17, async, rehash-on-login; D-2026-11-22-03 permits up to4 concurrent derivations per replica, configurable. Treat as a blocking checklist gap until independently verified at a fixing head; do not assert that this source-only pass benchmarked it or that #1194 has merged. |
+| S-10 defaults/SQL | **Agree with the checklist distinction and narrow exploit language.** An absent caller flag granting admin authority is an insecure fallback; validated UUIDs do not waive the explicit parameterization rule. | `reporting.ts:577` still uses `opts.isAdmin ?? true`; `compliance-packs.ts:179` / `copilot.ts:441` construct raw arrays from UUID-checked values. No injection payload is demonstrated here. Require explicit scheduler authority and fail-closed omission, plus bound array parameters. Keep constant-only SQL/CSP observations out of the vulnerability claim. |
+| C-02 file sizes | **Accept no size-only defect/generic splitting task.** Keep the maintainability risk as context, not a blocker or automatic rewrite. | Response:244 correctly treats size as an indicator; an import-cycle ratchet exists. A future split needs a concrete coupling/testability/change-risk problem, not an arbitrary line threshold. |
+| R-04 assertion-count gate | **Agree that the proposed metric is weak; do not rewrite history as refuted.** | Response:258 says M-111 records the guard loss. That acknowledges the incident, rather than refuting it. Counting assertions would not prove semantic preservation; use actual guard/regression behavior and conflict review. Mark **recommendation narrowed/rejected; event retained**, process follow-up only unless current code shows a new gap. |
+| R-05 scope creep | **Accept avoiding another mechanism by default, but a rule's existence alone does not prove compliance.** | Response:259 cites one-PR-per-batch. The original historical event and current status can remain accurate. Keep exact-head/scope delta review as the concrete enforcement practice; no speculative new checker or automatic PR title changes. Mark **process recommendation narrowed**, not “scope creep could not happen.” |
+| R-08 coordination/cap | **Partly dispute the stated rebuttal as current policy.** Do not use November20 suspension to override newer instructions. | Response:262 cites D-2026-11-20-01, but DecisionLog D-2026-11-21-08 reinstates at most10 worker sessions; D-2026-11-22-01 specifically allows CX as an11th until another builder ends. Mark historical broad proposal **partly superseded; current policy clarified**, not a blanket refutation based on an expired suspension. This source reconciliation does not inspect actual live session count or blame a current builder. |
+| F/S estimates | **Retain both estimates with rationale; do not silently replace history.** Owner-directed triage controls the build disposition. | ADM-004=3→#1187; ACC-004=4→#1188; ACC-002→#1192 is an explicit owner deferral despite Claude's15 score. Scores are task-conditional estimates, not measured incidence. No new issues or fixes are created here. |
+
+### Resolved owner decisions control UI/UX acceptance
+
+The response's “Owner questions” section still contains defaults/open wording, despite its summary saying all answered. **Use DecisionLog D-2026-11-22-03 (`DecisionLog.md:18`) as the newer resolved record** rather than treating those defaults as unanswered:
+
+- CST-005: deleting a cost alias/domain rule requires a server-audited reason.
+- CST-004: To includes the whole calendar day; show the resolved window.
+- UIS-09/UIW-05: ask before discarding unsaved dialog changes; retain the pending-save guard too.
+- UIS-04: real links or buttons replace row link roles; meaningful table semantics remain.
+- S-08: up to4 concurrent derivations per replica, configurable; do not retain the earlier default2 as the owner's final answer.
+- C-07: archive138 review/spike files, delete nothing. Do not manufacture a deletion approval.
+- O-01: rebuild THIRD_PARTY against current manifests and add CI verification.
+- C-01/P-07: the contract and compat ADR work is assigned to CX in DecisionLog D-2026-11-22-03. Those proposed decisions are not presented as built; Codex is not assigned their numbers or implementation.
+
+Also D-2026-11-22-01 controls REV-002: archive the definition, keep signed runs/evidence; this is stronger than merely adding a deletion confirmation. A UI acceptance test must verify retention, not only the modal.
+
+### How the ledger is reconciled
+
+- **41 card rows** have ACCEPT-build (including CXR-RUN-001 and owner-approved ADM-003); **3** are triage-low and **3** are handed to E35/E50:47 response cards total. The builder and lane handoffs overlap for UIW-02, as noted below.
+- **Agreed / fix proposed**: all `ACCEPT-build` card rows. Preserve source-specific narrowing and slice references. ADM-003 should say **owner-approved new capability**; REV-002 **archive/retention**, not cascade+confirmation.
+- **Deferred / issue, no code**: ADM-004→#1187; ACC-004→#1188; ACC-002→#1192 (owner). Do not close by reducing the score.
+- **Agreed / delegated, awaiting implementation/retest**: UIW-03→E35; UIW-04/05→E50. UIW-02 has builder work plus ChatPage handoff, so it is not globally closed or solely delegated.
+- **Narrowed before fix/retest**: RUN-001 model-read alert exists; missing datasets/sources alerts remain. ADM-009 already warns immediate effect; add consequence review, not a speculative dry-run endpoint. UIW-07 must branch for project-less instances. UIS-03 is a modal+shortcut conflict. UIS-09 now includes the owner-approved dirty prompt, not only the busy guard. ACC-003 cannot weaken enforcement from the fabricated false baseline, but its “off” claim/live control still misrepresents unknown state. REV-002 now follows archival policy.
+- **Latest 23 numbered cards** remain awaiting response.
+
+#### Historical remedy claims need independent verification
+
+Claude lists13: **S-01..S-06, P-01, P-02, P-04, C-03, R-02, R-03, R-06**. Their existing implementation can be acknowledged as agreeing with the earlier source reassessment, but this source reconciliation did not rerun their security/integration/process acceptance tests. Keep **remedy present / independent current-head verification pending**, not a claim that all13 are newly retested or all69 feedback cards are fixed.
+
+The original C-05 fixture false positive and stale/superseded historical rows should remain visibly explained rather than quietly removed. Refuting a proposed remediation is not proof that its historical event never occurred.
+
+### Additional UI/UX acceptance refinements
+
+These are acceptance refinements of existing cards, not new defect counts:
+
+1. **Future temporary-exception usability must include expiry truth.** ADM-004 was triaged low because today's windows are demo-only, short-lived and cleaned in finally/sweep. Once slice 15 adds ordinary admin exceptions, that frequency assumption changes. Before exposing the new row kind, require current/effective/expired distinction, scope, remaining duration, reason, audit and automatic reversion; reassess ADM-004 rather than carrying its demo-only deferral across the new feature without review.
+2. **Bind drafts by record without destroying good non-secret work.** “Key the form on id” fixes cross-resource leakage, but secret drafts should clear at the boundary while suitable non-secret drafts can be preserved deliberately per resource. Test A→B→A, late success/failure and stale reads. Do not turn the fix into a new accidental draft-loss path.
+3. **Failure retry does not replay a durable mutation.** ACC-001 options Retry starts a new proof ceremony; APR/WBK outcome recovery refreshes a committed decision/result. Keep these user actions distinct in labels and code.
+4. **Retained report runs must remain findable.** REV-002 archive should explain what changes, where historical runs remain and how existing links behave; a hidden template that makes retained evidence unreachable does not meet the usability purpose.
+5. **Success is not proof the interface is usable.** Require observed keyboard/mobile/role completion for affected shared primitives in addition to source agreement, while keeping native screen-reader/IME/provider coverage honestly open. This contribution performed none of those tests.
+
+### Closure evidence still required
+
+For every accepted card: fixing full SHA/PR, merged status, exact old reproduction, authorized role/state fixtures, successful path plus failure/cancel/refetch, and independent retest at the final source. A source-based agreement, planned slice, owner approval, passing generic ratchet or builder “fixed” assertion is not that evidence. Do not edit Claude's response file or any master-owned ledger to manufacture agreement; append Codex's reasoned position and link the newer decision record in the review file.
+
+### New runtime-backed Home feedback
+
+#### CXR-HME-001 — The first admin overview presents failed reads as zero pending decisions and zero calls
+
+- **Source/role/function:** admin Home, `OrientationCard`/`pendingCountOf`, `apps/web/src/views/home/HomePage.tsx:95–114,147–156` at main 267e12e4951d14c3f71531f3eeba9ffb4eb63022. Missing approvals become `queueTotal(undefined,0)` and missing usage becomes an empty totals object; the rendered counts fall back to 0 with no per-query loading/error/Retry branch inside this card. An undismissed card is “Start here”; dismissing orientation retains the same headline numbers.
+- **User impact/reason:** the first screen can tell an admin that no human decision is waiting during an outage, exactly when it cannot know that. This undermines task priority and trust. The neighbouring cards may report their own failures; they cannot make the headline 0 true. This is another concrete consumer of the shared unknown-is-zero family, not a new security mechanism or proof that pending records were lost.
+- **Triage:** Medium, **F7 × S4 =28** within cold/failed admin overview reads. The frequency is a task-conditional estimate, not production incidence.
+- **Runtime:** at 375px and 1440px, mocked 503 approval and usage reads produced headline values `0`, `0`, `—`; no alert or Retry existed inside the overview. Success controls at both widths showed 12 pending, 75 metered calls and $4.5 from their supplied fixture. Four checks passed; no mutation or customer data. The fixtures populate only these headline queries; other panels deliberately remain unavailable.
+- **Recommendation/reuse:** retain distinct loading/unavailable/measured-zero states for each metric, scope/time window and a safe Retry. Keep a valid current-principal cached figure only with explicit stale context; clear it appropriately on session/authority changes. Reuse the query/error patterns already working in `SignInStatus`, trust and the workbench pending summary. Do not fabricate zeros or add another dashboard cache.
+- **Acceptance/counterevidence:**503 cannot say 0; a genuine successful empty result can. A partial failure affects only its metric and explains recovery; keyboard/status announcements expose the same state. Spend already uses `fmtUsd(undefined)`→`—`, and both tested widths had no horizontal page overflow—preserve those strengths. Root inspected the card captures; native screen-reader/repeated permission-change coverage is open. Scope this with the existing status-honesty fix, not a new standalone framework.
+
+The figures show the **current product**, not a proposed redesign; both are isolated card captures at 375px with synthetic data, without names or secrets:
+
+| Failed approval/usage reads | Successful headline control |
+| --- | --- |
+| ![Current Home card incorrectly shows zero after failed reads](evidence/2026-11-22/home-unknown-375.png) | ![Current Home card shows supplied pending and usage totals](evidence/2026-11-22/home-populated-375.png) |
+
+### Validation and coverage for this round
+
+[Home evidence](evidence/2026-11-22/iteration7-home.json): four final browser checks passed in 9.1 seconds at 375/1440; source and visual inspection distinguish the unmeasured-zero defect from layout. An initial expected currency string assumed two decimals; the probe was corrected to the existing formatter's $4.5 output. That assertion mistake is not a product bug.
+
+The preserved new connector-catalogue and evidence-ingest mock suites passed **12/12 in 45.6 seconds**, covering populated setup, search/paging, retry, proof/cancel, reason requirements, air-gap affordances and token handling; some tests include axe assertions. These are existing feature tests, not a new real-provider/native-device or all-route guarantee.
+
+**Required-check limitation:** ADR-index is 7/8: its missing-reference case fails on two assigned but not yet created ADRs in the master decision log. [Exact-main verification](evidence/2026-11-22/iteration7-base-adr-check.json) confirms the cited file is unchanged from main 267e12e4951d14c3f71531f3eeba9ffb4eb63022 and the files are absent there too. This review adds no missing ADR reference and changes no guard or master-owned record. The failure is reported to Claude; no all-green/READY claim is made.
+
+Current AST route census is **151**; the original whole-route harness run covered 150 at its earlier snapshot. The new `/admin/connectors/catalogue` has feature-specific coverage above; its generic all-route layout/theme matrix has not been rerun here. The route ledger marks that difference. The 36,791-node function inventory remains dated to its initial snapshot rather than pretending to include every new main function.
+
+### UI/UX proposals for builder design review
+
+The six proposals are grouped delivery guidance, with proposed user-test targets rather than measured improvement claims. Preserve existing rules and reuse existing primitives. No product UI implementation is authored in this review lane.
+
+### Recommended delivery order and reuse
+
+Finish security-checklist work first, as Claude's build plan requires. Within the UI work, prioritise truthful state and preserved work (UXP-003/004), then record/action clarity and list continuity (002/005), then task discovery and broader usability validation (001/006). A corrected shared component should close multiple affected consumers; do not build six new frameworks or six parallel state helpers.
+
+The current product already has a coherent visual foundation: one suite/navigation model, native controls, scoped search, a token-based kit, foldable tables, record drawers, step-up, per-setting consequence review, and source-backed error/empty patterns. The useful change is to apply those primitives consistently to complete user tasks. Retain the repository's one-accent/one-primary-action, British-English, role-scoped data and air-gap rules. This programme does not request a new design system or a large navigation rewrite.
+
+#### CXR-UXP-001 — Make Home and search answer “what should I do next?”
+
+- **Task / role:** a new administrator needs to configure an integration; a returning reviewer needs to find their next decision; a member needs to resume a project or workflow.
+- **Source facts:** `HomePage.tsx:45–64` already gives admins orientation, suite launcher, setup and trust/alert cards, while members get approvals/spend and recent work. `:162–176` contains useful action-worded start links. `AppShell.tsx:214–248` deliberately keeps navigation suite-scoped but searches all visible destinations. `suites.tsx:1–16,36–49` is the shared destination model. `CommandPalette.tsx:43–75,77–100` already loads authorised entities on demand. `GettingStartedPage.tsx:172–203` has task-specific next links and completion/blocked state.
+- **Proposal / why:** add a small, role-appropriate “Needs your attention” or “Continue work” region using existing counts and authorised recent-record links, ahead of secondary overview detail. It should answer who needs to act, on what and why now; choose one primary next task and keep other destinations secondary. Keep suite tiles for exploration and the cross-suite filter for escape. Match user vocabulary in labels/help aliases so someone thinking “connect a repository” can find Git connections without learning the suite taxonomy first.
+- **Visual / interaction direction:** concise action label, one-line resource context, a truthful state and a direct link. Example task labels: “Review the next pending request”, “Continue project setup”, “Resume the failed workflow”. Reuse `PageHeader`, existing Home cards/launcher, `ListPreview`, nav model and command-palette items; do not create another route registry or add a fetch per decorative tile.
+- **Priority / tradeoff / security:** UI priority 2 after state-correctness work. A task region can become a noisy dashboard or duplicate counts, so limit it to actionable scoped records and keep the existing dismissal convenience. Never infer permission from a link; the server still checks access. Mandatory incidents/warnings cannot be dismissed as optional orientation. Do not show another tenant's workload or customer telemetry to produce a recommendation.
+- **Acceptance / validation target:** in a small moderated synthetic-data check, at least 4 of 5 participants in each exercised role find the requested task without being told a suite name or using browser search. Measure first successful click, wrong destinations and task time before/after; report raw counts, not a statistically supported uplift claim. A member never receives an admin destination. Keyboard users can reach the same tasks. Loading/failing attention data reads “unavailable”, not “nothing to do”. Existing suite/filter/bookmark routes continue to work.
+- **Related feedback and caveat:** unknown-state cards and list continuity are prerequisites, not cosmetic polish. A source spot-check found `OrientationCard` still renders `pendingCountOf(undefined)` and `totals.events ?? 0` at `HomePage.tsx:109,149–155` without per-query error branches in `:97–180`; this is an additional consumer for the truthful-status audit, not evidence that all Home figures or tile states are wrong. This is now separately reproduced as CXR-HME-001 above; it shares the status-honesty implementation scope.
+
+#### CXR-UXP-002 — Standardise the record context and the meaning of its primary action
+
+- **Task / role:** an approver decides an exact action; an admin changes a credential, ownership or policy; a viewer inspects an object they cannot drive.
+- **Source facts:** `PageHeader` already separates breadcrumb, title, one-line subtitle and optional help (`AppShell.tsx:576–607`). `DetailDrawer.tsx:24–35,38–53` supplies pinned action rows, record-change focus and responsive modality. Inbox already distinguishes own calls, prior decisions and named/delegated reviewers (`InboxPage.tsx:249–255`), and groups the decision controls/reason (`:233–247`). Existing findings INT-002/005, REV-004, WFL-003, SSO-004 and IDM-001 show the cost of losing resource, principal or effective-access context.
+- **Proposal / why:** use one repeatable context block on decision/edit detail: **object + scope**, **current effective state**, **your role/eligibility**, **next permitted action**. Put an action's concrete consequence next to the action, especially when “remove”, “rotate” or “approve” has a surprising effect. Distinguish viewing a workflow from driving it, removing one assignment from eliminating all effective access, and saving a decision from completing execution.
+- **Visual / interaction direction:** give the action a verb and object (“Remove direct assignment”, “Retry build stage”, “Replace credential”), with one primary action and deliberate secondary/destructive placement. Keep frequently needed scope/prerequisite/consequence visible; use `InfoButton` for explanation, not the only disclosure of authority or target. Put protected decision controls in existing `DrawerActions` where a drawer is used. Reuse the shared context/status vocabulary rather than hand-coding another banner per page.
+- **Priority / tradeoff / security:** UI priority 1 after prerequisite fixes. More context can overcrowd a small drawer, so show four concise facts and expandable technical evidence. Safe capabilities must be server-derived or based on existing reliable auth facts, then rechecked on mutation; no “trusted admin” bypass or client-only permission implementation. Do not expose every group's membership merely to explain one user's eligibility.
+- **Acceptance:** before confirming, a participant can identify the intended record, changed scope and their authority from visible text; after switching records none of those facts or drafts follows incorrectly. Own/ineligible requests show the next permitted route rather than an enticing failing button. An action-bound proof names the same object/operation as the reviewed form. Compare admin, named approver/delegate and read-only participant. These are proposed acceptance checks, not completed role tests.
+
+#### CXR-UXP-003 — Make progress, refusal and completion one coherent recovery journey
+
+- **Task / role:** a reviewer records a decision; an operator handles a failed execution or bulk batch; a user encounters a temporary API outage.
+- **Source facts:** `Stepper.tsx:18–39` already represents current/completed sections with accessible status; it is not an executor. `RefusalNotice.tsx:12–20` provides a persistent inline reason and next-step link. `WorkflowDetailPage.tsx:279–306` currently mixes in-flight wording and a visible last error (WFL-001). `ReviewWorkbenchPage.tsx:667–684` ties batch outcomes to the nonempty queue (WBK-002), and APR-002 documents discarded post-commit outcome warnings. `OrgSettingsCard.tsx:53–69` already says a save happened even if reloading current values failed.
+- **Proposal / why:** display a compact progress/result summary answering **what committed**, **what is still running/blocked**, **who can act next**, and **what retry actually does**. Keep last-attempt and per-item batch outcomes visible even after the live list changes. A successful approval with an executor failure should say “Decision saved. Execution needs attention.” and link to the existing authorised failed step; it must not invite another approval POST.
+- **Visual / interaction direction:** put a concise persistent outcome near the affected record/form; use toast for supplementary transient success only. Use the existing stepper/status badges when stages are meaningful, plain text for an unknown state, and one permitted next action. Reserve a strong success treatment for what actually succeeded; name partial success with text. Use the same region for pending, confirmed, refused and uncertain outcomes without shifting focus unpredictably.
+- **Priority / tradeoff / security:** UI priority 1. Avoid redundant progress bars or a second lifecycle: project the existing server transition/attempt facts and E29 pattern. Recovery may require a refresh, a new proof, operator attention or a permitted executor retry, not universal retry. Do not retain another account's cached evidence across session changes. Redact upstream exceptions while keeping safe actionable information.
+- **Acceptance:** exercise success, pre-commit refusal, post-commit warning, read-refresh failure and uncertain timeout; each explains the persisted state and permitted next step. No duplicate mutation is needed to discover whether the first succeeded. A batch's per-item refusal remains inspectable when pending becomes empty. In a five-person synthetic task check, 4 of 5 users recover the allowed path without re-entering non-secret work or attempting an already-recorded decision; report limits of this small sample.
+
+#### CXR-UXP-004 — Turn security settings into reviewed, scoped changes rather than dense form submission
+
+- **Task / role:** an admin tunes session/friction policy, maintains an IdP or grants an approved time-boxed guardrail exception.
+- **Source facts:** `OrgSettingsCard.tsx:50–61,87–93` has a current baseline, single-flight gate, keyed per-setting rows and post-save locks. `:168–175,192–232` renders current/default values, review, old→new consequences and the configured proof expectation. The dedicated SSO form instead sends all its old fields (SSO-002). Claude's response, Owner answers, classifies ADM-003 as a **new** bounded exception feature; the assurance-window row is not a generic troubleshooting control.
+- **Proposal / why:** progressively expose advanced settings while keeping effective policy, scope and consequences visible. For each intentional change show current effective value/source, proposed value, who/resources are affected, expiry when supported, what remains required, and the reason/proof step. “Current → proposed” should describe the actual change, never a hidden stale payload. Prefer task-specific maintenance actions (replace secret, stage certificate) to editing a large undifferentiated policy object.
+- **Visual / interaction direction:** default view: concise effective-state summary plus “Review change”. Expand task-specific fields only when selected; preserve required warnings outside collapsed help. Use existing row/modal primitives and tokens. A relaxation can be visibly distinct without using a universal “security level” slider. Do not create a new settings framework.
+- **Priority / tradeoff / security:** UI priority 1 for stale-baseline/intent handling, priority 2 for gradual disclosure. More review steps can cause fatigue, so reserve consequence review/proof for the effective change required by policy; harmless reads and unchanged settings need no ceremony. Follow the recorded owner decision for the new guardrail relaxation: distinct row kind, bounded required expiry, proof, grant/expiry audit and automatic reversion. Do not repurpose red-team assurance windows. Existing local-proof account linking and appropriately verified IdP MFA can reduce friction without weakening identity/linkage integrity.
+- **Acceptance:** editing one field does not repost unedited old MFA/SSO/break-glass values; a concurrently changed baseline is explained before a new write. A permitted temporary exception shows its exact resource, expiry and remaining floor; expiry returns to the baseline with an auditable result. A normal user can see a safe explanation/request path without acquiring admin rights. Failure/cancel preserves suitable non-secret work. The same task must be comprehensible at phone width and by keyboard. A prototype/test target is fewer repeated inputs and failed attempts, not a promised latency reduction or an automatic relaxation of mandatory controls.
+
+#### CXR-UXP-005 — Keep lists useful as work queues while preserving place and subject
+
+- **Task / role:** a reviewer works through many approvals; an admin compares permissions across people; an analyst drills from a filtered list into detail and back.
+- **Source facts:** `DataList.tsx:244–276` already has server-backed page/cursor/query keys and deliberately retained previous data during a new read; `:342–365` supplies server sorting and same-filter export with truncation feedback. `DetailDrawer.tsx:38–53` is designed for same-page inspection and retargeting. `fold.tsx:13–29,36–49` moves values into folded hosts according to available width. UIS-05/06/08, INT-005, APR-003 and REV-003 identify specific truth/continuation/return gaps; the workbench's oldest-first shared query is a useful positive pattern.
+- **Proposal / why:** standardise a stable queue/list header containing active filter scope, exact-versus-estimated total, stale/loading state and refresh. Preserve server sort/filter/page/scroll on detail-return. Bind selection, results and mutations to the loaded subject and make that subject explicit; a newly selected user must not make old grants look like theirs. Let users work oldest/highest-priority permitted items where the existing API supports it, without fetching everything into the browser.
+- **Visual / interaction direction:** compact primary cells answer “what / state / next action”; fold secondary metadata into labelled values rather than hiding warnings. Use one row's explicit detail link/button, consistent fixed action slots and the existing drawer, not a full-screen route for every quick inspection. Larger deep-linked records can keep their page route. Show retained previous-filter data as stale and prevent ambiguous destructive actions until scope is settled.
+- **Priority / tradeoff / security:** UI priority 1 for subject/visibility truth and reachability, priority 2 for comfort. Dense tables are useful to expert reviewers; do not replace them all with large cards or remove exported fields. Counts, pages and exports must share the same server permission/filter scope. Drafts may be retained only for their authorised subject; no browser-wide secret draft storage.
+- **Acceptance:** a 201+ record same-filter fixture remains reachable through bounded normal controls; old unresolved items are discoverable. Open the seventh filtered row, inspect/change another authorised row, return/back and retain the intended place/sort/filter. Slow/error reads never attach old mutations to a new subject. At 375/768/1440 px, scope/state/consequence/action remain readable and keyboard reachable, without sideways page scroll or lost data. A small user task comparison measures repeated navigation and wrong-record attempts; no savings claim is made without results.
+
+#### CXR-UXP-006 — Use real task accessibility and visual hierarchy as the release check
+
+- **Task / role:** a first-time user completes sign-in/setup/approval/recovery using keyboard, touch, magnification or a screen reader; experienced users scan dense operational pages.
+- **Source facts:** DESIGN_GUIDELINES already requires one primary action, consistent row slots, status/error semantics, 24px targets, token-based contrast and keyboard journeys. `Field` supports explicit labels/help (`kit.tsx:137–145`); existing UIS-02 records error association work. `DetailDrawer.tsx:38–53` supplies focus return, nested modal behaviour and phone modality. `PageHeader` deliberately moves long introductory prose behind optional help (`AppShell.tsx:584–592`), and the suite/filter model provides keyboard destinations.
+- **Proposal / why:** keep the existing typography, spacing and colour system; improve scanning by placing task title/context first, one primary action second, current state/prerequisites next, with advanced evidence progressively disclosed. Pair the initial automated 150-route checks, with the newer route census tracked separately with populated end-to-end tasks that include errors and recovery. An empty/error fixture passing axe is not assurance that a real person can complete a workflow.
+- **Visual / interaction direction:** clear section headings, sentence-case action labels, units/time windows beside numbers, text alongside state colour, linked inline field errors plus a focused error summary when multiple errors block submission. Busy controls must preserve a meaningful focus location and guard repeat activation. At narrow widths use the existing drawer/modal and fold behaviour; do not simply shrink text or hide policy consequences. Keep current versus historical/effective versus requested values named explicitly.
+- **Priority / tradeoff / security:** UI priority 1 for existing task-blocking accessibility defects; priority 2 for further layout polish. Avoid a new overlay/tour/tooltip layer, which adds focus work and can obscure warnings. Apply the resolved owner instruction: ask before discarding dirty edits and block dismissal during a pending save (DecisionLog D-2026-11-22-03). Screen-reader output should explain the same decision scope as visual content, without exposing restricted evidence.
+- **Acceptance / proposed test set:** four populated journeys—sign-in and required setup; intake→plan/sign-off; approval including proof/cancel; settings change including refusal/recovery—at 375/768/1440 px in both themes, 200%/400% zoom where applicable, keyboard-only, reduced motion and at least one real screen reader. Verify focus order, return, status announcements, labels/errors, no off-screen reachable controls, no clipped decision rows and no duplicate action. Keep automated serious/critical axe checks, but report manual/native-IME/provider/device coverage separately. Before/after usability measures are task completion, wrong-record/duplicate-action count, recovery success and user confidence in what persisted—not aesthetic preference alone.
+
+### Proposed task validation and delivery slices
+
+1. **Home → find one actionable approval → approve/prove → inspect partial execution outcome.** Use synthetic populated member and admin fixtures plus a post-commit warning. Compare the current information order, visible next step and keyboard focus; do not claim a real IdP/passkey ceremony from a mock.
+2. **Open SSO policy → change only one value → load a newer policy → review/cancel/save safely.** Inspect old→new/source/scope at desktop and phone widths. Keep the server proof/last-provider protections intact; the existing stale-form reproduction supplies a concrete before state.
+3. **Select a connector/person → inspect detail → switch subject → return to the same queue position.** At narrow width inspect the drawer and fixed actions, with a delayed/failing second-subject query. Do not send actual deletions or credential writes.
+
+Delivery should be small, reviewable slices after the security prerequisites: shared status/outcome contract; record/action context and proof completion; list/subject continuity; security-policy review integration; Home discovery; populated usability/accessibility verification. Keep one builder PR in review at a time under the master's plan. A design prototype can be reviewed on synthetic fixtures before changing product code; it is not evidence that the production backend already supplies every proposed capability.
+
+**Coverage limits:** this assessor inspected selected shell/Home/kit/settings/Inbox/workflow/list primitives and existing card/reply evidence. It did not manually review every page or function, run browser/native accessibility checks, interview users, benchmark vendors, test real integrations, or confirm a fix. These are concrete proposals for the builders and reviewer to challenge, not permission to merge, deploy, create a parallel lifecycle or declare UX completion.
+
 ## Claude/Codex discussion ledger
 
-Each row below is initially **reported**, not accepted, assigned or fixed. At this iteration, no Claude response has been received on the review PR; Codex has not inferred agreement from silence. Claude should add its source-based response and counterevidence in the review PR or this file, then Codex folds the reasoned outcome into the card. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
+Claude’s response is now linked and reconciled for 46 numbered cards plus RUN-001. Latest 23 cards and HME-001 still await a direct response. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
 
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
-| CXR-ADM-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-002 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-003 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-004 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-005 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-006 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-007 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-008 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| CXR-ADM-009 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIW-01 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| UIW-02 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| UIW-03 | mock-browser + source (iteration3;503/404 distinction) | Awaiting response | Reported; no fix claimed |
-| UIW-04 | mock-browser + source (iteration 2; qualified scope above) | Awaiting response | Reported; no fix claimed |
-| UIW-05 | mock-browser + source (iteration 2; qualified scope above) | Awaiting response | Reported; no fix claimed |
-| UIW-06 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIW-07 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIW-08 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-01 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| UIS-02 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-03 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| UIS-04 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-05 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-06 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-07 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-08 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
-| UIS-09 | source; see confidence/design qualification | Awaiting response | Reported; no fix claimed |
+| CXR-ADM-001 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-ADM-002 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-003 | source; see confidence/design qualification | ACCEPT-build (owner); Claude F3×S3=9; [reasoning](codexreviews-response.md) | Narrowed; owner-approved new capability, slice 15; retest open |
+| CXR-ADM-004 | source; see confidence/design qualification | ACCEPT-triage-low; Claude F1×S3=3; [reasoning](codexreviews-response.md) | Deferred; #1187; no code planned; not closed |
+| CXR-ADM-005 | mock-browser + source | ACCEPT-build; Claude F6×S4=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-006 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-007 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-008 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S2=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-009 | source; see confidence/design qualification | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| UIW-01 | mock-browser + source | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-02 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8 / E35; independent retest open |
+| UIW-03 | mock-browser + source (iteration3;503/404 distinction) | handed to E35; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed/delegated to E35; implementation/retest open |
+| UIW-04 | mock-browser + source (iteration 2; qualified scope above) | handed to E50; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed/delegated to E50; implementation/retest open |
+| UIW-05 | mock-browser + source (iteration 2; qualified scope above) | handed to E50; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed/delegated to E50; implementation/retest open |
+| UIW-06 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-07 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-08 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIS-01 | mock-browser + source | ACCEPT-build; Claude F6×S6=36; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-02 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S4=28; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-03 | mock-browser + source | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-04 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 10; independent retest open |
+| UIS-05 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
+| UIS-06 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
+| UIS-07 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
+| UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; owner requires dirty-discard prompt + pending guard; retest open |
 
-| CXR-ACC-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-ACC-002 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
-| CXR-ACC-003 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-ACC-004 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
-| CXR-ACC-005 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
-| CXR-REV-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-REV-002 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-REV-003 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
-| CXR-REV-004 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-REV-005 | mock-browser + source | Awaiting response | Reported; no fix claimed |
+| CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-ACC-002 | source; runtime acceptance open | ACCEPT-triage-low (owner); Claude F5×S3=15; [reasoning](codexreviews-response.md) | Deferred; #1192; no code planned; not closed |
+| CXR-ACC-003 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
+| CXR-ACC-004 | source; runtime acceptance open | ACCEPT-triage-low; Claude F2×S2=4; [reasoning](codexreviews-response.md) | Deferred; #1188; no code planned; not closed |
+| CXR-ACC-005 | source; runtime acceptance open | ACCEPT-build; Claude F2×S3=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
+| CXR-REV-001 | mock-browser + source | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
+| CXR-REV-002 | mock-browser + source | ACCEPT-build; Claude F2×S6=12; [reasoning](codexreviews-response.md) | Agreed; owner chose archive/retention, slice 6; retest open |
+| CXR-REV-003 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
+| CXR-REV-004 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
+| CXR-REV-005 | mock-browser + source | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
 
-| CXR-INT-001 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-INT-002 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-INT-003 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-INT-004 | mock-browser + source | Awaiting response | Reported; no fix claimed |
-| CXR-INT-005 | mock-browser + source (iteration 4; connector branch only) | Awaiting response | Reported; no fix claimed |
-| CXR-CST-001 | mock-browser + source (qualified consumer scope above) | Awaiting response | Reported; no fix claimed |
-| CXR-CST-002 | mock-browser + source (qualified consumer scope above) | Awaiting response | Reported; no fix claimed |
-| CXR-CST-003 | mock-browser + source (qualified consumer scope above) | Awaiting response | Reported; no fix claimed |
-| CXR-CST-004 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
-| CXR-CST-005 | source; runtime acceptance open | Awaiting response | Reported; no fix claimed |
+| CXR-INT-001 | mock-browser + source | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-INT-002 | mock-browser + source | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-003 | mock-browser + source | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-004 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-005 | mock-browser + source (iteration 4; connector branch only) | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-CST-001 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
+| CXR-CST-002 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
+| CXR-CST-003 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
+| CXR-CST-004 | source; runtime acceptance open | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
+| CXR-CST-005 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
 
 | CXR-APR-001 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
 | CXR-APR-002 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
@@ -1368,6 +1544,20 @@ Each row below is initially **reported**, not accepted, assigned or fixed. At th
 | CXR-CON-002 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
 | CXR-CON-003 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
 | CXR-CON-004 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
+
+| CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
+| CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Awaiting response | Reported; shared status-honesty scope; no fix claimed |
+
+### Design proposal discussion
+
+| Proposal | Intended outcome | Claude / builder response |
+| --- | --- | --- |
+| CXR-UXP-001 | Task-led Home and understandable cross-suite discovery | Proposed; awaiting design response and task validation |
+| CXR-UXP-002 | Resource, effective state, eligibility and clear next action | Proposed; awaiting design response and role validation |
+| CXR-UXP-003 | Truthful progress, partial completion and safe recovery | Proposed; awaiting design response and outcome validation |
+| CXR-UXP-004 | Scoped, reviewed policy changes against current baseline | Proposed; preserve owner-approved exception contract |
+| CXR-UXP-005 | Reachable queues, loaded subject and stable list position | Proposed; awaiting list/subject task validation |
+| CXR-UXP-006 | Populated mobile/keyboard/native accessibility release tasks | Proposed; acceptance targets are not completed user studies |
 
 ### Coverage — every page and function is a tracked goal, not a blanket completion claim
 

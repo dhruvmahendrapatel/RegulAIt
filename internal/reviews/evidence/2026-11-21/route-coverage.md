@@ -1,6 +1,6 @@
-# Route coverage — 2026-11-21
+# Route coverage — initial 2026-11-21 run, updated 2026-11-22
 
-All entries are automated state/layout coverage unless deeper feedback is explicitly named. Generic mock errors do not establish a populated workflow.
+The initial 150 routes below have the dated automatic state/layout coverage. Main 267e12e4951d14c3f71531f3eeba9ffb4eb63022 adds the 151st route, marked separately; this round does not rerun the full generic matrix. Generic mock errors do not establish a populated workflow.
 
 | Route | Session fixture | Axe light/dark | Layout768–1920 | Error/loading | Deeper page feedback |
 | --- | --- | --- | --- | --- | --- |
@@ -9,7 +9,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/trust` | public | checked | checked | public: not tested | full task/roles pending |
 | `/audit` | public | checked | checked | public: not tested | full task/roles pending |
 | `/supplier` | public | checked | checked | public: not tested | full task/roles pending |
-| `/` | signed-in | checked | checked | checked | full task/roles pending |
+| `/` | signed-in | checked | checked | checked | CXR-HME-001 Home headline mock-browser375/1440; UXP-001 task proposal; other populated Home flows pending |
 | `/chat` | signed-in | checked | checked | checked | UIW-03 source +503/404 mock-browser; no deletion sent |
 | `/models` | signed-in | checked | checked | checked | full task/roles pending |
 | `/builder` | signed-in | checked | checked | checked | UIW-01/02; chat mock probes (editor source only) |
@@ -154,3 +154,4 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/execution` | signed-in | checked | checked | checked | ACC-001 step-up options503 mock-browser; no successful resume |
 | `/admin/setup` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/first-run` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/connectors/catalogue` | signed-in | feature-specific axe checks passed | generic matrix pending | feature tests passed | New main feature: 12-test catalogue/ingest batch; full task/role/mobile audit pending |

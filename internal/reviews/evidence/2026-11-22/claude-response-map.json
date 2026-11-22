@@ -1,0 +1,472 @@
+[
+  {
+    "id": "CXR-RUN-001",
+    "claudeVerified": "Partial",
+    "claudeF": "3",
+    "claudeS": "2",
+    "claudeScore": "6",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`BuilderPlaygroundPage.tsx:471-474` already alerts on a failed model read. The datasets and source reads (`:280-281`) do not. The baseline count is likely timing: the QueryClient retries once (`App.tsx:165-169`). Fix the missing alerts, then shrink the baseline.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-001",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "6",
+    "claudeScore": "30",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ExternalScorersPage.tsx:301` and `editForms.tsx:223` use plain `api.post`/`api.patch`, but the server requires settings_relax step-up (`external-scorers.ts:464,635`). With no wrapper, the proof dialog never opens. The server stays fail-closed.",
+    "sliceOrIssue": "slice 2"
+  },
+  {
+    "id": "CXR-ADM-002",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "5",
+    "claudeScore": "30",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ExternalScorersPage.tsx:101-103` says the inline path stays local, but ADR-0220 trained detectors call registered scorers inline (`trained-detectors.ts:4-15`). The disclosure is wrong; a copy fix.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-003",
+    "claudeVerified": "Partial",
+    "claudeF": "3",
+    "claudeS": "3",
+    "claudeScore": "9",
+    "claudeDisposition": "ACCEPT-build (owner)",
+    "reason": "The window (`guardrails.ts:555-562`) is the ADR-0181 FX3 red-team window: demo-only, at most 60 minutes, and it never replaces an admin override. Exposing it is a new feature. Owner question 1. **Owner, 2026-11-22: build it** as a new row kind (required bounded expiry, step-up, audited grant and expiry, auto-revert), recorded in an ADR-0181 addendum, after the security slices.",
+    "sliceOrIssue": "slice 15"
+  },
+  {
+    "id": "CXR-ADM-004",
+    "claudeVerified": "Y",
+    "claudeF": "1",
+    "claudeS": "3",
+    "claudeScore": "3",
+    "claudeDisposition": "ACCEPT-triage-low",
+    "reason": "`ConfigRow` ignores the server's `expired` flag (`GuardrailsPage.tsx:64-72`). Only `demo:intake` creates window rows, it deletes them in `finally`, and the sweep runs every 5 minutes.",
+    "sliceOrIssue": "#1187"
+  },
+  {
+    "id": "CXR-ADM-005",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "4",
+    "claudeScore": "24",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`GuardrailsPage.tsx:606,625`: the sample result stays after the text changes. A failed rerun shows only in a toast (`adminKit.tsx:379-384`).",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-006",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "4",
+    "claudeScore": "20",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "The help says \"Runs every detector\" (`GuardrailsPage.tsx:596`), but the handler runs local rules for the input phase only (`guardrails.ts:1013-1022`). Relabel it and add a phase select; it stays local.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-007",
+    "claudeVerified": "Y",
+    "claudeF": "7",
+    "claudeS": "3",
+    "claudeScore": "21",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CredentialsPage.tsx:217,238` shows `inv ?? 0` before the read and after a failed read. An unread inventory is not zero.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-008",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "2",
+    "claudeScore": "8",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CredentialsPage.tsx:334` clears the draft even when `run()` resolves false, including when step-up is cancelled. A one-line fix.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "CXR-ADM-009",
+    "claudeVerified": "Partial",
+    "claudeF": "2",
+    "claudeS": "4",
+    "claudeScore": "8",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`EnforcementPosturePage.tsx:195-198` posts directly. `:284` already says it takes effect immediately. Add a kit `ConfirmModal` listing the controls that differ from strict. No dry-run endpoint, which would be speculative.",
+    "sliceOrIssue": "slice 3"
+  },
+  {
+    "id": "UIW-01",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "4",
+    "claudeScore": "16",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`BuilderUi.tsx:647-651`: the Composer clears the text before the send is acknowledged. It is shared by the builder chat, agent editor and inbox.",
+    "sliceOrIssue": "slice 8"
+  },
+  {
+    "id": "UIW-02",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "3",
+    "claudeScore": "9",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`BuilderUi.tsx:665-669` has no composition check. The same bug is in `ChatPage.tsx:821-825`. The builder part is ours; the ChatPage part is handed to E35.",
+    "sliceOrIssue": "slice 8 / E35"
+  },
+  {
+    "id": "UIW-03",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "5",
+    "claudeScore": "20",
+    "claudeDisposition": "handed to E35",
+    "reason": "`ChatPage.tsx:255-261`: a bare `catch` clears the open conversation on any error. Only 403/404 should, and that non-disclosure behaviour must stay. The file is in E35's surface (#960).",
+    "sliceOrIssue": "E35"
+  },
+  {
+    "id": "UIW-04",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "3",
+    "claudeScore": "12",
+    "claudeDisposition": "handed to E50",
+    "reason": "`ProjectContextPage.tsx:110-112` turns a failed list read into \"Nothing promotable yet\" (`:388-394`). The file is in E50's surface (#1133).",
+    "sliceOrIssue": "E50"
+  },
+  {
+    "id": "UIW-05",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "5",
+    "claudeScore": "15",
+    "claudeDisposition": "handed to E50",
+    "reason": "`ProjectContextPage.tsx:768-800` lets Escape or a backdrop click discard a draft or close the editor mid-save (`kit.tsx:1326-1336`). Same file as UIW-04.",
+    "sliceOrIssue": "E50"
+  },
+  {
+    "id": "UIW-06",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "2",
+    "claudeScore": "6",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`InboxPage.tsx:179-192` requires a reason for both decisions. `:238` disables only Approve, so Deny looks available.",
+    "sliceOrIssue": "slice 8"
+  },
+  {
+    "id": "UIW-07",
+    "claudeVerified": "Partial",
+    "claudeF": "4",
+    "claudeS": "3",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`WorkflowDetailPage.tsx:193` says unnamed calls are unconstrained, but `plan-only.ts:308-334` blocks mutating calls attributed to the project. The copy still holds for project-less instances. Branch it on `projectId` and cite the ADR-0250 exception.",
+    "sliceOrIssue": "slice 8"
+  },
+  {
+    "id": "UIW-08",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "3",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`WorkflowDetailPage.tsx:89-98`: `act()` has no pending state, so the action buttons allow double submission. Reuse `useAction` busy state.",
+    "sliceOrIssue": "slice 8"
+  },
+  {
+    "id": "UIS-01",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "6",
+    "claudeScore": "36",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "At 960px or narrower, the closed rail is only translated off screen (`shell.module.css:608-623`). The `<aside>` (`AppShell.tsx:306-343`) is not `inert`, so keyboard focus lands off screen. Entry-bundle code, so it stays within the #1185 first-load gate.",
+    "sliceOrIssue": "slice 4"
+  },
+  {
+    "id": "UIS-02",
+    "claudeVerified": "Y",
+    "claudeF": "7",
+    "claudeS": "4",
+    "claudeScore": "28",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`kit.tsx:179-194`: the Field error is a span with no id. There is no `aria-describedby` and no `aria-invalid`.",
+    "sliceOrIssue": "slice 4"
+  },
+  {
+    "id": "UIS-03",
+    "claudeVerified": "Partial",
+    "claudeF": "2",
+    "claudeS": "4",
+    "claudeScore": "8",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`AppShell.tsx:160-167` opens the palette (a div dialog) behind an open native `<dialog>`. Real, but only when the shortcut is pressed inside a modal.",
+    "sliceOrIssue": "slice 4"
+  },
+  {
+    "id": "UIS-04",
+    "claudeVerified": "Y",
+    "claudeF": "7",
+    "claudeS": "3",
+    "claudeScore": "21",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`kit.tsx:1146-1162` gives every clickable row `role=\"link\"`, including rows that select in place. No ADR governs this. Owner question 7.",
+    "sliceOrIssue": "slice 10"
+  },
+  {
+    "id": "UIS-05",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "3",
+    "claudeScore": "15",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`DataList.tsx:266` uses `keepPreviousData`, and the status line presents old rows as the new filter's result.",
+    "sliceOrIssue": "slice 5"
+  },
+  {
+    "id": "UIS-06",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "3",
+    "claudeScore": "18",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "Sort and page live in component state only (`DataList.tsx:238-246`), so drill-down and Back resets them. No conflict with ADR-0226.",
+    "sliceOrIssue": "slice 5"
+  },
+  {
+    "id": "UIS-07",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "2",
+    "claudeScore": "6",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`useTheme.ts:12-18` and `theme/mode.ts:18-27` notify separate listener sets, so the topbar icon goes stale. Fix with an observer on `data-theme`; no import of `mode.ts`, to stay out of the entry bundle.",
+    "sliceOrIssue": "slice 4"
+  },
+  {
+    "id": "UIS-08",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "3",
+    "claudeScore": "9",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`DataList.tsx:417` replaces the error with a bare `new Error`, dropping `.status`, so the 403 branch never fires. ErrorState also offers Retry on access errors (`kit.tsx:1532`).",
+    "sliceOrIssue": "slice 5"
+  },
+  {
+    "id": "UIS-09",
+    "claudeVerified": "Partial",
+    "claudeF": "4",
+    "claudeS": "4",
+    "claudeScore": "16",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`kit.tsx:1326-1334` closes on Escape even while busy. `IntegrationEditDialogs.tsx:47-51` lacks the guard that `PatchFormModal.tsx:49-55` has. Build the busy guard; the dirty-draft contract is owner question 6.",
+    "sliceOrIssue": "slice 4"
+  },
+  {
+    "id": "CXR-ACC-001",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "4",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`StepUpDialog.tsx:74-87`: a failed `begin()` leaves \"Getting ready\u2026\" with only Cancel (`:186-189`). Add a Retry that starts a fresh ceremony and never re-sends the action.",
+    "sliceOrIssue": "slice 2"
+  },
+  {
+    "id": "CXR-ACC-002",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "3",
+    "claudeScore": "15",
+    "claudeDisposition": "ACCEPT-triage-low (owner)",
+    "reason": "Federated links hard-code `returnTo=/app` (`LoginPage.tsx:373,400`), and the server enum (`auth.ts:2229`, `saml.ts:622`) is fixed by ADR-0026 and ADR-0036. Owner question 2; the fix must not create an open redirect. **Owner, 2026-11-22: triage-low**, not built.",
+    "sliceOrIssue": "#1192"
+  },
+  {
+    "id": "CXR-ACC-003",
+    "claudeVerified": "Partial",
+    "claudeF": "3",
+    "claudeS": "3",
+    "claudeScore": "9",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ModelRateLimits.tsx:66` shows a failed read as \"Not enforced\", and the copy is stale: the stored default is true (`schema.ts:5068`). Narrower than claimed: the toggle can only send the strict value, so enforcement cannot be weakened.",
+    "sliceOrIssue": "slice 9"
+  },
+  {
+    "id": "CXR-ACC-004",
+    "claudeVerified": "Y",
+    "claudeF": "2",
+    "claudeS": "2",
+    "claudeScore": "4",
+    "claudeDisposition": "ACCEPT-triage-low",
+    "reason": "`AccountPage.tsx:474-487` has no warning, but the server forces re-enrolment (`app.ts:1437-1447`). There is no bypass.",
+    "sliceOrIssue": "#1188"
+  },
+  {
+    "id": "CXR-ACC-005",
+    "claudeVerified": "Y",
+    "claudeF": "2",
+    "claudeS": "3",
+    "claudeScore": "6",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`LoginPage.tsx:67-74` falls back silently, and the options error (`:139-145`) is never rendered. Add a degraded notice with Retry.",
+    "sliceOrIssue": "slice 9"
+  },
+  {
+    "id": "CXR-REV-001",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "3",
+    "claudeScore": "18",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ReportsPage.tsx:56` types `schedulerPresent` but never reads it. The copy (`:228,312,319,342,379`) always says nothing fires schedules, and `reporting.ts:756` is stale.",
+    "sliceOrIssue": "slice 6"
+  },
+  {
+    "id": "CXR-REV-002",
+    "claudeVerified": "Y",
+    "claudeF": "2",
+    "claudeS": "6",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ReportsPage.tsx:284-294` deletes on one click, and the delete cascades its runs and schedules (`schema.ts:7252,7275`). Build the confirm; the cascade versus ADR-0047's immutability is owner question 3. **Owner, 2026-11-22: archive instead of delete.** The definition is hidden and its signed runs are kept as evidence; nothing cascades.",
+    "sliceOrIssue": "slice 6"
+  },
+  {
+    "id": "CXR-REV-003",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "5",
+    "claudeScore": "15",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`risks.ts:913-953` stops at `.limit(200)` with no cursor or total, which breaks ADR-0200's paginated-API rule. Use the ADR-0226 list contract. E52's #1134 does not touch `/v1/risks` today.",
+    "sliceOrIssue": "slice 6"
+  },
+  {
+    "id": "CXR-REV-004",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "4",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`RisksPage.tsx:165` holds one page-wide transition reason. Key it by risk id. The server checks the right risk, so there is no authorisation issue.",
+    "sliceOrIssue": "slice 6"
+  },
+  {
+    "id": "CXR-REV-005",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "3",
+    "claudeScore": "12",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "Workflow figures are computed (`shared/reporting.ts:794`) but rendered by neither `ReportsPage.tsx` nor `ReportsHistory.tsx:34-47`. Use one shared payload renderer.",
+    "sliceOrIssue": "slice 6"
+  },
+  {
+    "id": "CXR-INT-001",
+    "claudeVerified": "Y",
+    "claudeF": "6",
+    "claudeS": "5",
+    "claudeScore": "30",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`IntegrationOwnership.tsx:63` uses a plain `api.put` with no `withStepUp`. The server gate is fail-closed (`ownership.ts:160-171`). Same root cause as ADM-001.",
+    "sliceOrIssue": "slice 2"
+  },
+  {
+    "id": "CXR-INT-002",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "6",
+    "claudeScore": "24",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ConnectorsPage.tsx:231-247` keeps one component-wide token and baseUrl draft, and switching connector (`:253`) keeps them. Not a checklist gap: same admin, both connectors authorised, egress still guarded. Key the form on connector id.",
+    "sliceOrIssue": "slice 11"
+  },
+  {
+    "id": "CXR-INT-003",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "4",
+    "claudeScore": "20",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ConnectorsPage.tsx:261-275,367` reads a failed credential query as \"no credential\". The message is also wrong for keyless kinds.",
+    "sliceOrIssue": "slice 11"
+  },
+  {
+    "id": "CXR-INT-004",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "6",
+    "claudeScore": "30",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "The baseUrl draft starts empty (`ConnectorsPage.tsx:244`), and omitting it stores null (`agents-connectors.ts:5500-5503`), so a token-only rotation silently clears the override. Not SSRF: the fallback is the connector's own base URL, which egress still guards. Prefill the field and add an explicit clear choice.",
+    "sliceOrIssue": "slice 11"
+  },
+  {
+    "id": "CXR-INT-005",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "6",
+    "claudeScore": "24",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`ConnectorsPage.tsx:441-442,521` and `McpServersPage.tsx:266-268` keep entitlement rows after the subject changes, so Remove targets the previous subject. Precedent fix: `McpServerAdmission.tsx:211-222`.",
+    "sliceOrIssue": "slice 11"
+  },
+  {
+    "id": "CXR-CST-001",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "4",
+    "claudeScore": "20",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CostDashboardPage.tsx:218-219` has no error branch for the project-cost read, so a failure leaves a blank card.",
+    "sliceOrIssue": "slice 7"
+  },
+  {
+    "id": "CXR-CST-002",
+    "claudeVerified": "Y",
+    "claudeF": "4",
+    "claudeS": "5",
+    "claudeScore": "20",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CostDashboardPage.tsx:248-249` and `ProjectDetailPage.tsx:223-224` show the raw approval latch. The server enforces with `overageActive` (`projects.ts:275-278`). Web-only fix, so no conflict with E2's #1143.",
+    "sliceOrIssue": "slice 7"
+  },
+  {
+    "id": "CXR-CST-003",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "4",
+    "claudeScore": "20",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CostConsolidationPage.tsx:873-877` and the domain-rule path clear the draft and reason when the action fails.",
+    "sliceOrIssue": "slice 7"
+  },
+  {
+    "id": "CXR-CST-004",
+    "claudeVerified": "Y",
+    "claudeF": "5",
+    "claudeS": "3",
+    "claudeScore": "15",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CostConsolidationPage.tsx:371-372` sends \"To\" as midnight UTC, and the filter is exclusive, so the chosen day is excluded. Owner question 5.",
+    "sliceOrIssue": "slice 7"
+  },
+  {
+    "id": "CXR-CST-005",
+    "claudeVerified": "Y",
+    "claudeF": "3",
+    "claudeS": "5",
+    "claudeScore": "15",
+    "claudeDisposition": "ACCEPT-build",
+    "reason": "`CostConsolidationPage.tsx:908-911` removes a rule with no review, and `reresolveAll` (`cost-import.ts:952-960`) re-attributes history. Add a `ReasonModal` plus the re-attribution counts. Owner question 4 (server reason).",
+    "sliceOrIssue": "slice 7"
+  }
+]
