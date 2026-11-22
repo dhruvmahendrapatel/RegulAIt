@@ -1,0 +1,16 @@
+{
+  "adr": "ADR-0231",
+  "lane": "L2",
+  "tracking": "Lane L2 (ADR-0231 B3): the brief is API-only; the Connect SAP Agent Gateway panel and import picker are slice B5, posted on #453 for the design builder",
+  "gaps": {
+    "GET /v1/a2a/gateway-connections": "lists the agent gateway connections (never the client secret)",
+    "POST /v1/a2a/gateway-connections": "connects an agent gateway (SAP Agent Gateway; settings_relax step-up, audited)",
+    "PATCH /v1/a2a/gateway-connections/:connectionId": "turns a connection on or off, or rotates its client secret (step-up to widen, audited)",
+    "DELETE /v1/a2a/gateway-connections/:connectionId": "removes a connection and turns its imported agents off (step-up, audited)",
+    "POST /v1/a2a/gateway-connections/:connectionId/import": "reads the gateway's ARD catalogue and lists the A2A agents it offers; registers nothing",
+    "POST /v1/a2a/gateway-connections/:connectionId/agents": "registers one catalogue agent the admin picked (audited; nobody may call it until granted)",
+    "POST /v1/a2a/gateway-connections/:connectionId/refresh": "re-reads the catalogue: a changed card is held for review, a gone agent is turned off",
+    "POST /v1/a2a/agents/:agentId/pending-card/accept": "accepts a changed card (settings_relax step-up when it widens, audited)",
+    "DELETE /v1/a2a/agents/:agentId/pending-card": "rejects a changed card; the stored card stays (audited)"
+  }
+}

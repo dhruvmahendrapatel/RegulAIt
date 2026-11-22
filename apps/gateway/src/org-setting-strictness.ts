@@ -272,6 +272,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   mcpPrivateRangesDefault: notEqual(false),
   // ADR-0219 (P10): turning on calls to remote A2A agents opens a new egress path and a new callable
   a2aEnabled: notEqual(false),
+  // ADR-0231 §5: an agent gateway connection opens a catalogue of remote agents that can act in SAP for a person
+  sapAgentGatewayEnabled: notEqual(false),
   // ADR-0236 (P11): turning on MCP bundles opens a new way to grant tools to many people at once
   mcpBundlesEnabled: notEqual(false),
   // ADR-0251: the attribution mandate for connector and A2A calls; turning it off lets calls run unattributed

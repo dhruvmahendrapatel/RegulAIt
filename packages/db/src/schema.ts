@@ -1091,8 +1091,24 @@ export const a2aAgents = pgTable(
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // --- ADR-0231 B3 (migration `pending/a2a_gateway_connections`) ---
+    /** the agent gateway it was imported from (null = registered by url); the provider is the connection's, not copied */
+    gatewayConnectionId: uuid("gateway_connection_id").references((): AnyPgColumn => a2aGatewayConnections.id, { onDelete: "set null" }),
+    /** the ARD entry identifier it was imported under (the catalogue's own key) */
+    ardIdentifier: text("ard_identifier"),
+    /** ADR-0231 §3: the card's protocol version as published (0.3.x or 1.x), and a hash of the raw card as fetched */
+    cardProtocolVersion: text("card_protocol_version"),
+    cardRawSha256: text("card_raw_sha256"),
+    /** a refreshed card held for review: never used for a call until an admin accepts it (snapshot exception, ADR-0200:
+     * the remote party's card as fetched, kept to be diffed and accepted, its source of truth is the remote) */
+    pendingCard: jsonb("pending_card").$type<Record<string, unknown>>(),
+    pendingCardRawSha256: text("pending_card_raw_sha256"),
+    pendingCardFetchedAt: timestamp("pending_card_fetched_at", { withTimezone: true }),
   },
-  (t) => [unique("a2a_agents_name_uq").on(t.name)],
+  (t) => [
+    unique("a2a_agents_name_uq").on(t.name),
+    uniqueIndex("a2a_agents_gateway_ard_uq").on(t.gatewayConnectionId, t.ardIdentifier),
+  ],
 );
 export type A2aAgentRow = typeof a2aAgents.$inferSelect;
 
@@ -5193,6 +5209,8 @@ export const orgSettings = pgTable(
     /** ADR-0219 (P10, migration 0253): calls to remote agents over A2A. FALSE (the default, ADR-0180) = no remote
      * agent can be registered or called; an admin may turn it on (settings_relax step-up, audited). */
     a2aEnabled: boolean("a2a_enabled").notNull().default(false),
+    /** ADR-0231 §5: SAP Agent Gateway connections, their import and their agents' calls. Off by default (ADR-0180). */
+    sapAgentGatewayEnabled: boolean("sap_agent_gateway_enabled").notNull().default(false),
     /** ADR-0236 (P11, migration `mcp_bundles`): governed MCP bundles. FALSE (the default, ADR-0180) = no bundle can be created,
      * changed or granted, and the gateway loads no bundle grant; an admin may turn it on (settings_relax step-up, audited). */
     mcpBundlesEnabled: boolean("mcp_bundles_enabled").notNull().default(false),
@@ -18862,6 +18880,41 @@ export const a2aAgentRevocations = pgTable(
   ],
 );
 export type A2aAgentRevocationRow = typeof a2aAgentRevocations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Lane L2 (ADR-0231 B3): agent gateway connections. Migration `pending/a2a_gateway_connections`.
+// ---------------------------------------------------------------------------
+
+/**
+ * One agent gateway (SAP Agent Gateway) an admin connected: where its ARD catalogue is, and the client-credentials
+ * identity used ONLY to read that catalogue (ADR-0231 §2, §4). The secret is the data-key envelope, listed in
+ * CIPHERTEXT_COLUMNS, never returned. Agents imported from it point here (`a2a_agents.gateway_connection_id`).
+ */
+export const a2aGatewayConnections = pgTable(
+  "a2a_gateway_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    provider: text("provider", { enum: ["sap_agent_gateway"] }).notNull(),
+    /** the gateway's origin; the ARD manifest, every card and every agent interface must be on it */
+    baseUrl: text("base_url").notNull(),
+    tokenEndpoint: text("token_endpoint").notNull(),
+    clientId: text("client_id").notNull(),
+    clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+    clientSecretLast4: text("client_secret_last4").notNull(),
+    /** RFC 8707 `resource` for the discovery token, when the gateway asks for one */
+    resource: text("resource"),
+    scope: text("scope"),
+    allowPrivateRanges: boolean("allow_private_ranges"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastImportedAt: timestamp("last_imported_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("a2a_gateway_connections_name_uq").on(t.name)],
+);
+export type A2aGatewayConnectionRow = typeof a2aGatewayConnections.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
