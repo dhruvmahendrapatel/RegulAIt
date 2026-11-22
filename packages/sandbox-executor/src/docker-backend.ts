@@ -274,9 +274,31 @@ export const BRIDGE_INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4" as c
  * without an IPv4 address (Docker reserves no gateway), so the network's only addresses are its containers' (the
  * proxy at its fixed address, the sandbox). IPv6 is refused (`--ipv6=false`, checked again after create).
  */
-export function egressNetworkCreateArgs(network: string, executor?: string | null): string[] {
+export function egressNetworkCreateArgs(network: string, executor?: string | null, subnet?: string): string[] {
   if (!EGRESS_NETWORK_NAME.test(network)) throw new DockerBackendError("not a robot run's internal network name");
-  return ["network", "create", "--internal", "--driver", "bridge", "--ipv6=false", "--opt", `${BRIDGE_INHIBIT_IPV4}=true`, "--label", "org.regulait.sandbox=1", ...executorLabelArgs(executor), network];
+  if (subnet !== undefined && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(subnet)) throw new DockerBackendError("not an IPv4 subnet");
+  return [
+    "network",
+    "create",
+    "--internal",
+    "--driver",
+    "bridge",
+    "--ipv6=false",
+    "--opt",
+    `${BRIDGE_INHIBIT_IPV4}=true`,
+    ...(subnet !== undefined ? ["--subnet", subnet] : []),
+    "--label",
+    "org.regulait.sandbox=1",
+    ...executorLabelArgs(executor),
+    network,
+  ];
+}
+
+/** the IPv4 subnet `GET /networks/{name}` shows, or null */
+export function egressNetworkSubnet(net: unknown): string | null {
+  const configs = (net as { IPAM?: { Config?: Array<{ Subnet?: unknown }> | null } } | null)?.IPAM?.Config;
+  const found = Array.isArray(configs) ? configs.find((c) => typeof c.Subnet === "string" && c.Subnet.includes(".")) : undefined;
+  return typeof found?.Subnet === "string" ? found.Subnet : null;
 }
 
 /** what `GET /networks/{name}` must show for a run's network before its proxy starts: null, or what is wrong */
@@ -446,7 +468,9 @@ export function capEgressBytes(head: Buffer, tail: Buffer, total: number, max: n
 /** a log within `max` bytes: as it is, or its head and tail with a marker between (`capEgressBytes`) */
 /** the first line of a failed docker command's output, printable ASCII only, at most 300 characters */
 export function dockerReason(out: string): string {
-  const line = out.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "no output";
+  // every non-empty line, joined: the daemon puts the reason itself on the lines after its first (Docker 28:
+  // "invalid endpoint settings:" then "- user specified IP address is supported only when ...")
+  const line = out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0).join(" ") || "no output";
   let clean = "";
   for (const ch of line) {
     const c = ch.charCodeAt(0);
@@ -1198,7 +1222,21 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
       if (problem) throw new DockerBackendError(problem);
       if (!egress) return { network, proxyUrl: null, teardown };
       const targets = robotEgressSchema.parse(egress).targets;
-      const ip = egressProxyAddress(net.IPAM?.Config?.find((c) => typeof c.Subnet === "string" && c.Subnet.includes("."))?.Subnet);
+      // Docker 28 refuses `--ip` on a network whose subnet the daemon chose ("user specified IP address is supported
+      // only when connecting to networks with user configured subnets"). The daemon's allocator still picks a free
+      // subnet; the network is then made again ON that subnet, now user-configured, and checked again (fail closed:
+      // a subnet taken in between makes the create fail, and nothing starts)
+      const subnet = egressNetworkSubnet(net);
+      if (!subnet) throw new DockerBackendError("the internal network has no IPv4 subnet");
+      if ((await this.docker(["network", "rm", network])) !== 0) throw new DockerBackendError("the run's internal network could not be re-made on its subnet");
+      made.network = false;
+      if ((await this.docker(egressNetworkCreateArgs(network, this.executorTag, subnet))) !== 0) throw new DockerBackendError("the run's internal network was not re-made on its subnet");
+      made.network = true;
+      const pinned = await this.api(`/networks/${network}`);
+      const pinnedProblem = egressNetworkProblem(pinned);
+      if (pinnedProblem) throw new DockerBackendError(pinnedProblem);
+      if (egressNetworkSubnet(pinned) !== subnet) throw new DockerBackendError("the run's internal network is not on the subnet it was made on");
+      const ip = egressProxyAddress(subnet);
       // the ACL and the ports file, from the offer's targets, written 0600 and owned by whoever the proxy runs as
       // Security N-D: under this executor's own sub-directory, so another executor's reconciler never sees it
       const dir = path.join(this.egressAclDir!, this.executorTag, name);

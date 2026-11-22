@@ -226,6 +226,8 @@ interface SeamOptions {
   logsScript?: string;
   /** a docker verb that never exits (the timeout) */
   hang?: string;
+  /** hang only from this call of the `hang` verb on (1-based; default: every call) */
+  hangFrom?: number;
   /**
    * Security N-D: the daemon's labelled objects (all carry org.regulait.sandbox=1); `ps` / `network ls` list those
    * matching every `--filter label=org.regulait.executor=<tag>` given, as the daemon does
@@ -236,10 +238,11 @@ interface SeamOptions {
 /** the docker seam: the real init for the sandbox's `docker run`, no-ops (or the configured failures) for the rest */
 function seam(rig: Rig, opts: SeamOptions = {}) {
   let sandbox: ChildProcess | null = null;
+  let hangSeen = 0;
   return (args: string[]): DockerChild => {
     rig.calls.push(args);
     const noop = (code = 0, out = "") => spawn(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(out)}); process.exit(${code})`], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
-    if (opts.hang && (args[0] === opts.hang || `${args[0]} ${args[1]}` === opts.hang)) return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
+    if (opts.hang && (args[0] === opts.hang || `${args[0]} ${args[1]}` === opts.hang) && (hangSeen += 1) >= (opts.hangFrom ?? 1)) return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     if (args[0] === "run" && args[1] === "-d") {
       const mount = valueAfter(args, "--mount")!;
       const sub = /volume-subpath=([^,]+)$/.exec(mount)![1]!;
@@ -324,9 +327,14 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     const sandboxRun = rig.calls.find((c) => c[0] === "run" && c[1] !== "-d")!;
     const net = valueAfter(sandboxRun, "--network")!;
     const proxy = net.replace("regulait-egn-", "regulait-egp-");
-    expect(verbs(rig.calls)).toEqual(["network create", "run proxy", "network connect", "run sandbox"]);
-    const run = rig.calls.filter((c) => c[0] !== "ps" && !(c[0] === "network" && c[1] === "ls"));
-    expect(run[0]).toEqual(egressNetworkCreateArgs(net, b.executorTag));
+    // Docker 28: the network is made, then made again on the subnet the daemon chose (`--ip` needs a configured one)
+    expect(verbs(rig.calls)).toEqual(["network create", "network rm", "network create", "run proxy", "network connect", "run sandbox"]);
+    const all = rig.calls.filter((c) => c[0] !== "ps" && !(c[0] === "network" && c[1] === "ls"));
+    expect(all[0]).toEqual(egressNetworkCreateArgs(net, b.executorTag));
+    expect(all[1]).toEqual(["network", "rm", net]);
+    expect(all[2]).toEqual(egressNetworkCreateArgs(net, b.executorTag, "172.30.5.0/24"));
+    expect(valueAfter(all[2]!, "--subnet")).toBe("172.30.5.0/24");
+    const run = all.slice(2);
     // Security N-D: the sandbox, the proxy and the network carry this executor's tag; the ACL is under its directory
     expect(b.executorTag).toBe(executorTag("executor-under-test"));
     expect(valuesAfter(sandboxRun, "--label")).toContain(`org.regulait.executor=${b.executorTag}`);
@@ -391,7 +399,7 @@ describe("a robot run on the runc backend (the real init in place of docker run)
     const rig = newRig();
     await expect(runc(rig, { proxyFails: true }).start(offer, ROBOT_L1, "hardened_container")).rejects.toThrow(/egress proxy did not start/);
     expect(rig.calls.some((c) => c[0] === "run" && c[1] !== "-d"), "no sandbox started").toBe(false);
-    expect(verbs(rig.calls)).toEqual(["network create", "run proxy", "logs", "rm", "network rm"]);
+    expect(verbs(rig.calls)).toEqual(["network create", "network rm", "network create", "run proxy", "logs", "rm", "network rm"]);
     const net = rig.calls.find((c) => c[0] === "network" && c[1] === "create")!.at(-1)!;
     expect(rig.calls.at(-1)).toEqual(["network", "rm", net]);
   });
@@ -566,7 +574,8 @@ describe("the network check, the reconciler and the docker timeout (code review 
     expect(Date.now() - t0).toBeLessThan(5_000);
     // a run whose network removal hangs still ends
     const rig2 = newRig();
-    const h = await runc(rig2, { hang: "network rm", dockerTimeoutMs: 300 }).start(offer, ROBOT_L1, "hardened_container");
+    // (the first `network rm` is the re-make on the subnet; the teardown's is the second)
+    const h = await runc(rig2, { hang: "network rm", hangFrom: 2, dockerTimeoutMs: 300 }).start(offer, ROBOT_L1, "hardened_container");
     await h.kill();
     expect(await h.ended).toBe("killed");
   }, 30_000);
@@ -706,9 +715,11 @@ describe("capEgressLog (code review 8: head AND tail; CodeQL alert 81: linear tr
 });
 
 describe("dockerReason (why the proxy did not start, bounded)", () => {
-  it("keeps the first non-empty line, printable ASCII only, at most 300 characters", async () => {
+  it("keeps every non-empty line on one, printable ASCII only, at most 300 characters", async () => {
     const { dockerReason } = await import("./docker-backend.js");
-    expect(dockerReason("\n  docker: Error response from daemon: invalid mount config\nmore\n")).toBe("docker: Error response from daemon: invalid mount config");
+    expect(dockerReason("\n  docker: Error response from daemon: invalid mount config\nmore\n")).toBe("docker: Error response from daemon: invalid mount config more");
+    // Docker 28 puts the reason on the line after the first
+    expect(dockerReason("docker: Error response from daemon: invalid config for network n: invalid endpoint settings:\n- user specified IP address is supported only when connecting to networks with user configured subnets\n")).toMatch(/invalid endpoint settings: - user specified IP address/);
     expect(dockerReason("")).toBe("no output");
     expect(dockerReason("a\u0007béc")).toBe("a?b?c");
     expect(dockerReason("x".repeat(1000)).length).toBe(300);
