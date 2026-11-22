@@ -513,6 +513,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_agent_actions.reason",
     // ADR-0313: the admin's note on a paid-call price
     "paid_call_prices.note",
+    // ADR-0337 §5: a SaaS finding review's reason and its rendered rationale; a reader's usage note
+    "saas_finding_reviews.reason",
+    "saas_finding_reviews.rationale",
+    "saas_entitlement_usage_reads.note",
     // ADR-0366: a builder agent's halt reason and a containment's release reason
     "builder_agents.halted_reason",
     "agent_containments.release_reason",

@@ -257,6 +257,40 @@ export const SAAS_APP_AGENT_LINK_MACHINE = defineMachine({
   },
 });
 export type SaasAppAgentLinkState = (typeof SAAS_APP_AGENT_LINK_MACHINE.def.states)[number];
+/** `saas_finding_reviews.status` (ADR-0337 §5, slice 3b). An admin raises a SaaS entitlement finding into the approvals
+ * queue for a second administrator's decision. Nothing executes either way: RegulAIt never revokes a vendor-side
+ * grant. Approved records that the grant is to be removed or narrowed in the vendor's console; denied records the risk
+ * as accepted, with the decider's reason. A raised review can be withdrawn while it is pending. Every outcome is final:
+ * the same finding can be raised again as a new review. Same values as `SAAS_FINDING_REVIEW_STATES` below. */
+export const SAAS_FINDING_REVIEW_MACHINE = defineMachine({
+  id: "saas_finding_review",
+  stored: "saas_finding_reviews.status",
+  states: ["pending", "remediate", "accepted", "withdrawn"],
+  initial: ["pending"],
+  terminal: ["remediate", "accepted", "withdrawn"],
+  transitions: {
+    approve: {
+      from: ["pending"],
+      to: "remediate",
+      by: ["approver"],
+      summary: "The second administrator agreed: the grant is to be removed or narrowed in the vendor's own console (RegulAIt does not revoke it).",
+    },
+    deny: {
+      from: ["pending"],
+      to: "accepted",
+      by: ["approver"],
+      summary: "The second administrator kept the grant: the risk is accepted, with the decider's reason; the finding stays visible, marked accepted.",
+    },
+    withdraw: {
+      from: ["pending"],
+      to: "withdrawn",
+      by: ["admin"],
+      summary: "An admin withdrew the review before it was decided; its queue item is superseded.",
+    },
+  },
+});
+export type SaasFindingReviewState = (typeof SAAS_FINDING_REVIEW_MACHINE.def.states)[number];
+export const SAAS_FINDING_REVIEW_STATES = SAAS_FINDING_REVIEW_MACHINE.def.states;
 /** `detection_incidents.status` (ADR-0333, lane E15). An admin acknowledges an open incident (again, idempotently)
  * or closes it; a closed incident is final, so a later burst raises a new incident instead of reopening this one.
  * Same values as `DETECTION_INCIDENT_STATUSES` in @regulait/db. */
@@ -1027,6 +1061,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
+  [SAAS_FINDING_REVIEW_MACHINE.def.id]: SAAS_FINDING_REVIEW_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
   // ADR-0359 (lane E40): a behaviour baseline shadow finding

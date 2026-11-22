@@ -2108,6 +2108,9 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0337 §5 slice 3b: a SaaS entitlement finding review (raised, decided, withdrawn; objectId = the review).
+        // Plain text column — no DDL.
+        "saas_finding_review",
         // ADR-0358 (lane E39): the adoption-analytics privacy policy writes and each per-person ranking read; the CMDB
         // sync connector (its policy, credential and enable writes, and each sync run). Plain text column — no DDL needed.
         "adoption_analytics",
@@ -8484,6 +8487,10 @@ export const discoverySettings = pgTable(
     /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
      * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
     googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
+    /** ADR-0337 §4a (owner, 2026-11-22): whether a Salesforce entitlement source may read the org-wide OAuth tokens, which
+     * needs Customize Application (off by default; turning it on is a `settings_relax` step-up bound to
+     * `discoverySalesforceOrgTokens`, audited with its trade-off). Pending migration `saas_entitlement_usage`. */
+    salesforceOrgTokensEnabled: boolean("salesforce_org_tokens_enabled").notNull().default(false),
     // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
     endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     // ADR-0338: governed vendor agent control (disable, quarantine, restore), off (pending migration vendor_agent_control)
@@ -18500,6 +18507,115 @@ export const saasEntitlementGrantPrincipals = pgTable(
   ],
 );
 export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrincipals.$inferSelect;
+
+// ADR-0337 §5 (slice 3, pending migration `saas_entitlement_usage`): what the latest read of a source could observe of
+// use, and each app's latest observed use. Times only move forward (a later read never makes an app look less used).
+export const SAAS_ENTITLEMENT_USAGE_COVERAGES = ["none", "app", "verb"] as const;
+
+/** SAAS_ACTIVITY_LOG_STATES (@regulait/shared), as a literal tuple for the column type; the CHECK below pins them */
+export const SAAS_ACTIVITY_LOG_STATE_VALUES = ["off", "not_enabled", "unreadable", "no_activity_yet", "flowing"] as const;
+/** the usage coverage of a source's latest read (one row per source; replaced by each read) */
+export const saasEntitlementUsageReads = pgTable(
+  "saas_entitlement_usage_reads",
+  {
+    sourceId: uuid("source_id")
+      .primaryKey()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    coverage: text("coverage", { enum: SAAS_ENTITLEMENT_USAGE_COVERAGES }).notNull(),
+    /** the earliest moment the read could see use from; null when the vendor's last-use time is not window-bounded */
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    note: text("note").notNull(),
+    /** what the read observed of a guided activity-log setup (Microsoft 365 only; null elsewhere). An observation each
+     * read replaces, not a lifecycle: SAAS_ACTIVITY_LOG_STATES (@regulait/shared) */
+    activityLogState: text("activity_log_state", { enum: SAAS_ACTIVITY_LOG_STATE_VALUES }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    runId: uuid("run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("saas_entitlement_usage_reads_coverage_check", sql`${t.coverage} IN ('none', 'app', 'verb')`),
+    check(
+      "saas_entitlement_usage_reads_activity_log_state_check",
+      sql`${t.activityLogState} IS NULL OR ${t.activityLogState} IN ('off', 'not_enabled', 'unreadable', 'no_activity_yet', 'flowing')`,
+    ),
+    check("saas_entitlement_usage_reads_note_check", sql`length(${t.note}) BETWEEN 1 AND 300`),
+  ],
+);
+export type SaasEntitlementUsageReadRow = typeof saasEntitlementUsageReads.$inferSelect;
+
+/** an app's latest observed use (one row per app; reads and writes only where the coverage could tell them apart) */
+export const saasEntitlementAppUsage = pgTable(
+  "saas_entitlement_app_usage",
+  {
+    appId: uuid("app_id")
+      .primaryKey()
+      .references(() => saasEntitlementApps.id, { onDelete: "cascade" }),
+    lastUseAt: timestamp("last_use_at", { withTimezone: true }).notNull(),
+    lastReadAt: timestamp("last_read_at", { withTimezone: true }),
+    lastWriteAt: timestamp("last_write_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check(
+      "saas_entitlement_app_usage_last_use_check",
+      sql`${t.lastUseAt} >= coalesce(${t.lastReadAt}, ${t.lastUseAt}) AND ${t.lastUseAt} >= coalesce(${t.lastWriteAt}, ${t.lastUseAt})`,
+    ),
+  ],
+);
+export type SaasEntitlementAppUsageRow = typeof saasEntitlementAppUsage.$inferSelect;
+
+// ADR-0337 §5 slice 3b (pending migration `saas_finding_reviews`): a finding raised into the approvals queue for a
+// second administrator's recorded decision. Nothing executes: RegulAIt never revokes a vendor-side grant.
+/** the states of SAAS_FINDING_REVIEW_MACHINE (@regulait/shared); the ADR-0348 suite pins them to the CHECK */
+export const SAAS_FINDING_REVIEW_STATE_VALUES = ["pending", "remediate", "accepted", "withdrawn"] as const;
+export const SAAS_FINDING_RULE_ID_VALUES = ["unused-grant", "excessive-scope", "oversharing", "publicly-exposed-agent"] as const;
+
+export const saasFindingReviews = pgTable(
+  "saas_finding_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the finding's stable key (rule + grant row, or rule + registry record) */
+    findingKey: text("finding_key").notNull(),
+    ruleId: text("rule_id", { enum: SAAS_FINDING_RULE_ID_VALUES }).notNull(),
+    ruleVersion: integer("rule_version").notNull(),
+    /** the subject; SET NULL when the vendor-side grant or the registry record goes (the review then says so) */
+    grantId: uuid("grant_id").references(() => saasEntitlementGrants.id, { onDelete: "set null" }),
+    agentRecordId: uuid("agent_record_id").references(() => agentRegistryRecords.id, { onDelete: "set null" }),
+    /** DELIBERATE COPY (point-in-time evidence, ADR-0200 addendum): the source the finding was read from, as raised;
+     * it outlives the grant row the source is otherwise reached through. Deleting the source deletes its reviews. */
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    /** DELIBERATE COPY (point-in-time evidence): the rendered rationale and the evidence as raised, so the decision
+     * is bound to what the approver saw (the arguments digest covers them) */
+    rationale: text("rationale").notNull(),
+    evidence: jsonb("evidence").$type<Record<string, string | number | boolean | null>>().notNull(),
+    /** ADR-0348 machine SAAS_FINDING_REVIEW_MACHINE (@regulait/shared) */
+    status: text("status", { enum: SAAS_FINDING_REVIEW_STATE_VALUES }).notNull().default("pending"),
+    reason: text("reason").notNull(),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("saas_finding_reviews_pending_uq").on(t.findingKey).where(sql`${t.status} = 'pending'`),
+    uniqueIndex("saas_finding_reviews_approval_uq").on(t.approvalId),
+    index("saas_finding_reviews_key_idx").on(t.findingKey, t.createdAt),
+    index("saas_finding_reviews_source_idx").on(t.sourceId),
+    check("saas_finding_reviews_status_check", sql`${t.status} IN ('pending', 'remediate', 'accepted', 'withdrawn')`),
+    check("saas_finding_reviews_rule_check", sql`${t.ruleId} IN ('unused-grant', 'excessive-scope', 'oversharing', 'publicly-exposed-agent')`),
+    check("saas_finding_reviews_key_check", sql`${t.findingKey} ~ '^[a-z-]{1,40}:(grant|record):[0-9a-f-]{36}$'`),
+    check("saas_finding_reviews_subject_check", sql`${t.grantId} IS NULL OR ${t.agentRecordId} IS NULL`),
+    check("saas_finding_reviews_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 1000`),
+    check("saas_finding_reviews_rationale_check", sql`length(${t.rationale}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type SaasFindingReviewRow = typeof saasFindingReviews.$inferSelect;
 // ===== end ADR-0337 =====
 
 // ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
