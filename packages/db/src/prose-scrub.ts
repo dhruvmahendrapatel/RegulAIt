@@ -320,6 +320,11 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.vendorAgentActions, ["reason"]],
   // ADR-0313: the admin's note on a paid-call price (free text, shown in the price list)
   [s.paidCallPrices, ["note"]],
+  // ADR-0337 §5 slice 3b: the admin's reason for raising a SaaS finding, and the rationale rendered from vendor-read
+  // evidence (app and scope names a vendor returned, which an attacker-controlled app could fill)
+  [s.saasFindingReviews, ["reason", "rationale"]],
+  // ADR-0337 §5: a reader's usage note (built by the reader, but it can carry vendor-read text in future readers)
+  [s.saasEntitlementUsageReads, ["note"]],
 ];
 
 /**
