@@ -33,6 +33,8 @@ permissions:
 # ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
 # are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
 env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
   REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
