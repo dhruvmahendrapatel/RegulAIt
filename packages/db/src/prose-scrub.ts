@@ -227,7 +227,12 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // controls are jsonb, which this registry cannot reach (see the exclusions).
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
-  [s.builderAgents, ["autonomyNote", "autonomyEnforcementReason"]],
+  // ADR-0180 addendum (E51): the autonomy-enforcement reason; ADR-0366: a builder agent's halt reason (a containment
+  // or an admin), as for agents.halted_reason
+  [s.builderAgents, ["autonomyNote", "autonomyEnforcementReason", "haltedReason"]],
+  // ADR-0366: the admin's reason for releasing a rogue-agent containment, and the signal's explanation (it quotes an
+  // agent name a person typed)
+  [s.agentContainments, ["releaseReason", "explanation"]],
   // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
   // admin's note on the decision
   [s.agentIdentityLinks, ["note", "decisionNote"]],
@@ -311,6 +316,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.endpointAddonRemovals, ["reason"]],
   // ADR-0338: the admin's reason for a vendor agent control action
   [s.vendorAgentActions, ["reason"]],
+  // ADR-0313: the admin's note on a paid-call price (free text, shown in the price list)
+  [s.paidCallPrices, ["note"]],
 ];
 
 /**
@@ -354,6 +361,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
  * - `fairness_datasets.purge_reason` — ADR-0222 (migration 0271): a DB CHECK
  *   limits it to `'retention'` or `'deleted'`, set only by the retention sweep
  *   and the delete route. A credential cannot appear in a two-member enum.
+ * - `paid_call_holds.release_reason` — ADR-0313: a DB CHECK limits it to
+ *   `call_failed`, `expired` or `not_executed`, set only by the gateway. A
+ *   credential cannot appear in a three-member enum.
  */
 export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "audit_log.reason",
@@ -363,6 +373,7 @@ export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "fairness_datasets.purge_reason",
   "mcp_registry_entries.conflict_reason",
   "migration_audit_outbox.reason",
+  "paid_call_holds.release_reason",
   "risk_acceptances.compensating_controls",
   "trace_retention_holds.release_reason",
   "usage_events.stop_reason",

@@ -783,6 +783,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         });
       }
     }
+    // ADR-0366: rogue-agent containment proposals are decided by an administrator, so the named approver must be an
+    // ACTIVE ADMIN — anyone else could never decide them, and every proposal would wait unrouted
+    if (body.containmentApproverUserId) {
+      const [approver] = await db
+        .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.containmentApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (!approver.isAdmin || approver.disabledAt) {
+        return reply.status(422).send({
+          error: "containment_approver_not_admin",
+          detail: "the containment approver must be an active administrator",
+        });
+      }
+    }
     // The sign-in lockout guards (ADR-0025/0036 sso_only, ADR-0174
     // break-glass) run further down, INSIDE the sign-in invariant lock, over
     // the row as re-read under that lock (AER-056). `before` here serves only
