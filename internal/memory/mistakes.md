@@ -2001,7 +2001,19 @@ number, before the create call had returned its URL.
 Rule: subscribe only after the create call has returned, using the number in the URL it returned; never send the two in
 the same response.
 
-### M-120 (2026-11-22) - REPEAT of M-117: cited a reserved, not-yet-written ADR by its number
+### M-120 (2026-11-22) - REPEAT of M-117: the master cited reserved, unwritten ADR numbers as ADR-NNNN
+
+The master's DecisionLog row D-2026-11-22-03 (#1199) wrote the reserved numbers 0380 and 0381 in ADR-NNNN form, although it had only
+reserved them for lane CX. Neither file exists, so `scripts/adr-index.test.mjs` failed `build-and-test` on main from about
+07:17 to 09:48 and on every PR rebuilt in that window. #1201 fixed it. The PR itself looked green because CI scope skips
+`build-and-test` (and so the adr-index test) for docs-only changes. The test was not run locally before the push.
+
+Rule: never write `ADR-NNNN` for an ADR that has no file in `internal/decisions/` on main. A reserved number is written
+as "ADR number NNNN (reserved, not written yet)". Before pushing any change to `internal/`, `.github/`, `scripts/` or
+CLAUDE.md, run `npx vitest run scripts/adr-index.test.mjs` as its own step and read the result, even for docs-only PRs,
+because CI will not run it for them.
+
+### M-121 (2026-11-22) - REPEAT of M-117: cited a reserved, not-yet-written ADR by its number
 
 Lane CX recorded the owner's two reserved ADR numbers (0380 for C-01, 0381 for P-07) in the `ADR-` form in `internal/reviews/codexreviews-response.md`
 on #1194. Neither file exists yet, so `scripts/adr-index.test.mjs` failed `build-and-test`. The adr-index test was not run
