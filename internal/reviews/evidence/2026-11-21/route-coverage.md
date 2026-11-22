@@ -44,9 +44,9 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/feedback` | signed-in | checked | checked | checked | full task/roles pending |
 | `/feedback/:useCaseId` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/governance/use-cases/:id` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/users` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/roles` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/teams` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/users` | signed-in | checked | checked | checked | CXR-IDM-003 both count consumers mock-browser; lifecycle/override source; real ceremonies pending |
+| `/admin/roles` | signed-in | checked | checked | checked | CXR-IDM-001/002 mock-browser +source; group sync and proof completion pending |
+| `/admin/teams` | signed-in | checked | checked | checked | Source create/membership/classification/delete; populated runtime and full server gates pending |
 | `/admin/client-access` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/sso` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/sso/link-requests` | signed-in | checked | checked | checked | full task/roles pending |
@@ -90,7 +90,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/reports` | signed-in | checked | checked | checked | REV-001/002/005 mock-browser + source; destructive request refused |
 | `/admin/prompt-versions` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/approvals` | signed-in | checked | checked | checked | CXR-APR-001/002 admin mock-browser +source;003 source paging gap |
-| `/admin/review-workbench` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/review-workbench` | signed-in | checked | checked | checked | CXR-WBK-001..005 source +mock-browser; real bulk/scheduler/claims pending |
 | `/admin/audit` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/lineage` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/traces` | signed-in | checked | checked | checked | full task/roles pending |

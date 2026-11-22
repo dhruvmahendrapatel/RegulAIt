@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Pure compiled shared schema;no database or policy write",
+  "teamReassignAccepted": false,
+  "userReassignAccepted": true,
+  "rejection": [
+    "reassign must name a single user — a role or team cannot become the one named approver"
+  ]
+}
