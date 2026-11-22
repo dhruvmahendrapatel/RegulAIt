@@ -10,7 +10,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/audit` | public | checked | checked | public: not tested | full task/roles pending |
 | `/supplier` | public | checked | checked | public: not tested | full task/roles pending |
 | `/` | signed-in | checked | checked | checked | full task/roles pending |
-| `/chat` | signed-in | checked | checked | checked | UIW-03; source pass |
+| `/chat` | signed-in | checked | checked | checked | UIW-03 source +503/404 mock-browser; no deletion sent |
 | `/models` | signed-in | checked | checked | checked | full task/roles pending |
 | `/builder` | signed-in | checked | checked | checked | UIW-01/02; chat mock probes (editor source only) |
 | `/builder/inbox` | signed-in | checked | checked | checked | full task/roles pending |
@@ -31,7 +31,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/inbox` | signed-in | checked | checked | checked | UIW-06; source pass |
 | `/inbox/annotations/:itemId` | signed-in | checked | checked | checked | full task/roles pending |
 | `/projects` | signed-in | checked | checked | checked | Real gateway: admin create201; viewer member-scoped list/create403 |
-| `/projects/:projectId` | signed-in | checked | checked | checked | full task/roles pending |
+| `/projects/:projectId` | signed-in | checked | checked | checked | CXR-CST-002 source budget consumer; runtime pending |
 | `/projects/:projectId/context` | signed-in | checked | checked | checked | UIW-04/05 mock probes; real viewer read200/write403, content expanded |
 | `/projects/:projectId/context/graph` | signed-in | checked | checked | checked | full task/roles pending |
 | `/context` | signed-in | checked | checked | checked | full task/roles pending |
@@ -111,8 +111,8 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/model-credentials` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/custom-providers` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/external-scorers` | signed-in | checked | checked | checked | CXR-ADM-001/002; populated mock probe |
-| `/admin/connectors` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/mcp-servers` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/connectors` | signed-in | checked | checked | checked | CXR-INT-001..005 source;001..004 mock-browser; real provider/races pending |
+| `/admin/mcp-servers` | signed-in | checked | checked | checked | CXR-INT-001/005 source; MCP runtime and registry/bundle internals pending |
 | `/admin/mcp-servers/registries/:registryId/entries` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/mcp-servers/bundles` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/mcp-servers/bundles/:bundleId` | signed-in | checked | checked | checked | full task/roles pending |
@@ -125,8 +125,8 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/engines` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/engines/placements` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/engines/executors/:executorId/attestations` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/cost` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/cost-consolidation` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/cost` | signed-in | checked | checked | checked | CXR-CST-001/002 source +mock-browser; broader charts/roles pending |
+| `/admin/cost-consolidation` | signed-in | checked | checked | checked | CXR-CST-003..005 source;003 alias mock-browser; dates/removal runtime pending |
 | `/admin/cost-consolidation/imports` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/cost-consolidation/imports/:importId` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/spend-monitor` | signed-in | checked | checked | checked | full task/roles pending |

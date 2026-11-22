@@ -1,0 +1,83 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Chromium + synthetic intercepted API fixtures; no external providers or successful mutations",
+  "expected": 9,
+  "unexpected": 0,
+  "seconds": 9.3,
+  "observations": {
+    "chat-503": {
+      "status": 503,
+      "failedReads": 2,
+      "initialSelection": "00000000-0000-4000-8000-000000000301",
+      "finalSelection": "00000000-0000-4000-8000-000000000302",
+      "newestTranscriptShown": true,
+      "alerts": [],
+      "deletesSent": 0
+    },
+    "chat-404": {
+      "status": 404,
+      "failedReads": 3,
+      "initialSelection": "00000000-0000-4000-8000-000000000301",
+      "finalSelection": "00000000-0000-4000-8000-000000000302",
+      "newestTranscriptShown": true,
+      "alerts": [],
+      "deletesSent": 0
+    },
+    "connector-cross-draft": {
+      "selectedConnector": "B",
+      "priorSecretDraftRetained": true,
+      "priorEndpointDraftRetained": true,
+      "mutationSent": false
+    },
+    "connector-read-outage": {
+      "failedReads": 1,
+      "noCredentialBadgeVisible": true,
+      "alerts": [],
+      "retryButtons": 0,
+      "mutationSent": false
+    },
+    "connector-rotation-endpoint": {
+      "savedOverridePresent": true,
+      "inputBlank": true,
+      "request": {
+        "baseUrlPresent": false,
+        "tokenPresent": true
+      },
+      "postMockedAndRefused": true
+    },
+    "connector-owner-stepup": {
+      "ownerWrites": 1,
+      "proofOptionsRequests": 0,
+      "proofDialogs": 0,
+      "alerts": [
+        "Confirm it's you to continue: this action needs a fresh passkey, authenticator code or sign-in \u2014 this action needs you to confirm it's you"
+      ],
+      "mutationMockedAndRefused": true
+    },
+    "expired-budget": {
+      "budgetInput": {
+        "budgetUsd": 10,
+        "spentUsd": 12,
+        "period": "monthly",
+        "periodKey": "2026-11",
+        "overageApproved": true,
+        "overageApprovedPeriod": "2026-10",
+        "overageActive": false
+      },
+      "approvedBadgeVisible": true,
+      "mutationSent": false
+    },
+    "cost-read-outage": {
+      "failedReads": 2,
+      "cardText": "Synthetic budget project\nDownload CSV",
+      "alerts": [],
+      "retryButtons": 0
+    },
+    "alias-failed-save": {
+      "posts": 1,
+      "accountAfterFailure": "",
+      "reasonAfterFailure": "",
+      "postMockedAndRefused": true
+    }
+  }
+}
