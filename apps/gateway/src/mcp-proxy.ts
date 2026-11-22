@@ -35,7 +35,7 @@ import {
   type Db,
   type PaidCallPriceRow,
 } from "@regulait/db";
-import { scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { agentResponseAuditFacts, agentResponseBody, scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 import { actorEntitlementsReach, DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import { selectTools } from "@regulait/optimizer-kernel";
@@ -424,6 +424,8 @@ export type GovernedToolCallOutcome =
       pii?: McpPii;
       guardrails?: DispatchGuardrails;
       costUsd?: number | null;
+      /** ADR-0354 — an `advise` policy allowed this call and returns static guidance to the agent */
+      advice?: ReturnType<typeof agentResponseBody>;
     }
   | { kind: "unknown_tool" }
   /**
@@ -1252,6 +1254,8 @@ async function executeGovernedToolCallInner(
         ...(approvedApprovalId ? { approvedApprovalId } : {}),
         policyEpoch,
         killSwitch,
+        // ADR-0354: every decision row records the response the agent was given (allow, advise, correct, ...)
+        agentResponse: agentResponseAuditFacts(decision),
         receiptClass: "decision",
         // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
         ...(stdioPlacement
@@ -1921,6 +1925,7 @@ async function executeGovernedToolCallInner(
       // ADR-0024 (O11): every executed call is metered, so the cost is always
       // reported back — attributed or not. O10: tool-first resolution. ADR-0313: a paid call's settlement.
       costUsd: chargedUsd,
+      ...(decision.response?.kind === "advise" ? { advice: agentResponseBody(decision.response) } : {}),
     };
   } finally {
     // ADR-0313: a hold neither settled nor released above (an exit that billed nothing) is released here; if even that
@@ -2648,7 +2653,7 @@ export async function callToolForCaller(
     case "unknown_tool":
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
     case "allowed":
-      return outcome.content as Record<string, unknown>;
+      return withPolicyAdvice(outcome.content as Record<string, unknown>, outcome.advice);
     default:
       throw mcpErrorForGovernanceOutcome(outcome);
   }
@@ -3076,20 +3081,49 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
  * unchanged, so `mcp-protocol.ts` names every refusal exactly as a tool call
  * does (ADR-0185 G3).
  */
+/** ADR-0354 — the `_meta` key the graduated response travels under (structured data, never mixed into markup) */
+export const AGENT_RESPONSE_META_KEY = "regulait.ai/response";
+
+/**
+ * ADR-0354 — an `advise` answer: the upstream result unchanged, plus the policy's static guidance as structured
+ * `_meta` and as one clearly-labelled text item appended AFTER the upstream content, so an agent that reads only text
+ * still sees it and can never mistake it for tool output. The guidance is validated plain text (parseAgentGuidance).
+ */
+export function withPolicyAdvice(
+  result: Record<string, unknown>,
+  advice: ReturnType<typeof agentResponseBody> | undefined,
+): Record<string, unknown> {
+  if (!advice?.message) return result;
+  const meta = (result._meta && typeof result._meta === "object" ? result._meta : {}) as Record<string, unknown>;
+  const content = Array.isArray(result.content) ? result.content : [];
+  return {
+    ...result,
+    content: [...content, { type: "text", text: `[RegulAIt policy advice] ${advice.message}` }],
+    _meta: { ...meta, [AGENT_RESPONSE_META_KEY]: advice },
+  };
+}
+
 export function mcpErrorForGovernanceOutcome(
   outcome: Exclude<GovernedToolCallOutcome, { kind: "allowed" | "unknown_tool" }>,
 ): McpError {
   switch (outcome.kind) {
-    case "denied":
+    case "denied": {
+      // ADR-0354: a `correct` refusal also tells the agent the approved route, as validated plain text in the
+      // message and as structured error data. It carries no grant: the agent's retry is decided afresh.
+      const steer = outcome.decision.response?.kind === "correct" ? agentResponseBody(outcome.decision.response) : null;
       return new McpError(
         ErrorCode.InvalidRequest,
-        `Denied by policy: ${outcome.decision.reason}`,
+        `Denied by policy: ${outcome.decision.reason}` +
+          (steer ? ` — ${steer.message ?? ""} Instead: ${steer.alternative ?? ""}` : ""),
         // ADR-0186 decision 32: the connector route's 403 code, carried in the
         // error data (a JSON-RPC answer has no HTTP status of its own)
         outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID
           ? { error: CREDENTIAL_AUDIENCE_ERROR, status: 403 }
-          : undefined,
+          : steer
+            ? { [AGENT_RESPONSE_META_KEY]: steer }
+            : undefined,
       );
+    }
     // §8.4 input block: denied pre-call, nothing executed, nothing billed.
     // The message names CATEGORIES only, never the matched content.
     case "pii_blocked":

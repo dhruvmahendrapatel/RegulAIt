@@ -33,6 +33,14 @@
  */
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import type { AbacDecision, AbacEffect } from "./index.js";
+import {
+  AGENT_RESPONSE_TABLE,
+  POLICY_RESPONSES,
+  compareResponseStrictness,
+  responseOfPolicyMode,
+  type AgentGuidance,
+  type PolicyResponseMode,
+} from "./agent-response.js";
 
 export type { AbacDecision, AbacEffect };
 
@@ -405,9 +413,14 @@ export function abacSchemaText(version: string): string | null {
 // The neutral interface everything above this file speaks
 // ---------------------------------------------------------------------------
 
-/** the effect a policy applies WHEN IT MATCHES — never "allow" (ABAC cannot grant) */
-export type AbacPolicyMode = "forbid" | "require_approval";
-export const ABAC_POLICY_MODES: readonly AbacPolicyMode[] = ["forbid", "require_approval"];
+/**
+ * What a policy does WHEN IT MATCHES — never "allow" (ABAC cannot grant). ADR-0354 widens the vocabulary to the
+ * graduated responses (`agent-response.ts` is the declared table): `advise` lets an already-allowed call run with
+ * guidance, `correct` refuses with a safe alternative, `block_session` refuses and ends the session, `disable`
+ * refuses and quarantines the agent. None of them can turn a refusal into an allow.
+ */
+export type AbacPolicyMode = PolicyResponseMode;
+export const ABAC_POLICY_MODES: readonly AbacPolicyMode[] = POLICY_RESPONSES;
 
 export interface AbacPolicy {
   /** stable policy id (survives version bumps) — this is what lands in `ruleId` */
@@ -423,6 +436,8 @@ export interface AbacPolicy {
   approverUserId?: string | null;
   approverName?: string | null;
   description?: string | null;
+  /** ADR-0354 — the stored, already-validated agent guidance (advise and correct only) */
+  guidance?: AgentGuidance | null;
 }
 
 export interface AbacPrincipalAttrs {
@@ -1110,17 +1125,23 @@ class CedarAbacEngine implements AbacEngine {
 
     if (matched.length === 0) return { effect: "permit" };
 
-    // PRECEDENCE among matched policies: a hard `forbid` beats a
-    // `require_approval` (strictest wins — an approver must not be able to sign
-    // away a policy that refuses outright), and within a mode the policies are
-    // ordered by name so the governing policy is stable and explainable.
+    // PRECEDENCE among matched policies: the strictest response wins (ADR-0354's
+    // declared order: disable, block_session, forbid, correct, require_approval,
+    // advise), so a hard `forbid` still beats a `require_approval` (an approver
+    // must not be able to sign away a policy that refuses outright) and an
+    // `advise` never outranks anything that restricts. Within a mode the
+    // policies are ordered by name so the governing policy is stable and
+    // explainable.
     matched.sort((a, b) => {
-      if (a.mode !== b.mode) return a.mode === "forbid" ? -1 : 1;
+      const byStrictness = compareResponseStrictness(responseOfPolicyMode(a.mode), responseOfPolicyMode(b.mode));
+      if (byStrictness !== 0) return byStrictness;
       return a.name.localeCompare(b.name);
     });
     const governing = matched[0]!;
+    const responseEffect = AGENT_RESPONSE_TABLE[responseOfPolicyMode(governing.mode)].effect;
     return {
-      effect: governing.mode,
+      effect: responseEffect === "allow" ? "permit" : responseEffect === "deny" ? "forbid" : "require_approval",
+      response: { policyId: governing.id, mode: governing.mode, guidance: governing.guidance ?? null },
       policyId: governing.id,
       policyName: governing.name,
       policyVersion: governing.version ?? null,
