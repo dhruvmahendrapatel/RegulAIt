@@ -296,6 +296,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/robots/:robotId/versions/:version/retire",
   "PUT /v1/robots/:robotId/secrets/:name/:scope",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope",
+  // ADR-0364 S3: the author's test run (owner or admin; one of the requester's projects) and one run's record
+  "POST /v1/robots/:robotId/versions/:version/test-runs",
+  "GET /v1/robots/:robotId/runs/:runId",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
@@ -801,6 +804,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // every other builder route above.
   "GET /v1/builder/agents/:id/autonomy",
   "PUT /v1/builder/agents/:id/autonomy",
+  // DELIBERATELY ABSENT, so ADMIN-ONLY (ADR-0180 addendum, lane E51): PUT
+  // /v1/builder/agents/:id/autonomy/enforcement. Relaxing the oversight gate
+  // loosens a strict default; it takes a step-up and is audited.
   //
   // --- A10: risk tolerance and acceptance ------------------------------------
   // The acceptance HISTORY reads like the risk detail: owner-or-admin in the

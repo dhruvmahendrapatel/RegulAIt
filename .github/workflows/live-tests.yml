@@ -21,6 +21,10 @@ concurrency:
   group: live-tests
   cancel-in-progress: false
 
+env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
+
 jobs:
   live:
     # The nightly schedule is off by default (owner decision 2026-11-15): a scheduled run only proceeds when the

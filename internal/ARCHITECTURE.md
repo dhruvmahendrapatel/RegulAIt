@@ -58,7 +58,7 @@ builds on its own.
 
 | Package | What it does |
 |---|---|
-| `policy-kernel` | Pure default-deny decision core: `evaluate`, `evaluateAgent`, `evaluateConnector`, `visibleTools`, `executionGate` (kill switch), `literacyGate`, `matchingApprovalRules`; `./abac` and `./actor` wrap Cedar. |
+| `policy-kernel` | Pure default-deny decision core: `evaluate`, `evaluateAgent`, `evaluateConnector`, `visibleTools`, `executionGate` (kill switch), `literacyGate`, `matchingApprovalRules`; the graduated agent-response table (`agent-response.ts`, ADR-0354: advise, correct, block session, disable over the three effects); `./abac` and `./actor` wrap Cedar. |
 | `optimizer-kernel` | Pillar 6, pure functions: model routing, complexity, token estimates, compaction, prompt-cache planning, lazy tool selection, edit-vs-rewrite, batching, reference preprocessing. |
 | `orchestration-kernel` | Pillar 7, pure task-DAG and delegation core. |
 | `workflow-kernel` | Pillar 2, declarative template validation and stage types. |

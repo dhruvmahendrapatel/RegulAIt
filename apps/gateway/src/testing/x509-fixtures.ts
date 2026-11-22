@@ -30,6 +30,8 @@ export async function makeCert(
     /** basicConstraints pathLenConstraint (a CA only) */
     pathLen?: number;
     uris?: string[];
+    /** dNSName subject alternative names (ADR-0351: a TLS server certificate for the syslog receiver test) */
+    dnsNames?: string[];
     keyUsage?: number;
     notBefore?: Date;
     notAfter?: Date;
@@ -52,8 +54,12 @@ export async function makeCert(
   const ku = opts.keyUsage ?? (opts.isCA ? 0x06 : 0x80);
   const bits = new asn1js.BitString({ valueHex: new Uint8Array([ku]).buffer });
   cert.extensions.push(new Extension({ extnID: "2.5.29.15", critical: true, extnValue: bits.toBER(false), parsedValue: bits }));
-  if (opts.uris && opts.uris.length > 0) {
-    const alt = new GeneralNames({ names: opts.uris.map((value) => new GeneralName({ type: 6, value })) });
+  if ((opts.uris && opts.uris.length > 0) || (opts.dnsNames && opts.dnsNames.length > 0)) {
+    const names = [
+      ...(opts.uris ?? []).map((value) => new GeneralName({ type: 6, value })),
+      ...(opts.dnsNames ?? []).map((value) => new GeneralName({ type: 2, value })),
+    ];
+    const alt = new GeneralNames({ names });
     cert.extensions.push(new Extension({ extnID: "2.5.29.17", extnValue: alt.toSchema().toBER(false), parsedValue: alt }));
   }
   for (const x of opts.extra ?? []) {

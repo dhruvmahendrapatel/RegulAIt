@@ -43,6 +43,32 @@ Egress: `login.microsoftonline.com` and `graph.microsoft.com`.
 A run that could not read every listing to its end (a permission missing, a listing cut short) is kept as a partial
 read: it adds and refreshes what it saw and removes nothing. Only a complete read removes grants that were revoked.
 
+### Optional: activity logs (a guided setup, off by default)
+
+To observe use (the findings below), the source can also read each app's last sign-in
+(`reports/servicePrincipalSignInActivities`, a Graph beta report). This is off until you turn it on. Setup:
+
+1. In the Microsoft Entra admin center, open App registrations and select this source's app. Under API permissions,
+   add the Microsoft Graph **application** permission `AuditLog.Read.All`. It reads sign-in and audit logs and cannot
+   change anything.
+2. Grant admin consent, as a Privileged Role Administrator or Global Administrator. Use the same page, or the link
+   `https://login.microsoftonline.com/<tenantId>/adminconsent?client_id=<clientId>`.
+3. Check that the tenant has Microsoft Entra ID P1 or P2. Without it, Microsoft refuses the read.
+4. Set the source's target `activityLogs` to `on`. On an enabled source this is a widening, so it needs a step-up.
+5. Run the source.
+
+`GET /v1/discovery/entitlements/sources/<sourceId>/read-setup` serves the steps, the consent link, and the state the
+latest read observed. The state is one of:
+
+- `off`;
+- `not checked`;
+- `not enabled`: refused;
+- `unreadable`;
+- `no activity yet`;
+- `flowing`.
+
+No app is judged unused until the state is `flowing`. The grant read is never affected by this read.
+
 ## Google Workspace OAuth app grants — `entitlement_google_workspace`
 
 Reads the OAuth grants users made to apps, from the Admin SDK Reports API (`token` activity: the latest `authorize` or
@@ -99,6 +125,90 @@ An app in the graph can be linked to a RegulAIt agent, so its grants are shown a
 `GET /v1/discovery/entitlements/apps?sourceId=<source id>` lists a source's apps with their link state and which link
 changes are allowed next. There is no screen yet.
 
-## Salesforce and Slack
+## Salesforce connected apps — `entitlement_salesforce`
 
-`entitlement_salesforce` and `entitlement_slack` are listed as "not built yet"; their readers follow.
+Reads every connected app, whether any user may authorise it themselves ("All users may self-authorize"), and which
+profiles and permission sets an admin pre-authorised for it.
+
+Target: `environment` (`production` or `sandbox`), `myDomain` (the org's My Domain URL,
+`https://<name>.my.salesforce.com`, or `https://<name>--<sandbox>.sandbox.my.salesforce.com`; the only host the reader
+calls) and `orgId` (the org's `00D…` id). Scope: organisation level, or a list of connected app ids (`0H4…`).
+
+Credential: static only (the OAuth 2.0 JWT bearer flow). Create a connected app with "Use digital signatures" and a
+certificate, pre-authorise a dedicated integration user, and store the matching private key (an RSA key of at least
+2048 bits, PKCS#8 PEM, `BEGIN PRIVATE KEY`) as the secret. Public config: `clientId` (the consumer key) and `username` (the integration user).
+
+Give the integration user View Setup and Configuration and API Enabled, and nothing that can change the org. A user
+whose session holds Modify All Data, Modify Metadata, Customize Application, Author Apex, Manage Users, Assign
+Permission Sets, Manage Profiles and Permission Sets, Manage Internal Users, Manage Roles, Manage Sharing or Reset
+Passwords, or who may create, edit or delete records of any object, is refused before anything is read (the same check
+as the Agentforce source).
+
+What this default read **cannot see**, as each run's outcomes and the read-setup view state:
+
+- connected apps' OAuth scopes: they are only in the Metadata API, which needs write-capable permissions, so they are
+  never read;
+- which users hold a token for each app, and when each app was last used: these need Customize Application, so they
+  are read only with the opt-in below.
+
+### Opt-in: org-wide OAuth tokens (Customize Application)
+
+Off by default. The opt-in needs both keys:
+
+1. An admin turns on `salesforceOrgTokens` in the discovery settings. This is a step-up, audited with its trade-off.
+2. The source sets its target `orgTokens` to `on`. While the switch is off, a source asking for this is refused at
+   create, change, enable and run.
+
+The integration user may then hold **Customize Application**, and nothing else from the list above. It can change the
+org's setup, so the credential is recorded as `unverified`, never `read-only`. RegulAIt still only reads:
+`SELECT AppName, UserId, LastUsedDate FROM OauthToken`. The map then shows:
+
+- who holds a token for each connected app, as pseudonyms;
+- each app's last use, which feeds the unused-grant finding.
+
+A token whose app name is missing from the listing, or is shared by two apps, is counted and not guessed. Without
+Customize Application on the user, the tokens are not read: only the user's own would be visible.
+
+Egress: your My Domain host only.
+
+## Slack approved apps — `entitlement_slack`
+
+Reads the apps approved for an Enterprise Grid org or a workspace, with each app's user and bot scopes.
+
+Target: exactly one of `enterpriseId` (`E…`) or `teamId` (`T…`). Scope: organisation level, or a list of app ids
+(`A…`).
+
+Credential: static only. The secret is an org-level user token (`xoxp-…`) from an app installed by an org admin, with
+the scope `admin.apps:read` (other `:read` scopes are tolerated). Every run checks the token's scopes first; any scope
+that is not a `:read` scope refuses the credential before anything is read. The token must belong to the target org or
+workspace.
+
+Egress: `slack.com`.
+
+## Observed use and findings
+
+Each read also records how finely it could see the apps' use (the coverage, shown on the run's audit row):
+
+| Source | What is observed | Coverage |
+|---|---|---|
+| `entitlement_m365` with `activityLogs: on` | each app's last sign-in (needs `AuditLog.Read.All` and Entra ID P1 or P2), once the logs flow | per app |
+| `entitlement_google_workspace` | the token `activity` events: each app's latest read and latest write, by API method name, with the same read-only Reports scope (recorded only on Enterprise and Education Standard or Plus and Cloud Identity Premium) | reads and writes |
+| `entitlement_salesforce` with the org-wide token opt-in | each connected app's latest OAuth token use | per app |
+| Google with the Directory opt-in, Salesforce without the opt-in, Slack | nothing: no usage source the reader may use | none |
+
+`GET /v1/discovery/entitlements/findings?windowDays=90` (admin only; 7 to 365 days) computes four findings at read time,
+each with its evidence and the rule's limits:
+
+- **unused grant**: an app with no observed use in the window, for grants first seen at least the window ago;
+- **excessive scope**: a write, admin or unrecognised scope held by an app that only read in the window (Google only);
+- **oversharing**: a tenant-wide consent to a write, admin or unrecognised scope, with the publisher's verification;
+- **publicly exposed agent**: a published Copilot Studio agent with no authentication or the "any multi-tenant" policy.
+
+A source that could not observe use, or observed less than the window, is listed as not assessable, never as unused.
+Nothing is revoked: act on a finding in the vendor's own admin console, and the next read shows the change.
+
+To have a second administrator decide a finding, raise it: `POST /v1/discovery/entitlements/findings/reviews` with the
+finding's `key`, the `approverUserId` of another admin and a `reason`. It appears in the approvals queue. Approving it
+records that the grant is to be removed or narrowed in the vendor's console; denying it records the risk as accepted.
+Either way nothing is sent to the vendor, and the findings report shows the decision on the finding.
+

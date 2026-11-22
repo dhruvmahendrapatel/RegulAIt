@@ -65,6 +65,7 @@ import { bomOrgSettingsFields } from "./bom/settings.js";
 import { isolationOrgSettingsFields } from "./isolation/settings.js";
 // ADR-0218: the organisation default palette and the theme lock
 import { appearanceOrgSettingsFields } from "./appearance.js";
+import { CONTAINMENT_AUTO_THRESHOLDS } from "./rogue-containment.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -666,6 +667,17 @@ export {
   type SkillAdmissionScan,
   type SkillScanInput,
 } from "./skill-admission.js";
+
+// ADR-0354 — the one validator for advise / correct guidance returned to an agent (plain text, admission-scanned)
+export {
+  AGENT_GUIDANCE_ALTERNATIVE_MAX,
+  AGENT_GUIDANCE_MESSAGE_MAX,
+  agentGuidanceSchema,
+  parseAgentGuidance,
+  type AgentGuidanceInput,
+  type AgentGuidanceResult,
+  type ValidAgentGuidance,
+} from "./agent-guidance.js";
 // ADR-0175 A5 — release-age cooldown (pure status + admin write shapes).
 export {
   RELEASE_AGE_RECOMMENDED_DAYS,
@@ -2186,6 +2198,9 @@ export const upsertComplianceProfileSchema = z.object({
    * ADR-0045 dispatch gate enforce on the project even where the org relaxed `mrmEnforced`. Clearing it on an
    * existing profile is a loosening (step-up, rule-loosening.ts). */
   mrmRequired: z.boolean().nullable().optional(),
+  /** ADR-0347: the longest an agent memory write on a project carrying this tag may live, in hours. MIN-composed with
+   * the org's `agentMemoryTtlHours`, so it can only shorten it; raising or clearing it is a loosening (step-up). */
+  memoryTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -2299,7 +2314,13 @@ export const patchProjectMemberSchema = z.object({
 });
 
 export const contributeContextSchema = z.object({
-  key: z.string().min(1).max(128),
+  /** #905 security review [1]: a context key is an identifier, never free text. It is shown to workers inside the
+   * context frame, so quotes, newlines and spaces could forge a frame or its provenance. */
+  key: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9._:/-]+$/, "a context key uses letters, digits and . _ : / - only"),
   content: z.string().min(1).max(200_000),
   /** the accepted revision this write is based on; required once the key exists */
   baseRevision: z.number().int().positive().optional(),
@@ -2315,6 +2336,8 @@ export const contributeContextSchema = z.object({
    */
   producedByRunId: z.string().uuid().optional(),
   producedByNodeId: z.string().min(1).max(64).optional(),
+  /** ADR-0347: ask for a SHORTER expiry than the policy's, in hours; longer than the policy is refused */
+  expiresInHours: z.number().int().min(1).max(8760).optional(),
 });
 
 export const promoteContextSchema = z.object({
@@ -2524,6 +2547,10 @@ export const updateOrgSettingsSchema = z
     sapUnattributedWritesAllowed: z.boolean().optional(),
     /** false (default) = the seeded rule covers writes only; true also makes reads approve-first (a tightening) */
     sapReadsApproveFirst: z.boolean().optional(),
+    /** ADR-0347: hours an agent memory or shared-context write lives (default 24); longer is a relaxation */
+    agentMemoryTtlHours: z.number().int().min(1).max(8760).optional(),
+    /** ADR-0347: 'block' (default) refuses a flagged memory write; 'log' stores it and audits the hits (a relaxation) */
+    agentMemoryScanMode: z.enum(["block", "log"]).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import
      * and a new skill version stay in quarantine until this deployment has
@@ -2537,6 +2564,12 @@ export const updateOrgSettingsSchema = z
      * on the inventory page only; true = one alert episode per flagged
      * credential. */
     staleCredentialAlerts: z.boolean().optional(),
+    /** ADR-0366: the severity at or above which a rogue-agent signal halts the agent at once ('critical' by default;
+     * a lower severity contains more). 'off' = every signal is only a proposal (a relaxation). */
+    containmentAutoSeverity: z.enum(CONTAINMENT_AUTO_THRESHOLDS).optional(),
+    /** ADR-0366: the administrator rogue-agent containment proposals are routed to. null = proposals are recorded
+     * unrouted (the alert still notifies; automatic containment still applies). */
+    containmentApproverUserId: z.string().uuid().nullable().optional(),
     /** ADR-0175 A15: the grid region whose energy factor overrides the org
      * default intensity. null = the default. */
     energyRegion: z.string().trim().min(1).max(64).nullable().optional(),
@@ -4899,6 +4932,16 @@ export {
 // ADR-0180 §5 (A8) — the agent autonomy class: derivation rules and control floors.
 export {
   AUTONOMY_AGENTIC_TEST_CLASSES,
+  AUTONOMY_DISPATCH_ERRORS,
+  AUTONOMY_DISPATCH_RULE_IDS,
+  AUTONOMY_ENFORCED_CLASSES,
+  autonomyClassBlocksOnUnmetFloor,
+  autonomyDispatchVerdict,
+  autonomyEnforcementChangeSchema,
+  autonomyEnforcementView,
+  type AutonomyDispatchVerdict,
+  type AutonomyEnforcementChangeInput,
+  type AutonomyEnforcementView,
   AUTONOMY_FLOORS,
   AUTONOMY_FLOOR_IDS,
   AUTONOMY_GUARDRAIL_DETECTORS,
@@ -5078,6 +5121,7 @@ export * from "./repo-analysis.js";
 export * from "./discovery/index.js";
 // ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
 export * from "./saas-entitlements.js";
+export * from "./saas-entitlement-findings.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5112,7 +5156,10 @@ export * from "./state-machines.js";
 export * from "./pipeline-steps.js";
 export * from "./kill-switch-guard.js";
 export * from "./vendor-agent-control.js";
+// ADR-0366: rogue-agent containment signals, the decision and the lifecycle (pure)
+export * from "./rogue-containment.js";
 export * from "./robots.js";
+export * from "./robots-run.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits
@@ -5135,9 +5182,33 @@ export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-actions.js";
 
+// ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
+export * from "./adoption-analytics.js";
+
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 
+// ADR-0359 (lane E40): behaviour baselines' pure statistics (robust z-score and share of history)
+export {
+  BEHAVIOUR_BASELINE,
+  BEHAVIOUR_CATEGORY_SIGNALS,
+  BEHAVIOUR_FINDING_STATUSES,
+  BEHAVIOUR_METHODS,
+  BEHAVIOUR_MODES,
+  BEHAVIOUR_SIGNAL_NAMES,
+  BEHAVIOUR_SIGNALS,
+  BEHAVIOUR_SUBJECT_KINDS,
+  BEHAVIOUR_VOLUME_SIGNALS,
+  evaluateCategory,
+  evaluateVolume,
+  volumeBaselineStats,
+  type BehaviourFindingStatus,
+  type BehaviourMethod,
+  type BehaviourMode,
+  type BehaviourSignal,
+  type BehaviourSubjectKind,
+  type BehaviourVerdict,
+} from "./behaviour-baseline.js";
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
 
@@ -5147,3 +5218,7 @@ export * from "./fairness-evaluation.js";
 // ADR-0363 slice 2: customer-defined classifiers inside the guardrail pipeline
 export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
+// ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
+export * from "./content-inspection.js";
+// ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
+export * from "./ai-app-risk.js";

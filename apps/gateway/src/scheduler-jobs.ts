@@ -129,6 +129,8 @@ export const SCHEDULER_JOB_NAMES = {
   fairnessDatasetRetentionSweep: "fairness-dataset-retention-sweep",
   // ADR-0303: delivers the audit chain to enabled SIEM destinations (siem-delivery.ts)
   siemDeliverySweep: "siem-delivery-sweep",
+  // ADR-0359 (E40): rolls the audit chain up into behaviour baselines and records shadow findings (behaviour/sweep.ts)
+  behaviourBaselineSweep: "behaviour-baseline-sweep",
   // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows (detection/sweep.ts)
   agentDetectionSweep: "agent-detection-sweep",
   // ADR-0322: pulls vendor usage and cost from enabled connectors (vendor-usage-pull.ts); off by default
@@ -137,6 +139,8 @@ export const SCHEDULER_JOB_NAMES = {
   costOutcomeRecorder: "cost-outcome-recorder",
   // ADR-0312 (pilot addendum): the five-minute spend-budget pass of the governance monitor (governance-monitor.ts)
   spendBudgetAlerts: "spend-budget-alerts",
+  // ADR-0313: releases paid-call holds left open past their TTL (paid-calls.ts)
+  paidCallHoldSweeper: "paid-call-hold-sweeper",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
   // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
@@ -196,6 +200,9 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runDueReportSchedules(ctx.db, {
           actorUserId: ctx.actorUserId,
+          // the scheduler acts for the deployment, with full report scope;
+          // stated here, never defaulted inside the function (Codex review S-10)
+          isAdmin: true,
           now: ctx.now,
         });
         return {
@@ -871,14 +878,17 @@ import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
+import { behaviourJobDefinitions } from "./behaviour/sweep.js";
 import { detectionJobDefinitions } from "./detection/sweep.js";
 import { costOutcomeJobDefinitions } from "./cost-outcomes.js";
 import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
+import { paidCallJobDefinitions } from "./paid-calls.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
+import { robotRunJobDefinitions } from "./robot-runs.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -896,14 +906,17 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
+    ...behaviourJobDefinitions(), // ADR-0359: behaviour-baseline-sweep
     ...detectionJobDefinitions(), // ADR-0333: agent-detection-sweep
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
+    ...paidCallJobDefinitions(), // ADR-0313: paid-call-hold-sweeper
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
     ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
     ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
+    ...robotRunJobDefinitions(), // ADR-0364 S3: robot-run-stale-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================
