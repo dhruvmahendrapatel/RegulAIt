@@ -30,7 +30,7 @@ positive in the original report.
     Exposing it as a general troubleshooting override is a new product capability, not a missing form field.
   - **O-04.** Codex narrows it to a "disclosed subset contract". ADR-0176 already decided Ajv for eval output, so the
     documented subset does not settle it. The eval scorer should move to the same Ajv configuration as the playground.
-  - **S-08.** Codex calls it a sensible follow-up. We treat it as a security-checklist gap. The scrypt cost (N=2^14,
+  - **S-08.** Codex calls it a sensible follow-up. We treat it as a security-checklist gap (the owner chose N=2^17). The scrypt cost (N=2^14,
     r=8, p=1) is below OWASP's minimum equivalents, and the code comment and ADR-0025 wrongly say "per OWASP".
   - **S-10.** Codex calls it latent. Two parts are checklist items under ADR-0180: the `isAdmin ?? true` default, and
     `sql.raw` array building, where the checklist says parameterised queries only.
@@ -54,19 +54,30 @@ positive in the original report.
   - **List state (UIS-05, UIS-06, UIS-08).** All in `apps/web/src/ui/DataList.tsx`.
 - **No new screens.** No card needs a brand-new screen, so nothing is added to KNOWN_UI_GAPS for #453.
 
+## Owner answers (2026-11-22, 01:15 UTC, relayed by the master)
+
+- **ADM-003: build it.** Admins may grant time-boxed guardrail relaxations, under these conditions:
+  - an expiry is required, with a bounded maximum duration;
+  - granting needs step-up;
+  - the grant and the expiry are both audited;
+  - the relaxation reverts automatically at expiry;
+  - it is recorded in an ADR-0181 addendum, and it is a new row kind, so the assurance-window rows and the CHECK
+    constraints for existing kinds are untouched.
+
+  It is a new feature, so it is built after the security slices (slice 15).
+- **REV-002: archive instead of delete.** "Delete" becomes archive: the definition is hidden, and its signed runs are
+  kept as evidence. Nothing cascades (slice 6).
+- **S-08: N=2^17, asynchronous, rehash on sign-in,** with the memory limits checked and the login path load-tested.
+  This replaces the N=2^15/p=3 default first proposed (slice 1).
+- **ACC-002: triage-low.** File the issue and do not build it.
+
 ## Owner questions
 
-The secure default is built meanwhile wherever a slice depends on one.
+The secure default is built meanwhile wherever a slice depends on one. The numbers of answered questions are kept.
 
-1. **ADM-003:** should the ADR-0181 red-team window also become an admin-facing temporary guardrail override (at most
-   60 minutes, audited)? It needs an ADR-0181 addendum. *Default: no; it stays demo-only.*
-2. **ACC-002:** federated sign-in drops the deep link because ADR-0026 and ADR-0036 pin `returnTo` to `/app` or
-   `/admin`. Widen it to a server-validated same-origin path, stored in the OIDC state or SAML correlation row, with
-   no `//`, `/\`, schemes or control characters? It needs an ADR addendum and a security review. *Default: keep the
-   enum until approved.*
-3. **REV-002:** deleting a report definition cascades its runs, which ADR-0047 calls immutable. Keep the cascade,
-   archive the definition instead, or refuse delete while runs exist? *Default: a confirm dialog that names the run and
-   schedule counts; cascade unchanged until decided.*
+1. *(answered above: ADM-003)*
+2. *(answered above: ACC-002)*
+3. *(answered above: REV-002)*
 4. **CST-005:** creating a cost alias or domain rule needs an audited reason, but deleting one does not, and deleting
    re-attributes stored lines. Require a reason on the server DELETE too? *Default under ADR-0180: yes, built in the
    cost slice unless the owner objects.*
@@ -77,8 +88,9 @@ The secure default is built meanwhile wherever a slice depends on one.
    waits for the answer.*
 7. **UIS-04:** may clickable table rows change from `role="link"` on `<tr>` to a real link or button in the primary
    cell? E2E specs that query rows by the link role would change. *Default: yes, with spec updates in the same PR.*
-8. **S-08 cost target:** N=2^15, r=8, p=3 (32 MiB per verification, OWASP-equivalent) with async `crypto.scrypt` and
-   rehash on login, or N=2^17, p=1 (128 MiB, needs a concurrency cap)? *Default: N=2^15, p=3.*
+8. *(answered above: S-08 at N=2^17)*. New question: the load test shows about 6 sign-ins per second per replica
+   with two derivations at once (256 MiB peak). Raise the cap to 4 (512 MiB peak, about twice the throughput)?
+   *Default: 2.*
 9. **C-07:** 138 files under `apps/web/review` and `apps/web/spikes` are outside type-checking. Archive, type-check or
    delete them? Deletion needs the owner.
 10. **O-01:** revive the stale `builder/lane-b-third-party` branch, or redo THIRD_PARTY.md against the current
@@ -98,7 +110,7 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 3 | `builder/codex-guardrail-credential-honesty` | ADM-002, ADM-005, ADM-006, ADM-007, ADM-008, ADM-009, RUN-001 |
 | 4 | `builder/codex-kit-a11y` | UIS-01, UIS-02, UIS-03, UIS-07, UIS-09 (busy guard) |
 | 5 | `builder/codex-datalist-state` | UIS-05, UIS-06, UIS-08 |
-| 6 | `builder/codex-reports-risks` | REV-001, REV-002, REV-003, REV-004, REV-005 |
+| 6 | `builder/codex-reports-risks` | REV-001, REV-002 (archive, per the owner), REV-003, REV-004, REV-005 |
 | 7 | `builder/codex-cost-recovery` | CST-001, CST-002, CST-003, CST-004, CST-005 |
 | 8 | `builder/codex-workspace-actions` | UIW-01 (builder Composer), UIW-06, UIW-07, UIW-08 |
 | 9 | `builder/codex-account-states` | ACC-003, ACC-005 |
@@ -107,6 +119,12 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 12 | `builder/codex-early-auth-large-bodies` | S-07 |
 | 13 | `builder/codex-oss-and-ledger` | O-01, O-03, O-04, O-02 (ADR-0176 text), P-06, P-09 |
 | 14 | `builder/codex-wave-concurrency` | P-05 (coordinated with E2) |
+| 15 | `builder/codex-guardrail-timeboxed-relax` | ADM-003 (owner answer; ADR-0181 addendum, new row kind) |
+
+**The master's pre-check (2026-11-22)** suggested triage-low for UIS-03, UIS-06, UIS-07, ADM-009 and S-07. On our
+rescoring each is at or above F×S 5 and the fix is small, so they stay ACCEPT-build. The master may overrule. Its
+slice order put the connector credential cards (INT-002..005) first. They stay at slice 11 because UI-C's #1089 edits
+the same file and must merge first. None of them is a checklist gap (see the INT rows).
 
 **Handed to other lanes** (recorded here and in the PR body for the master; their files are not edited here):
 - **E35 (#960):** UIW-03 and the ChatPage part of UIW-02.
@@ -124,7 +142,7 @@ already fixed. "PR" is filled in as each slice merges.
 | CXR-RUN-001 | Partial | 3 | 2 | 6 | ACCEPT-build | `BuilderPlaygroundPage.tsx:471-474` already alerts on a failed model read. The datasets and source reads (`:280-281`) do not. The baseline count is likely timing: the QueryClient retries once (`App.tsx:165-169`). Fix the missing alerts, then shrink the baseline. | slice 3 |
 | CXR-ADM-001 | Y | 5 | 6 | 30 | ACCEPT-build | `ExternalScorersPage.tsx:301` and `editForms.tsx:223` use plain `api.post`/`api.patch`, but the server requires settings_relax step-up (`external-scorers.ts:464,635`). With no wrapper, the proof dialog never opens. The server stays fail-closed. | slice 2 |
 | CXR-ADM-002 | Y | 6 | 5 | 30 | ACCEPT-build | `ExternalScorersPage.tsx:101-103` says the inline path stays local, but ADR-0220 trained detectors call registered scorers inline (`trained-detectors.ts:4-15`). The disclosure is wrong; a copy fix. | slice 3 |
-| CXR-ADM-003 | Partial | 3 | 3 | 9 | REJECT | The window (`guardrails.ts:555-562`) is the ADR-0181 FX3 red-team window: demo-only, at most 60 minutes, and it never replaces an admin override. Exposing it is a new feature. Owner question 1. | — |
+| CXR-ADM-003 | Partial | 3 | 3 | 9 | ACCEPT-build (owner) | The window (`guardrails.ts:555-562`) is the ADR-0181 FX3 red-team window: demo-only, at most 60 minutes, and it never replaces an admin override. Exposing it is a new feature. Owner question 1. **Owner, 2026-11-22: build it** as a new row kind (required bounded expiry, step-up, audited grant and expiry, auto-revert), recorded in an ADR-0181 addendum, after the security slices. | slice 15 |
 | CXR-ADM-004 | Y | 1 | 3 | 3 | ACCEPT-triage-low | `ConfigRow` ignores the server's `expired` flag (`GuardrailsPage.tsx:64-72`). Only `demo:intake` creates window rows, it deletes them in `finally`, and the sweep runs every 5 minutes. | #1187 |
 | CXR-ADM-005 | Y | 6 | 4 | 24 | ACCEPT-build | `GuardrailsPage.tsx:606,625`: the sample result stays after the text changes. A failed rerun shows only in a toast (`adminKit.tsx:379-384`). | slice 3 |
 | CXR-ADM-006 | Y | 5 | 4 | 20 | ACCEPT-build | The help says "Runs every detector" (`GuardrailsPage.tsx:596`), but the handler runs local rules for the input phase only (`guardrails.ts:1013-1022`). Relabel it and add a phase select; it stays local. | slice 3 |
@@ -164,7 +182,7 @@ already fixed. "PR" is filled in as each slice merges.
 | Card | Verified | F | S | F×S | Verdict | Reasoning | PR |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | CXR-ACC-001 | Y | 3 | 4 | 12 | ACCEPT-build | `StepUpDialog.tsx:74-87`: a failed `begin()` leaves "Getting ready…" with only Cancel (`:186-189`). Add a Retry that starts a fresh ceremony and never re-sends the action. | slice 2 |
-| CXR-ACC-002 | Y | 5 | 3 | 15 | ACCEPT-build (design first) | Federated links hard-code `returnTo=/app` (`LoginPage.tsx:373,400`), and the server enum (`auth.ts:2229`, `saml.ts:622`) is fixed by ADR-0026 and ADR-0036. Owner question 2; the fix must not create an open redirect. | after owner |
+| CXR-ACC-002 | Y | 5 | 3 | 15 | ACCEPT-triage-low (owner) | Federated links hard-code `returnTo=/app` (`LoginPage.tsx:373,400`), and the server enum (`auth.ts:2229`, `saml.ts:622`) is fixed by ADR-0026 and ADR-0036. Owner question 2; the fix must not create an open redirect. **Owner, 2026-11-22: triage-low**, not built. | #1192 |
 | CXR-ACC-003 | Partial | 3 | 3 | 9 | ACCEPT-build | `ModelRateLimits.tsx:66` shows a failed read as "Not enforced", and the copy is stale: the stored default is true (`schema.ts:5068`). Narrower than claimed: the toggle can only send the strict value, so enforcement cannot be weakened. | slice 9 |
 | CXR-ACC-004 | Y | 2 | 2 | 4 | ACCEPT-triage-low | `AccountPage.tsx:474-487` has no warning, but the server forces re-enrolment (`app.ts:1437-1447`). There is no bypass. | #1188 |
 | CXR-ACC-005 | Y | 2 | 3 | 6 | ACCEPT-build | `LoginPage.tsx:67-74` falls back silently, and the options error (`:139-145`) is never rendered. Add a degraded notice with Retry. | slice 9 |
@@ -174,7 +192,7 @@ already fixed. "PR" is filled in as each slice merges.
 | Card | Verified | F | S | F×S | Verdict | Reasoning | PR |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | CXR-REV-001 | Y | 6 | 3 | 18 | ACCEPT-build | `ReportsPage.tsx:56` types `schedulerPresent` but never reads it. The copy (`:228,312,319,342,379`) always says nothing fires schedules, and `reporting.ts:756` is stale. | slice 6 |
-| CXR-REV-002 | Y | 2 | 6 | 12 | ACCEPT-build | `ReportsPage.tsx:284-294` deletes on one click, and the delete cascades its runs and schedules (`schema.ts:7252,7275`). Build the confirm; the cascade versus ADR-0047's immutability is owner question 3. | slice 6 |
+| CXR-REV-002 | Y | 2 | 6 | 12 | ACCEPT-build | `ReportsPage.tsx:284-294` deletes on one click, and the delete cascades its runs and schedules (`schema.ts:7252,7275`). Build the confirm; the cascade versus ADR-0047's immutability is owner question 3. **Owner, 2026-11-22: archive instead of delete.** The definition is hidden and its signed runs are kept as evidence; nothing cascades. | slice 6 |
 | CXR-REV-003 | Y | 3 | 5 | 15 | ACCEPT-build | `risks.ts:913-953` stops at `.limit(200)` with no cursor or total, which breaks ADR-0200's paginated-API rule. Use the ADR-0226 list contract. E52's #1134 does not touch `/v1/risks` today. | slice 6 |
 | CXR-REV-004 | Y | 3 | 4 | 12 | ACCEPT-build | `RisksPage.tsx:165` holds one page-wide transition reason. Key it by risk id. The server checks the right risk, so there is no authorisation issue. | slice 6 |
 | CXR-REV-005 | Y | 4 | 3 | 12 | ACCEPT-build | Workflow figures are computed (`shared/reporting.ts:794`) but rendered by neither `ReportsPage.tsx` nor `ReportsHistory.tsx:34-47`. Use one shared payload renderer. | slice 6 |
@@ -210,7 +228,7 @@ already fixed. "PR" is filled in as each slice merges.
 | S-05 | Y | – | – | – | REJECT (fixed) | `a2a.ts:89-91` evaluates A2A through the governed core. | — |
 | S-06 | Y | – | – | – | REJECT (fixed) | Attribution requirements default to true (`schema.ts:5199,5201`). | — |
 | S-07 | Y | 2 | 3 | 6 | ACCEPT-build | Auth runs in preHandler (`app.ts:1330`), after body parsing. It matters only on routes with raised JSON limits (`decision-receipts.ts:385`, `engine-tasks.ts:664,712`, `engine-runs.ts:2222`). Reuse the `supplier-portal.ts:1364` early-auth pattern. | slice 12 |
-| S-08 | Y | 3 | 5 | 15 | ACCEPT-build (checklist gap) | `auth.ts:457-501` uses synchronous `scryptSync` at N=2^14, r=8, p=1, below OWASP's minimum equivalents, and the comment and ADR-0025 wrongly say "per OWASP". ADR-0176 already lists async scrypt as "replace now". Owner question 8. | slice 1 |
+| S-08 | Y | 3 | 5 | 15 | ACCEPT-build (checklist gap) | `auth.ts:457-501` uses synchronous `scryptSync` at N=2^14, r=8, p=1, below OWASP's minimum equivalents, and the comment and ADR-0025 wrongly say "per OWASP". ADR-0176 already lists async scrypt as "replace now". Owner question 8. **Owner, 2026-11-22: N=2^17**, async, rehash on sign-in, load-tested (ADR-0025 addendum). | slice 1 (`builder/codex-auth-hardening`) |
 | S-09 | Y | 2 | 2 | 4 | ACCEPT-triage-low | Any `Bearer` prefix moves a client from the 1200/min per-IP bucket to the 6000/min bucket (`rate-limit.ts:244-248,285`). It is still per IP, and a verified credential tier exists. | #1189 |
 | S-10 | Partial | 1 | 4 | 4 | ACCEPT-build (checklist gap) | `reporting.ts:577` defaults `isAdmin ?? true`, and the scheduler call relies on it (`scheduler-jobs.ts:197`). `compliance-packs.ts:179` and `copilot.ts:441` use `sql.raw` arrays over UUID-validated ids: no injection shown, but the checklist requires parameters. Already fine: the style CSP and constant arrays. | slice 1 |
 | P-01 | Y | – | – | – | REJECT (fixed) | One governed core covers model, connector, MCP and A2A calls. | — |
