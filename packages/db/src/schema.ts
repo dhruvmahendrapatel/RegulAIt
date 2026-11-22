@@ -1912,6 +1912,9 @@ export const auditLog = pgTable(
         "robot",
         "robot_version",
         "robot_secret",
+        // ADR-0364 S3: one robot run (objectId = robot_runs.id; detail carries the version, the outcome and evidence
+        // hashes, never an input value, an output value or a secret). Plain text column — no DDL.
+        "robot_run",
         // ADR-0232 (lane E49 slice 1): a pipeline run (objectId = the run). Plain text column — no DDL.
         "pipeline_run",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
@@ -2052,6 +2055,9 @@ export const auditLog = pgTable(
         // ADR-0312: the cost-per-outcome recorder ran (manual refresh) and an admin read the outcome roll-up. Plain
         // text column — no DDL.
         "cost_outcome",
+        // ADR-0313: a paid-call price (created, deleted) and a paid call's hold (reserved, refused, settled, released).
+        // Plain text column — no DDL.
+        "paid_call",
         // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
         // tier, or the write floor). Plain text column — no DDL.
         "content_provenance",
@@ -2070,6 +2076,9 @@ export const auditLog = pgTable(
         "browser_governance",
         // ADR-0331: a governed add-on removal (created, cancelled; objectId = the removal). Plain text column — no DDL.
         "endpoint_addon_removal",
+        // ADR-0366: a rogue-agent containment (filed, contained, declined, released; objectId = the containment).
+        // Plain text column — no DDL.
+        "agent_containment",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
         // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
@@ -4041,6 +4050,8 @@ export const projects = pgTable("projects", {
    * orphans its children back to ungrouped, never deletes project rows. */
   initiativeId: uuid("initiative_id").references(() => initiatives.id, { onDelete: "set null" }),
   budgetUsd: doublePrecision("budget_usd"),
+  /** ADR-0364 addendum: an admin's per-project override of the free-form browser session budget (NULL = org default) */
+  freeformBrowserBudgetUsd: doublePrecision("freeform_browser_budget_usd"),
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
@@ -4916,6 +4927,13 @@ export const orgSettings = pgTable(
     engineMaxRunTimeoutMinutes: integer("engine_max_run_timeout_minutes").notNull().default(30),
     /** the budget a run gets when it names none (USD); higher relaxes it */
     engineDefaultRunBudgetUsd: doublePrecision("engine_default_run_budget_usd").notNull().default(2),
+    /**
+     * ADR-0364 addendum (owner decision 2026-11-19): a free-form browser session's default budget ($2, counted against
+     * the project budget; an admin may override it per project, `projects.freeform_browser_budget_usd`) and its maximum
+     * run time (30 minutes, besides the end-of-turn and 5-minute-idle ends). Free-form browsing itself stays off.
+     */
+    freeformBrowserSessionBudgetUsd: doublePrecision("freeform_browser_session_budget_usd").notNull().default(2),
+    freeformBrowserMaxRunMinutes: integer("freeform_browser_max_run_minutes").notNull().default(30),
     /** a run whose budget is above this waits for approval (USD); higher relaxes it */
     engineRunApprovalThresholdUsd: doublePrecision("engine_run_approval_threshold_usd").notNull().default(10),
     /** raw engine reports kept (encrypted) this many days; longer relaxes it */
@@ -4994,6 +5012,10 @@ export const orgSettings = pgTable(
     /** the stdio MCP and engine worker floors (decision 3, OWNER DECISION 4): L2; L1 relaxes them */
     isolationFloorMcpStdio: text("isolation_floor_mcp_stdio", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
     isolationFloorEngineWorker: text("isolation_floor_engine_worker", { enum: REQUIRABLE_ISOLATION_CLASSES })
+      .notNull()
+      .default("user_space_kernel"),
+    /** ADR-0364 S3 (pending migration robot_browser_isolation): the robot run floor, L2; L1 relaxes it (never below L1) */
+    isolationFloorRobotBrowser: text("isolation_floor_robot_browser", { enum: REQUIRABLE_ISOLATION_CLASSES })
       .notNull()
       .default("user_space_kernel"),
     /** an executor's self-test is fresh this long, 60–1440 minutes; longer relaxes it */
@@ -5248,6 +5270,13 @@ export const orgSettings = pgTable(
      * `stale_credentials` rule raises one alert episode per flagged
      * credential; false = it only shows flags on the inventory page. */
     staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(true),
+    /** ADR-0366: automatic rogue-agent containment at or above this severity ('critical' by default, ADR-0180);
+     * 'off' = every signal is only a proposal. */
+    containmentAutoSeverity: text("containment_auto_severity", { enum: CONTAINMENT_AUTO_THRESHOLDS_E52 })
+      .notNull()
+      .default("critical"),
+    /** ADR-0366: the administrator containment proposals are routed to; NULL = recorded unrouted. */
+    containmentApproverUserId: uuid("containment_approver_user_id").references(() => users.id, { onDelete: "set null" }),
     /** ADR-0175 A15: the grid region whose `energy_factors` intensity
      * overrides the org default for the energy estimate. NULL = default. */
     energyRegion: text("energy_region"),
@@ -5812,6 +5841,11 @@ export const orgSettings = pgTable(
       "org_settings_isolation_floors_check",
       sql`${t.isolationFloorPublic} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorInternal} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorConfidential} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorRegulated} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorMcpStdio} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorEngineWorker} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
     ),
+    /** ADR-0364 S3: a robot run is never placed below a hardened container (there is no L0 value) */
+    check(
+      "org_settings_isolation_floor_robot_browser_check",
+      sql`${t.isolationFloorRobotBrowser} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
+    ),
     check(
       "org_settings_executor_attestation_max_age_minutes_check",
       sql`${t.executorAttestationMaxAgeMinutes} BETWEEN 60 AND 1440`,
@@ -6116,8 +6150,13 @@ export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 // refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
 // behaviour exactly.
 
-/** what a matching ABAC policy does to a call the RBAC layer already allowed */
-export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+/**
+ * What a matching ABAC policy does to a call the RBAC layer already allowed. ADR-0354 adds the graduated responses
+ * (the declared table is `@regulait/policy-kernel`'s `AGENT_RESPONSE_TABLE`; the kernel's `POLICY_RESPONSES` is the
+ * same list, pinned by a test): advise allows with guidance, correct denies with a safe alternative, block_session
+ * denies and ends the session, disable denies and quarantines the agent. None widens access.
+ */
+export const ABAC_POLICY_MODES = ["advise", "require_approval", "correct", "forbid", "block_session", "disable"] as const;
 
 /** Shared-lockable policy generation for exact-action approval consumption. */
 export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
@@ -6161,6 +6200,12 @@ export const abacPolicyVersions = pgTable(
     /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
      * approver a paused call routes to — the SAME queue, not a parallel one */
     approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0354 — the static, admin-reviewed text an `advise` or `correct` response returns to the agent. Plain text
+     * (validated by `parseAgentGuidance`; the CHECKs refuse markup and bound the length). Required for advise and
+     * correct, NULL for every other mode (DB CHECK). */
+    guidanceMessage: text("guidance_message"),
+    /** ADR-0354 — `correct` only: the approved route the agent may take instead. Advisory text, never a grant. */
+    guidanceAlternative: text("guidance_alternative"),
     /** policy unit tests travelling WITH the version they describe */
     testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
     authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -6169,7 +6214,18 @@ export const abacPolicyVersions = pgTable(
   (t) => [
     uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
     index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
-    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_mode_check",
+      sql`${t.mode} IN ('advise','require_approval','correct','forbid','block_session','disable')`,
+    ),
+    check(
+      "abac_policy_versions_guidance_check",
+      sql`CASE ${t.mode} WHEN 'advise' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NULL WHEN 'correct' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NOT NULL ELSE ${t.guidanceMessage} IS NULL AND ${t.guidanceAlternative} IS NULL END`,
+    ),
+    check(
+      "abac_policy_versions_guidance_text_check",
+      sql`(${t.guidanceMessage} IS NULL OR (char_length(${t.guidanceMessage}) BETWEEN 1 AND 500 AND ${t.guidanceMessage} !~ '[<>[:cntrl:]]')) AND (${t.guidanceAlternative} IS NULL OR (char_length(${t.guidanceAlternative}) BETWEEN 1 AND 300 AND ${t.guidanceAlternative} !~ '[<>[:cntrl:]]'))`,
+    ),
     check(
       "abac_policy_versions_approver_check",
       sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
@@ -10504,6 +10560,13 @@ export const virtualKeys = pgTable(
     }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    // --- ADR-0366 slice 2 (pending/rogue_agent_containment_b_keys.sql): a REVERSIBLE halt -----------------------
+    /** a rogue-agent containment of this key: NULL = not halted. Unlike `revoked_at` (permanent) a halt is lifted by an
+     * approved release; while set the key authenticates nothing (`virtual_key_halted`). CHECK: no halt without a
+     * reason, as on `agents`. */
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
@@ -12195,6 +12258,13 @@ export const builderAgents = pgTable(
     autonomyRelaxedAt: timestamp("autonomy_relaxed_at", { withTimezone: true }),
     /** the admin's reason for the latest change (relax or restore), prose-scrubbed by the db handle */
     autonomyEnforcementReason: text("autonomy_enforcement_reason"),
+    // --- ADR-0366 (pending/rogue_agent_containment.sql): the builder agent's own halt --------
+    /** the ADR-0124 halt for one builder agent: NULL = not halted. Set by a rogue-agent containment (or an admin);
+     * every turn (chat, schedule, inbound message, resume) is refused while set. The DB CHECK makes "halted with no
+     * reason" unrepresentable, as on `agents`. */
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
@@ -15943,7 +16013,7 @@ export const executionPlacements = pgTable(
     check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "execution_placements_workload_kind_check",
-      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`,
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
     ),
     check(
       "execution_placements_required_class_check",
@@ -16094,9 +16164,30 @@ export const executionOffers = pgTable(
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     reportedAt: timestamp("reported_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    /**
+     * ADR-0364 S3 (pending migration robot_browser_isolation): a robot_browser offer's per-run egress targets
+     * (`[{host, port}]`), required on that kind and NULL on every other. Exception comment (ADR-0200 3NF): a
+     * point-in-time "as offered" snapshot of the version's `robot_version_allowed_sites` (the source of truth), the
+     * instruction the executor builds the run's proxy ACL from; written once with the offer.
+     */
+    egressTargets: jsonb("egress_targets").$type<Array<{ host: string; port: number }>>(),
+    /**
+     * ADR-0364 S3: the robot run this offer is for (`robot_runs.id`), required on a robot_browser offer and NULL on every
+     * other; the executor hands it to the runner. Its foreign key to `robot_runs` is added by the migration that
+     * creates `robot_runs` (pending robots_s3_runs.sql, `execution_offers_robot_run_fk`, runs after this one).
+     */
+    robotRunId: uuid("robot_run_id").references(() => robotRuns.id, { onDelete: "restrict" }),
   },
   (t) => [
-    check("execution_offers_workload_kind_check", sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`),
+    check(
+      "execution_offers_workload_kind_check",
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
+    ),
+    check(
+      "execution_offers_egress_targets_check",
+      sql`(${t.workloadKind} = 'robot_browser') = (${t.egressTargets} IS NOT NULL) AND (${t.egressTargets} IS NULL OR (jsonb_typeof(${t.egressTargets}) = 'array' AND jsonb_array_length(${t.egressTargets}) BETWEEN 1 AND 64))`,
+    ),
+    check("execution_offers_robot_run_check", sql`(${t.workloadKind} = 'robot_browser') = (${t.robotRunId} IS NOT NULL)`),
     check("execution_offers_required_class_check", sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
     check(
       "execution_offers_required_by_check",
@@ -19650,14 +19741,56 @@ export const robotRuns = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    /** ADR-0364 S3: the decision 7 placement the run executed under (set once) */
+    executionPlacementId: uuid("execution_placement_id").references(() => executionPlacements.id, { onDelete: "restrict" }),
   },
   (t) => [
+    index("robot_runs_placement_idx").on(t.executionPlacementId),
     index("robot_runs_version_idx").on(t.robotVersionId, t.status, t.contentDigest),
     check("robot_runs_kind_check", sql`${t.kind} IN ('test', 'agent', 'freeform')`),
     check("robot_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'refused')`),
   ],
 );
 export type RobotRunRow = typeof robotRuns.$inferSelect;
+
+/**
+ * ADR-0364 S3: one stored evidence item of a run (a redacted screenshot, a download, the egress log). The bytes are in
+ * the content-addressed store under `sha256/<hex>`; the row is append-only (a trigger refuses UPDATE, DELETE and
+ * TRUNCATE). Evidence leaves only by retention expiry.
+ */
+export const ROBOT_EVIDENCE_KINDS_E45 = ["screenshot", "download", "egress_log"] as const;
+export const ROBOT_EVIDENCE_WITHHELD_E45 = ["pii_block", "no_store"] as const;
+export const robotRunEvidence = pgTable(
+  "robot_run_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotRunId: uuid("robot_run_id")
+      .notNull()
+      .references(() => robotRuns.id, { onDelete: "restrict" }),
+    item: integer("item").notNull(),
+    kind: text("kind", { enum: ROBOT_EVIDENCE_KINDS_E45 }).notNull(),
+    step: integer("step"),
+    contentType: text("content_type").notNull(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * ADR-0364 §7: NULL = the bytes are in the store under the sha256. Otherwise why they were never kept: `pii_block`
+     * (the project's PII mode is `block`, so a download is recorded by its sha256 and size only) or `no_store` (no
+     * artifact store is configured).
+     */
+    bytesWithheld: text("bytes_withheld", { enum: ROBOT_EVIDENCE_WITHHELD_E45 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("robot_run_evidence_item_uq").on(t.robotRunId, t.item),
+    index("robot_run_evidence_sha_idx").on(t.sha256),
+    check("robot_run_evidence_kind_check", sql`${t.kind} IN ('screenshot', 'download', 'egress_log')`),
+    // items 0..63 are the runner's; item 64 (ROBOT_EGRESS_LOG_ITEM) is the executor's egress log, and only it
+    check("robot_run_evidence_item_check", sql`${t.item} >= 0 AND ${t.item} <= 64`),
+    check("robot_run_evidence_egress_slot_check", sql`(${t.item} = 64) = (${t.kind} = 'egress_log')`),
+  ],
+);
+export type RobotRunEvidenceRow = typeof robotRunEvidence.$inferSelect;
 // ===== end ADR-0364 =================================================================================================
 
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
@@ -20286,6 +20419,86 @@ export const vendorAgentActions = pgTable(
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
+// ===== ADR-0313 (lane E2, G9): paid-tool and agent-payment budgets ===================================================
+/**
+ * ADR-0313 (migration `pending/paid_call_budgets.sql`, numbered at merge) — a PAID CALL's price. A row turns a tool
+ * (or every tool of a server) or a connector into a paid call: each call must first reserve `max_settle_usd` against the
+ * attributed project budget and/or the run's cap (default-deny: no budget envelope, no call), and settles at the
+ * reported charge (never above the hold) or `price_usd`. Exactly one subject. Admin-written; deleting one is a step-up.
+ */
+export const paidCallPrices = pgTable(
+  "paid_call_prices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    mcpToolId: uuid("mcp_tool_id").references(() => mcpTools.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "cascade" }),
+    /** the quoted price of one call, settled when the upstream reports no charge */
+    priceUsd: doublePrecision("price_usd").notNull(),
+    /** the most one call may settle at, and so what a call reserves (x402's maxAmountRequired) */
+    maxSettleUsd: doublePrecision("max_settle_usd").notNull(),
+    /** how long an unsettled hold counts before the sweeper releases it */
+    holdTtlSeconds: integer("hold_ttl_seconds").notNull().default(900),
+    note: text("note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("paid_call_prices_server_uq").on(t.mcpServerId).where(sql`${t.mcpServerId} IS NOT NULL`),
+    uniqueIndex("paid_call_prices_tool_uq").on(t.mcpToolId).where(sql`${t.mcpToolId} IS NOT NULL`),
+    uniqueIndex("paid_call_prices_connector_uq").on(t.connectorId).where(sql`${t.connectorId} IS NOT NULL`),
+    check(
+      "paid_call_prices_subject_check",
+      sql`num_nonnulls(${t.mcpServerId}, ${t.mcpToolId}, ${t.connectorId}) = 1`,
+    ),
+    check("paid_call_prices_amount_check", sql`${t.priceUsd} > 0 AND ${t.maxSettleUsd} >= ${t.priceUsd} AND ${t.maxSettleUsd} <= 10000`),
+    check("paid_call_prices_ttl_check", sql`${t.holdTtlSeconds} BETWEEN 60 AND 86400`),
+  ],
+);
+export type PaidCallPriceRow = typeof paidCallPrices.$inferSelect;
+
+/**
+ * ADR-0313 — ONE RESERVATION. Written in the reserving transaction under the budget envelope's advisory lock, so
+ * concurrent paid calls can never together exceed the budget. `held` counts against the envelope until it is settled
+ * (by the call's usage row, which then carries the spend) or released (the call failed, or the hold expired).
+ * Never deleted: a hold is the evidence of what was authorised.
+ */
+export const paidCallHolds = pgTable(
+  "paid_call_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    priceId: uuid("price_id").references(() => paidCallPrices.id, { onDelete: "set null" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    orchestrationRunId: uuid("orchestration_run_id").references(() => orchestrationRuns.id, { onDelete: "set null" }),
+    subjectKind: text("subject_kind", { enum: ["mcp_tool", "connector"] }).notNull(),
+    mcpServerId: uuid("mcp_server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    /** 3NF exception, deliberate (point-in-time evidence): the tool name the call was authorised for */
+    toolName: text("tool_name"),
+    connectorId: uuid("connector_id").references(() => connectors.id, { onDelete: "set null" }),
+    heldUsd: doublePrecision("held_usd").notNull(),
+    state: text("state", { enum: ["held", "settled", "released"] }).notNull().default("held"),
+    settledUsd: doublePrecision("settled_usd"),
+    usageEventId: uuid("usage_event_id").references(() => usageEvents.id, { onDelete: "set null" }),
+    releaseReason: text("release_reason", { enum: ["call_failed", "expired", "not_executed"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("paid_call_holds_project_held_idx").on(t.projectId).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_run_held_idx").on(t.orchestrationRunId).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_expiry_idx").on(t.expiresAt).where(sql`${t.state} = 'held'`),
+    index("paid_call_holds_created_idx").on(t.createdAt),
+    check(
+      "paid_call_holds_state_check",
+      sql`CASE ${t.state} WHEN 'held' THEN ${t.settledUsd} IS NULL AND ${t.releaseReason} IS NULL WHEN 'settled' THEN ${t.settledUsd} IS NOT NULL AND ${t.settledUsd} >= 0 AND ${t.settledUsd} <= ${t.heldUsd} AND ${t.releaseReason} IS NULL WHEN 'released' THEN ${t.settledUsd} IS NULL AND ${t.releaseReason} IS NOT NULL ELSE false END`,
+    ),
+    check("paid_call_holds_amount_check", sql`${t.heldUsd} > 0`),
+  ],
+);
+export type PaidCallHoldRow = typeof paidCallHolds.$inferSelect;
+// ===== end ADR-0313 =================================================================================================
 
 // ===== ADR-0358 (lane E39): AI adoption analytics =====
 /**
@@ -20312,3 +20525,74 @@ export const adoptionAnalyticsPolicy = pgTable(
 );
 export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
 // ===== end ADR-0358 (lane E39) adoption analytics =====
+
+// ===== ADR-0366 (lane E52): rogue-agent containment =====
+import {
+  CONTAINMENT_AUTO_THRESHOLDS as CONTAINMENT_AUTO_THRESHOLDS_E52,
+  CONTAINMENT_SEVERITIES as CONTAINMENT_SEVERITIES_E52,
+  CONTAINMENT_SIGNAL_SOURCES as CONTAINMENT_SIGNAL_SOURCES_E52,
+  CONTAINMENT_STATES as CONTAINMENT_STATES_E52,
+  CONTAINMENT_SUBJECT_KINDS as CONTAINMENT_SUBJECT_KINDS_E52,
+} from "@regulait/shared";
+
+/**
+ * One containment of one agent for one signal (ADR-0366). Created `proposed` (filed in the Approvals Queue) or
+ * `contained` (automatic, at or above the org threshold); `released` and `declined` are terminal
+ * (`CONTAINMENT_MACHINE`). Exactly one of `agent_id` / `builder_agent_id` / `virtual_key_id` is set (CHECK).
+ *
+ * ADR-0200 exceptions: `explanation` and `evidence` are the point-in-time snapshot of the signal as it was decided
+ * (the alert's live detail is refreshed and later resolved); `signal_rule_id` / `signal_ref_id` are the producing
+ * rule and record, kept FK-free so a behaviour-baseline finding (lane E40) can be a source without a schema change,
+ * and so an alert's deletion cannot erase why an agent was halted (`alert_id` is the FK and is set null).
+ * Row-level security (ADR-0234): admin, `system_task` and `migration` only.
+ */
+export const agentContainments = pgTable(
+  "agent_containments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: CONTAINMENT_SUBJECT_KINDS_E52 }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    /** slice 2: a contained virtual key */
+    virtualKeyId: uuid("virtual_key_id").references(() => virtualKeys.id, { onDelete: "cascade" }),
+    signalSource: text("signal_source", { enum: CONTAINMENT_SIGNAL_SOURCES_E52 }).notNull(),
+    signalRuleId: text("signal_rule_id").notNull(),
+    signalRefId: text("signal_ref_id").notNull(),
+    alertId: uuid("alert_id").references(() => governanceAlerts.id, { onDelete: "set null" }),
+    severity: text("severity", { enum: CONTAINMENT_SEVERITIES_E52 }).notNull(),
+    /** the threshold in force when the signal was decided (evidence) */
+    thresholdAtDecision: text("threshold_at_decision", { enum: CONTAINMENT_AUTO_THRESHOLDS_E52 }).notNull(),
+    automatic: boolean("automatic").notNull(),
+    status: text("status", { enum: CONTAINMENT_STATES_E52 }).notNull(),
+    explanation: text("explanation").notNull(),
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** the queue row for a proposal; NULL for an automatic containment or an unrouted proposal */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** whether this containment set the halt (false = the agent was already halted when it was contained) */
+    haltApplied: boolean("halt_applied").notNull().default(false),
+    containedAt: timestamp("contained_at", { withTimezone: true }),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** owner decision 2026-11-21: a release is a request (who asked, when, its approval), decided by another admin */
+    releaseRequestedByUserId: uuid("release_requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releaseRequestedAt: timestamp("release_requested_at", { withTimezone: true }),
+    releaseApprovalId: uuid("release_approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** the administrator who APPROVED the release */
+    releasedByUserId: uuid("released_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** the requester's reason */
+    releaseReason: text("release_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_containments_signal_uq").on(t.signalSource, t.signalRefId),
+    index("agent_containments_agent_idx").on(t.agentId, t.status),
+    index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
+    index("agent_containments_virtual_key_idx").on(t.virtualKeyId, t.status),
+    // the list's keyset (created_at DESC, id DESC), ADR-0031
+    index("agent_containments_created_idx").on(t.createdAt, t.id),
+    index("agent_containments_release_approval_idx").on(t.releaseApprovalId),
+  ],
+);
+export type AgentContainmentRow = typeof agentContainments.$inferSelect;
+// ===== end ADR-0366 =====

@@ -523,6 +523,21 @@ async function withAgentGate(
   source: string,
   body: (model: ModelRow, lease: string | null) => Promise<TurnOutcome>,
 ): Promise<TurnOutcome> {
+  // ADR-0366 / ADR-0124: a halted builder agent (a rogue-agent containment, or an admin) runs no turn of any source
+  // (chat, schedule, inbound message, resume). Read fresh: the row in hand may predate a containment that just landed.
+  const [halt] = await db
+    .select({ haltedAt: builderAgents.haltedAt, haltedReason: builderAgents.haltedReason })
+    .from(builderAgents)
+    .where(eq(builderAgents.id, agent.id));
+  if (halt?.haltedAt) {
+    await audit(db, userId, agent.id, "builder-agent-halted-refused", `turn refused: builder agent '${agent.name}' is halted`, { source }, "deny");
+    return {
+      ok: false,
+      status: 409,
+      error: "builder_agent_halted",
+      detail: `this agent is halted: ${halt.haltedReason ?? "(no reason recorded)"}. An administrator releases it.`,
+    };
+  }
   // owner rule (2026-10-04): every builder agent bills to a project. A legacy
   // agent created before the rule is refused before anything is dispatched.
   if (!agent.projectId) {
@@ -860,6 +875,29 @@ async function writeAgentMessage(seg: Segment, state: LoopState) {
  */
 async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"): Promise<Refusal | null> {
   const { db, userId } = seg;
+  // ADR-0366 (#1134 security review): a containment can land MID-TURN. The halt is read fresh before every model step
+  // and every tool call, so a contained agent makes no further call; the turn ends on the refusal, audited.
+  const [halt] = await db
+    .select({ haltedAt: builderAgents.haltedAt, haltedReason: builderAgents.haltedReason })
+    .from(builderAgents)
+    .where(eq(builderAgents.id, seg.agent.id));
+  if (halt?.haltedAt) {
+    await audit(
+      db,
+      userId,
+      seg.agent.id,
+      "builder-agent-halted-refused",
+      `${phase === "tool" ? "tool call" : "model step"} refused mid-turn: builder agent '${seg.agent.name}' is halted`,
+      { source: seg.source, phase, step: state.modelSteps, toolCalls: state.toolCalls, threadId: seg.thread.id },
+      "deny",
+    );
+    return {
+      ok: false,
+      status: 409,
+      error: "builder_agent_halted",
+      detail: `this agent was halted during the turn: ${halt.haltedReason ?? "(no reason recorded)"}. An administrator releases it.`,
+    };
+  }
   if (phase === "step") {
     const [fresh] = await db.select().from(agents).where(eq(agents.id, seg.model.id));
     const model = (fresh ?? seg.model) as AgentRow;

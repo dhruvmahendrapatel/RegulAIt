@@ -41,6 +41,7 @@ import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+
 /** One row of `GET /v1/users/:userId/servers/:serverId/entitlements`. */
 interface McpEntitlementRow {
   /** a named tool, or the server-wide read-all grant which names none */
@@ -68,7 +69,13 @@ export default function McpServersPage() {
       <PageHeader
         title="MCP servers"
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
-        actions={<Link to="/admin/mcp-servers/bundles">MCP bundles</Link>}
+        actions={
+          <>
+            {/* ADR-0246 (P27): definition pinning and high-risk tooling, on their own lazy page */}
+            <Link to="/admin/mcp-servers/pinning">Pinning and high-risk tooling</Link>
+            <Link to="/admin/mcp-servers/bundles">MCP bundles</Link>
+          </>
+        }
       />
       <Tabs
         tabs={MCP_TABS}
@@ -132,6 +139,8 @@ function McpServersTab() {
     </Button>
   );
 
+  // the selected server, read once for every card that shows it
+  const selected = (servers.data?.servers ?? []).find((s) => s.id === selectedId);
   return (
     <>
       <div className={v.stack}>
@@ -217,17 +226,18 @@ function McpServersTab() {
           />
         </Card>
 
+
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
 
-        {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpUpstreamCredentialCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
+        {selectedId && <McpExecutionCard server={selected} />}
+        {selectedId && <McpIdentityAssertionCard server={selected} />}
+        {selectedId && <McpUpstreamCredentialCard server={selected} />}
 
         {selectedId && (
           <ToolsCard
             key={selectedId}
-            server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)!}
+            server={selected!}
           />
         )}
 

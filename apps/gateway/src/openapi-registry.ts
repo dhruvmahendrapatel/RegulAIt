@@ -1028,6 +1028,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/robots/:robotId/versions/:version/retire": "internal",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "internal",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "internal",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "internal",
+  "GET /v1/robots/:robotId/runs/:runId": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -1173,6 +1175,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/users/:userId/spend-budget": "internal",
   "PUT /v1/users/:userId/spend-budget": "internal",
   "DELETE /v1/users/:userId/spend-budget": "internal",
+  // ADR-0313: paid-tool and agent-payment budgets
+  "GET /v1/paid-call-prices": "internal",
+  "POST /v1/paid-call-prices": "internal",
+  "DELETE /v1/paid-call-prices/:priceId": "internal",
+  "GET /v1/paid-call-holds": "internal",
   "POST /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx": "internal",
@@ -1340,6 +1347,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/retention-holds/release": "internal",
   "PUT /v1/execution/mode": "internal",
   "POST /v1/agents/:agentId/halt": "internal",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "internal",
+  "GET /v1/containments/:id": "internal",
+  "POST /v1/containments/:id/release": "internal",
   "POST /v1/agents/:agentId/unhalt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
@@ -1875,6 +1886,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/users/:userId/spend-budget": "cost-outcomes",
   "PUT /v1/users/:userId/spend-budget": "cost-outcomes",
   "DELETE /v1/users/:userId/spend-budget": "cost-outcomes",
+  "GET /v1/paid-call-prices": "paid-calls",
+  "POST /v1/paid-call-prices": "paid-calls",
+  "DELETE /v1/paid-call-prices/:priceId": "paid-calls",
+  "GET /v1/paid-call-holds": "paid-calls",
   "GET /v1/traces": "tracing",
   "GET /v1/traces/:traceId": "tracing",
   "GET /v1/sessions": "tracing",
@@ -2602,6 +2617,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/robots/:robotId/versions/:version/submit": "builder",
   "POST /v1/robots/:robotId/versions/:version/retire": "builder",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "builder",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "builder",
+  "GET /v1/robots/:robotId/runs/:runId": "builder",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "builder",
   "GET /v1/copilot/tools": "copilot",
   "POST /v1/copilot/ask": "copilot",
@@ -2862,6 +2879,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/retention-holds/release": "automation",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "agents",
+  "GET /v1/containments/:id": "agents",
+  "POST /v1/containments/:id/release": "agents",
   "POST /v1/agents/:agentId/unhalt": "agents",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "servers",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",

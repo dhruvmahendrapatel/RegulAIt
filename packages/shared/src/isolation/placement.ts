@@ -118,27 +118,35 @@ export function projectIsolationSensitivity(useCaseSensitivities: readonly unkno
 
 /** the shipped profile a workload kind runs under when nothing is configured (decision 2) */
 export function defaultProfileFor(kind: IsolableWorkloadKind, assurance: AgentAssurance): ShippedExecutionProfileName {
+  // ADR-0364 S3: a robot run has exactly one shipped profile (the only one with a per-run egress proxy; no other
+  // profile may run robot_browser). An unknown or low-assurance agent still raises the run's class through the
+  // unknown-agent floor (`computeRequiredClass`); it cannot move the run to a profile that cannot run it.
+  if (kind === "robot_browser") return "robot-browser";
   if (assurance !== "known") return MOST_RESTRICTIVE_EXECUTION_PROFILE;
   return kind === "engine_worker" ? "engine-worker" : "restricted";
 }
 
 /**
- * Decision 3: the workload kind's own floor. `mcp_stdio` and `engine_worker`
- * read their (relaxable, audited) org settings; `code_exec` is L2, and L3 for
- * a confidential or regulated project; `byoc_worker` has none of its own ("the
- * class the placement requires"). A sensitivity that does not resolve gives
- * `code_exec` no floor here: the sensitivity fact itself refuses the call.
+ * Decision 3: the workload kind's own floor. `mcp_stdio`, `engine_worker`
+ * and `robot_browser` (ADR-0364 S3) read their (relaxable, audited) org
+ * settings; `code_exec` is L2, and L3 for a confidential or regulated
+ * project; `byoc_worker` has none of its own ("the class the placement
+ * requires"). A sensitivity that does not resolve gives `code_exec` no floor
+ * here: the sensitivity fact itself refuses the call. A robot floor that was
+ * not read (undefined) does not resolve either: the call is refused.
  */
 export function workloadKindFloor(
   kind: IsolableWorkloadKind,
   sensitivity: unknown,
-  settings: { isolationFloorMcpStdio: unknown; isolationFloorEngineWorker: unknown },
+  settings: { isolationFloorMcpStdio: unknown; isolationFloorEngineWorker: unknown; isolationFloorRobotBrowser?: unknown },
 ): unknown {
   switch (kind) {
     case "mcp_stdio":
       return settings.isolationFloorMcpStdio;
     case "engine_worker":
       return settings.isolationFloorEngineWorker;
+    case "robot_browser":
+      return settings.isolationFloorRobotBrowser;
     case "code_exec":
       return sensitivity === "confidential" || sensitivity === "regulated" ? "microvm" : "user_space_kernel";
     case "byoc_worker":

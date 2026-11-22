@@ -12,6 +12,7 @@ import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exception
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
+import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -455,7 +456,12 @@ export const ROBOT_RUN_MACHINE = defineMachine({
     start: { from: ["queued"], to: "running", by: ["system"], summary: "The sandbox placement was accepted and the runner started." },
     succeed: { from: ["running"], to: "succeeded", by: ["worker"], summary: "Every step ran and the outputs matched the output schema." },
     fail: { from: ["running"], to: "failed", by: ["worker"], summary: "A step failed; the run stopped with evidence." },
-    time_out: { from: ["running"], to: "timed_out", by: ["worker", "system"], summary: "The run hit its wall-clock or step limit." },
+    time_out: {
+      from: ["queued", "running"],
+      to: "timed_out",
+      by: ["worker", "system"],
+      summary: "The run hit its wall-clock or step limit, or the stale-run sweep ended a run no gateway still holds.",
+    },
     cancel: {
       from: ["queued", "running"],
       to: "cancelled",
@@ -1021,4 +1027,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
   [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
   [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
+  // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
+  [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);

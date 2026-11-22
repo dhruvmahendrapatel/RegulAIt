@@ -3,10 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agents,
+  and,
   auditLog,
   createDb,
   desc,
   eq,
+  inArray,
+  notInArray,
   repetitiveAskClusterSpans,
   repetitiveAskClusters,
   repetitiveAskSettings,
@@ -80,6 +83,14 @@ beforeAll(async () => {
     .returning({ id: agents.id });
   bigId = big!.id;
   smallId = small!.id;
+  // the scan's pool is every enabled agent, and files sharing this database leave their own (some cheaper than the
+  // small one) behind: only this file's two are enabled while it runs, the others are re-enabled afterwards
+  const others = await db
+    .update(agents)
+    .set({ enabled: false })
+    .where(and(eq(agents.enabled, true), notInArray(agents.id, [bigId, smallId])))
+    .returning({ id: agents.id });
+  if (others.length > 0) restores.push(async () => void (await db.update(agents).set({ enabled: true }).where(inArray(agents.id, others.map((o) => o.id)))));
   const [t] = await db.insert(traces).values({ kind: "dispatch", name: "adr0328", userId: adminId, status: "ok" }).returning();
   traceId = t!.id;
   const base = { traceId, kind: "llm" as const, status: "ok" as const, startedAt: new Date(), agentId: bigId, name: "adr0328", costUsd: 0.02 };

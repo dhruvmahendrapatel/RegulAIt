@@ -65,6 +65,7 @@ import { bomOrgSettingsFields } from "./bom/settings.js";
 import { isolationOrgSettingsFields } from "./isolation/settings.js";
 // ADR-0218: the organisation default palette and the theme lock
 import { appearanceOrgSettingsFields } from "./appearance.js";
+import { CONTAINMENT_AUTO_THRESHOLDS } from "./rogue-containment.js";
 
 export { detectPII, redactPII, PII_REDACTION_VERSION, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
 export {
@@ -659,6 +660,17 @@ export {
   type SkillAdmissionScan,
   type SkillScanInput,
 } from "./skill-admission.js";
+
+// ADR-0354 — the one validator for advise / correct guidance returned to an agent (plain text, admission-scanned)
+export {
+  AGENT_GUIDANCE_ALTERNATIVE_MAX,
+  AGENT_GUIDANCE_MESSAGE_MAX,
+  agentGuidanceSchema,
+  parseAgentGuidance,
+  type AgentGuidanceInput,
+  type AgentGuidanceResult,
+  type ValidAgentGuidance,
+} from "./agent-guidance.js";
 // ADR-0175 A5 — release-age cooldown (pure status + admin write shapes).
 export {
   RELEASE_AGE_RECOMMENDED_DAYS,
@@ -2545,6 +2557,12 @@ export const updateOrgSettingsSchema = z
      * on the inventory page only; true = one alert episode per flagged
      * credential. */
     staleCredentialAlerts: z.boolean().optional(),
+    /** ADR-0366: the severity at or above which a rogue-agent signal halts the agent at once ('critical' by default;
+     * a lower severity contains more). 'off' = every signal is only a proposal (a relaxation). */
+    containmentAutoSeverity: z.enum(CONTAINMENT_AUTO_THRESHOLDS).optional(),
+    /** ADR-0366: the administrator rogue-agent containment proposals are routed to. null = proposals are recorded
+     * unrouted (the alert still notifies; automatic containment still applies). */
+    containmentApproverUserId: z.string().uuid().nullable().optional(),
     /** ADR-0175 A15: the grid region whose energy factor overrides the org
      * default intensity. null = the default. */
     energyRegion: z.string().trim().min(1).max(64).nullable().optional(),
@@ -5130,7 +5148,10 @@ export * from "./state-machines.js";
 export * from "./pipeline-steps.js";
 export * from "./kill-switch-guard.js";
 export * from "./vendor-agent-control.js";
+// ADR-0366: rogue-agent containment signals, the decision and the lifecycle (pure)
+export * from "./rogue-containment.js";
 export * from "./robots.js";
+export * from "./robots-run.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits

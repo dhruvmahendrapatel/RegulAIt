@@ -1,0 +1,10 @@
+{
+  "adr": "ADR-0366",
+  "lane": "E52",
+  "tracking": "ADR-0366 (lane E52): rogue-agent containment admin routes, API-only in slice 1; screen requested on #453",
+  "gaps": {
+    "GET /v1/containments": "lists rogue-agent containments (proposed, contained, declined, released), newest first, keyset-paginated",
+    "GET /v1/containments/:id": "one containment, its evidence snapshot and its lifecycle (which transitions are allowed now)",
+    "POST /v1/containments/:id/release": "an administrator requests a containment release with a reason and a settings_relax step-up (refused while the execution dial is not normal); a different administrator decides it in the Approvals Queue with an MFA step-up; audited"
+  }
+}

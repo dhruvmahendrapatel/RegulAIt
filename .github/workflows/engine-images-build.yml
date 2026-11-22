@@ -25,6 +25,7 @@ on:
       - packages/engine-admission-scan/**
       - packages/engine-promptfoo/**
       - packages/engine-runner/**
+      - packages/robot-runner/**
       - scripts/build-engine-image.sh
       - scripts/engine-images-gate.mjs
       - scripts/engine-images-normalise.mjs
@@ -61,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

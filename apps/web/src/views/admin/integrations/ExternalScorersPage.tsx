@@ -33,6 +33,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { ExternalScorer } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -320,10 +321,12 @@ export default function ExternalScorersPage() {
                           disabled={act.busy}
                           onClick={() =>
                             void act.run(
+                              // enabling a scorer an enabled trained detector uses is a settings_relax step-up
+                              // (external-scorers.ts); withStepUp opens the proof and resends this exact call
                               () =>
-                                api.post(`/v1/external-scorers/${r.id}/enabled`, {
-                                  enabled: !r.enabled,
-                                }),
+                                withStepUp((h) =>
+                                  stepUpApi.post(`/v1/external-scorers/${r.id}/enabled`, { enabled: !r.enabled }, h),
+                                ),
                               r.enabled ? `'${r.name}' disabled` : `'${r.name}' enabled`,
                             )
                           }
