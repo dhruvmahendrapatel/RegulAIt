@@ -1,0 +1,186 @@
+[
+  {
+    "module": "github.com/stripe/smokescreen",
+    "version": "v0.1.0",
+    "licence": "MIT",
+    "file": "LICENSE.txt",
+    "sha256": "87f4c6e8082dfe39d705be46f91dd329cfca135cbabff1ebdd278e934b9964ea",
+    "read": "v0.1.0 (commit 609eb893): MIT License, Copyright (c) 2016 Stripe"
+  },
+  {
+    "module": "github.com/DataDog/datadog-go",
+    "version": "v4.5.1+incompatible",
+    "licence": "MIT",
+    "file": "LICENSE.txt",
+    "sha256": "c3bb8749e1ee518dd601665eec782649c8779812d52a496c7ded5137978b53a5",
+    "read": "Copyright (c) 2015 Datadog, Inc Permission is hereby granted, free of charge, to any perso"
+  },
+  {
+    "module": "github.com/armon/go-proxyproto",
+    "version": "v0.0.0-20170620220930-48572f11356f",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "9830db0392372aabde3ea973fb5e414e813902cf4ccb2694cb512cec318eebbb",
+    "read": "The MIT License (MIT) Copyright (c) 2014 Armon Dadgar Permission is hereby granted, free o"
+  },
+  {
+    "module": "github.com/beorn7/perks",
+    "version": "v1.0.1",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "0db7c9ebb3717e526f34f87dd1ee8bc77d36846e29cb0cec9246f7138fbe962b",
+    "read": "Copyright (C) 2013 Blake Mizerany Permission is hereby granted, free of charge, to any per"
+  },
+  {
+    "module": "github.com/carlmjohnson/versioninfo",
+    "version": "v0.22.4",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "20160f88867e0ceed2f82d2a8e07edd09cfe5067b4932ab6a917f5795f200f0a",
+    "read": "MIT License Copyright (c) 2021 Carl Johnson Permission is hereby granted, free of charge, "
+  },
+  {
+    "module": "github.com/cespare/xxhash/v2",
+    "version": "v2.1.2",
+    "licence": "MIT",
+    "file": "LICENSE.txt",
+    "sha256": "f566a9f97bacdaf00d9f21dd991e81dc11201c4e016c86b470799429a1c9a79c",
+    "read": "Copyright (c) 2016 Caleb Spare MIT License Permission is hereby granted, free of charge, t"
+  },
+  {
+    "module": "github.com/golang/protobuf",
+    "version": "v1.5.2",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "8778a9fc1eaffb03ab873caae251df2d224f6b5502be8777d3cd573a4dd43903",
+    "read": "Copyright 2010 The Go Authors. All rights reserved. Redistribution and use in source and b"
+  },
+  {
+    "module": "github.com/hashicorp/golang-lru",
+    "version": "v1.0.2",
+    "licence": "MPL-2.0",
+    "file": "LICENSE",
+    "sha256": "6c7088eb877b5d7e6e0e9d27e822ea25fcda2e83f9eba59bb5f1418a656796e0",
+    "read": "Copyright (c) 2014 HashiCorp, Inc. Mozilla Public License, version 2.0 1. Definitions 1.1."
+  },
+  {
+    "module": "github.com/matttproud/golang_protobuf_extensions",
+    "version": "v1.0.1",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  },
+  {
+    "module": "github.com/patrickmn/go-cache",
+    "version": "v2.1.0+incompatible",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "0070a164e0fc28e82739a764c37b38c56de796f9a8d1862b4413eb6978cd4e04",
+    "read": "Copyright (c) 2012-2017 Patrick Mylund Nielsen and the go-cache contributors Permission is"
+  },
+  {
+    "module": "github.com/prometheus/client_golang",
+    "version": "v1.13.0",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  },
+  {
+    "module": "github.com/prometheus/client_model",
+    "version": "v0.2.0",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  },
+  {
+    "module": "github.com/prometheus/common",
+    "version": "v0.37.0",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  },
+  {
+    "module": "github.com/prometheus/procfs",
+    "version": "v0.8.0",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  },
+  {
+    "module": "github.com/rs/xid",
+    "version": "v1.2.1",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "c480873f0ff2b7e2c539bdd84fb4da4178d8d02479c94924f7bffeafb7add358",
+    "read": "Copyright (c) 2015 Olivier Poitrey Permission is hereby granted, free"
+  },
+  {
+    "module": "github.com/sirupsen/logrus",
+    "version": "v1.9.3",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "51a0c9ec7f8b7634181b8d4c03e5b5d204ac21d6e72f46c313973424664b2e6b",
+    "read": "The MIT License (MIT) Copyright (c) 2014 Simon Eskildsen Permission is hereby granted, fre"
+  },
+  {
+    "module": "github.com/stripe/goproxy",
+    "version": "v0.0.0-20260826103935-0cd07c409a76",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "bb75ec34334a0f835a3a42e1419779e0ab6fe4bef05fc699a01d280ff14c4d02",
+    "read": "Copyright (c) 2012 Elazar Leibovich. All rights reserved. Redistribution and use in source"
+  },
+  {
+    "module": "golang.org/x/net",
+    "version": "v0.62.0",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "read": "Copyright 2009 The Go Authors. Redistribution and use in source and binary forms, with or "
+  },
+  {
+    "module": "golang.org/x/sys",
+    "version": "v0.49.0",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "read": "Copyright 2009 The Go Authors. Redistribution and use in source and binary forms, with or "
+  },
+  {
+    "module": "golang.org/x/text",
+    "version": "v0.43.0",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "read": "Copyright 2009 The Go Authors. Redistribution and use in source and binary forms, with or "
+  },
+  {
+    "module": "google.golang.org/protobuf",
+    "version": "v1.33.0",
+    "licence": "BSD-3-Clause",
+    "file": "LICENSE",
+    "sha256": "4835612df0098ca95f8e7d9e3bffcb02358d435dbb38057c844c99d7f725eb20",
+    "read": "Copyright (c) 2018 The Go Authors. All rights reserved. Redistribution and use in source a"
+  },
+  {
+    "module": "gopkg.in/urfave/cli.v1",
+    "version": "v1.20.0",
+    "licence": "MIT",
+    "file": "LICENSE",
+    "sha256": "da277af11b85227490377fbcac6afccc68be560c4fff36ac05ca62de55345fd7",
+    "read": "MIT License Copyright (c) 2016 Jeremy Saenz & Contributors Permission is hereby granted, f"
+  },
+  {
+    "module": "gopkg.in/yaml.v2",
+    "version": "v2.4.0",
+    "licence": "Apache-2.0",
+    "file": "LICENSE",
+    "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+    "read": " Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDIT"
+  }
+]
