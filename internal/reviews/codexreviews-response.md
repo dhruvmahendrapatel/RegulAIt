@@ -108,7 +108,7 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 13 | `builder/codex-oss-and-ledger` | O-01, O-03, O-04, O-02 (ADR-0176 text), P-06, P-09 |
 | 14 | `builder/codex-wave-concurrency` | P-05 (coordinated with E2) |
 
-**Handed to other lanes** (the master has been told; their files are not edited here):
+**Handed to other lanes** (recorded here and in the PR body for the master; their files are not edited here):
 - **E35 (#960):** UIW-03 and the ChatPage part of UIW-02.
 - **E50 (#1133):** UIW-04 and UIW-05. P-08 is gated on E50.
 
@@ -125,7 +125,7 @@ already fixed. "PR" is filled in as each slice merges.
 | CXR-ADM-001 | Y | 5 | 6 | 30 | ACCEPT-build | `ExternalScorersPage.tsx:301` and `editForms.tsx:223` use plain `api.post`/`api.patch`, but the server requires settings_relax step-up (`external-scorers.ts:464,635`). With no wrapper, the proof dialog never opens. The server stays fail-closed. | slice 2 |
 | CXR-ADM-002 | Y | 6 | 5 | 30 | ACCEPT-build | `ExternalScorersPage.tsx:101-103` says the inline path stays local, but ADR-0220 trained detectors call registered scorers inline (`trained-detectors.ts:4-15`). The disclosure is wrong; a copy fix. | slice 3 |
 | CXR-ADM-003 | Partial | 3 | 3 | 9 | REJECT | The window (`guardrails.ts:555-562`) is the ADR-0181 FX3 red-team window: demo-only, at most 60 minutes, and it never replaces an admin override. Exposing it is a new feature. Owner question 1. | — |
-| CXR-ADM-004 | Y | 1 | 3 | 3 | ACCEPT-triage-low | `ConfigRow` ignores the server's `expired` flag (`GuardrailsPage.tsx:64-72`). Only `demo:intake` creates window rows, it deletes them in `finally`, and the sweep runs every 5 minutes. | issue |
+| CXR-ADM-004 | Y | 1 | 3 | 3 | ACCEPT-triage-low | `ConfigRow` ignores the server's `expired` flag (`GuardrailsPage.tsx:64-72`). Only `demo:intake` creates window rows, it deletes them in `finally`, and the sweep runs every 5 minutes. | #1187 |
 | CXR-ADM-005 | Y | 6 | 4 | 24 | ACCEPT-build | `GuardrailsPage.tsx:606,625`: the sample result stays after the text changes. A failed rerun shows only in a toast (`adminKit.tsx:379-384`). | slice 3 |
 | CXR-ADM-006 | Y | 5 | 4 | 20 | ACCEPT-build | The help says "Runs every detector" (`GuardrailsPage.tsx:596`), but the handler runs local rules for the input phase only (`guardrails.ts:1013-1022`). Relabel it and add a phase select; it stays local. | slice 3 |
 | CXR-ADM-007 | Y | 7 | 3 | 21 | ACCEPT-build | `CredentialsPage.tsx:217,238` shows `inv ?? 0` before the read and after a failed read. An unread inventory is not zero. | slice 3 |
@@ -166,7 +166,7 @@ already fixed. "PR" is filled in as each slice merges.
 | CXR-ACC-001 | Y | 3 | 4 | 12 | ACCEPT-build | `StepUpDialog.tsx:74-87`: a failed `begin()` leaves "Getting ready…" with only Cancel (`:186-189`). Add a Retry that starts a fresh ceremony and never re-sends the action. | slice 2 |
 | CXR-ACC-002 | Y | 5 | 3 | 15 | ACCEPT-build (design first) | Federated links hard-code `returnTo=/app` (`LoginPage.tsx:373,400`), and the server enum (`auth.ts:2229`, `saml.ts:622`) is fixed by ADR-0026 and ADR-0036. Owner question 2; the fix must not create an open redirect. | after owner |
 | CXR-ACC-003 | Partial | 3 | 3 | 9 | ACCEPT-build | `ModelRateLimits.tsx:66` shows a failed read as "Not enforced", and the copy is stale: the stored default is true (`schema.ts:5068`). Narrower than claimed: the toggle can only send the strict value, so enforcement cannot be weakened. | slice 9 |
-| CXR-ACC-004 | Y | 2 | 2 | 4 | ACCEPT-triage-low | `AccountPage.tsx:474-487` has no warning, but the server forces re-enrolment (`app.ts:1437-1447`). There is no bypass. | issue |
+| CXR-ACC-004 | Y | 2 | 2 | 4 | ACCEPT-triage-low | `AccountPage.tsx:474-487` has no warning, but the server forces re-enrolment (`app.ts:1437-1447`). There is no bypass. | #1188 |
 | CXR-ACC-005 | Y | 2 | 3 | 6 | ACCEPT-build | `LoginPage.tsx:67-74` falls back silently, and the options error (`:139-145`) is never rendered. Add a degraded notice with Retry. | slice 9 |
 
 ### Risk, evidence and reporting (CXR-REV)
@@ -211,7 +211,7 @@ already fixed. "PR" is filled in as each slice merges.
 | S-06 | Y | – | – | – | REJECT (fixed) | Attribution requirements default to true (`schema.ts:5199,5201`). | — |
 | S-07 | Y | 2 | 3 | 6 | ACCEPT-build | Auth runs in preHandler (`app.ts:1330`), after body parsing. It matters only on routes with raised JSON limits (`decision-receipts.ts:385`, `engine-tasks.ts:664,712`, `engine-runs.ts:2222`). Reuse the `supplier-portal.ts:1364` early-auth pattern. | slice 12 |
 | S-08 | Y | 3 | 5 | 15 | ACCEPT-build (checklist gap) | `auth.ts:457-501` uses synchronous `scryptSync` at N=2^14, r=8, p=1, below OWASP's minimum equivalents, and the comment and ADR-0025 wrongly say "per OWASP". ADR-0176 already lists async scrypt as "replace now". Owner question 8. | slice 1 |
-| S-09 | Y | 2 | 2 | 4 | ACCEPT-triage-low | Any `Bearer` prefix moves a client from the 1200/min per-IP bucket to the 6000/min bucket (`rate-limit.ts:244-248,285`). It is still per IP, and a verified credential tier exists. | issue |
+| S-09 | Y | 2 | 2 | 4 | ACCEPT-triage-low | Any `Bearer` prefix moves a client from the 1200/min per-IP bucket to the 6000/min bucket (`rate-limit.ts:244-248,285`). It is still per IP, and a verified credential tier exists. | #1189 |
 | S-10 | Partial | 1 | 4 | 4 | ACCEPT-build (checklist gap) | `reporting.ts:577` defaults `isAdmin ?? true`, and the scheduler call relies on it (`scheduler-jobs.ts:197`). `compliance-packs.ts:179` and `copilot.ts:441` use `sql.raw` arrays over UUID-validated ids: no injection shown, but the checklist requires parameters. Already fine: the style CSP and constant arrays. | slice 1 |
 | P-01 | Y | – | – | – | REJECT (fixed) | One governed core covers model, connector, MCP and A2A calls. | — |
 | P-02 | Y | – | – | – | REJECT (fixed) | The project plan-only gate is wired in. | — |
@@ -227,13 +227,13 @@ already fixed. "PR" is filled in as each slice merges.
 | C-03 | Y | – | – | – | REJECT (fixed) | The migration guard (ADR-0252) is in place. | — |
 | C-04 | Y | – | – | – | REJECT (superseded) | The owner's 2026-11-19 census design replaces the report's fix. | — |
 | C-05 | Y | – | – | – | REJECT (false positive) | The flagged line is inside a source-string fixture. | — |
-| C-06 | Y | 2 | 2 | 4 | ACCEPT-triage-low | The garak test is opt-in with no CI job. A 150 ms deadline races a 600 ms delayed commit (`zz-adr0188-s5…:1034-1035`). | issue |
+| C-06 | Y | 2 | 2 | 4 | ACCEPT-triage-low | The garak test is opt-in with no CI job. A 150 ms deadline races a 600 ms delayed commit (`zz-adr0188-s5…:1034-1035`). | #1190 |
 | C-07 | Y | – | – | – | owner question | 138 files are outside type-checking. Owner question 9. | — |
 | O-01 | Y | 5 | 3 | 15 | ACCEPT-build | 18 gateway packages and 2 web packages are missing from THIRD_PARTY.md, and no preflight checks completeness. Owner question 10. | slice 13 |
 | O-02 | Y | 3 | 2 | 6 | ACCEPT-build | The ADR-0176 table still marks cockatiel, the OTLP trace encoder and the scheduler as open, with stale evidence text. Fix the table; schedule the replacements. | slice 13 |
 | O-03 | Y | 3 | 2 | 6 | ACCEPT-build | A handwritten `csvCell` (`shared/billing.ts:494`), two parsers and `stableStringify` remain, against ADR-0176's "replace now". Evidence-byte formats stay as they are. | slice 13 |
 | O-04 | Y (we disagree with the narrowing) | 4 | 3 | 12 | ACCEPT-build | Eval uses a handwritten subset (`shared/evals.ts:271,583`) while the playground uses Ajv (`playground.ts:94`). ADR-0176:84 already chose Ajv. | slice 13 |
-| O-05 | Y | 1 | 2 | 2 | ACCEPT-triage-low | ADR-0187 records the owner's GCC/libquadmath exceptions, but ADR-0176 does not point to them. The master adds a cross-reference. | issue |
+| O-05 | Y | 1 | 2 | 2 | ACCEPT-triage-low | ADR-0187 records the owner's GCC/libquadmath exceptions, but ADR-0176 does not point to them. The master adds a cross-reference. | #1191 |
 | R-01 | Y | – | – | – | REJECT (process) | The merge loop checks the released SHA. Native reviews are an owner choice. | — |
 | R-02 | Y | – | – | – | REJECT (fixed) | `mcp-admission-rescan.ts:284`, with a regression test. | — |
 | R-03 | Y | – | – | – | REJECT (fixed) | ADR-0252 merge-time numbering. | — |
