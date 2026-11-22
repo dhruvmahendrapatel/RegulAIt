@@ -89,6 +89,10 @@ WORKDIR /app
 COPY --from=build /app /app
 
 ENV PORT=3000
+# ADR-0025 addendum (Codex review S-08): up to four 128 MiB password derivations
+# run on libuv's thread pool at once (REGULAIT_PASSWORD_HASH_CONCURRENCY), so the
+# pool is raised from 4 to 8 to keep threads free for file and DNS work.
+ENV UV_THREADPOOL_SIZE=8
 EXPOSE 3000
 
 # ADR-0167 (CFG-07): the serving process is NOT root. The image's `node` user

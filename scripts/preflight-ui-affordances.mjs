@@ -50,7 +50,6 @@ export const DELIBERATELY_API_ONLY = new Map([
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   // CXR-REV-002 (ADR-0047 addendum 2026-11-22): this DELETE archives (it deletes nothing); the screen calls POST .../archive
   ["/v1/reports/definitions/:x", "a report definition is archived, never deleted (ADR-0047 addendum): DELETE is kept only so an older client archives too, and the Reports screen's Archive action calls POST /v1/reports/definitions/:id/archive"],
-  ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
   // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
@@ -68,6 +67,9 @@ export const DELIBERATELY_API_ONLY = new Map([
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
   ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
+  // ADR-0313 (lane E2, G9): removing a paid-call price is a relaxation (settings_relax step-up, audited) and is API-only
+  // until the paid-call screens on #453 land (the route census gap file holds the same route); delete this entry then.
+  ["/v1/paid-call-prices/:x", "removing a paid-call price (settings_relax step-up, audited): API-only until the paid-call screens on #453 (ADR-0313, lane E2)"],
   // ADR-0322 (lane E7): the vendor usage pull brief is API-only; the connector screen is posted on #453 (route census
   // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
   ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
