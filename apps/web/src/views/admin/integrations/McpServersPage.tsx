@@ -21,8 +21,6 @@ import { McpRegistriesPanel } from "./McpRegistriesPanel";
 import { McpAdmissionClearButton, McpServerNextSteps, McpSyncToolsButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
 import { McpUpstreamCredentialCard } from "./McpUpstreamCredential";
-import { McpChangedSinceApprovalCard } from "./McpDefinitionPins";
-import { McpAuthorisedTargetsCard, McpHighRiskCard } from "./McpHighRisk";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
@@ -42,6 +40,11 @@ import {
 import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0246 (P27): the pinning and high-risk cards and the definition-pin page load on demand in one chunk, through one
+// import, so they add nothing to admin-integrations (ADR-0344 per-route budgets; the owner chose lazy-loading over a raise)
+export const loadMcpPinning = () => import("./McpPinning");
+const McpPinningPanel = lazy(() => loadMcpPinning().then((m) => ({ default: m.McpPinningPanel })));
 
 /** One row of `GET /v1/users/:userId/servers/:serverId/entitlements`. */
 interface McpEntitlementRow {
@@ -219,7 +222,9 @@ function McpServersTab() {
           />
         </Card>
 
-        <McpChangedSinceApprovalCard />
+        <Suspense fallback={null}>
+          <McpPinningPanel server={selectedId ? (servers.data?.servers ?? []).find((s) => s.id === selectedId) : undefined} />
+        </Suspense>
 
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
@@ -227,7 +232,6 @@ function McpServersTab() {
         {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
         {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
         {selectedId && <McpUpstreamCredentialCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpHighRiskCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
 
         {selectedId && (
           <ToolsCard
@@ -246,7 +250,6 @@ function McpServersTab() {
 
         <McpEntitlementCard users={users} servers={servers.data?.servers ?? []} />
         <McpVisibleToolsCard users={users} servers={servers.data?.servers ?? []} />
-        <McpAuthorisedTargetsCard />
       </div>
       {life.dialogs}
       <Suspense fallback={null}>{editing && <EditServerDialog server={editing} onClose={() => setEditing(null)} />}</Suspense>
