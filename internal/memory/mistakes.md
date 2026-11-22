@@ -2012,3 +2012,13 @@ Rule: never write `ADR-NNNN` for an ADR that has no file in `internal/decisions/
 as "ADR number NNNN (reserved, not written yet)". Before pushing any change to `internal/`, `.github/`, `scripts/` or
 CLAUDE.md, run `npx vitest run scripts/adr-index.test.mjs` as its own step and read the result, even for docs-only PRs,
 because CI will not run it for them.
+
+### M-121 (2026-11-22) - REPEAT of M-117: cited a reserved, not-yet-written ADR by its number
+
+Lane CX recorded the owner's two reserved ADR numbers (0380 for C-01, 0381 for P-07) in the `ADR-` form in `internal/reviews/codexreviews-response.md`
+on #1194. Neither file exists yet, so `scripts/adr-index.test.mjs` failed `build-and-test`. The adr-index test was not run
+before the push, because the change looked like prose only.
+
+Rule: any edit under `internal/`, `scripts/` or `.github/` that writes `ADR-` followed by four digits runs
+`pnpm exec vitest run --dir scripts adr-index` before the push. A reserved or unmerged ADR is written as "ADR number NNNN
+(reserved)" or by its PR, never as `ADR-NNNN`.

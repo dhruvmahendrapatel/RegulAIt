@@ -198,6 +198,9 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runDueReportSchedules(ctx.db, {
           actorUserId: ctx.actorUserId,
+          // the scheduler acts for the deployment, with full report scope;
+          // stated here, never defaulted inside the function (Codex review S-10)
+          isAdmin: true,
           now: ctx.now,
         });
         return {
