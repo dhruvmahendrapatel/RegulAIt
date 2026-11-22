@@ -197,7 +197,7 @@ export default function StepUpDialog() {
           </div>
         ) : !opts && optsFailed ? (
           <div className={v.stack}>
-            <p className={v.faint} style={{ margin: 0 }}>
+            <p className={`${v.faint} ${v.flush}`}>
               The confirmation could not be prepared. Nothing was sent for this action yet.
             </p>
             <Button
