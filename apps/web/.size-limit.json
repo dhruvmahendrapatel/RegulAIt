@@ -265,6 +265,12 @@
     "limit": "3.4 kB"
   },
   {
+    "name": "chunk: ProcessAnalyticsPage",
+    "path": "dist/assets/ProcessAnalyticsPage-????????.js",
+    "gzip": true,
+    "limit": "7.1 kB"
+  },
+  {
     "name": "chunk: ProfileEditModal",
     "path": "dist/assets/ProfileEditModal-????????.js",
     "gzip": true,
