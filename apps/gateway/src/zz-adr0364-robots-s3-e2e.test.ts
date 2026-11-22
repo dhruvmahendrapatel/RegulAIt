@@ -382,8 +382,9 @@ function robotRunner(trace: RunnerTrace, scenario: "succeed" | "halt" | "loop" |
         size: JPEG.length,
         sha256: JPEG_SHA,
       });
-      trace.filled = [];
-      for (let i = 0; i < ROBOT_RUN_LIMITS.evidenceItems; i++) trace.filled.push((await call("POST", "evidence", shot(i))).status);
+      // all at once, not one at a time: each answer is matched to its request by frame id, so the gateway's item
+      // limits are exercised with every item in flight together (and the test does not pay one stdio window per item)
+      trace.filled = (await Promise.all(Array.from({ length: ROBOT_RUN_LIMITS.evidenceItems }, (_, i) => call("POST", "evidence", shot(i))))).map((r) => r.status);
       // the reserved slot's number is outside the runner's range, and a stored number is never taken twice
       trace.overflow = (await call("POST", "evidence", shot(ROBOT_RUN_LIMITS.evidenceItems))).status;
       trace.reused = (await call("POST", "evidence", shot(0))).status;
