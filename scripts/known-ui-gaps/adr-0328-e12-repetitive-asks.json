@@ -1,0 +1,12 @@
+{
+  "adr": "ADR-0328",
+  "lane": "E12",
+  "tracking": "ADR-0328 (lane E12): the brief is API and backend only; the repetitive-ask page (clusters, suggested agent, savings, dismiss, settings) is for UI-D",
+  "gaps": {
+    "GET /v1/repetitive-asks/settings": "reads the repetitive-ask detection switch and thresholds, with the strict defaults and floors",
+    "PUT /v1/repetitive-asks/settings": "turns repetitive-ask detection on or off or changes its thresholds (enabling or relaxing one is a settings_relax step-up, audited)",
+    "POST /v1/repetitive-asks/scan": "scans recent model spans for clusters of near-duplicate prompts and stores them with a suggested cheaper agent (read-only, no prompt text kept, spaced 10 minutes, audited)",
+    "GET /v1/repetitive-asks/clusters": "lists repetitive-ask clusters with their evidence, the suggested cheaper agent and the projected monthly saving, under the ADR-0226 list contract",
+    "POST /v1/repetitive-asks/clusters/:id/dismiss": "dismisses a repetitive-ask cluster (audited)"
+  }
+}

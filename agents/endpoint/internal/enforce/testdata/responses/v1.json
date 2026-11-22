@@ -1,0 +1,92 @@
+{
+  "schema": "regulait.agent-responses/1",
+  "order": [
+    "allow",
+    "advise",
+    "ask",
+    "correct",
+    "deny",
+    "block_session",
+    "disable"
+  ],
+  "policyModes": [
+    "advise",
+    "require_approval",
+    "correct",
+    "forbid",
+    "block_session",
+    "disable"
+  ],
+  "responses": [
+    {
+      "kind": "allow",
+      "effect": "allow",
+      "guidance": "none",
+      "alternative": "none",
+      "session": "continues",
+      "agent": "unchanged",
+      "rank": 0,
+      "auditRuleId": "response-allow"
+    },
+    {
+      "kind": "advise",
+      "effect": "allow",
+      "guidance": "required",
+      "alternative": "none",
+      "session": "continues",
+      "agent": "unchanged",
+      "rank": 0,
+      "auditRuleId": "response-advise"
+    },
+    {
+      "kind": "ask",
+      "effect": "require_approval",
+      "guidance": "none",
+      "alternative": "none",
+      "session": "continues",
+      "agent": "unchanged",
+      "rank": 1,
+      "auditRuleId": "response-ask"
+    },
+    {
+      "kind": "correct",
+      "effect": "deny",
+      "guidance": "required",
+      "alternative": "required",
+      "session": "continues",
+      "agent": "unchanged",
+      "rank": 2,
+      "auditRuleId": "response-correct"
+    },
+    {
+      "kind": "deny",
+      "effect": "deny",
+      "guidance": "none",
+      "alternative": "none",
+      "session": "continues",
+      "agent": "unchanged",
+      "rank": 2,
+      "auditRuleId": "response-deny"
+    },
+    {
+      "kind": "block_session",
+      "effect": "deny",
+      "guidance": "none",
+      "alternative": "none",
+      "session": "ends",
+      "agent": "unchanged",
+      "rank": 3,
+      "auditRuleId": "response-block-session"
+    },
+    {
+      "kind": "disable",
+      "effect": "deny",
+      "guidance": "none",
+      "alternative": "none",
+      "session": "ends",
+      "agent": "quarantine",
+      "rank": 4,
+      "auditRuleId": "response-disable"
+    }
+  ]
+}

@@ -62,7 +62,7 @@ async function heldTransaction(hold: (tx: Db) => Promise<void>): Promise<{ commi
     ready();
     await gate;
   });
-  await written;
+  await Promise.race([written, done]);
   return {
     commit: async () => {
       release();

@@ -127,6 +127,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.endpointCommandExceptions, ["reason", "decisionReason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
+  // ADR-0219 follow-up (PR #810 review): why a person's role-derived access to a remote agent was revoked
+  [s.a2aAgentRevocations, ["reason"]],
   // ADR-0327 addendum — why the author proposed a decision-table version
   [s.decisionTableVersions, ["reason"]],
   // ADR-0327 slice 4a — why an admin asked to switch a rule-like step, and why it was reverted
@@ -225,7 +227,12 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // controls are jsonb, which this registry cannot reach (see the exclusions).
   [s.riskAcceptances, ["rationale", "revokeReason"]],
   // ADR-0180 A8 — a steward's note on the autonomy class they declared
-  [s.builderAgents, ["autonomyNote"]],
+  // ADR-0180 addendum (E51): the autonomy-enforcement reason; ADR-0366: a builder agent's halt reason (a containment
+  // or an admin), as for agents.halted_reason
+  [s.builderAgents, ["autonomyNote", "autonomyEnforcementReason", "haltedReason"]],
+  // ADR-0366: the admin's reason for releasing a rogue-agent containment, and the signal's explanation (it quotes an
+  // agent name a person typed)
+  [s.agentContainments, ["releaseReason", "explanation"]],
   // ADR-0339 slice 2 — the note an admin types when staging an agent's non-human identity link, and the second
   // admin's note on the decision
   [s.agentIdentityLinks, ["note", "decisionNote"]],
@@ -307,6 +314,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.mrmRetestRuns, ["reason"]],
   // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
   [s.endpointAddonRemovals, ["reason"]],
+  // ADR-0338: the admin's reason for a vendor agent control action
+  [s.vendorAgentActions, ["reason"]],
 ];
 
 /**

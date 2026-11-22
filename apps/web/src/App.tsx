@@ -33,6 +33,7 @@ const BuilderPromptsPage = screen(() => import("./screens/builder"), "BuilderPro
 const BuilderPromptDetailPage = screen(() => import("./screens/builder"), "BuilderPromptDetailPage");
 const BuilderPlaygroundPage = screen(() => import("./screens/builder"), "BuilderPlaygroundPage");
 const WebhooksPage = screen(() => import("./screens/admin-integrations"), "WebhooksPage");
+const SiemDeliveryPage = screen(() => import("./screens/admin-integrations"), "SiemDeliveryPage");
 const ModelsPage = lazy(() => import("./views/models/ModelsPage"));
 const RunsPage = screen(() => import("./screens/runs"), "RunsPage");
 const RunDetailPage = screen(() => import("./screens/runs"), "RunDetailPage");
@@ -58,6 +59,7 @@ const ClientAccessPage = screen(() => import("./screens/admin-identity-access"),
 const SsoArea = screen(() => import("./screens/admin-identity-access"), "SsoArea");
 const ScimPage = screen(() => import("./screens/admin-identity-access"), "ScimPage");
 const CredentialsPage = screen(() => import("./screens/admin-identity-access"), "CredentialsPage");
+const AgentCredentialsPage = screen(() => import("./screens/admin-identity-access"), "AgentCredentialsPage");
 const GroupMappingsPage = screen(() => import("./screens/admin-identity-access"), "GroupMappingsPage");
 const VirtualKeysPage = screen(() => import("./screens/admin-identity-access"), "VirtualKeysPage");
 const WorkloadIdentitiesArea = screen(() => import("./screens/admin-identity-access"), "WorkloadIdentitiesArea");
@@ -111,6 +113,9 @@ const ModelCredentialsPage = screen(() => import("./screens/admin-integrations")
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
 const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
+// ADR-0255: the governed connector catalogue is its own lazy chunk, loaded only when opened, so it adds nothing to the
+// entry bundle or to admin-integrations (ADR-0344 per-route budgets)
+const ConnectorCataloguePage = screen(() => import("./views/admin/integrations/ConnectorCataloguePage"), "default");
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
 const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
@@ -270,6 +275,8 @@ function ApplicationRoutes() {
                 <Route path="virtual-keys" element={<VirtualKeysPage />} />
                 {/* ADR-0175 A7 */}
                 <Route path="credentials" element={<CredentialsPage />} />
+                {/* ADR-0315 G7 */}
+                <Route path="agent-credentials" element={<AgentCredentialsPage />} />
                 {/* ADR-0188 S6 preview: routed but deliberately NOT in the navigation
                     (suites.tsx) until creating/revoking an identity and binding a
                     credential stop answering 501 — see the page's header comment */}
@@ -342,9 +349,11 @@ function ApplicationRoutes() {
                 {/* ADR-0088 */}
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
+                <Route path="connectors/catalogue" element={<ConnectorCataloguePage />} />
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />
+                <Route path="siem" element={<SiemDeliveryPage />} />
                 <Route path="admission" element={<AdmissionReviewPage />} />
                 <Route path="git-connections" element={<GitConnectionsPage />} />
                 <Route path="pm-connections" element={<PmConnectionsPage />} />

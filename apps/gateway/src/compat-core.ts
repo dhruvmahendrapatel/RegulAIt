@@ -101,9 +101,10 @@ import {
   semanticCacheSavings,
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
+import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
   engineKeyProjectPin,
   loadVirtualKeyContext,
@@ -442,6 +443,8 @@ export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "xai",
   "google",
+  // ADR-0352: Vertex runs the same @ai-sdk/google implementation as "google"
+  "vertex",
   "mock",
 ]);
 
@@ -536,6 +539,8 @@ export interface CompatPrepared {
    * for every other caller.
    */
   workloadGrantId?: string | undefined;
+  /** ADR-0251 slice 4b: the request's session facts, read during prepare, for the governed core's ABAC v5 request */
+  principal: AbacPrincipalContext;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -974,6 +979,7 @@ export async function prepareCompatCall(
       ignoredFields: args.ignoredFields ?? [],
       virtualKey,
       ...(req.authCtx.via === "workload" ? { workloadGrantId: req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT } : {}),
+      principal: abacPrincipalFromRequest(req),
       routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
     },
   };
@@ -1086,6 +1092,7 @@ export async function executeCompatCall(
       : undefined);
   const dispatchArgs: GovernedDispatchArgs = {
     ...(engineGrantId ? { delegationGrantId: engineGrantId } : {}),
+    principal: prepared.principal, // ADR-0251 slice 4b
     userId: prepared.userId,
     served: prepared.served,
     requestedAgentId: prepared.requested.id,
@@ -1114,6 +1121,81 @@ export async function executeCompatCall(
       resolutionMode: prepared.resolution.mode,
     },
   };
+
+  // -------------------------------------------------------------------------
+  // ADR-0327 SLICE 4B — A SWITCHED RULE-LIKE STEP IS ANSWERED BY ITS RULE.
+  //
+  // Only a step a named reviewer switched (slice 4a), only while its rule still hashes to what they approved, and only
+  // for an input the rule's exact-match cells cover; anything else goes to the AI exactly as before. A tool-bearing or
+  // tool-forcing turn, a structured-output request and a passthrough call are never rule-served: the rule was measured
+  // on plain answers. The answer goes through the one dispatch core as a candidate, so every input gate and the
+  // output PII and guardrail checks still run, and its span is marked so detection never measures the rule itself.
+  // -------------------------------------------------------------------------
+  const ruleAnswer =
+    prepared.routingMode !== "passthrough" && !args.tools && !args.toolChoice && !args.responseFormat
+      ? await switchedRuleAnswer(db, { agentId: prepared.served.id, stepName: prepared.served.name, inputText: flatText })
+      : null;
+  if (ruleAnswer) {
+    const ruleStep = ruleAnswer.ref;
+    const governed = await executeGovernedDispatch(db, dataKey, {
+      ...dispatchArgs,
+      onText: undefined,
+      onThinking: undefined,
+      cachedResponse: { outputText: ruleAnswer.output, model: null, inputTokens: 0, outputTokens: 0, createdAt: new Date() },
+      ruleStepServed: ruleStep,
+    });
+    if (!governed.ok) return compatHoldStatus(governed);
+    args.onText?.(governed.result.outputText);
+    await recordRuleStepSaving(db, {
+      userId: prepared.userId,
+      requestedAgentId: prepared.requested.id,
+      servedAgentId: prepared.served.id,
+      projectId: prepared.projectId ?? null,
+      ruleAnswer,
+      surface: `compat_${args.surface}`,
+    });
+    await db.insert(auditLog).values({
+      userId: prepared.userId,
+      objectType: "agent",
+      objectId: prepared.requested.id,
+      detail: {
+        surface: `compat_${args.surface}`,
+        mode: COMPAT_MODE,
+        resolution: prepared.resolution,
+        servedAgentId: prepared.served.id,
+        ruleStep,
+        ...(prepared.projectId ? { projectId: prepared.projectId } : {}),
+        receiptClass: "decision",
+      },
+      effect: "allow",
+      ruleId: "compat-rule-step-served",
+      ruleChain: [],
+      reason:
+        `intercepted ${args.surface}-shaped call answered by the approved rule for step ${prepared.served.name} — ` +
+        `no provider was contacted and nothing was billed`,
+    });
+    // No usage_events: nothing was spent. The ledger records the saving.
+    return {
+      ok: true,
+      result: {
+        servedAgentId: governed.result.servedAgentId,
+        // the wire response needs a valid model identifier; the audit row and the span record that a rule answered
+        model: governed.result.model,
+        outputText: governed.result.outputText,
+        stopReason: "end_turn",
+        refusal: false,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        costUsd: 0,
+        measuredCostSavedUsd: ruleAnswer.avgCostPerRunUsd,
+        credentialSource: "none",
+        projectBudgetAlerted: false,
+        ...(governed.result.pii ? { pii: governed.result.pii } : {}),
+        ...(governed.result.guardrails ? { guardrails: governed.result.guardrails } : {}),
+        ...(governed.result.useCaseGate ? { useCaseGate: governed.result.useCaseGate } : {}),
+      },
+      ...(governed.trace ? { trace: governed.trace } : {}),
+    };
+  }
 
   if (cacheKey) {
     const hit = await lookupSemanticCache(db, {

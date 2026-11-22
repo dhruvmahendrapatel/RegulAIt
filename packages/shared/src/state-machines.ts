@@ -7,9 +7,12 @@
 import { defineMachine, type StateMachine } from "./state-machine.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
+import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
+import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
+import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -304,6 +307,34 @@ export const DETECTION_RESPONSE_MACHINE = defineMachine({
   },
 });
 
+/** `endpoint_device_quarantines.status` (ADR-0333 §6, lane E15). A `quarantine_device` detection response opens a
+ * quarantine `active`: the device's AI tools are refused until it ends. It ends exactly once, either released by an
+ * admin with a step-up (a human decision; widening, so only under the `normal` execution dial) or expired by the
+ * system at `expires_at` (also widening, so also only under `normal`). Both ends are final; a later incident opens a
+ * new quarantine. Same values as `ENDPOINT_DEVICE_QUARANTINE_STATUSES` in @regulait/db. */
+export const ENDPOINT_DEVICE_QUARANTINE_MACHINE = defineMachine({
+  id: "endpoint_device_quarantine",
+  stored: "endpoint_device_quarantines.status",
+  states: ["active", "released", "expired"],
+  initial: ["active"],
+  terminal: ["released", "expired"],
+  transitions: {
+    release: {
+      from: ["active"],
+      to: "released",
+      by: ["admin"],
+      summary: "An admin released the device after a step-up; its AI tools are governed by the normal policy again.",
+    },
+    expire: {
+      from: ["active"],
+      to: "expired",
+      by: ["system"],
+      summary: "The quarantine reached its end time and the execution dial is normal, so it ended on its own.",
+    },
+  },
+});
+export type EndpointDeviceQuarantineState = (typeof ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.states)[number];
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
@@ -595,7 +626,8 @@ export const VENDOR_USAGE_PULL_RUN_MACHINE = defineMachine({
 });
 
 /**
- * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule. Proposed `pending_review` with a
+ * ADR-0327 slice 4a (lane E12): one request to switch a step from the AI to its rule (a detector suggestion, or since
+ * slice 4d one published decision-table version). Proposed `pending_review` with a
  * named reviewer in the approvals queue; only that approval's decide path moves it on. Stored in
  * `rule_step_switches.status`.
  */
@@ -610,7 +642,8 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
       from: ["pending_review"],
       to: "switched",
       by: ["approver"],
-      summary: "The named reviewer approves; the suggestion is switched in the same transaction.",
+      summary:
+        "The named reviewer approves; the suggestion, or the decision table's published version (slice 4d), is switched in the same transaction.",
     },
     reject: {
       from: ["pending_review"],
@@ -628,8 +661,9 @@ export const RULE_STEP_SWITCH_MACHINE = defineMachine({
     revert: {
       from: ["switched"],
       to: "reverted",
-      by: ["admin"],
-      summary: "An admin reverts the switch; the AI answers every request again. No approval needed.",
+      by: ["admin", "system"],
+      summary:
+        "An admin reverts the switch, or publishing a newer decision-table version reverts a switch of the old one; the AI answers every request again. No approval needed.",
     },
   },
 });
@@ -722,6 +756,240 @@ export const ENDPOINT_ADDON_TARGET_MACHINE = defineMachine({
   },
 });
 
+/** `pipeline_runs.status` (ADR-0232 §3–§5 as built by lane E49 slice 1). A pipeline run is one governed run of one
+ * published workflow-template version (ADR-0341): it never executes anything itself. `start` is recorded in the same
+ * transaction as the workflow instance the governed start path (`startWorkflowInstanceWithTemplates`) created, and
+ * `refuse` when that path refused (nothing ran). The settling events are observed from the instance's own terminal
+ * status: `completed` succeeds, `aborted` cancels, `denied` and `rolled_back` fail. */
+export const PIPELINE_RUN_STATES = ["requested", "running", "succeeded", "failed", "cancelled", "refused"] as const;
+export type PipelineRunState = (typeof PIPELINE_RUN_STATES)[number];
+export const PIPELINE_RUN_MACHINE = defineMachine({
+  id: "pipeline_run",
+  stored: "pipeline_runs.status",
+  states: PIPELINE_RUN_STATES,
+  initial: ["requested"],
+  terminal: ["succeeded", "failed", "cancelled", "refused"],
+  transitions: {
+    start: {
+      from: ["requested"],
+      to: "running",
+      by: ["system"],
+      summary: "The governed workflow start accepted the run and created its workflow instance.",
+    },
+    refuse: {
+      from: ["requested"],
+      to: "refused",
+      by: ["system"],
+      summary: "The governed workflow start refused the run (a retired template, attribution, a missing approver); nothing ran.",
+    },
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "The workflow instance completed.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "The workflow instance was denied at a sign-off or rolled back.",
+    },
+    cancel: {
+      from: ["running"],
+      to: "cancelled",
+      by: ["system"],
+      summary: "The workflow instance was aborted.",
+    },
+  },
+});
+
+/** `builder_agents.autonomy_enforcement` (ADR-0180 addendum, 2026-11-21, lane E51). Whether an unmet autonomy floor
+ * blocks dispatch for a `delegated` or `autonomous` builder agent. Every agent starts `enforced` (ADR-0180: the strict
+ * value is the default, existing agents included). Only an admin relaxes it, with a reason and a step-up; restoring it
+ * is an admin act too. Both changes are audited. Neither state is final: an agent can be relaxed and restored again. */
+export const AUTONOMY_ENFORCEMENT_STATES = ["enforced", "relaxed"] as const;
+export const AUTONOMY_ENFORCEMENT_MACHINE = defineMachine({
+  id: "builder_agent_autonomy_enforcement",
+  stored: "builder_agents.autonomy_enforcement",
+  states: AUTONOMY_ENFORCEMENT_STATES,
+  initial: ["enforced"],
+  terminal: [],
+  transitions: {
+    relax: {
+      from: ["enforced"],
+      to: "relaxed",
+      by: ["admin"],
+      summary:
+        "An admin let the agent run while its autonomy floors are unmet, with a reason and a step-up. Each such run is audited.",
+    },
+    restore: {
+      from: ["relaxed"],
+      to: "enforced",
+      by: ["admin"],
+      summary: "An admin restored the strict default: an unmet floor blocks the agent's delegated or autonomous runs again.",
+    },
+  },
+});
+export type AutonomyEnforcementState = (typeof AUTONOMY_ENFORCEMENT_STATES)[number];
+export type AutonomyEnforcementEvent = keyof typeof AUTONOMY_ENFORCEMENT_MACHINE.def.transitions;
+
+/** Every declared machine, by id: the one list an agent or a document reads. */
+/** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
+ * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
+ * remediation workflow confirms the finding. */
+const ALL_DISPOSITIONS = SHADOW_AI_DISPOSITIONS;
+export const SHADOW_AI_FINDING_MACHINE = defineMachine({
+  id: "shadow_ai_finding",
+  stored: "shadow_ai_findings.disposition",
+  states: SHADOW_AI_DISPOSITIONS,
+  initial: ["open"],
+  terminal: [],
+  transitions: {
+    reopen: { from: ALL_DISPOSITIONS, to: "open", by: ["admin"], summary: "Put the finding back in the triage queue." },
+    confirm: {
+      from: ALL_DISPOSITIONS,
+      to: "confirmed",
+      by: ["admin", "system"],
+      summary: "The use is real and needs governance; linking a remediation workflow also confirms it.",
+    },
+    sanction: { from: ALL_DISPOSITIONS, to: "sanctioned", by: ["admin"], summary: "The use is known and allowed, with a reason." },
+    mark_false_positive: {
+      from: ALL_DISPOSITIONS,
+      to: "false_positive",
+      by: ["admin"],
+      summary: "The finding is not AI use, with a reason.",
+    },
+    mark_remediated: { from: ALL_DISPOSITIONS, to: "remediated", by: ["admin"], summary: "The use was brought under governance or stopped." },
+  },
+});
+
+/** `ai_use_cases.status` (ADR-0080 intake, ADR-0168 review policy). The intake workflow drives it: the sync maps the
+ * instance's status onto the use case (`statusForInstance` in use-cases.ts), a returned sign-off parks it at
+ * `needs_info`, an expired or re-reviewed approval re-opens it, and an admin retires it. Same values as
+ * `AI_USE_CASE_STATUSES` in @regulait/db. */
+export const USE_CASE_MACHINE = defineMachine({
+  id: "use_case",
+  stored: "ai_use_cases.status",
+  states: ["proposed", "under_review", "needs_info", "approved", "rejected", "retired"],
+  initial: ["proposed"],
+  terminal: ["retired"],
+  transitions: {
+    submit_for_review: {
+      from: ["proposed", "needs_info"],
+      to: "under_review",
+      by: ["system"],
+      summary: "The intake reached its sign-off: the use case waits on its reviewers.",
+    },
+    back_to_draft: {
+      from: ["under_review"],
+      to: "proposed",
+      by: ["system"],
+      summary: "The intake went back before its sign-off (a re-opened plan or artifact).",
+    },
+    return_for_info: {
+      from: ["proposed", "under_review"],
+      to: "needs_info",
+      by: ["approver"],
+      summary: "A reviewer returned the sign-off for more information.",
+    },
+    approve: {
+      from: ["proposed", "under_review", "needs_info"],
+      to: "approved",
+      by: ["approver"],
+      summary: "The intake workflow completed: the use case is approved, for a lifetime set by its tier.",
+    },
+    reject: {
+      from: ["proposed", "under_review", "needs_info"],
+      to: "rejected",
+      by: ["approver"],
+      summary: "The intake was denied or aborted.",
+    },
+    reopen_review: {
+      from: ["approved"],
+      to: "under_review",
+      by: ["admin", "system"],
+      summary: "An expired approval (recertification) or an admin's re-review puts the use case back in front of its reviewers.",
+    },
+    retire: {
+      from: ["proposed", "under_review", "needs_info", "approved", "rejected"],
+      to: "retired",
+      by: ["admin"],
+      summary: "An admin retires the use case, with a reason; nothing leaves retired.",
+    },
+  },
+});
+
+/** `repetitive_ask_clusters.status` (ADR-0328). A scan inserts `suggested`; a rescan refreshes the evidence but never the
+ * status. Dismissal is final for that fingerprint. Slices 3 and 4 add the eval gate, shadow and switch states. */
+export const REPETITIVE_ASK_CLUSTER_MACHINE = defineMachine({
+  id: "repetitive_ask_cluster",
+  stored: "repetitive_ask_clusters.status",
+  states: ["suggested", "dismissed"],
+  initial: ["suggested"],
+  terminal: ["dismissed"],
+  transitions: {
+    dismiss: {
+      from: ["suggested"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the cluster; a cheaper model is never suggested for it again.",
+    },
+  },
+});
+
+/** `approvals.status`, the ONE Approvals Queue (GOVERNANCE_LAYER_SPEC §6). A pending entry is decided once
+ * (approved, denied, or for an intake sign-off returned for information); an approved entry is spent by exactly one
+ * retried call; an entry the world has moved past (a re-opened stage, an expiry, a changed policy context, a failed
+ * signature recheck) is superseded. The column has no CHECK constraint yet (STATE_MACHINES.md §4). */
+export const APPROVAL_MACHINE = defineMachine({
+  id: "approval",
+  stored: "approvals.status",
+  states: ["pending", "approved", "denied", "returned", "consumed", "superseded"],
+  initial: ["pending"],
+  terminal: ["denied", "returned", "consumed", "superseded"],
+  transitions: {
+    approve: { from: ["pending"], to: "approved", by: ["approver"], summary: "The named approver (or a signed quorum) approved it." },
+    deny: { from: ["pending"], to: "denied", by: ["approver"], summary: "The approver denied it, with a reason." },
+    return: {
+      from: ["pending"],
+      to: "returned",
+      by: ["approver"],
+      summary: "An intake sign-off sent back for more information; the next version asks again in a new entry.",
+    },
+    consume: { from: ["approved"], to: "consumed", by: ["system"], summary: "The one retried call this approval allowed was made." },
+    supersede: {
+      from: ["pending", "approved"],
+      to: "superseded",
+      by: ["system"],
+      summary: "The work moved on (re-opened, reassigned, expired, or its policy context changed); the entry can no longer be decided or spent.",
+    },
+  },
+});
+
+/** `redteam_libraries.status` (ADR-0057, ADR-0208 G9). A draft is edited; publishing freezes it into an eval dataset
+ * (editing a published library mints the next version); retiring withdraws a draft or a published version for good. */
+export const REDTEAM_LIBRARY_MACHINE = defineMachine({
+  id: "redteam_library",
+  stored: "redteam_libraries.status",
+  states: ["draft", "published", "retired"],
+  initial: ["draft"],
+  terminal: ["retired"],
+  transitions: {
+    publish: {
+      from: ["draft"],
+      to: "published",
+      by: ["admin"],
+      summary: "Freeze the probes into an eval dataset; an empty library is refused.",
+    },
+    retire: {
+      from: ["draft", "published"],
+      to: "retired",
+      by: ["admin"],
+      summary: "Withdraw this version, with a reason (a published one needs a step-up); refused while a run is in progress.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
@@ -732,6 +1000,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
@@ -743,4 +1012,16 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
+  [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
+  // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
+  [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  [SHADOW_AI_FINDING_MACHINE.def.id]: SHADOW_AI_FINDING_MACHINE,
+  [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
+  [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
+  [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
+  // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
+  [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
+  [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
+  // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
+  [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);
