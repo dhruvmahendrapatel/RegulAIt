@@ -444,6 +444,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/decision-tables/:id/versions": "internal",
   "POST /v1/decision-tables/:id/switch": "internal",
   "POST /v1/decision-tables/:id/revert": "internal",
+  "GET /v1/repetitive-asks/settings": "internal",
+  "PUT /v1/repetitive-asks/settings": "internal",
+  "POST /v1/repetitive-asks/scan": "internal",
+  "GET /v1/repetitive-asks/clusters": "internal",
+  "POST /v1/repetitive-asks/clusters/:id/dismiss": "internal",
   "POST /v1/rule-steps/suggestions/:id/shadow": "internal",
   "POST /v1/rule-steps/suggestions/:id/shadow/stop": "internal",
   "POST /v1/rule-steps/suggestions/:id/switch": "internal",
@@ -1469,6 +1474,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/sensitivity-labels/settings": "internal",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "internal",
+  "GET /v1/ai-app-risk": "internal",
+  "GET /v1/shadow-ai/risk": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -1484,6 +1491,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "internal",
   "PUT /v1/builder/agents/:id/autonomy": "internal",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "internal",
   // --- A10
   "GET /v1/risk-tolerances": "internal",
   "PUT /v1/risk-tolerances": "internal",
@@ -2094,6 +2102,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/decision-tables/:id/versions": "cost-events",
   "POST /v1/decision-tables/:id/switch": "cost-events",
   "POST /v1/decision-tables/:id/revert": "cost-events",
+  "GET /v1/repetitive-asks/settings": "cost-events",
+  "PUT /v1/repetitive-asks/settings": "cost-events",
+  "POST /v1/repetitive-asks/scan": "cost-events",
+  "GET /v1/repetitive-asks/clusters": "cost-events",
+  "POST /v1/repetitive-asks/clusters/:id/dismiss": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/shadow": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/shadow/stop": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/switch": "cost-events",
@@ -2973,6 +2986,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/sensitivity-labels/settings": "org",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "org",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "org",
+  "GET /v1/ai-app-risk": "org",
+  "GET /v1/shadow-ai/risk": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",
@@ -2986,6 +3001,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "builder",
   "PUT /v1/builder/agents/:id/autonomy": "builder",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "builder",
   // --- A10
   "GET /v1/risk-tolerances": "risks",
   "PUT /v1/risk-tolerances": "risks",

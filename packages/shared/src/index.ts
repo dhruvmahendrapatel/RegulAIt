@@ -4907,6 +4907,16 @@ export {
 // ADR-0180 §5 (A8) — the agent autonomy class: derivation rules and control floors.
 export {
   AUTONOMY_AGENTIC_TEST_CLASSES,
+  AUTONOMY_DISPATCH_ERRORS,
+  AUTONOMY_DISPATCH_RULE_IDS,
+  AUTONOMY_ENFORCED_CLASSES,
+  autonomyClassBlocksOnUnmetFloor,
+  autonomyDispatchVerdict,
+  autonomyEnforcementChangeSchema,
+  autonomyEnforcementView,
+  type AutonomyDispatchVerdict,
+  type AutonomyEnforcementChangeInput,
+  type AutonomyEnforcementView,
   AUTONOMY_FLOORS,
   AUTONOMY_FLOOR_IDS,
   AUTONOMY_GUARDRAIL_DETECTORS,
@@ -5160,3 +5170,5 @@ export * from "./custom-classifiers.js";
 export * from "./agent-credential.js";
 // ADR-0362: content inspection beyond text (the sandboxed extractor's vocabulary)
 export * from "./content-inspection.js";
+// ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
+export * from "./ai-app-risk.js";
