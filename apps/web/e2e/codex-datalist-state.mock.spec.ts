@@ -134,6 +134,16 @@ test("UIS-06: Back from a run's detail restores the sort and the page, beside th
   await expect(page).toHaveURL(/keep=me/);
 });
 
+test("UIS-06: writing the list's place keeps the page's own #hash", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/ui/runs?keep=me#something");
+  await expect(status(page, "runs")).toHaveText("1–10 of 64");
+  await list(page, "runs").getByRole("button", { name: "Run", exact: true }).click();
+  await expect(page).toHaveURL(/runs\.sort=name/);
+  expect(new URL(page.url()).hash).toBe("#something");
+  expect(new URL(page.url()).searchParams.get("keep")).toBe("me");
+});
+
 test("UIS-06: a keyset page comes back by its cursor, and a stale cursor falls back to the first page", async ({ page }) => {
   const lists: URL[] = [];
   await mockApi(page, { lists });

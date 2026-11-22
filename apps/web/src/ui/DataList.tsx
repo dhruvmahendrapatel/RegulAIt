@@ -17,7 +17,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { downloadCsv } from "../views/admin/adminKit";
 import { Button, Modal, Select, Table, type Column, type TableProps, type TableSort } from "./kit";
@@ -252,8 +252,9 @@ export function DataList<T>(props: DataListProps<T>) {
   const filterKey = JSON.stringify(Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== false && v !== ""));
 
   // UIS-06: the sort and the page come back from the address (Back from a row's detail lands where the reader was)
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const [restored] = useState(() => {
     const size = loadPageSize(listId);
     const sortable = new Set(props.columns.filter((c) => c.sortable).map((c) => c.key));
@@ -337,8 +338,9 @@ export function DataList<T>(props: DataListProps<T>) {
   const { key: defaultKey, dir: defaultDir } = props.defaultSort;
   useEffect(() => {
     const next = writePlace(params, listId, { sort, offset: placeOffset, cursor: placeCursor }, { key: defaultKey, dir: defaultDir });
-    if (next) setParams(next, { replace: true, preventScrollReset: true, state: location.state });
-  }, [params, listId, sort, placeOffset, placeCursor, defaultKey, defaultDir, setParams, location.state]);
+    // the page's own #hash (an anchor, an open panel) and history state survive the write
+    if (next) navigate({ search: `?${next.toString()}`, hash: location.hash }, { replace: true, preventScrollReset: true, state: location.state });
+  }, [params, listId, sort, placeOffset, placeCursor, defaultKey, defaultDir, navigate, location.hash, location.state]);
 
   const rows: T[] | undefined = all ? infinite.data?.pages.flatMap((p) => p.items) : pagedData?.items;
   const lastBody = all ? infinite.data?.pages.at(-1) : pagedData;
