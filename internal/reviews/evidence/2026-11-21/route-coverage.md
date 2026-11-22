@@ -26,9 +26,9 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/builder/playground` | signed-in | checked | checked | known missing error alert | full task/roles pending |
 | `/runs` | signed-in | checked | checked | checked | UIS-06; source pass |
 | `/runs/:runId` | signed-in | checked | checked | checked | full task/roles pending |
-| `/workflows` | signed-in | checked | checked | checked | full task/roles pending |
-| `/workflows/:instanceId` | signed-in | checked | checked | checked | UIW-07/08; check matching detail component |
-| `/inbox` | signed-in | checked | checked | checked | UIW-06; source pass |
+| `/workflows` | signed-in | checked | checked | checked | CXR-WFL-002 mock-browser +pure matcher/source; UIW-08 detail actions separate |
+| `/workflows/:instanceId` | signed-in | checked | checked | checked | CXR-WFL-001/003 mock-browser +source; UIW-07/08 source; real recovery pending |
+| `/inbox` | signed-in | checked | checked | checked | UIW-06 source; CXR-APR-002 source outcome consumer; runtime pending |
 | `/inbox/annotations/:itemId` | signed-in | checked | checked | checked | full task/roles pending |
 | `/projects` | signed-in | checked | checked | checked | Real gateway: admin create201; viewer member-scoped list/create403 |
 | `/projects/:projectId` | signed-in | checked | checked | checked | CXR-CST-002 source budget consumer; runtime pending |
@@ -89,7 +89,7 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/redteam` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/reports` | signed-in | checked | checked | checked | REV-001/002/005 mock-browser + source; destructive request refused |
 | `/admin/prompt-versions` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/approvals` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/approvals` | signed-in | checked | checked | checked | CXR-APR-001/002 admin mock-browser +source;003 source paging gap |
 | `/admin/review-workbench` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/audit` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/lineage` | signed-in | checked | checked | checked | full task/roles pending |
@@ -104,14 +104,14 @@ All entries are automated state/layout coverage unless deeper feedback is explic
 | `/admin/copilot` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/chatops` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/chatops/identity-links` | signed-in | checked | checked | checked | full task/roles pending |
-| `/admin/workflow-templates` | signed-in | checked | checked | checked | full task/roles pending |
+| `/admin/workflow-templates` | signed-in | checked | checked | checked | CXR-WFL-004 mock-browser +source; gallery/intake preview source; all stage variants pending |
 | `/admin/agents` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/agents/catalog` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/agents/stewardship` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/model-credentials` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/custom-providers` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/external-scorers` | signed-in | checked | checked | checked | CXR-ADM-001/002; populated mock probe |
-| `/admin/connectors` | signed-in | checked | checked | checked | CXR-INT-001..005 source;001..004 mock-browser; real provider/races pending |
+| `/admin/connectors` | signed-in | checked | checked | checked | CXR-INT-001..005 source +mock-browser (connector consumers); real providers/races pending |
 | `/admin/mcp-servers` | signed-in | checked | checked | checked | CXR-INT-001/005 source; MCP runtime and registry/bundle internals pending |
 | `/admin/mcp-servers/registries/:registryId/entries` | signed-in | checked | checked | checked | full task/roles pending |
 | `/admin/mcp-servers/bundles` | signed-in | checked | checked | checked | full task/roles pending |
