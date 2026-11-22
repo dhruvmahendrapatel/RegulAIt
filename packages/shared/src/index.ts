@@ -5114,6 +5114,7 @@ export * from "./repo-analysis.js";
 export * from "./discovery/index.js";
 // ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
 export * from "./saas-entitlements.js";
+export * from "./saas-entitlement-findings.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5151,6 +5152,7 @@ export * from "./vendor-agent-control.js";
 // ADR-0366: rogue-agent containment signals, the decision and the lifecycle (pure)
 export * from "./rogue-containment.js";
 export * from "./robots.js";
+export * from "./robots-run.js";
 // ADR-0261 (P37): third-party security telemetry ingest — the DefenseClaw JSONL parser and mapping (pure)
 export * from "./third-party-ingest/index.js";
 // ADR-0251 (P-01): admin shapes for the governed core's resource approval rules and rate limits

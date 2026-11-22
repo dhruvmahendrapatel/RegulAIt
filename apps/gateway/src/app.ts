@@ -531,6 +531,7 @@ import {
 } from "./compliance-profile-lifecycle.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { applyRobotVersionDecision, precheckRobotVersionDecision, registerRobotRoutes } from "./robots.js";
+import { robotEgressLogHook } from "./robot-runs.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
@@ -647,6 +648,12 @@ import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
+import {
+  applySaasFindingReviewDecision,
+  precheckSaasFindingReviewDecision,
+  registerSaasFindingReviewRoutes,
+  saasFindingReviewApprovalLabels,
+} from "./saas-finding-reviews.js";
 import { registerContextGraphRoutes } from "./context-graph-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -660,6 +667,7 @@ import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
+import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
@@ -4701,6 +4709,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
     );
     // ADR-0338: what a vendor agent control action asks the approver to approve
+    // ADR-0337 §5 slice 3b: what a SaaS entitlement finding review asks the approver to decide
+    const saasFindingReviewLabel = await saasFindingReviewApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "saas_finding_review").map((r) => r.stageId),
+    );
     const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
@@ -4792,6 +4805,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "saas_finding_review" && r.stageId ? (saasFindingReviewLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
@@ -5301,6 +5315,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0337 §5 slice 3b — a SaaS entitlement finding review: never its requester, only an admin in the pool (no
+    // override), and the approval must still bind the review as raised. Nothing executes on either decision.
+    if (row.objectType === "saas_finding_review") {
+      const refusal = await precheckSaasFindingReviewDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0366 — a rogue-agent containment or its release: only an active administrator decides, never the agent's
     // steward nor the release's requester, with an MFA `approval_decide` step-up (owner decision 2026-11-21)
     if (row.objectType === "agent_containment") {
@@ -5712,6 +5732,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approver's step-up is spent here, with the move.
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0337 §5 slice 3b: approved = remediate in the vendor's console, denied = risk accepted; nothing is sent
+      if (updated.objectType === "saas_finding_review") {
+        await applySaasFindingReviewDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0366: a proposal approved = the agent is halted (ADR-0124's halt), denied = it keeps running; a release
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
@@ -6392,6 +6416,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
   // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
   registerSaasEntitlementRoutes(app, db);
+  registerSaasFindingReviewRoutes(app, db);
   registerContextGraphRoutes(app, db);
   // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
   // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
@@ -6427,6 +6452,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerCostOutcomeRoutes(app, db);
   // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)
   registerBudgetAlertRoutes(app, db);
+  // ADR-0313: paid-call prices and holds (admin-only through the default gate; deleting a price is a step-up)
+  registerPaidCallRoutes(app, db);
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
@@ -6457,7 +6484,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);
   // ADR-0364 (lane E45 S2): governed RPA robots — versions, review, secrets (the Robots MCP server is first-party)
-  registerRobotRoutes(app, db, { dataKey: opts.dataKey });
+  registerRobotRoutes(app, db, { dataKey: opts.dataKey, ...(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }) });
   // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
   registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0358 (lane E39): AI adoption analytics, admin-only aggregates
@@ -6626,7 +6653,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerIsolationRoutes(app, db);
   // ADR-0190 I5: an engine task's artifact input is streamed from the same artifact store the upload route writes
   const engineTaskStore = opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore };
-  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}), ...engineTaskStore, engineTasks: engineTaskChannelHooks });
+  registerExecutorChannelRoutes(app, db, {
+    // ADR-0364 S3: a robot placement's end carries its Smokescreen log, stored as that run's egress evidence
+    robotEgressLog: robotEgressLogHook(opts.artifactStore ?? null),
+    ...(opts.executorChannel ?? {}),
+    ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+    ...engineTaskStore,
+    engineTasks: engineTaskChannelHooks,
+  });
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (the runner's self token only: registerEngineRunnerScopeHook).

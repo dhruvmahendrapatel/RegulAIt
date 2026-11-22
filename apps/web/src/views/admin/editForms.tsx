@@ -17,6 +17,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
+import { api as stepUpApi, withStepUp } from "../../stepup/stepUp";
 import { Button } from "../../ui/kit";
 import { PatchFormModal } from "./PatchFormModal";
 import { BOOL, nullableEnum, TRI_STATE, type Choice, type PatchField } from "./patchForm";
@@ -220,7 +221,7 @@ export function EditExternalScorerButton(props: { scorer: { id: string; name: st
       title={`Edit external scorer ${s.name}`}
       fields={EXTERNAL_SCORER_FIELDS}
       record={{ ...s }}
-      save={(body) => api.patch(`/v1/external-scorers/${seg(s.id)}`, body)}
+      save={(body) => withStepUp((h) => stepUpApi.patch(`/v1/external-scorers/${seg(s.id)}`, body, h))}
       onSaved={done}
     />
   );

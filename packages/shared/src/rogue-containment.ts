@@ -41,8 +41,9 @@ export function containmentThresholdLooser(value: ContainmentAutoThreshold, base
   return containmentThresholdStrictness(value) < containmentThresholdStrictness(base);
 }
 
-/** What a containment acts on. Slice 1 contains registry agents and builder agents, both through a halt. */
-export const CONTAINMENT_SUBJECT_KINDS = ["agent", "builder_agent"] as const;
+/** What a containment acts on, always through a reversible halt: registry agents and builder agents (slice 1), and
+ * virtual keys (slice 2: unregistered AI traffic on a key that no approved use case covers). */
+export const CONTAINMENT_SUBJECT_KINDS = ["agent", "builder_agent", "virtual_key"] as const;
 export type ContainmentSubjectKind = (typeof CONTAINMENT_SUBJECT_KINDS)[number];
 
 /** Where a signal came from. `monitor` = a governance-monitor episode (slice 1); `behaviour_baseline` is reserved for
@@ -106,8 +107,10 @@ export interface ContainmentAlertInput {
  *   declared. Severity from the gap (`autonomyGapSeverity`).
  * - `classical_model_drift`: a model card bound to a registry agent drifted past its alert threshold; the agent is
  *   serving outside the behaviour it was approved for. The monitor's own severity (`high`).
- * - `unregistered_ai_traffic` is NOT mapped: its subject is a project, a virtual key or a user, never an agent, so
- *   there is no agent to contain (ADR-0366 §3; a key or project containment is a later slice).
+ * - `unregistered_ai_traffic` on a VIRTUAL KEY (slice 2): traffic attributed to no project, so no approved use case
+ *   covers it; the key is contained (halted, reversibly). The monitor's own severity (`medium`). A finding whose
+ *   subject is a project or a user is not mapped: halting a whole project or a person is wider than the finding
+ *   (ADR-0366 slice 2 §2).
  */
 export function containmentSignalFromAlert(alert: ContainmentAlertInput): ContainmentSignal | null {
   const detail = alert.detail ?? {};
@@ -125,6 +128,24 @@ export function containmentSignalFromAlert(alert: ContainmentAlertInput): Contai
       severity,
       explanation: `builder agent ${typeof detail.agentName === "string" ? `'${detail.agentName.slice(0, 120)}'` : agentId} is declared ${declared} but was observed acting ${observed}`,
       evidence: { declared, observed, reasons: Array.isArray(detail.reasons) ? detail.reasons.slice(0, 20) : [] },
+    };
+  }
+  if (alert.ruleId === "unregistered_ai_traffic") {
+    const keyId = detail.subjectId;
+    if (detail.subjectType !== "virtual_key" || typeof keyId !== "string" || !UUID_RE.test(keyId)) return null;
+    if (alert.subjectKey !== `virtual_key:${keyId}`) return null; // the subject key and the detail must agree
+    const calls = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+    return {
+      source,
+      subject: { kind: "virtual_key", id: keyId },
+      severity: (CONTAINMENT_SEVERITIES as readonly string[]).includes(alert.severity) ? (alert.severity as ContainmentSeverity) : "medium",
+      explanation: `virtual key ${keyId} carried ${calls(detail.modelCalls)} model and ${calls(detail.mcpCalls)} MCP calls attributed to no project, so no approved use case covers them`,
+      evidence: {
+        modelCalls: calls(detail.modelCalls),
+        mcpCalls: calls(detail.mcpCalls),
+        windowDays: calls(detail.windowDays),
+        lastAt: typeof detail.lastAt === "string" ? detail.lastAt : null,
+      },
     };
   }
   if (alert.ruleId === "classical_model_drift") {
@@ -147,7 +168,7 @@ export function containmentSignalFromAlert(alert: ContainmentAlertInput): Contai
 }
 
 /** The rules that can produce a containment signal (for the policy read and for tests). */
-export const CONTAINMENT_SIGNAL_RULES = ["autonomy_declared_below_observed", "classical_model_drift"] as const;
+export const CONTAINMENT_SIGNAL_RULES = ["autonomy_declared_below_observed", "classical_model_drift", "unregistered_ai_traffic"] as const;
 
 // ---------------------------------------------------------------------------
 // The containment lifecycle (ADR-0348's defineMachine)

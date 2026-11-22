@@ -1,0 +1,9 @@
+[
+  {
+    "subject": "github.com/hashicorp/golang-lru",
+    "licence": "MPL-2.0",
+    "condition": "unmodified",
+    "decision": "reused from ADR-0187 decision 194 (MPL-2.0 admitted while its files are unmodified) for robot-egress; owner to confirm (ADR-0364 S3)",
+    "why": "v1.0.2 is linked into smokescreen v0.1.0 through its proxy library stripe/goproxy (https.go, a certificate cache). It is a weak, file-level copyleft licence outside the ADR-0176 list; the module is shipped exactly as published (verified against go.sum and the checksum database, `go mod verify`) and never patched. Until the owner records the decision, the image builds but is not admissible."
+  }
+]

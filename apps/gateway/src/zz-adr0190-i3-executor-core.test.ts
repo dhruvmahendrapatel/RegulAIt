@@ -84,6 +84,7 @@ const RESTRICTED = SHIPPED_EXECUTION_PROFILES.restricted;
 const RESTRICTED_DIGEST = executionProfileDigest(RESTRICTED);
 const MICROVM_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["restricted-microvm"]);
 const ENGINE_WORKER_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["engine-worker"]);
+const ROBOT_BROWSER_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["robot-browser"]);
 const IMAGE = `sha256:${"c".repeat(64)}`;
 
 let db: Db;
@@ -339,15 +340,17 @@ describe("the loop against the real gateway", () => {
       [
         [RESTRICTED_DIGEST, "user_space_kernel", "pass"],
         [ENGINE_WORKER_DIGEST, "user_space_kernel", "pass"],
+        // ADR-0364 S3: the fake backend serves the robot profile too
+        [ROBOT_BROWSER_DIGEST, "user_space_kernel", "pass"],
       ].sort(),
     );
     expect(att.every((a) => a.expiresAt.getTime() - a.observedAt.getTime() === 120 * 60_000)).toBe(true);
-    expect((await audits("executor-attestation-passed", r.executorId)).length).toBe(2);
+    expect((await audits("executor-attestation-passed", r.executorId)).length).toBe(3);
     const view = await inject("GET", `/v1/executors/${r.executorId}`, adminAuth);
     expect(view.json().attestations).toEqual(expect.arrayContaining([expect.objectContaining({ profileDigest: RESTRICTED_DIGEST, fresh: true, class: "user_space_kernel" })]));
     expect(view.json().runtimeVersion).toBe("fake-0.0.0");
     const listed = await inject("GET", `/v1/executors/${r.executorId}/attestations`, adminAuth);
-    expect(listed.json().attestations).toHaveLength(2);
+    expect(listed.json().attestations).toHaveLength(3);
     expect(listed.json().attestations[0].report.signature).toBeDefined();
 
     // the broker offers; the executor takes it on its next window
@@ -382,7 +385,7 @@ describe("the loop against the real gateway", () => {
     const backend = new FakeSandboxBackend().lie("root_read_only", (o) => ({ ...o, readOnly: false }), "canary");
     const r = await rig("failtest", { backend });
     await r.run(1);
-    expect((await audits("executor-attestation-failed", r.executorId)).length).toBe(2);
+    expect((await audits("executor-attestation-failed", r.executorId)).length).toBe(3);
     const refused = await offerTo(r);
     expect(refused).toMatchObject({ kind: "refused", code: "attestation_stale" });
     const p = await placementRow((refused as { placementId: string }).placementId);

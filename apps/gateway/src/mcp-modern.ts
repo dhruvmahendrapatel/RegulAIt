@@ -80,7 +80,8 @@ export interface ModernMcpContext {
   /** the shared `tools/list` (mcp-proxy.ts `listToolsForCaller`) */
   listTools: () => Promise<{ tools: unknown[] }>;
   /** the shared `tools/call` (mcp-proxy.ts `callToolForCaller`) */
-  callTool: (name: string, args: Record<string, unknown> | undefined) => Promise<Record<string, unknown>>;
+  /** `signal`: ADR-0364 S3 (review B), the exchange's abort (the client left), so a robot run is cancelled with it */
+  callTool: (name: string, args: Record<string, unknown> | undefined, signal?: AbortSignal) => Promise<Record<string, unknown>>;
   /** closes whatever upstream session the route opened (its own close-on-disconnect stays registered) */
   closeUpstream: () => void;
 }
@@ -105,14 +106,14 @@ async function auditMethodNotServed(ctx: ModernMcpContext, method: string): Prom
 }
 
 /** the per-request v2 server: `tools` only, both handlers the shared governance functions */
-export function buildModernServer(ctx: ModernMcpContext): ModernServer {
+export function buildModernServer(ctx: ModernMcpContext, signal?: AbortSignal): ModernServer {
   const server = new ModernServer({ name: "regulait-gateway", version: "0.1.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler("tools/list", async () => {
     const { tools } = await ctx.listTools();
     return { tools: sortToolsByName(tools as ModernTool[]) };
   });
   server.setRequestHandler("tools/call", async (request) => {
-    const result = await ctx.callTool(request.params.name, request.params.arguments as Record<string, unknown> | undefined);
+    const result = await ctx.callTool(request.params.name, request.params.arguments as Record<string, unknown> | undefined, signal);
     return server.projectCallToolResult(result as CallToolResult, undefined);
   });
   server.fallbackRequestHandler = async (request: JSONRPCRequest) => {
@@ -138,7 +139,7 @@ export async function serveModernMcp(req: FastifyRequest, reply: FastifyReply, c
   }
   const abort = new AbortController();
   reply.raw.on("close", () => abort.abort());
-  const handler = createMcpHandler(() => buildModernServer(ctx), {
+  const handler = createMcpHandler(() => buildModernServer(ctx, abort.signal), {
     legacy: "reject",
     onerror: (err) => req.log.debug({ err }, "mcp 2026-07-28 exchange reported an error"),
   });

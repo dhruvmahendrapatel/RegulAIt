@@ -70,10 +70,10 @@ describe("the executor loop", () => {
     r.gateway.offer({ requiredClass: "user_space_kernel", profileDigest: restricted });
     await r.run(1);
     expect(r.gateway.announced).toBe(true);
-    // gvisor serves restricted and engine-worker (L2) but not restricted-microvm (L3)
-    expect([...r.gateway.attestations.keys()].sort()).toEqual([restricted, executionProfileDigest(SHIPPED_EXECUTION_PROFILES["engine-worker"])].sort());
+    // gvisor serves restricted, engine-worker and robot-browser (L2) but not restricted-microvm (L3)
+    expect([...r.gateway.attestations.keys()].sort()).toEqual([restricted, executionProfileDigest(SHIPPED_EXECUTION_PROFILES["engine-worker"]), executionProfileDigest(SHIPPED_EXECUTION_PROFILES["robot-browser"])].sort());
     const canaries = r.backend.sandboxes.filter((s) => s.kind === "canary");
-    expect(canaries).toHaveLength(2);
+    expect(canaries).toHaveLength(3);
     expect(canaries.every((c) => c.probed && c.killed && !c.released)).toBe(true);
     expect(r.outcomes).toHaveLength(1);
     expect(r.outcomes[0]!.outcome).toMatchObject({ kind: "placed", ended: "completed" });
@@ -118,7 +118,7 @@ describe("the executor loop", () => {
     expect(r.outcomes).toHaveLength(1);
     expect(r.outcomes[0]!.outcome).toEqual({ kind: "declined", reason: "attestation_stale" });
     expect(r.backend.sandboxes.filter((s) => s.kind === "placement")).toHaveLength(0);
-    expect(r.gateway.log.audit.filter((a) => a.startsWith("executor-attestation-passed"))).toHaveLength(2);
+    expect(r.gateway.log.audit.filter((a) => a.startsWith("executor-attestation-passed"))).toHaveLength(3);
   });
 
   it("a backend lying in one probe: report refused, sandbox killed, input never released, executor quarantined, re-enable re-attests", async () => {
@@ -173,7 +173,7 @@ describe("the executor loop", () => {
     r.gateway.offer({ requiredClass: "user_space_kernel", profileDigest: restricted });
     await r.run(1);
     expect(r.gateway.attestations.size).toBe(0);
-    expect(r.gateway.log.audit.filter((a) => a.startsWith("executor-attestation-failed"))).toHaveLength(2);
+    expect(r.gateway.log.audit.filter((a) => a.startsWith("executor-attestation-failed"))).toHaveLength(3);
     expect(r.outcomes[0]!.outcome).toEqual({ kind: "declined", reason: "attestation_stale" });
     expect(r.logs.some((l) => l.includes("proc_status:seccomp_not_filtering"))).toBe(true);
   });
