@@ -121,7 +121,7 @@ export default function ExternalScorersPage() {
                   back a trained detector. Once a detector is turned on, the prompt or completion text of live
                   requests is sent to that scorer&apos;s URL during the request, through the egress guard. Nothing is
                   sent inline until an admin turns a detector on, in the Trained detectors tab of the{" "}
-                  <Link to="/admin/guardrails">Guardrails</Link> page.
+                  <Link className={v.inlineLink} to="/admin/guardrails">Guardrails</Link> page.
                 </li>
               </ul>
             </>
@@ -130,7 +130,7 @@ export default function ExternalScorersPage() {
           <p className={v.faint}>
             An external score is <strong>the vendor&apos;s opinion</strong>. A scorer is used by evaluations, and
             inline on live requests only when it backs a trained detector that an admin has turned on (Trained
-            detectors tab of <Link to="/admin/guardrails">Guardrails</Link>).
+            detectors tab of <Link className={v.inlineLink} to="/admin/guardrails">Guardrails</Link>).
           </p>
         </Card>
 
