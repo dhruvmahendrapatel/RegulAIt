@@ -370,7 +370,7 @@ describe("applying an import", () => {
 
   it("CXR-CST-005: removing an alias WITHOUT a reason is a 400 that deletes nothing and audits nothing", async () => {
     const [alias] = await db.select().from(vendorAccountAliases);
-    for (const payload of [{}, { reason: "" }, { reason: "x".repeat(501) }]) {
+    for (const payload of [{}, { reason: "" }, { reason: "   \t " }, { reason: "x".repeat(501) }]) {
       const res = await del(`/v1/cost-imports/mappings/${alias!.id}`, payload);
       expect(res.statusCode).toBe(400);
     }
@@ -381,6 +381,17 @@ describe("applying an import", () => {
     const [ghost] = await db.select().from(importedCostLines).where(eq(importedCostLines.accountKey, GHOST));
     expect(ghost!.resolvedUserId).toBe(bobId);
     expect(await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.aliasDeleted))).toHaveLength(0);
+  });
+
+  it("ADR-0180: a whitespace-only reason is a 400 on alias and domain-rule create, and writes nothing", async () => {
+    const aliasesBefore = await db.select().from(vendorAccountAliases);
+    const rulesBefore = await db.select().from(vendorDomainRules);
+    const alias = await post("/v1/cost-imports/mappings", { vendor: "github-copilot", accountRef: "ws-only@example.com", userId: bobId, reason: "   " });
+    expect(alias.statusCode).toBe(400);
+    const rule = await post("/v1/cost-imports/domain-rules", { fromDomain: "ws-only.example", toDomain: "example.com", reason: " \n\t " });
+    expect(rule.statusCode).toBe(400);
+    expect(await db.select().from(vendorAccountAliases)).toHaveLength(aliasesBefore.length);
+    expect(await db.select().from(vendorDomainRules)).toHaveLength(rulesBefore.length);
   });
 
   it("a non-admin cannot remove an alias, even with a reason", async () => {
@@ -444,6 +455,8 @@ describe("applying an import", () => {
     // CXR-CST-005: a reasonless removal is a 400 and the rule (and the line it resolved) stay put
     const refused = await del(`/v1/cost-imports/domain-rules/${rule.json().domainRule.id}`);
     expect(refused.statusCode).toBe(400);
+    const blank = await del(`/v1/cost-imports/domain-rules/${rule.json().domainRule.id}`, { reason: "    " });
+    expect(blank.statusCode).toBe(400);
     expect(await db.select().from(vendorDomainRules).where(eq(vendorDomainRules.id, rule.json().domainRule.id))).toHaveLength(1);
     expect(await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.domainRuleDeleted))).toHaveLength(0);
 

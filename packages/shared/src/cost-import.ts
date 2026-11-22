@@ -1439,12 +1439,15 @@ export const costImportRequestSchema = z
   })
   .strict();
 
+/** an audited reason on an identity-mapping write: trimmed, so whitespace alone is not a reason (ADR-0180) */
+const auditedMappingReason = z.string().trim().min(1).max(500);
+
 export const vendorAliasRequestSchema = z
   .object({
     vendor: z.string().min(1).max(100).default(ANY_VENDOR),
     accountRef: z.string().min(1).max(200),
     userId: z.string().uuid(),
-    reason: z.string().min(1).max(500),
+    reason: auditedMappingReason,
   })
   .strict();
 
@@ -1454,7 +1457,7 @@ export const vendorAliasRequestSchema = z
  */
 export const costResolutionRuleRemovalSchema = z
   .object({
-    reason: vendorAliasRequestSchema.shape.reason,
+    reason: auditedMappingReason,
   })
   .strict();
 
@@ -1463,7 +1466,7 @@ export const vendorDomainRuleRequestSchema = z
     vendor: z.string().min(1).max(100).default(ANY_VENDOR),
     fromDomain: z.string().min(3).max(253),
     toDomain: z.string().min(3).max(253),
-    reason: z.string().min(1).max(500),
+    reason: auditedMappingReason,
     enabled: z.boolean().default(true),
   })
   .strict()
