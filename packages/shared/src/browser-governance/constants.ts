@@ -151,7 +151,12 @@ export const BROWSER_POLICY_MODES = ["enforce", "audit"] as const;
 export type BrowserPolicyMode = (typeof BROWSER_POLICY_MODES)[number];
 export const BROWSER_SITE_DECISIONS = ["allow", "deny"] as const;
 /** why a site is denied: fixed codes the block page explains, never free text */
-export const BROWSER_DENY_REASONS = ["site_denied", "no_site_rule", "execution_posture", "user_disabled"] as const;
+/**
+ * Why a site is denied. `account_not_recognised` (#1028; owner decision 2026-11-21 reversing B1): the profile account,
+ * or no account, matches no active RegulAIt user, so nothing is allowed. Org-wide rules are never given to an unknown
+ * account, so a disabled person cannot reach them by signing the browser in with a personal account.
+ */
+export const BROWSER_DENY_REASONS = ["site_denied", "no_site_rule", "execution_posture", "user_disabled", "account_not_recognised"] as const;
 export type BrowserDenyReason = (typeof BROWSER_DENY_REASONS)[number];
 
 /**

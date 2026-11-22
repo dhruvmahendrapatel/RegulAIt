@@ -615,6 +615,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
     // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
     "agent_identity_links.note",
     "agent_identity_links.decision_note",
