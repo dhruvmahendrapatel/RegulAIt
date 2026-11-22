@@ -5183,6 +5183,27 @@ export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
 // ADR-0357: governance configuration as code (the document schema and the dry-run plan)
 export * from "./governance-config.js";
 
+// ADR-0359 (lane E40): behaviour baselines' pure statistics (robust z-score and share of history)
+export {
+  BEHAVIOUR_BASELINE,
+  BEHAVIOUR_CATEGORY_SIGNALS,
+  BEHAVIOUR_FINDING_STATUSES,
+  BEHAVIOUR_METHODS,
+  BEHAVIOUR_MODES,
+  BEHAVIOUR_SIGNAL_NAMES,
+  BEHAVIOUR_SIGNALS,
+  BEHAVIOUR_SUBJECT_KINDS,
+  BEHAVIOUR_VOLUME_SIGNALS,
+  evaluateCategory,
+  evaluateVolume,
+  volumeBaselineStats,
+  type BehaviourFindingStatus,
+  type BehaviourMethod,
+  type BehaviourMode,
+  type BehaviourSignal,
+  type BehaviourSubjectKind,
+  type BehaviourVerdict,
+} from "./behaviour-baseline.js";
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
 
