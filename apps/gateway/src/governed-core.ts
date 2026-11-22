@@ -38,6 +38,7 @@ import {
   type AbacDecision,
   type Decision,
   type EntitlementDecision,
+  type GovernedActor,
   type GovernedResource,
   type GovernedResourceDecision,
   type ResourceApprovalRule,
@@ -46,6 +47,8 @@ import {
 } from "@regulait/policy-kernel";
 import { perCallResourceApprovalRuleEvaluator } from "@regulait/policy-kernel/resource-approval-rule-cedar";
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
+import type { AbacPrincipalContext } from "./abac-principal.js";
+import { actorForGrant } from "./in-process-delegation.js";
 import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
   modelConsentState,
@@ -186,6 +189,9 @@ export async function loadResourceRestrictions(
     /** false: leave every limit's `currentCount` at 0, because the caller decides through `governedEvaluateResource`,
      * which counts the window once, under the rate lock (hard windows). Default true (a read of the current counts). */
     counts?: boolean;
+    /** ADR-0251 slice 4b: the request's session facts and delegation chain for the ABAC v5 request. Absent facts read
+     * as their strict values (fail closed). */
+    facts?: GovernedRequestFacts;
   },
 ): Promise<ResourceRestrictions> {
   const { userId, resource } = args;
@@ -195,6 +201,8 @@ export async function loadResourceRestrictions(
     evaluateAbacForGovernedCall(db, {
       userId,
       projectId: args.projectId ?? null,
+      principal: args.facts?.principal ?? null,
+      actor: args.facts?.actor ?? null,
       target:
         resource.type === "model"
           ? { type: "model", id: resource.id, mode: resource.mode }
@@ -277,12 +285,26 @@ export interface GovernedResourceInput {
   canQueue: boolean;
   /** already loaded by the caller (to build a consent binding first); loaded here when absent */
   restrictions?: ResourceRestrictions;
+  /** ADR-0251 slice 4b: used only when `restrictions` is loaded here */
+  facts?: GovernedRequestFacts;
+}
+
+/**
+ * ADR-0251 slice 4b — what a route knows about a governed call that the core below it cannot read for itself: the
+ * request's session facts (`abacPrincipalFromRequest`) and the stored delegation chain (`actorForGrant`). Both feed
+ * only the ABAC v5 request; each absent fact reads as its strict value there (fail closed).
+ */
+export interface GovernedRequestFacts {
+  principal?: AbacPrincipalContext | null;
+  actor?: GovernedActor | null;
 }
 
 /** ADR-0251 — the core's decision for a model, connector or A2A call. Never throws; an error is a deny. */
 export async function governedEvaluateResource(db: Db, input: GovernedResourceInput): Promise<GovernedResourceDecision> {
   try {
-    const r = input.restrictions ?? (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, projectId: input.projectId, counts: false }));
+    const r =
+      input.restrictions ??
+      (await loadResourceRestrictions(db, { userId: input.userId, resource: input.resource, projectId: input.projectId, counts: false, ...(input.facts ? { facts: input.facts } : {}) }));
     const compose = (rateLimits: LoadedRateLimit[]) =>
       composeResourceDecision({
         resource: input.resource,
@@ -351,6 +373,10 @@ export async function governedModelGate(
     invocation?: Omit<ModelInvocation, "mode"> | undefined;
     provider?: string | null | undefined;
     model?: string | null | undefined;
+    /** ADR-0251 slice 4b: the request's session facts, from the route; absent = strict values */
+    principal?: AbacPrincipalContext | null | undefined;
+    /** ADR-0188 S4: the delegation grant an in-process agent dispatches under; its stored chain feeds ABAC */
+    delegationGrantId?: string | null | undefined;
   },
 ): Promise<ModelGateRefusal | null> {
   const resource: GovernedResource = { type: "model", id: args.agentId, name: args.agentName, mode: args.mode };
@@ -360,7 +386,14 @@ export async function governedModelGate(
   try {
     const limited = await checkModelRateLimit(db, { userId: args.userId, agentId: args.agentId, agentName: args.agentName, projectId: args.projectId });
     if (limited) return limited;
-    const restrictions = await loadResourceRestrictions(db, { userId: args.userId, resource, projectId: args.projectId });
+    // a grant that cannot be read throws here, and the catch below refuses the call (error is deny)
+    const actor = args.delegationGrantId ? await actorForGrant(db, args.delegationGrantId, { costKnown: true }) : null;
+    const restrictions = await loadResourceRestrictions(db, {
+      userId: args.userId,
+      resource,
+      projectId: args.projectId,
+      facts: { principal: args.principal ?? null, actor },
+    });
     // ADR-0239 slice 2b: an engine error binds no consent here; the kernel refuses the call on the same error
     const verdict = matchingResourceApprovalRulesWith(restrictions.approvalRuleEvaluator, resource, restrictions.approvalRules);
     const matched = verdict.kind === "matched" ? verdict.rules : [];

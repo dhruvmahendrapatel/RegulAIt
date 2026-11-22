@@ -419,7 +419,14 @@ export async function referenceIssues(db: Db, plan: GovernancePlan, desired: Nor
       r.toolGrants.forEach((g) => tool(g.server, g.tool));
       r.serverGrants.forEach((g) => {
         server(g.server);
-        if (!g.readOnlyAll) miss(c, "inert_server_grant", `server ${g.server}: readOnlyAll false confers nothing; grant tools by name instead`);
+        // the UI path refuses the same write (app.ts INERT_SERVER_GRANT): the row would list as a grant while
+        // granting nothing. The schema still accepts false, so a legacy live row round-trips and surfaces here.
+        if (!g.readOnlyAll)
+          miss(
+            c,
+            "inert_server_grant",
+            `server grant on ${g.server} has readOnlyAll=false, which confers nothing: set readOnlyAll: true for read-all on this server, or grant individual tools`,
+          );
       });
       r.agentGrants.forEach((g) => hasAgent.has(g.agent) || miss(c, "unknown_agent", `no agent named ${g.agent}`));
       r.connectorGrants.forEach((g) => hasConnector.has(g.connector) || miss(c, "unknown_connector", `no connector named ${g.connector}`));

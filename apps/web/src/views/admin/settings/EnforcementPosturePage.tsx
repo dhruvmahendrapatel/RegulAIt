@@ -43,7 +43,7 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, InfoButton, Table, TabPanel, Tabs, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, InfoButton, Table, TabPanel, Tabs, type Tone } from "../../../ui/kit";
 import { QueryGate, orgSettingsQuery, useAction } from "../adminKit";
 import { BomPostureCard, receiptKeysQuery, type ReceiptSigningKeyPosture } from "./BomPostureCard";
 import { bomUnresolved, discoveryUnresolved, isolationUnresolved, orgSettingsUnresolved, tabLabel } from "./postureTabs";
@@ -192,11 +192,16 @@ export default function EnforcementPosturePage() {
   // ADR-0181: the database hop's TLS posture (environment-backed, never a switch)
   const dbTls = controls.find((c) => c.key === "databaseTls")?.current as string | undefined;
 
-  const harden = () =>
+  // CXR-ADM-009: the bulk harden is confirmed first, listing what it would change, from the posture already loaded
+  const [confirmHarden, setConfirmHarden] = useState(false);
+  const toHarden = enforcement.filter((c) => c.settable && !c.satisfied);
+  const harden = () => {
+    setConfirmHarden(false);
     void act.run(async () => {
       await api.post("/v1/org/posture/harden", { groups: ["enforcement"] });
       await posture.refetch();
     }, "Enforcement controls hardened");
+  };
 
 
   return (
@@ -283,7 +288,7 @@ export default function EnforcementPosturePage() {
                 >
                   Takes effect immediately · no dry run
                 </Badge>
-                <Button size="sm" onClick={harden} disabled={act.busy}>
+                <Button size="sm" onClick={() => setConfirmHarden(true)} disabled={act.busy}>
                   Harden enforcement controls
                 </Button>
               </div>
@@ -380,6 +385,40 @@ export default function EnforcementPosturePage() {
           </TabPanel>
         </QueryGate>
       </div>
+      <ConfirmModal
+        open={confirmHarden}
+        title="Harden enforcement controls?"
+        confirmLabel={toHarden.length > 0 ? `Harden ${plural(toHarden.length, "control")}` : "Apply anyway"}
+        danger={toHarden.length > 0}
+        onCancel={() => setConfirmHarden(false)}
+        onConfirm={harden}
+        body={
+          <div className={v.stack}>
+            {toHarden.length > 0 ? (
+              <>
+                <p>
+                  This sets each control below to its strict value. It takes effect immediately, with no dry run, and
+                  every change is audited.
+                </p>
+                <ul aria-label="Controls that would change">
+                  {toHarden.map((c) => (
+                    <li key={c.key}>
+                      <strong>{CONTROL_LABEL[c.key] ?? c.key}</strong>: now{" "}
+                      <span className={v.mono}>{renderValue(c.current)}</span>, would be{" "}
+                      <span className={v.mono}>{renderValue(c.hardened)}</span>. {c.refuses}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p>Every settable enforcement control is already at its strict value, so applying changes nothing.</p>
+            )}
+            <p className={v.faint}>
+              Deployment-environment controls and the optimisation group are not changed by this action.
+            </p>
+          </div>
+        }
+      />
     </>
   );
 }

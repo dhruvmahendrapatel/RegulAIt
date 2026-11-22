@@ -198,6 +198,36 @@ describe("POST /v1/governance-config/plan", () => {
     expect(await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, n("wf")))).toEqual([]);
   });
 
+  it("refuses an inert server grant (readOnlyAll: false), as the UI path does", async () => {
+    const r = await plan({
+      document: {
+        apiVersion: GOVERNANCE_CONFIG_API_VERSION,
+        kind: "GovernanceConfig",
+        spec: { roles: [{ name: n("inert"), serverGrants: [{ server: n("server"), readOnlyAll: false }] }] },
+      },
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    const out = r.json();
+    expect(out.issues).toContainEqual(expect.objectContaining({ section: "roles", key: n("inert"), code: "inert_server_grant" }));
+    expect(out.applicable).toBe(false);
+  });
+
+  it("caps workflow templates per document (each changed one is validated against the database)", async () => {
+    const workflowTemplates = Array.from({ length: 201 }, (_, i) => ({ name: n(`wf-cap-${i}`), definition: {} }));
+    const r = await plan({ document: { apiVersion: GOVERNANCE_CONFIG_API_VERSION, kind: "GovernanceConfig", spec: { workflowTemplates } } });
+    expect(r.statusCode, r.body).toBe(400);
+    expect(r.json().error).toBe("invalid_document");
+  });
+
+  it("a non-admin cannot export or plan (403)", async () => {
+    const issued = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${approverId}/keys`, payload: { name: n("non-admin") } });
+    expect(issued.statusCode, issued.body).toBe(201);
+    const asUser = { authorization: `Bearer ${issued.json().token}` };
+    expect((await app.inject({ method: "GET", url: "/v1/governance-config/export", headers: asUser })).statusCode).toBe(403);
+    const doc = { apiVersion: GOVERNANCE_CONFIG_API_VERSION, kind: "GovernanceConfig", spec: {} };
+    expect((await app.inject({ method: "POST", url: "/v1/governance-config/plan", headers: asUser, payload: { document: doc } })).statusCode).toBe(403);
+  });
+
   it("a role created by the same file is a valid subject for its rate limit", async () => {
     const doc = await exportJson();
     const r = await plan({

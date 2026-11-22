@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-21 - P-01c item 2, slice 4b: ABAC v5 session facts and actor chain ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "Slice 4b", lane L1; no migration).** Model, connector and A2A calls now evaluate v5 policies with the request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) and the stored delegation chain. Each actor is evaluated as `Agent`. A missing fact reads as its strict value, so a forbid on it fires (fail closed). Only `context.rateLimitUsagePct` stays unsupplied and refused at write time.
