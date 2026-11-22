@@ -41,10 +41,6 @@ import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-// ADR-0246 (P27): the pinning and high-risk cards and the definition-pin page load on demand in one chunk, through one
-// import, so they add nothing to admin-integrations (ADR-0344 per-route budgets; the owner chose lazy-loading over a raise)
-export const loadMcpPinning = () => import("./McpPinning");
-const McpPinningPanel = lazy(() => loadMcpPinning().then((m) => ({ default: m.McpPinningPanel })));
 
 /** One row of `GET /v1/users/:userId/servers/:serverId/entitlements`. */
 interface McpEntitlementRow {
@@ -73,7 +69,13 @@ export default function McpServersPage() {
       <PageHeader
         title="MCP servers"
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
-        actions={<Link to="/admin/mcp-servers/bundles">MCP bundles</Link>}
+        actions={
+          <>
+            {/* ADR-0246 (P27): definition pinning and high-risk tooling, on their own lazy page */}
+            <Link to="/admin/mcp-servers/pinning">Pinning and high-risk tooling</Link>
+            <Link to="/admin/mcp-servers/bundles">MCP bundles</Link>
+          </>
+        }
       />
       <Tabs
         tabs={MCP_TABS}
@@ -137,6 +139,8 @@ function McpServersTab() {
     </Button>
   );
 
+  // the selected server, read once for every card that shows it
+  const selected = (servers.data?.servers ?? []).find((s) => s.id === selectedId);
   return (
     <>
       <div className={v.stack}>
@@ -222,21 +226,18 @@ function McpServersTab() {
           />
         </Card>
 
-        <Suspense fallback={null}>
-          <McpPinningPanel server={selectedId ? (servers.data?.servers ?? []).find((s) => s.id === selectedId) : undefined} />
-        </Suspense>
 
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
 
-        {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpUpstreamCredentialCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
+        {selectedId && <McpExecutionCard server={selected} />}
+        {selectedId && <McpIdentityAssertionCard server={selected} />}
+        {selectedId && <McpUpstreamCredentialCard server={selected} />}
 
         {selectedId && (
           <ToolsCard
             key={selectedId}
-            server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)!}
+            server={selected!}
           />
         )}
 

@@ -202,15 +202,24 @@ async function expectServersPageAxeClean(page: Page, label: string) {
 const card = (page: Page, title: string) => page.locator("[data-rg-card]").filter({ has: page.getByText(title, { exact: true }) });
 
 test.describe("MCP definition pinning and high-risk tooling", () => {
+  test("the MCP servers page links to the pinning page from its header", async ({ page }) => {
+    await mockApi(page);
+    await page.goto("/ui/admin/mcp-servers");
+    await page.getByRole("link", { name: "Pinning and high-risk tooling" }).click();
+    await expect(page).toHaveURL(/\/admin\/mcp-servers\/pinning$/);
+    await expect(page.getByRole("heading", { name: "Pinning and high-risk tooling", level: 1 })).toBeVisible();
+    await expect(card(page, "Changed since approval")).toBeVisible();
+  });
+
   test("the queue counts the changed servers; the diff is text; nothing is preselected; re-approval asks for a step-up", async ({ page }) => {
     const { calls } = await mockApi(page);
-    await page.goto("/ui/admin/mcp-servers");
+    await page.goto("/ui/admin/mcp-servers/pinning");
     const queue = card(page, "Changed since approval");
     await expect(queue.getByText("1 server to review")).toBeVisible();
     await expect(queue.getByText("Changed items blocked")).toBeVisible();
     const row = queue.getByRole("row").filter({ hasText: "Docs MCP" });
     await expect(row).toContainText("2 items");
-    await expectServersPageAxeClean(page, "MCP servers: changed since approval");
+    await expectServersPageAxeClean(page, "MCP pinning: changed since approval");
 
     await row.getByRole("link", { name: "Review changes on Docs MCP" }).click();
     await expect(page).toHaveURL(/\/ui\/admin\/mcp-servers\/definition-pins\/11111111-1111-4111-8111-111111111111$/);
@@ -272,7 +281,7 @@ test.describe("MCP definition pinning and high-risk tooling", () => {
 
   test("an unknown server says so; the queue shows an error with Retry, then the empty state", async ({ page }) => {
     await mockApi(page, { failQueue: 2, noChanges: true });
-    await page.goto("/ui/admin/mcp-servers");
+    await page.goto("/ui/admin/mcp-servers/pinning");
     const queue = card(page, "Changed since approval");
     const err = queue.getByRole("alert");
     await expect(err).toBeVisible();
@@ -286,8 +295,10 @@ test.describe("MCP definition pinning and high-risk tooling", () => {
 
   test("high-risk tooling: mark with a reason and a confirmation, then apply the policy with a chosen approver", async ({ page }) => {
     const { calls } = await mockApi(page, { quorum422: true });
-    await page.goto("/ui/admin/mcp-servers");
-    await page.getByRole("link", { name: "Show tools on Lab scanner" }).click();
+    await page.goto("/ui/admin/mcp-servers/pinning");
+    // no server is preselected, so the high-risk card shows only once one is picked
+    await expect(card(page, "High-risk tooling")).toHaveCount(0);
+    await page.getByLabel("Server", { exact: true }).selectOption({ label: "Lab scanner" });
     const hr = card(page, "High-risk tooling");
     await expect(hr.getByText("Standard", { exact: true })).toBeVisible();
 
@@ -312,7 +323,7 @@ test.describe("MCP definition pinning and high-risk tooling", () => {
     await hr.getByLabel("Approver", { exact: true }).selectOption("avery");
     await hr.getByRole("button", { name: "Apply high-risk policy" }).click();
     await expect(hr.getByRole("alert")).toContainText("the approver pool can never reach a quorum of 2");
-    await expectServersPageAxeClean(page, "MCP servers: high-risk tooling, a refused policy");
+    await expectServersPageAxeClean(page, "MCP pinning: high-risk tooling, a refused policy");
 
     await hr.getByLabel("Approver role (optional)").selectOption({ label: "Security reviewers" });
     await hr.getByRole("button", { name: "Apply high-risk policy" }).click();
@@ -325,7 +336,7 @@ test.describe("MCP definition pinning and high-risk tooling", () => {
 
   test("authorised targets: add with a step-up, refusals inline, remove behind a confirmation", async ({ page }) => {
     const { calls } = await mockApi(page);
-    await page.goto("/ui/admin/mcp-servers");
+    await page.goto("/ui/admin/mcp-servers/pinning");
     const targets = card(page, "Authorised targets");
     await expect(targets.getByRole("row").filter({ hasText: "192.0.2.0/24" })).toContainText("Network range (CIDR)");
     await expect(targets.getByRole("row").filter({ hasText: "192.0.2.0/24" })).toContainText("Ada Admin");
@@ -354,7 +365,7 @@ test.describe("MCP definition pinning and high-risk tooling", () => {
     await targets.getByRole("button", { name: "Add target" }).click();
     await confirmStepUp(page);
     await expect(targets.getByRole("alert")).toContainText("Nothing was added.");
-    await expectServersPageAxeClean(page, "MCP servers: authorised targets, a refused add");
+    await expectServersPageAxeClean(page, "MCP pinning: authorised targets, a refused add");
 
     await targets.getByRole("button", { name: "Remove 192.0.2.0/24" }).click();
     const dialog = page.getByRole("dialog", { name: "Remove 192.0.2.0/24?" });
