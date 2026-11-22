@@ -217,10 +217,10 @@ export async function persistEntitlementBatch(
   out.usageCoverage = usage.coverage;
   await t
     .insert(saasEntitlementUsageReads)
-    .values({ sourceId: ctx.sourceId, coverage: usage.coverage, windowStart: usage.windowStart ? new Date(usage.windowStart) : null, note: usage.note, recordedAt: sql`now()`, runId: ctx.runId })
+    .values({ sourceId: ctx.sourceId, coverage: usage.coverage, windowStart: usage.windowStart ? new Date(usage.windowStart) : null, note: usage.note, activityLogState: usage.activityLogState ?? null, recordedAt: sql`now()`, runId: ctx.runId })
     .onConflictDoUpdate({
       target: saasEntitlementUsageReads.sourceId,
-      set: { coverage: sql`excluded.coverage`, windowStart: sql`excluded.window_start`, note: sql`excluded.note`, recordedAt: sql`excluded.recorded_at`, runId: sql`excluded.run_id` },
+      set: { coverage: sql`excluded.coverage`, windowStart: sql`excluded.window_start`, note: sql`excluded.note`, activityLogState: sql`excluded.activity_log_state`, recordedAt: sql`excluded.recorded_at`, runId: sql`excluded.run_id` },
     });
   const usedIds = usage.apps.map((u) => u.externalId);
   const usedAppId = new Map<string, string>();

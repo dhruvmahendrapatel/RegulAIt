@@ -1,7 +1,7 @@
 {
   "adr": "ADR-0337",
   "lane": "E18",
-  "tracking": "ADR-0337 §5 and §6 (lane E18): the findings report (slice 3) and the owner decision 2026-11-17 (vendor-app auto-link to agents, admin link and unlink) are API-only in the lane brief; the graph, findings and link screen is requested on #453. raised under the lane brief (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0337)",
+  "tracking": "ADR-0337 §5 and §6 (lane E18): the findings report (slice 3) and the owner decision 2026-11-17 (vendor-app auto-link to agents, admin link and unlink) are API-only in the lane brief; the graph, findings and link screen is requested on #453. raised under the lane brief (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0337); owner decisions 2026-11-22: the Microsoft 365 activity-log setup checklist and the Salesforce read-scope explanation screen belong to the design builder, requested on #453",
   "gaps": {
     "GET /v1/discovery/entitlements/apps": "lists the apps one SaaS entitlement source holds, each with its agent link state and the link transitions allowed next",
     "PUT /v1/discovery/entitlements/apps/:appId/agent-link": "links a vendor app to an agent by hand (a partial or fuzzy match), audited",
@@ -12,6 +12,7 @@
     "GET /v1/discovery/entitlements/findings": "the SaaS entitlement findings (unused grant, excessive scope, oversharing, publicly exposed agent), computed at read time with their evidence and what is not assessable (ADR-0337 §5)",
     "POST /v1/discovery/entitlements/findings/reviews": "raises a SaaS entitlement finding the report flags now into the approvals queue for a second administrator's decision (remove the grant, or accept the risk); nothing executes",
     "GET /v1/discovery/entitlements/findings/reviews": "lists raised finding reviews with their state and the transitions allowed next",
-    "POST /v1/discovery/entitlements/findings/reviews/:reviewId/withdraw": "withdraws a pending finding review (audited); its queue item is superseded"
+    "POST /v1/discovery/entitlements/findings/reviews/:reviewId/withdraw": "withdraws a pending finding review (audited); its queue item is superseded",
+    "GET /v1/discovery/entitlements/sources/:sourceId/read-setup": "one entitlement source's guided read setup as data (#453): for Microsoft 365, the off-by-default activity-log setup, its exact admin steps and consent link, and the state the latest read observed; for Salesforce, what the default read sees and cannot see, and the org-wide token opt-in with its trade-off"
   }
 }

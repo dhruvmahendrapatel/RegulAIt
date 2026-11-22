@@ -18,9 +18,9 @@ import {
   GOOGLE_WORKSPACE_DIRECTORY_USER_SECURITY_SCOPE,
   GOOGLE_WORKSPACE_REPORTS_READONLY_SCOPE,
 } from "@regulait/cloud-discovery";
-import { checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
+import { SALESFORCE_DEFAULT_READ, checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
 import { DISCOVERY_SCANNERS, type ScanContext } from "./discovery-scanners.js";
-import { M365_PERMISSION_RESOURCES, M365_USAGE_READ, SAAS_ENTITLEMENT_SCANNERS, USAGE_NOT_OBSERVED, WORKSPACE_USAGE_READ, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
+import { M365_PERMISSION_RESOURCES, M365_USAGE_READ, SALESFORCE_TOKENS_READ, SAAS_ENTITLEMENT_SCANNERS, USAGE_NOT_OBSERVED, WORKSPACE_USAGE_READ, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
 import { SALESFORCE_PERMISSIONS_QUERY, WRITE_SYSTEM_PERMISSIONS } from "./salesforce-org.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000e18";
@@ -197,7 +197,23 @@ describe("ADR-0337 entitlement_m365", () => {
     expect(batch.apps.find((a) => a.externalId === AGENT_APP)!.grants.map((g) => g.scope).sort()).toEqual(["Files.Read.All", "Mail.ReadWrite"]);
   });
 
-  it("observes use from Entra sign-in activity (coverage app, held apps only); a failed usage read leaves the grant read complete", async () => {
+  it("activity logs are OFF by default: no sign-in activity is asked of Graph, and the state says so (owner decision 2026-11-22)", async () => {
+    let asked = 0;
+    const v = fakeM365(["Application.Read.All"], (url) => {
+      if (url.pathname === "/beta/reports/servicePrincipalSignInActivities") asked++;
+      return null;
+    });
+    const res = await scanner("entitlement_m365").run(ctxFor({ fetch: v.f, source, credential }).ctx);
+    const batch = checkSaasEntitlementBatch(res.entitlements, "m365");
+    expect(asked).toBe(0);
+    expect(batch.complete).toBe(true);
+    expect(batch.usage).toMatchObject({ coverage: "none", apps: [], activityLogState: "off" });
+    expect(res.readOutcomes!.find((o) => o.read === M365_USAGE_READ)!.status).toBe("skipped");
+    expect(SAAS_ENTITLEMENT_SCANNERS.find((s) => s.kind === "entitlement_m365")!.validateTarget!({ tenantId: TENANT, activityLogs: "yes" }, { orgLevel: true, include: [] })).toMatch(/activityLogs/);
+  });
+
+  it("activity logs on: flowing observes use (coverage app, held apps only); refused reads 'not enabled'; a failed read leaves the grants complete", async () => {
+    const on = { ...source, target: { tenantId: TENANT, activityLogs: "on" } };
     const signIns = (url: URL) =>
       url.pathname === "/beta/reports/servicePrincipalSignInActivities"
         ? json({
@@ -209,20 +225,37 @@ describe("ADR-0337 entitlement_m365", () => {
           })
         : null;
     const v = fakeM365(["Application.Read.All", "AuditLog.Read.All"], signIns);
-    const res = await scanner("entitlement_m365").run(ctxFor({ fetch: v.f, source, credential }).ctx);
+    const res = await scanner("entitlement_m365").run(ctxFor({ fetch: v.f, source: on, credential }).ctx);
     const batch = checkSaasEntitlementBatch(res.entitlements, "m365");
     expect(batch.complete).toBe(true);
     // a first-party app is not held, and an app with no sign-in time is simply not seen used
-    expect(batch.usage).toEqual({ coverage: "app", windowStart: null, note: expect.stringMatching(/per app/), apps: [{ externalId: AGENT_APP, lastUseAt: "2026-11-15T08:00:00.123Z", lastReadAt: null, lastWriteAt: null }] });
+    expect(batch.usage).toEqual({
+      coverage: "app",
+      windowStart: null,
+      note: expect.stringMatching(/per app/),
+      apps: [{ externalId: AGENT_APP, lastUseAt: "2026-11-15T08:00:00.123Z", lastReadAt: null, lastWriteAt: null }],
+      activityLogState: "flowing",
+    });
     expect(res.readOutcomes!.find((o) => o.read === M365_USAGE_READ)!.status).toBe("read");
 
     const denied = fakeM365(["Application.Read.All"], (url) => (url.pathname === "/beta/reports/servicePrincipalSignInActivities" ? json({ error: {} }, 403) : null));
-    const res2 = await scanner("entitlement_m365").run(ctxFor({ fetch: denied.f, source, credential }).ctx);
+    const res2 = await scanner("entitlement_m365").run(ctxFor({ fetch: denied.f, source: on, credential }).ctx);
     const b2 = checkSaasEntitlementBatch(res2.entitlements, "m365");
     expect(b2.complete).toBe(true);
-    expect(b2.usage).toMatchObject({ coverage: "none", apps: [] });
+    expect(b2.usage).toMatchObject({ coverage: "none", apps: [], activityLogState: "not_enabled" });
     expect(b2.usage!.note).toMatch(/AuditLog\.Read\.All/);
     expect(res2.readOutcomes!.find((o) => o.read === M365_USAGE_READ)!.status).toBe("denied");
+
+    const broken = fakeM365(["Application.Read.All"], (url) => (url.pathname === "/beta/reports/servicePrincipalSignInActivities" ? json({ error: {} }, 500) : null));
+    const b3 = checkSaasEntitlementBatch((await scanner("entitlement_m365").run(ctxFor({ fetch: broken.f, source: on, credential }).ctx)).entitlements, "m365");
+    expect(b3.usage).toMatchObject({ coverage: "none", apps: [], activityLogState: "unreadable" });
+  });
+
+  it("activity logs on but holding no activity at all: 'no activity yet', and nothing is judged unused from it", async () => {
+    const on = { ...source, target: { tenantId: TENANT, activityLogs: "on" } };
+    const v = fakeM365(["Application.Read.All", "AuditLog.Read.All"], (url) => (url.pathname === "/beta/reports/servicePrincipalSignInActivities" ? json({ value: [] }) : null));
+    const batch = checkSaasEntitlementBatch((await scanner("entitlement_m365").run(ctxFor({ fetch: v.f, source: on, credential }).ctx)).entitlements, "m365");
+    expect(batch.usage).toMatchObject({ coverage: "none", apps: [], activityLogState: "no_activity_yet" });
   });
 
   it("the include list keeps only the named client applications", async () => {
@@ -602,6 +635,71 @@ describe("ADR-0337 entitlement_salesforce", () => {
     expect(calls.methods.filter(([h, m]) => h === "acme.my.salesforce.com" && m !== "GET")).toEqual([["acme.my.salesforce.com", "POST"]]);
     expect(calls.secrets).toEqual(expect.arrayContaining([sf.accessToken, sf.assertions[0]]));
     expect(calls.raw.join("")).not.toContain(sf.accessToken);
+  });
+
+  it("states plainly what the default read cannot see (owner decision 2026-11-22)", async () => {
+    const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential }).ctx);
+    const skipped = Object.fromEntries(res.readOutcomes!.filter((o) => o.status === "skipped").map((o) => [o.read, o.detail]));
+    expect(skipped["Salesforce OAuth scopes"]).toBe(SALESFORCE_DEFAULT_READ.cannotSee[0]);
+    expect(skipped[SALESFORCE_TOKENS_READ]).toBe(SALESFORCE_DEFAULT_READ.cannotSee[1]);
+  });
+
+  describe("the org-wide OAuth token opt-in (Customize Application only, owner decision 2026-11-22)", () => {
+    const optIn = { ...source, target: { ...source.target, orgTokens: "on" } };
+    const tokens = (_u: URL, q: string) =>
+      q.includes("FROM OauthToken")
+        ? json({
+            done: true,
+            records: [
+              { AppName: "Sales agent", UserId: "0055g0000AUsrAAAAA", LastUsedDate: "2026-11-10T09:00:00.000+0000" },
+              { AppName: "Sales agent", UserId: "0055g0000BUsrBBAAA", LastUsedDate: "2026-11-12T09:00:00.000Z" },
+              { AppName: "Not a connected app here", UserId: "0055g0000CUsrCCAAA", LastUsedDate: "2026-11-12T09:00:00.000Z" },
+            ],
+          })
+        : null;
+
+    it("tolerates Customize Application alone, reads who holds a token and each app's last use, and is never recorded read_only", async () => {
+      const sf = fakeSalesforce({ PermissionsCustomizeApplication: true }, tokens);
+      const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: sf.f, source: optIn, credential }).ctx);
+      expect(res.credentialWriteScope).toBe("unverified");
+      // only the three columns are selected: nothing that could revoke a token
+      expect(sf.queries.filter((q) => q.includes("FROM OauthToken"))).toEqual(["SELECT AppName, UserId, LastUsedDate FROM OauthToken"]);
+      // the object-level write check still ran
+      expect(sf.queries.some((q) => q.includes("FROM ObjectPermissions"))).toBe(true);
+      const batch = checkSaasEntitlementBatch(res.entitlements, "salesforce");
+      const agent = batch.apps.find((a) => a.externalId === "0H4AGENT0000001")!;
+      const held = agent.grants.find((g) => g.scope === "connected_app:user_token")!;
+      expect(held).toMatchObject({ consent: "user", grantType: "delegated" });
+      expect(held.principals).toHaveLength(2);
+      expect(held.principals.every((p) => p.startsWith("psn:"))).toBe(true);
+      expect(batch.usage).toMatchObject({ coverage: "app", apps: [{ externalId: "0H4AGENT0000001", lastUseAt: "2026-11-12T09:00:00.000Z" }] });
+      // a token whose app is not in the listing is counted, never guessed
+      expect(res.readOutcomes!.find((o) => o.read === "Salesforce OAuth tokens matched to connected apps")!.detail).toMatch(/^1 token/);
+      expect(res.readOutcomes!.some((o) => o.read === SALESFORCE_TOKENS_READ && o.status === "read")).toBe(true);
+      expect(JSON.stringify(res)).not.toContain("0055g0000AUsr");
+    });
+
+    it("any other write or escalation permission, or object-level write, still refuses the credential", async () => {
+      const both = fakeSalesforce({ PermissionsCustomizeApplication: true, PermissionsModifyAllData: true }, tokens);
+      const r1 = await scanner("entitlement_salesforce").run(ctxFor({ fetch: both.f, source: optIn, credential }).ctx);
+      expect(r1.credentialWriteScope).toBe("write");
+      expect(r1.readOutcomes![0]!.detail).toMatch(/PermissionsModifyAllData/);
+      expect(r1.readOutcomes![0]!.detail).not.toMatch(/PermissionsCustomizeApplication/);
+      const objects = fakeSalesforce({ PermissionsCustomizeApplication: true }, tokens, [{ Id: "110xx0000000001AAA", SobjectType: "Account" }]);
+      expect((await scanner("entitlement_salesforce").run(ctxFor({ fetch: objects.f, source: optIn, credential }).ctx)).credentialWriteScope).toBe("write");
+      expect(objects.queries.some((q) => q.includes("FROM OauthToken"))).toBe(false);
+    });
+
+    it("without Customize Application the tokens are not read (only the user's own would show); without the opt-in it is refused", async () => {
+      const none = fakeSalesforce({}, tokens);
+      const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: none.f, source: optIn, credential }).ctx);
+      expect(res.credentialWriteScope).toBe("read_only");
+      expect(none.queries.some((q) => q.includes("FROM OauthToken"))).toBe(false);
+      expect(res.readOutcomes!.find((o) => o.read === SALESFORCE_TOKENS_READ)!.detail).toMatch(/does not hold Customize Application/);
+      const noOptIn = fakeSalesforce({ PermissionsCustomizeApplication: true }, tokens);
+      expect((await scanner("entitlement_salesforce").run(ctxFor({ fetch: noOptIn.f, source, credential }).ctx)).credentialWriteScope).toBe("write");
+      expect(scanner("entitlement_salesforce").validateTarget!({ ...source.target, orgTokens: "yes" }, { orgLevel: true, include: [] })).toMatch(/orgTokens/);
+    });
   });
 
   it.each([...WRITE_SYSTEM_PERMISSIONS])("an integration user holding %s is refused before any app is read (decision 7)", async (perm) => {

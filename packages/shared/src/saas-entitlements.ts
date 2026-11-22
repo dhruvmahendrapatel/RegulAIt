@@ -131,7 +131,33 @@ export interface SaasUsageObservation {
   note: string;
   /** per app the read saw use of; an app the read lists among its grants but not here was not seen used */
   apps: SaasAppUsage[];
+  /**
+   * For a platform whose usage source is a guided, off-by-default setup (Microsoft 365's Entra activity logs, owner
+   * decision 2026-11-22): what the read observed of that setup. Absent for every other platform.
+   */
+  activityLogState?: SaasActivityLogState;
 }
+
+/**
+ * What a read observed of an off-by-default activity-log setup (ADR-0337 §5a). It is an OBSERVATION, not a lifecycle:
+ * each read replaces it, so any state may follow any other; nothing is decided from it except what to tell the admin.
+ *  - `off`: the source does not ask for activity logs (the default); nothing was read.
+ *  - `not_enabled`: the vendor refused the read (the permission is not consented, or the licence is missing).
+ *  - `unreadable`: the read failed or was cut short, so whether the logs flow cannot be told.
+ *  - `no_activity_yet`: the read worked and reached its end, but the logs hold no activity at all yet (they are not
+ *    flowing yet, so nothing is judged from them).
+ *  - `flowing`: the read worked and the logs hold activity.
+ * Coverage follows: only `flowing` observes use (`app`); the other four observe none.
+ */
+export const SAAS_ACTIVITY_LOG_STATES = ["off", "not_enabled", "unreadable", "no_activity_yet", "flowing"] as const;
+export type SaasActivityLogState = (typeof SAAS_ACTIVITY_LOG_STATES)[number];
+const ACTIVITY_LOG_OBSERVES_USE: Readonly<Record<SaasActivityLogState, boolean>> = Object.freeze({
+  off: false,
+  not_enabled: false,
+  unreadable: false,
+  no_activity_yet: false,
+  flowing: true,
+});
 
 export interface SaasAppUsage {
   externalId: string;
@@ -301,8 +327,88 @@ function checkUsage(raw: unknown): SaasUsageObservation {
         : entry,
     );
   }
-  return { coverage, windowStart: u.windowStart as string | null, note: u.note, apps: [...byApp.values()] };
+  let activityLogState: SaasActivityLogState | undefined;
+  if (u.activityLogState !== undefined) {
+    if (!(SAAS_ACTIVITY_LOG_STATES as readonly unknown[]).includes(u.activityLogState)) throw new SaasEntitlementBatchRefused("the usage block has an unknown activity-log state");
+    activityLogState = u.activityLogState as SaasActivityLogState;
+    // the state and the coverage are one fact seen twice: they must agree
+    if (ACTIVITY_LOG_OBSERVES_USE[activityLogState] !== (coverage !== "none")) throw new SaasEntitlementBatchRefused(`activity-log state '${activityLogState}' contradicts coverage '${coverage}'`);
+  }
+  return { coverage, windowStart: u.windowStart as string | null, note: u.note, apps: [...byApp.values()], ...(activityLogState ? { activityLogState } : {}) };
 }
+
+// ---------------------------------------------------------------------------
+// guided, off-by-default reads (owner decisions 2026-11-22, ADR-0337 §5a)
+// ---------------------------------------------------------------------------
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The Microsoft 365 activity-log setup, as data the admin UI shows step by step (the checklist screen is the design
+ * lane's, #453). The read it enables is Graph `reports/servicePrincipalSignInActivities`: application permission
+ * `AuditLog.Read.All`, and a tenant on Microsoft Entra ID P1 or P2.
+ */
+export const M365_ACTIVITY_LOG_SETUP = Object.freeze({
+  permission: "AuditLog.Read.All",
+  permissionType: "application",
+  license: "Microsoft Entra ID P1 or P2",
+  steps: Object.freeze([
+    Object.freeze({
+      id: "add-permission",
+      title: "Add the read permission to the app registration",
+      detail:
+        "In the Microsoft Entra admin center, open App registrations, select the app this source signs in as, open API permissions, and add the Microsoft Graph APPLICATION permission AuditLog.Read.All. It reads sign-in and audit logs and cannot change anything.",
+    }),
+    Object.freeze({
+      id: "grant-consent",
+      title: "Grant admin consent",
+      detail:
+        "Open the admin consent link (or select 'Grant admin consent' on the same API permissions page) as a Privileged Role Administrator or Global Administrator, and review the listed permissions before accepting.",
+    }),
+    Object.freeze({
+      id: "check-license",
+      title: "Check the tenant's licence",
+      detail:
+        "Service principal sign-in activity needs Microsoft Entra ID P1 or P2. In the admin center, Overview shows the licence. Without it Microsoft refuses the read and this setup stays 'not enabled'.",
+    }),
+    Object.freeze({
+      id: "turn-on",
+      title: "Turn on activity logs for this source",
+      detail: "Set the source's 'activityLogs' to 'on'. Changing an enabled source's target is a step-up, like any widening of a read.",
+    }),
+    Object.freeze({
+      id: "run-and-confirm",
+      title: "Run the source and confirm the logs flow",
+      detail:
+        "Run the source. The state reads 'flowing' once sign-in activity appears; a newly consented app can show 'no activity yet' for a while. Until the state is 'flowing', no app is judged unused.",
+    }),
+  ]),
+});
+
+/** the tenant-wide admin consent link for the source's app, or null when either id is not a GUID */
+export function m365AdminConsentUrl(tenantId: string, clientId: string | null | undefined): string | null {
+  if (!GUID.test(tenantId) || !clientId || !GUID.test(clientId)) return null;
+  return `https://login.microsoftonline.com/${tenantId.toLowerCase()}/adminconsent?client_id=${clientId.toLowerCase()}`;
+}
+
+/**
+ * What the Salesforce read sees, and cannot see, WITHOUT the admin opt-in (owner decision 2026-11-22: no broad access
+ * by default). The permission map shows these plainly next to the Salesforce apps.
+ */
+export const SALESFORCE_DEFAULT_READ = Object.freeze({
+  sees: Object.freeze([
+    "every connected app in the org, and whether any user may authorise it themselves",
+    "the profiles and permission sets an admin pre-authorised for each connected app",
+  ]),
+  cannotSee: Object.freeze([
+    "each connected app's OAuth scopes (they are only in the Metadata API, which needs write-capable permissions; never read)",
+    "which users hold a token for each app, and when each app was last used (org-wide OAuth tokens need Customize Application; read only with the admin opt-in)",
+  ]),
+});
+
+/** the trade-off an admin accepts by turning on the Salesforce org-wide token read; shown and audited with the switch */
+export const SALESFORCE_ORG_TOKENS_TRADE_OFF =
+  "The integration user must hold Customize Application, a permission that can also change the org's setup (custom objects, fields, page layouts and connected apps). RegulAIt still only reads, and still refuses the credential if the user holds any other write or escalation permission or object-level write, but the credential is no longer read-only by construction: it is recorded as 'unverified', never 'read_only'. In return the map shows which users hold a token for each connected app and when each app was last used, so unused apps can be found.";
 
 /**
  * Whether one Google API method (the `method_name` of a token `activity` event, e.g. `gmail.users.messages.get`) only

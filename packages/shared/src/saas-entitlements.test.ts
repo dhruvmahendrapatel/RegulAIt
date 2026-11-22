@@ -13,6 +13,11 @@ import {
   STATE_MACHINES,
   AGENT_VENDOR_IDENTIFIER_PATTERN,
   SaasEntitlementBatchRefused,
+  SAAS_ACTIVITY_LOG_STATES,
+  M365_ACTIVITY_LOG_SETUP,
+  SALESFORCE_DEFAULT_READ,
+  SALESFORCE_ORG_TOKENS_TRADE_OFF,
+  m365AdminConsentUrl,
   checkSaasEntitlementBatch,
   classifySaasScope,
   entitlementPlatformOf,
@@ -184,5 +189,34 @@ describe("ADR-0337 §6 agent link machine (owner decision 2026-11-17)", () => {
     expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("1234-abc.apps.googleusercontent.com")).toBe(true);
     expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("has space")).toBe(false);
     expect(AGENT_VENDOR_IDENTIFIER_PATTERN.test("x".repeat(256))).toBe(false);
+  });
+});
+
+describe("ADR-0337 §5a guided reads (owner decisions 2026-11-22)", () => {
+  const withUsage = (usage: unknown) => ({ platform: "m365", tenant: "t", complete: true, apps: [], usage });
+  it("an activity-log state must be known and agree with the coverage: only 'flowing' observes use", () => {
+    for (const state of SAAS_ACTIVITY_LOG_STATES) {
+      const coverage = state === "flowing" ? "app" : "none";
+      expect(checkSaasEntitlementBatch(withUsage({ coverage, windowStart: null, note: "n", apps: [], activityLogState: state }), "m365").usage!.activityLogState).toBe(state);
+      const other = coverage === "app" ? "none" : "app";
+      expect(() => checkSaasEntitlementBatch(withUsage({ coverage: other, windowStart: null, note: "n", apps: [], activityLogState: state }), "m365")).toThrow(SaasEntitlementBatchRefused);
+    }
+    expect(() => checkSaasEntitlementBatch(withUsage({ coverage: "none", windowStart: null, note: "n", apps: [], activityLogState: "maybe" }), "m365")).toThrow(/unknown activity-log state/);
+    // absent stays absent (every platform but Microsoft 365)
+    expect(checkSaasEntitlementBatch(withUsage({ coverage: "none", windowStart: null, note: "n", apps: [] }), "m365").usage).not.toHaveProperty("activityLogState");
+  });
+
+  it("the admin consent link names only the tenant and the app, both GUIDs; the setup is data", () => {
+    const tenant = "11111111-2222-4333-8444-555555555555";
+    const client = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE";
+    expect(m365AdminConsentUrl(tenant, client)).toBe(`https://login.microsoftonline.com/${tenant}/adminconsent?client_id=${client.toLowerCase()}`);
+    expect(m365AdminConsentUrl(tenant, "x&redirect_uri=https://evil.example")).toBeNull();
+    expect(m365AdminConsentUrl("common", client)).toBeNull();
+    expect(m365AdminConsentUrl(tenant, undefined)).toBeNull();
+    expect(M365_ACTIVITY_LOG_SETUP.permission).toBe("AuditLog.Read.All");
+    expect(M365_ACTIVITY_LOG_SETUP.steps.map((s) => s.id)).toEqual(["add-permission", "grant-consent", "check-license", "turn-on", "run-and-confirm"]);
+    expect(Object.isFrozen(M365_ACTIVITY_LOG_SETUP.steps)).toBe(true);
+    expect(SALESFORCE_DEFAULT_READ.cannotSee).toHaveLength(2);
+    expect(SALESFORCE_ORG_TOKENS_TRADE_OFF).toMatch(/Customize Application/);
   });
 });

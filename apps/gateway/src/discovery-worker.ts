@@ -99,7 +99,7 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
-import { directoryTokensProblem, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, loadDiscoverySettings, salesforceOrgTokensProblem } from "./discovery-posture.js";
 import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
@@ -669,6 +669,8 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   // ADR-0337 §4: the Directory token listing switched off after the run was queued stops here, before any credential
   const directoryOff = directoryTokensProblem(source.kind, source.target, runSettings);
   if (directoryOff) return fail("directory_tokens_not_allowed", directoryOff);
+  const orgTokensOff = salesforceOrgTokensProblem(source.kind, source.target, runSettings);
+  if (orgTokensOff) return fail("salesforce_org_tokens_not_allowed", orgTokensOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 

@@ -122,15 +122,50 @@ the grant read partial; it only makes use unobservable. Researched per vendor (o
 
 | Platform | Source | Credential cost | Coverage |
 |---|---|---|---|
-| Microsoft 365 | Graph beta `reports/servicePrincipalSignInActivities`: each app's last sign-in | `AuditLog.Read.All` (read) and Entra ID P1 or P2 | `app`: per app, no read/write split |
+| Microsoft 365 | Graph beta `reports/servicePrincipalSignInActivities`: each app's last sign-in. A guided setup, off by default (§5a) | `AuditLog.Read.All` (read) and Entra ID P1 or P2 | `app` once the logs flow: per app, no read/write split |
 | Google Workspace | Reports `token` `activity` events: API method per user and app | the same read-only Reports scope | `verb`: method names classified by the frozen `classifyGoogleApiMethod` (get, list, search, query, batchGet, export read; anything else counts as a write). Recorded only on Enterprise and Education Standard or Plus and Cloud Identity Premium, so a tenant with no event at all is `none`, never "unused" |
 | Google (Directory opt-in) | none: the token listing carries no activity | n/a | `none` |
-| Salesforce | none yet: login history needs Monitor Login History, the free API event log files need View Event Log Files and keep one day | not held by the read-only integration user | `none` (follow-up) |
+| Salesforce | `OauthToken.LastUsedDate`, only with the audited org-wide token opt-in (§4a); otherwise none (login history needs Monitor Login History, the API event log files need View Event Log Files and keep one day) | Customize Application, by opt-in only | `app` with the opt-in, else `none` |
 | Slack | none: access and integration logs need the legacy `admin` scope, which includes a write method; audit logs carry app lifecycle events only | refused (write-capable) | `none` |
 
 Not used: Microsoft Graph activity logs (the only per-permission, per-verb Microsoft signal) live in a customer's Log
-Analytics workspace, not the Graph API; a follow-up can read them where the customer exports them. Salesforce
-`OauthToken.LastUsedDate` needs Customize Application (the open owner question 3).
+Analytics workspace, not the Graph API; a follow-up can read them where the customer exports them.
+
+**§5a. Guided, off-by-default reads (owner decisions 2026-11-22).**
+
+- **Microsoft 365 activity logs.** The sign-in activity read runs only when the source's `activityLogs` is `on`. Each
+  read records what it observed of the setup, `SAAS_ACTIVITY_LOG_STATES`, in `saas_entitlement_usage_reads.activity_log_state`:
+  - `off`: the default; nothing is asked of Graph.
+  - `not_enabled`: Graph refused the read (no consent, or no P1 or P2).
+  - `unreadable`: the read failed or was cut short.
+  - `no_activity_yet`: the read worked but the logs hold no activity at all.
+  - `flowing`: the logs hold activity.
+
+  Only `flowing` observes use (coverage `app`); the batch check refuses a state that contradicts its coverage. A tenant
+  with no activity at all is not judged: that would flag every app unused. The state is an observation that each read
+  replaces, not a lifecycle, so it has no declared machine. `GET /v1/discovery/entitlements/sources/:sourceId/read-setup`
+  serves the setup as data the UI shows:
+  - the exact admin steps (`M365_ACTIVITY_LOG_SETUP`);
+  - the permission and licence;
+  - the tenant-wide admin consent link, built only from the tenant and the app's client id, both GUIDs;
+  - the observed state, which reads `not_checked` until a read since the source asked for logs.
+
+  The checklist screen is the design lane's (#453; KNOWN_UI_GAPS).
+- **Salesforce.** No broad access by default. The default read states plainly what it cannot see
+  (`SALESFORCE_DEFAULT_READ`), in the run's outcomes and in the read-setup view: OAuth scopes are never read (Metadata
+  API, write-capable), and per-user tokens and last use need the opt-in. The opt-in (§4a) is two-keyed:
+  - the org switch `salesforceOrgTokens`: off by default, turned on with a `settings_relax` step-up bound to it, and
+    audited with `SALESFORCE_ORG_TOKENS_TRADE_OFF`;
+  - the source's `orgTokens: on`: refused at create, widen, enable, run and in the worker while the switch is off.
+
+  With both, the integration user may hold Customize Application, and only that. Every other write or escalation
+  permission, and any object-level write, still refuses the credential, which is recorded `unverified`, never
+  `read_only`. The reader then selects only `AppName, UserId, LastUsedDate FROM OauthToken`:
+  - a token is matched to a connected app only by a unique name, and the rest are counted, never guessed;
+  - each holder becomes a pseudonymised principal of a `connected_app:user_token` grant;
+  - each app's latest use becomes coverage `app`.
+
+  Without Customize Application on the user, tokens are not read: only the user's own would be visible.
 
 **The rules (slice 3a), `SAAS_FINDING_RULES_V1`.** A frozen, versioned set in the ADR-0092 discipline (id, severity
 class, a rationale rendered strictly from the evidence, a limits paragraph on every payload; no score). It is a sibling
@@ -259,4 +294,14 @@ Salesforce JWT bearer assertion.
    an admin; partial or fuzzy matches stay admin-only (§6).
 3. Salesforce: should an admin be allowed to grant the integration user Customize Application (org-wide OAuth tokens,
    per-user grants and `LastUsedDate` usage) or metadata read (OAuth scopes), knowing both can also change the org?
-   Default: no; connected apps, self-authorisation and pre-authorisations only.
+   Default: no; connected apps, self-authorisation and pre-authorisations only. **Answered 2026-11-22, below.**
+
+### Owner decisions (2026-11-22)
+
+1. Salesforce: **no broad access by default.** The integration user gets neither Customize Application nor metadata
+   read. The map shows what the narrower permissions reveal and states plainly what it cannot see. An admin may opt in
+   to Customize Application, for org-wide OAuth tokens only (never metadata). That choice is audited and its trade-off
+   explained (§5a).
+2. Microsoft 365 activity logs: **a guided setup, off by default.** The backend detects whether the Graph activity
+   logs are flowing and reports "not enabled" honestly until they are. The exact admin steps and the consent link are
+   data the UI shows. The in-app checklist screen belongs to the design lane (KNOWN_UI_GAPS, #453) (§5a).

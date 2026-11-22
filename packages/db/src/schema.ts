@@ -8456,6 +8456,10 @@ export const discoverySettings = pgTable(
     /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
      * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
     googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
+    /** ADR-0337 §4a (owner, 2026-11-22): whether a Salesforce entitlement source may read the org-wide OAuth tokens, which
+     * needs Customize Application (off by default; turning it on is a `settings_relax` step-up bound to
+     * `discoverySalesforceOrgTokens`, audited with its trade-off). Pending migration `saas_entitlement_usage`. */
+    salesforceOrgTokensEnabled: boolean("salesforce_org_tokens_enabled").notNull().default(false),
     // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
     endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     // ADR-0338: governed vendor agent control (disable, quarantine, restore), off (pending migration vendor_agent_control)
@@ -18456,6 +18460,8 @@ export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrinci
 // use, and each app's latest observed use. Times only move forward (a later read never makes an app look less used).
 export const SAAS_ENTITLEMENT_USAGE_COVERAGES = ["none", "app", "verb"] as const;
 
+/** SAAS_ACTIVITY_LOG_STATES (@regulait/shared), as a literal tuple for the column type; the CHECK below pins them */
+export const SAAS_ACTIVITY_LOG_STATE_VALUES = ["off", "not_enabled", "unreadable", "no_activity_yet", "flowing"] as const;
 /** the usage coverage of a source's latest read (one row per source; replaced by each read) */
 export const saasEntitlementUsageReads = pgTable(
   "saas_entitlement_usage_reads",
@@ -18467,11 +18473,18 @@ export const saasEntitlementUsageReads = pgTable(
     /** the earliest moment the read could see use from; null when the vendor's last-use time is not window-bounded */
     windowStart: timestamp("window_start", { withTimezone: true }),
     note: text("note").notNull(),
+    /** what the read observed of a guided activity-log setup (Microsoft 365 only; null elsewhere). An observation each
+     * read replaces, not a lifecycle: SAAS_ACTIVITY_LOG_STATES (@regulait/shared) */
+    activityLogState: text("activity_log_state", { enum: SAAS_ACTIVITY_LOG_STATE_VALUES }),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
     runId: uuid("run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
   },
   (t) => [
     check("saas_entitlement_usage_reads_coverage_check", sql`${t.coverage} IN ('none', 'app', 'verb')`),
+    check(
+      "saas_entitlement_usage_reads_activity_log_state_check",
+      sql`${t.activityLogState} IS NULL OR ${t.activityLogState} IN ('off', 'not_enabled', 'unreadable', 'no_activity_yet', 'flowing')`,
+    ),
     check("saas_entitlement_usage_reads_note_check", sql`length(${t.note}) BETWEEN 1 AND 300`),
   ],
 );

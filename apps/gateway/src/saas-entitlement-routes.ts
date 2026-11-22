@@ -22,7 +22,11 @@ import {
   agentVendorIdentifiers,
   agents,
   auditLog,
+  discoveryCredentials,
+  discoverySources,
+  isNull,
   saasEntitlementApps,
+  saasEntitlementUsageReads,
   type Db,
 } from "@regulait/db";
 import {
@@ -31,8 +35,13 @@ import {
   SAAS_ENTITLEMENT_PLATFORMS,
   SAAS_FINDING_WINDOW_DAYS_MAX,
   SAAS_FINDING_WINDOW_DAYS_MIN,
+  M365_ACTIVITY_LOG_SETUP,
+  SALESFORCE_DEFAULT_READ,
+  SALESFORCE_ORG_TOKENS_TRADE_OFF,
+  m365AdminConsentUrl,
   parseSaasFindingWindowDays,
 } from "@regulait/shared";
+import { loadDiscoverySettings } from "./discovery-posture.js";
 import { SAAS_FINDINGS_PER_RULE_MAX, computeSaasFindings } from "./saas-entitlement-findings.js";
 import { latestReviewsByKey } from "./saas-finding-reviews.js";
 import { GUID } from "./discovery-wider-scanners.js";
@@ -46,6 +55,7 @@ const isUniqueViolation = (e: unknown): boolean => {
 const MAX_PAGE = 200;
 
 const appParam = z.object({ appId: z.string().uuid() });
+const sourceParam = z.object({ sourceId: z.string().uuid() });
 const identifierParam = z.object({ identifierId: z.string().uuid() });
 const page = { after: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(50) };
 const appsQuery = z.object({ sourceId: z.string().uuid(), ...page }).strict();
@@ -95,6 +105,70 @@ export function registerSaasEntitlementRoutes(app: FastifyInstance, db: Db): voi
     const reviews = await latestReviewsByKey(db, report.rules.flatMap((r) => r.findings.map((f) => f.key)));
     for (const r of report.rules) for (const f of r.findings) f.review = reviews.get(f.key) ?? null;
     return report;
+  });
+
+  // Owner decisions 2026-11-22 (ADR-0337 §4a and §5a): what one entitlement source's read can see and what it needs
+  // to see more, as data the admin UI shows (the checklist screen is the design lane's, #453). Reads only: no row, no
+  // audit entry, no vendor call. Microsoft 365: the guided activity-log setup and its observed state. Salesforce: what
+  // the default read sees and cannot see, and the org-wide token opt-in with its trade-off.
+  app.get("/v1/discovery/entitlements/sources/:sourceId/read-setup", async (req, reply) => {
+    const p = sourceParam.safeParse(req.params);
+    if (!p.success) return badRequest(reply, p.error);
+    const [source] = await db
+      .select({ id: discoverySources.id, kind: discoverySources.kind, target: discoverySources.target })
+      .from(discoverySources)
+      .where(eq(discoverySources.id, p.data.sourceId));
+    if (!source) return reply.status(404).send({ error: "not_found", detail: "no such discovery source" });
+    const target = source.target as Record<string, unknown>;
+    const [read] = await db
+      .select({ coverage: saasEntitlementUsageReads.coverage, note: saasEntitlementUsageReads.note, activityLogState: saasEntitlementUsageReads.activityLogState, recordedAt: saasEntitlementUsageReads.recordedAt, runId: saasEntitlementUsageReads.runId })
+      .from(saasEntitlementUsageReads)
+      .where(eq(saasEntitlementUsageReads.sourceId, source.id));
+    const lastRead = read ? { coverage: read.coverage, note: read.note, recordedAt: read.recordedAt.toISOString(), runId: read.runId } : null;
+    if (source.kind === "entitlement_m365") {
+      const requested = target.activityLogs === "on";
+      const [cred] = await db
+        .select({ publicConfig: discoveryCredentials.publicConfig })
+        .from(discoveryCredentials)
+        .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
+      // the state the latest read OBSERVED; a source asking for logs that has not been read since says so, never a guess
+      const observed = read?.activityLogState ?? null;
+      const state = !requested ? "off" : observed && observed !== "off" ? observed : "not_checked";
+      return {
+        sourceId: source.id,
+        platform: "m365",
+        activityLogs: {
+          requested,
+          state,
+          permission: M365_ACTIVITY_LOG_SETUP.permission,
+          permissionType: M365_ACTIVITY_LOG_SETUP.permissionType,
+          license: M365_ACTIVITY_LOG_SETUP.license,
+          steps: M365_ACTIVITY_LOG_SETUP.steps,
+          consentUrl: m365AdminConsentUrl(String(target.tenantId ?? ""), cred?.publicConfig.clientId),
+        },
+        lastRead,
+      };
+    }
+    if (source.kind === "entitlement_salesforce") {
+      const settings = await loadDiscoverySettings(db);
+      const requested = target.orgTokens === "on";
+      // the token read happens only when the source asks AND the org switch allows it (and the user holds the permission)
+      const reads = requested && settings.salesforceOrgTokens;
+      return {
+        sourceId: source.id,
+        platform: "salesforce",
+        orgTokens: {
+          requested,
+          allowed: settings.salesforceOrgTokens,
+          permission: "Customize Application",
+          tradeOff: SALESFORCE_ORG_TOKENS_TRADE_OFF,
+        },
+        sees: reads ? [...SALESFORCE_DEFAULT_READ.sees, "which users hold a token for each connected app, and when each app was last used"] : SALESFORCE_DEFAULT_READ.sees,
+        cannotSee: reads ? [SALESFORCE_DEFAULT_READ.cannotSee[0]] : SALESFORCE_DEFAULT_READ.cannotSee,
+        lastRead,
+      };
+    }
+    return reply.status(409).send({ error: "no_read_setup", detail: "only Microsoft 365 and Salesforce entitlement sources have a guided read setup" });
   });
 
   // the apps one entitlement source holds, each with its link state and what can be done with it next

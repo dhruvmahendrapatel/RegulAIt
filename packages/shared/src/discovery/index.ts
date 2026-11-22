@@ -297,6 +297,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   endpointMcpConfig: "discoveryEndpointMcpConfig",
   /** ADR-0337 §4: allowing Google Workspace sources to use the Directory token listing (its scope could revoke tokens) */
   googleDirectoryTokens: "discoveryGoogleDirectoryTokens",
+  /** ADR-0337 §4a: allowing Salesforce sources to read org-wide OAuth tokens (needs Customize Application) */
+  salesforceOrgTokens: "discoverySalesforceOrgTokens",
   /** ADR-0331: turning on the governed removal of flagged MCP servers from endpoints (signed directives) */
   endpointAddonRemoval: "discoveryEndpointAddonRemoval",
   /** ADR-0338: turning on governed vendor agent control (disable, quarantine, restore through the vendor admin API) */
