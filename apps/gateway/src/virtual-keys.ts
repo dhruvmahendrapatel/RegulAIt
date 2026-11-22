@@ -422,11 +422,16 @@ function publicKey(row: VirtualKeyRow) {
     upstreamCredentialId: row.upstreamCredentialId ?? null,
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
+    /** ADR-0366 slice 2: a contained key is HALTED (reversible), refused `virtual_key_halted` until released */
+    haltedAt: row.haltedAt,
+    haltedReason: row.haltedReason,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
-    /** derived, so a caller does not have to re-implement the expiry rule */
+    /** derived, so a caller does not have to re-implement the expiry rule; false while halted */
     active:
-      row.revokedAt === null && (row.expiresAt === null || row.expiresAt.getTime() > Date.now()),
+      row.revokedAt === null &&
+      row.haltedAt === null &&
+      (row.expiresAt === null || row.expiresAt.getTime() > Date.now()),
   };
 }
 
@@ -438,10 +443,11 @@ function publicKey(row: VirtualKeyRow) {
 
 export type VirtualKeyListRow = ReturnType<typeof publicKey> & { ownerEmail: string | null };
 
-const vkStateSql = sql<string>`case when ${virtualKeys.revokedAt} is not null then 'revoked' when ${virtualKeys.expiresAt} is not null and ${virtualKeys.expiresAt} <= now() then 'expired' else 'active' end`;
-const vkState = (k: VirtualKeyListRow) => (k.revokedAt ? "revoked" : k.active ? "active" : "expired");
+// the derived state, revoked > halted > expired > active (ADR-0366 slice 2: a contained key reads halted, never active)
+const vkStateSql = sql<string>`case when ${virtualKeys.revokedAt} is not null then 'revoked' when ${virtualKeys.haltedAt} is not null then 'halted' when ${virtualKeys.expiresAt} is not null and ${virtualKeys.expiresAt} <= now() then 'expired' else 'active' end`;
+const vkState = (k: VirtualKeyListRow) => (k.revokedAt ? "revoked" : k.haltedAt ? "halted" : k.active ? "active" : "expired");
 
-const vkListFilters = z.object({ state: z.enum(["active", "expired", "revoked"]).optional() }).strict();
+const vkListFilters = z.object({ state: z.enum(["active", "halted", "expired", "revoked"]).optional() }).strict();
 
 const vkListReader = (db: Db): ListReader<VirtualKeyListRow> => ({
   fetch: async (q) => {

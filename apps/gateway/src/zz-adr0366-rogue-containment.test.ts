@@ -530,6 +530,27 @@ describe("ADR-0366 slice 2: containing a virtual key (unregistered AI traffic)",
     const alertId = await trafficAlert(k.id);
     expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 1 });
     expect((await call(k.header)).json().error).toBe("virtual_key_halted");
+    // #1196 review [1]: the admin list shows the contained key as halted (with why), never active
+    type Listed = { id: string; active: boolean; haltedAt: string | null; haltedReason: string | null };
+    const keysAt = async (state: string) => {
+      const out: Listed[] = [];
+      let next = "";
+      for (let guard = 0; guard < 50; guard++) {
+        const res = await app.inject({ method: "GET", url: `/v1/virtual-keys?limit=100&state=${state}${next}`, headers: AUTH });
+        expect(res.statusCode, res.body).toBe(200);
+        const body = res.json();
+        out.push(...(body.items as Listed[]));
+        if (body.nextCursor) next = `&cursor=${encodeURIComponent(body.nextCursor)}`;
+        else if (body.nextOffset !== null && body.nextOffset !== undefined) next = `&offset=${body.nextOffset}`;
+        else break;
+      }
+      return out.filter((x) => x.id === k.id);
+    };
+    const [halted] = await keysAt("halted");
+    expect(halted).toMatchObject({ active: false });
+    expect(halted!.haltedAt).not.toBeNull();
+    expect(halted!.haltedReason).toContain("contained (ADR-0366)");
+    expect(await keysAt("active")).toHaveLength(0);
     const c = (await containmentOf(alertId))!;
     const asked = await as(adminId, releaseStep(c.id), "POST", `/v1/containments/${c.id}/release`, { reason: `a366 key reviewed ${RUN}` });
     expect(asked.statusCode, asked.body).toBe(202);

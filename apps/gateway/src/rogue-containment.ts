@@ -175,7 +175,7 @@ export async function haltVirtualKeyInTx(
   const [before] = await tx.select().from(virtualKeys).where(eq(virtualKeys.id, keyId)).for("update");
   if (!before || before.revokedAt) return null;
   if (before.haltedAt) return { changed: false, name: before.name };
-  await tx.update(virtualKeys).set({ haltedAt: new Date(), haltedReason: reason, haltedByUserId: actor.userId }).where(eq(virtualKeys.id, keyId));
+  await tx.update(virtualKeys).set({ haltedAt: sql`now()`, haltedReason: reason, haltedByUserId: actor.userId }).where(eq(virtualKeys.id, keyId));
   await tx.insert(auditLog).values({
     userId: actor.userId ?? NO_IDENTITY,
     objectType: "virtual_key",
