@@ -194,6 +194,7 @@ import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
+import { registerRepetitiveAskRoutes } from "./repetitive-asks.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -502,6 +503,7 @@ import {
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerAgentRiskProofRoutes } from "./agent-risk-proof-routes.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
@@ -575,6 +577,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerResourceRuleRoutes } from "./resource-rule-routes.js";
 import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
@@ -686,6 +689,7 @@ import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory
 import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
+import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
@@ -704,6 +708,7 @@ import {
   registerCustomClassifierRoutes,
 } from "./custom-classifiers.js";
 import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
+import { registerAiAppRiskRoutes } from "./ai-app-risk.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -6002,6 +6007,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
   registerDecisionTableSwitchRoutes(app, db);
+  registerRepetitiveAskRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6298,6 +6304,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpToolSyncRoutes(app, db);
   // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
   registerMcpDefinitionPinRoutes(app, db);
+  registerAgentRiskProofRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
   registerMcpSapBusinessRoutes(app, db);
@@ -6324,6 +6331,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0251 (P-01): admin routes for the governed core's resource approval rules and rate limits
+  registerResourceRuleRoutes(app, db);
   // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
   registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
@@ -6451,6 +6460,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRobotRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
   registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0358 (lane E39): AI adoption analytics, admin-only aggregates
+  registerAdoptionAnalyticsRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -6572,6 +6583,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssuranceSettingsRoutes(app, db);
   // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
   registerSensitivityLabelRoutes(app, db);
+  // ADR-0363 slice 3: AI app risk attributes and the risk-ranked shadow-AI inventory (read-only; UI is a #453 gap)
+  registerAiAppRiskRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);

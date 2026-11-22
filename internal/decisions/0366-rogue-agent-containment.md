@@ -184,6 +184,26 @@ As built (#1134, second update):
   `deny_release` (replacing the admin-only `release`). Schema: `release_requested_by_user_id`, `release_requested_at`,
   `release_approval_id`; `released_by_user_id` is now the approving administrator.
 
+## Review fixes (#1134, R2 + S4 at 35f07e9e)
+
+- **ADR-0124's unhalt defers to containment.** `POST /v1/agents/:agentId/unhalt` refuses `409 held_by_containment`
+  (naming the containments and pointing to the release route) while any containment of that agent is `contained` or
+  `release_pending`. It checks before the step-up is spent and again under the row lock. One admin can therefore
+  never lift a containment's halt; only an approved release can.
+- **One unhalt per subject.** `unhaltAgentInTx` is extracted from the route (as `haltAgentInTx` was for ADR-0182),
+  with a builder-agent mirror `unhaltBuilderAgentInTx`. An approved release lifts the halt through these, so the
+  subject's own history reads HALTED … LIFTED with the previous reason (`execution-agent-unhalted`,
+  `execution-builder-agent-unhalted`).
+- **A builder agent contained mid-turn makes no further call.** `stepGate` re-reads the builder halt before every
+  model step and every tool call (audited `builder-agent-halted-refused` with the phase).
+- **The list uses ADR-0031's keyset primitives** (`pagination.ts`: microsecond-exact, opaque cursor), with a
+  `(created_at, id)` index.
+- **Guarded moves.** Every lifecycle UPDATE uses `whereFrom` with `.returning()`, so a concurrent change fails the
+  decision instead of being silently lost.
+- Still triage-low, recorded and not changed: halt ownership is decided by the reason prefix plus "no other open
+  containment"; some timestamps come from the application clock; an unrouted proposal (an agent with no steward) has
+  no admin dismiss yet; a contained builder agent's export/import carry-over (slice 2 follow-up).
+
 ## Consequences
 
 - An agent seen acting fully autonomously while declared `assist` is halted the moment the monitor raises the episode,
@@ -206,6 +226,8 @@ As built (#1134, second update):
    revoked**: `revoked_at` is permanent, and the owner decision of 2026-11-21 makes every containment reversible by an
    approved release. `resolveVirtualKey`, the one place a `rglv_` token is resolved, refuses a halted key with the new
    holder-facing refusal `virtual_key_halted`. `haltVirtualKeyInTx` is audited `execution-virtual-key-halted`.
+   An approved release lifts it through `unhaltVirtualKeyInTx` (audited `execution-virtual-key-unhalted` with the
+   previous reason), the same one-unhalt-per-subject rule as slice 1's review fixes; there is no other key unhalt path.
 3. **Paths.** Unchanged from slice 1 and its addendum: a proposal by default (the key's owner is the steward who may
    not decide it), automatic at or above the threshold, release by approval. A revoked key is not contained (nothing
    to halt).
@@ -218,4 +240,6 @@ As built (#1134, second update):
   leaves shadow mode.
 - Containment of a project for `unregistered_ai_traffic` (the virtual key is slice 2).
 - Re-evaluating a refreshed episode whose severity escalated (slice 1 decides at raise).
+- A halted builder agent's export/import carry-over (#1134 security review [6], triage-low: an import creates a new,
+  unhalted agent that the monitor must flag again). Not built in slice 2.
 - The admin screen (#453): containments list, release with step-up, policy settings.

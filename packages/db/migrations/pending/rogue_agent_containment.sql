@@ -144,7 +144,7 @@ CREATE INDEX IF NOT EXISTS "agent_containments_agent_idx" ON "agent_containments
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_containments_builder_agent_idx" ON "agent_containments" ("builder_agent_id", "status");
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "agent_containments_created_idx" ON "agent_containments" ("created_at");
+CREATE INDEX IF NOT EXISTS "agent_containments_created_idx" ON "agent_containments" ("created_at", "id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_containments_release_approval_idx" ON "agent_containments" ("release_approval_id");
 --> statement-breakpoint

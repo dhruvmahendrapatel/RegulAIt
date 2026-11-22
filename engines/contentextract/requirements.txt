@@ -1,0 +1,7 @@
+# ADR-0362 slice 1 — the content-extraction image's Python closure, pinned by version AND sha256 (our lockfile).
+# Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
+# for CPython 3.12 on linux/amd64 (python:3.12-slim-trixie, pinned by digest in the Dockerfile). The hash is the
+# sha256 of the exact wheel PyPI serves (py3-none-manylinux_2_17_x86_64), recorded 2026-11-17. pypdfium2 has no
+# Python dependencies; everything else the extractor uses is the standard library.
+pypdfium2==5.15.2 \
+    --hash=sha256:dc31aea5b0fb9fefc9b537a65f4113980b2c40798445736a7e6565bc85161e37

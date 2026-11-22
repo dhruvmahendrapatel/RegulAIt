@@ -5,7 +5,7 @@
 - **Index**: **Repetitive ask → smaller model (pillar 6): find clusters of near-duplicate prompts sent to one agent (SimHash plus TF-IDF cosine, computed locally, ids and fingerprints only), suggest a cheaper entitled agent from the existing right-sized routing, require the ADR-0044 eval harness to pass on a sample before any switch, then the ADR-0327 shadow/approve/revert pattern; savings through pillar 5. Off by default.**
 - **Backlog item**: owner direction 2026-11-15 (lane E12, item 2); PENDING fragment `2026-11-21-e12-repetitive-asks-pending.md`
 - **Built in**: lane E12, one PR per slice (slice 1: this ADR and the detector in `packages/optimizer-kernel/src/repetitive-asks.ts`)
-- **Migration**: none in slice 1
+- **Migration**: none in slice 1; slice 2 adds `pending/repetitive_asks.sql` (settings, clusters, cluster span sample), numbered at merge
 - **Related**: ADR-0327 (the same lifecycle for rule-like steps, reused), ADR-0044 (eval harness), ADR-0042 (trace
   capture posture), ADR-0067 (the one tokenizer), ADR-0119 (semantic cache, exact match only), ADR-0176 (open source
   first), ADR-0180 (secure by default), ADR-0200 (3NF, security checklist), ADR-0251 (one governed decision core),
@@ -98,3 +98,27 @@ Facts read from the code on `main` (05aa6293 and later):
 - Slice 1 (built): `findRepetitiveAsks`, `askFingerprint` and `repetitiveAskOptionProblems` in
   `@regulait/optimizer-kernel`, with 7 tests, including that the result holds no prompt text and that the cosine
   check is required as well as the fingerprint.
+- Slice 2 (built): detection at the gateway (`apps/gateway/src/repetitive-asks.ts`, migration `repetitive_asks`).
+  - **Off by default.** `repetitive_ask_settings` is a singleton, and no row means off. Turning detection on, or
+    relaxing a threshold (a wider Hamming bound, a lower similarity or size floor), needs a `settings_relax` step-up.
+    Every change is audited. The kernel's `REPETITIVE_ASK_FLOORS` (5 bits, 0.8, 10 asks) bound both the API schema and
+    the database CHECKs.
+  - **The scan.**
+    - `POST /v1/repetitive-asks/scan` runs at most every 10 minutes. It covers the 10 costliest agents over the
+      rule-step scan window. It reads only captured, unwithheld, successful previews, never a rule-served span.
+    - `findRepetitiveAsks` runs on a worker thread. The kernel's existing offload now runs either job through one
+      bounded worker.
+    - Each cluster is upserted on `(agent, fingerprint)` with its counts, cohesion and measured cost, plus a sample of
+      up to 50 member span ids (`repetitive_ask_cluster_spans`, a join table; a span pruned by retention leaves it).
+      No prompt text is stored or audited.
+  - **The suggestion.** It is the agent that `routeModel` picks for the cluster's representative ask among enabled
+    agents. Routing itself keeps to priced agents no higher than the one that answered. The projected monthly saving
+    is the cluster's measured window cost, scaled to 30 days, multiplied by the price share saved at the routing
+    estimate. It is advisory: serving (slice 4) narrows each request's own entitlement-filtered candidates.
+  - **Lifecycle.** `REPETITIVE_ASK_CLUSTER_MACHINE` (owner rule 12) has the states `suggested` and `dismissed`.
+    Dismissal is final, and a rescan refreshes the evidence, never the status.
+  - **Routes.** All admin-only and API-only; UI-D builds the page:
+    - `GET` and `PUT /v1/repetitive-asks/settings`;
+    - `POST /v1/repetitive-asks/scan`;
+    - `GET /v1/repetitive-asks/clusters` (ADR-0226 list contract);
+    - `POST /v1/repetitive-asks/clusters/:id/dismiss`.

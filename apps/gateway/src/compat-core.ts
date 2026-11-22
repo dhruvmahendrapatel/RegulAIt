@@ -104,7 +104,7 @@ import {
 import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
   engineKeyProjectPin,
   loadVirtualKeyContext,
@@ -539,6 +539,8 @@ export interface CompatPrepared {
    * for every other caller.
    */
   workloadGrantId?: string | undefined;
+  /** ADR-0251 slice 4b: the request's session facts, read during prepare, for the governed core's ABAC v5 request */
+  principal: AbacPrincipalContext;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -977,6 +979,7 @@ export async function prepareCompatCall(
       ignoredFields: args.ignoredFields ?? [],
       virtualKey,
       ...(req.authCtx.via === "workload" ? { workloadGrantId: req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT } : {}),
+      principal: abacPrincipalFromRequest(req),
       routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
     },
   };
@@ -1089,6 +1092,7 @@ export async function executeCompatCall(
       : undefined);
   const dispatchArgs: GovernedDispatchArgs = {
     ...(engineGrantId ? { delegationGrantId: engineGrantId } : {}),
+    principal: prepared.principal, // ADR-0251 slice 4b
     userId: prepared.userId,
     served: prepared.served,
     requestedAgentId: prepared.requested.id,

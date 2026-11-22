@@ -2095,6 +2095,10 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0358 (lane E39): the adoption-analytics privacy policy writes and each per-person ranking read; the CMDB
+        // sync connector (its policy, credential and enable writes, and each sync run). Plain text column — no DDL needed.
+        "adoption_analytics",
+        "cmdb_connector",
       ],
     })
       .notNull()
@@ -4212,6 +4216,10 @@ export const complianceProfiles = pgTable("compliance_profiles", {
   /** ADR-0346 decision 9 (migration fairness_evaluation): this framework REQUIRES the fairness promotion gate on the
    * model cards of projects it classifies. OR-composed like `mrmRequired`; NULL and false never relax the org setting. */
   fairnessGateRequired: boolean("fairness_gate_required"),
+  /** ADR-0347 (pending migration agent_memory_governance): the longest an agent memory or shared-context write on a
+   * project carrying this tag may live, in hours. Composed MIN across a project's profiles and with the org's
+   * `agentMemoryTtlHours`, so a tag can only shorten it. NULL = no opinion. Raising or clearing it is a loosening. */
+  memoryTtlHours: integer("memory_ttl_hours"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   /** ADR-0208 (migration 0223): a retired profile is read-only — no new version, no new carrier. Retire is refused
    * while any project, pending project, team or infra resource carries the tag. DB CHECK ties retired_* to status. */
@@ -4289,11 +4297,24 @@ export const projectContextItems = pgTable(
     contributedByTeamId: uuid("contributed_by_team_id"),
     /** §9.4 promotion provenance: the team-local artifact this came from */
     sourceArtifactId: uuid("source_artifact_id"),
+    /** ADR-0347 provenance: the orchestration run and task-graph node that produced this write, checked at write time
+     * (same project, the caller's own run). FK-free like the contributor ids: provenance is a governance record that
+     * must survive the run's deletion. */
+    producedByRunId: uuid("produced_by_run_id"),
+    producedByNodeId: text("produced_by_node_id"),
+    /** ADR-0347 provenance, point-in-time evidence (deliberately not joined): the agent that served that node when
+     * this was written, read from the run's own node_dispatched event, never from the caller. */
+    producedByAgentId: uuid("produced_by_agent_id"),
+    /** ADR-0347: mandatory expiry, set from the database clock at write time. Reads stop returning the row after it. */
+    expiresAt: timestamp("expires_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now() + interval '24 hours'`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("project_context_project_key_rev_uq").on(t.projectId, t.key, t.revision),
     index("project_context_project_key_idx").on(t.projectId, t.key),
+    index("project_context_expires_idx").on(t.expiresAt),
   ],
 );
 
@@ -5212,6 +5233,13 @@ export const orgSettings = pgTable(
     sapUnattributedWritesAllowed: boolean("sap_unattributed_writes_allowed").notNull().default(false),
     /** false (default) = the seeded approval rule covers writes only; true = it covers every tool on the server */
     sapReadsApproveFirst: boolean("sap_reads_approve_first").notNull().default(false),
+    /** ADR-0347 (pending migration agent_memory_governance): how long an agent memory or shared-context write lives,
+     * in hours, before reads stop returning it (default 24, CHECK 1..8760). A per-classification
+     * `compliance_profiles.memory_ttl_hours` can only shorten it. Longer is a settings_relax step-up, audited. */
+    agentMemoryTtlHours: integer("agent_memory_ttl_hours").notNull().default(24),
+    /** ADR-0347: 'block' (strict default) refuses a memory write the injection, jailbreak, secret or PII scan flags;
+     * 'log' stores it and audits the hits. 'log' is a settings_relax step-up, audited. */
+    agentMemoryScanMode: text("agent_memory_scan_mode", { enum: ["block", "log"] }).notNull().default("block"),
     /** ADR-0175 A5 (migration 0140): the release-age cooldown in days. 7
      * (DEFAULT since ADR-0181, migration 0159). 0 = off; an admin may relax
      * it (audited). */
@@ -6098,8 +6126,13 @@ export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 // refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
 // behaviour exactly.
 
-/** what a matching ABAC policy does to a call the RBAC layer already allowed */
-export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+/**
+ * What a matching ABAC policy does to a call the RBAC layer already allowed. ADR-0354 adds the graduated responses
+ * (the declared table is `@regulait/policy-kernel`'s `AGENT_RESPONSE_TABLE`; the kernel's `POLICY_RESPONSES` is the
+ * same list, pinned by a test): advise allows with guidance, correct denies with a safe alternative, block_session
+ * denies and ends the session, disable denies and quarantines the agent. None widens access.
+ */
+export const ABAC_POLICY_MODES = ["advise", "require_approval", "correct", "forbid", "block_session", "disable"] as const;
 
 /** Shared-lockable policy generation for exact-action approval consumption. */
 export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
@@ -6143,6 +6176,12 @@ export const abacPolicyVersions = pgTable(
     /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
      * approver a paused call routes to — the SAME queue, not a parallel one */
     approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0354 — the static, admin-reviewed text an `advise` or `correct` response returns to the agent. Plain text
+     * (validated by `parseAgentGuidance`; the CHECKs refuse markup and bound the length). Required for advise and
+     * correct, NULL for every other mode (DB CHECK). */
+    guidanceMessage: text("guidance_message"),
+    /** ADR-0354 — `correct` only: the approved route the agent may take instead. Advisory text, never a grant. */
+    guidanceAlternative: text("guidance_alternative"),
     /** policy unit tests travelling WITH the version they describe */
     testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
     authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -6151,7 +6190,18 @@ export const abacPolicyVersions = pgTable(
   (t) => [
     uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
     index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
-    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_mode_check",
+      sql`${t.mode} IN ('advise','require_approval','correct','forbid','block_session','disable')`,
+    ),
+    check(
+      "abac_policy_versions_guidance_check",
+      sql`CASE ${t.mode} WHEN 'advise' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NULL WHEN 'correct' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NOT NULL ELSE ${t.guidanceMessage} IS NULL AND ${t.guidanceAlternative} IS NULL END`,
+    ),
+    check(
+      "abac_policy_versions_guidance_text_check",
+      sql`(${t.guidanceMessage} IS NULL OR (char_length(${t.guidanceMessage}) BETWEEN 1 AND 500 AND ${t.guidanceMessage} !~ '[<>[:cntrl:]]')) AND (${t.guidanceAlternative} IS NULL OR (char_length(${t.guidanceAlternative}) BETWEEN 1 AND 300 AND ${t.guidanceAlternative} !~ '[<>[:cntrl:]]'))`,
+    ),
     check(
       "abac_policy_versions_approver_check",
       sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
@@ -12175,6 +12225,15 @@ export const builderAgents = pgTable(
     autonomyDeclaredBy: uuid("autonomy_declared_by").references(() => users.id, { onDelete: "set null" }),
     autonomyDeclaredAt: timestamp("autonomy_declared_at", { withTimezone: true }),
     autonomyNote: text("autonomy_note"),
+    // --- ADR-0180 addendum (lane E51, pending migration builder_agent_autonomy_enforcement) --------------------
+    /** whether an unmet autonomy floor blocks a delegated or autonomous run (AUTONOMY_ENFORCEMENT_MACHINE in
+     * @regulait/shared). Strict by default for every agent, existing ones included; only an admin relaxes it */
+    autonomyEnforcement: text("autonomy_enforcement", { enum: ["enforced", "relaxed"] }).notNull().default("enforced"),
+    /** the admin who relaxed it, and when; both null while enforced */
+    autonomyRelaxedBy: uuid("autonomy_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    autonomyRelaxedAt: timestamp("autonomy_relaxed_at", { withTimezone: true }),
+    /** the admin's reason for the latest change (relax or restore), prose-scrubbed by the db handle */
+    autonomyEnforcementReason: text("autonomy_enforcement_reason"),
     // --- ADR-0366 (pending/rogue_agent_containment.sql): the builder agent's own halt --------
     /** the ADR-0124 halt for one builder agent: NULL = not halted. Set by a rogue-agent containment (or an admin);
      * every turn (chat, schedule, inbound message, resume) is refused while set. The DB CHECK makes "halted with no
@@ -12185,6 +12244,12 @@ export const builderAgents = pgTable(
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
+    check("builder_agents_autonomy_enforcement_ck", sql`${t.autonomyEnforcement} IN ('enforced', 'relaxed')`),
+    check(
+      "builder_agents_autonomy_relaxed_ck",
+      sql`(${t.autonomyEnforcement} = 'relaxed') = (${t.autonomyRelaxedAt} IS NOT NULL)
+        AND (${t.autonomyEnforcementReason} IS NULL OR length(${t.autonomyEnforcementReason}) <= 2000)`,
+    ),
     check(
       "builder_agents_limit_ck",
       sql`${t.monthlyLimitUsd} IS NULL OR (${t.monthlyLimitUsd} >= 0.01 AND ${t.monthlyLimitUsd} <= 100000)`,
@@ -12392,6 +12457,10 @@ export const builderAgentMemory = pgTable(
       .references(() => builderAgents.id, { onDelete: "cascade" }),
     content: text("content").notNull(),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0347: mandatory expiry, set from the database clock at write time. The runtime stops reading it after. */
+    expiresAt: timestamp("expires_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now() + interval '24 hours'`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("builder_agent_memory_agent_idx").on(t.agentId, t.createdAt)],
@@ -17015,7 +17084,8 @@ export const thirdPartyIngestRecordFindings = pgTable(
 );
 
 // ===== ADR-0303 (lane L11): SIEM delivery of the audit chain =====================================================
-export const SIEM_DESTINATION_KINDS = ["webhook"] as const;
+/** ADR-0351 slice 1 (migration pending/siem_syslog_tls): `syslog_tls` is RFC 5424 over TLS (RFC 5425) */
+export const SIEM_DESTINATION_KINDS = ["webhook", "syslog_tls"] as const;
 export const SIEM_DESTINATION_STATES = ["active", "backoff", "dead_letter"] as const;
 
 /**
@@ -17033,7 +17103,10 @@ export const siemDestinations = pgTable(
     url: text("url").notNull(),
     allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
     enabled: boolean("enabled").notNull().default(false),
-    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** the webhook's `whsec_` secret under REGULAIT_DATA_KEY; null exactly for a `syslog_tls` destination (CHECK) */
+    secretCiphertext: text("secret_ciphertext"),
+    /** ADR-0351: `syslog_tls` only, the PEM of the CA(s) that issued the receiver's certificate (public, not a secret) */
+    tlsCaPem: text("tls_ca_pem"),
     secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }).notNull().defaultNow(),
     /** the highest `audit_log.seq` the receiver acknowledged */
     cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull(),
@@ -18009,6 +18082,92 @@ export const ruleStepSwitches = pgTable(
 export type RuleStepSwitchRow = typeof ruleStepSwitches.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// ADR-0328 slice 2 (lane E12, migration `repetitive_asks`) — repetitive asks: clusters of near-duplicate prompts sent to
+// one agent, found by `findRepetitiveAsks` (@regulait/optimizer-kernel) on captured previews in the gateway process.
+// No prompt text is stored: fingerprints, counts, measured cost and a bounded sample of member span ids. Read-only:
+// nothing here changes routing. Written only by `apps/gateway/src/repetitive-asks.ts`, each write with its audit row.
+// ---------------------------------------------------------------------------
+
+/** One row, absent until an admin first saves it. Absent = OFF (ADR-0180). Bounds = the kernel's REPETITIVE_ASK_FLOORS. */
+export const repetitiveAskSettings = pgTable(
+  "repetitive_ask_settings",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    maxHamming: integer("max_hamming").notNull().default(3),
+    minSimilarity: doublePrecision("min_similarity").notNull().default(0.9),
+    minClusterSize: integer("min_cluster_size").notNull().default(20),
+    lastScanAt: timestamp("last_scan_at", { withTimezone: true }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("repetitive_ask_settings_singleton_check", sql`${t.id} = 'singleton'`),
+    check("repetitive_ask_settings_max_hamming_check", sql`${t.maxHamming} BETWEEN 0 AND 5`),
+    check("repetitive_ask_settings_min_similarity_check", sql`${t.minSimilarity} >= 0.8 AND ${t.minSimilarity} <= 1`),
+    check("repetitive_ask_settings_min_cluster_size_check", sql`${t.minClusterSize} BETWEEN 10 AND 100000`),
+  ],
+);
+export type RepetitiveAskSettingsRow = typeof repetitiveAskSettings.$inferSelect;
+
+export const REPETITIVE_ASK_CLUSTER_STATUSES = ["suggested", "dismissed"] as const;
+export type RepetitiveAskClusterStatus = (typeof REPETITIVE_ASK_CLUSTER_STATUSES)[number];
+
+/**
+ * One row per (agent, cluster fingerprint): a measured read model of `trace_spans` (its source of truth; ADR-0200
+ * exception), refreshed by each scan, with the cheaper agent `routeModel` would accept and the projected monthly saving.
+ */
+export const repetitiveAskClusters = pgTable(
+  "repetitive_ask_clusters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** the representative ask's 64-bit SimHash, 16 lowercase hex characters (never text) */
+    fingerprint: text("fingerprint").notNull(),
+    asks: integer("asks").notNull(),
+    /** mean TF-IDF cosine of the members to the representative */
+    cohesion: doublePrecision("cohesion").notNull(),
+    /** measured cost of the members' AI calls over the scan window; null when none was priced */
+    windowCostUsd: doublePrecision("window_cost_usd"),
+    /** the cheaper agent suggested for this cluster; null when no cheaper candidate passes `routeModel` */
+    candidateAgentId: uuid("candidate_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    projectedMonthlySavingsUsd: doublePrecision("projected_monthly_savings_usd"),
+    status: text("status", { enum: REPETITIVE_ASK_CLUSTER_STATUSES }).notNull().default("suggested"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedBy: uuid("dismissed_by").references(() => users.id, { onDelete: "set null" }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("repetitive_ask_clusters_agent_fingerprint_uq").on(t.agentId, t.fingerprint),
+    index("repetitive_ask_clusters_status_savings_idx").on(t.status, t.projectedMonthlySavingsUsd),
+    index("repetitive_ask_clusters_candidate_idx").on(t.candidateAgentId),
+    check("repetitive_ask_clusters_fingerprint_check", sql`${t.fingerprint} ~ '^[0-9a-f]{16}$'`),
+    check("repetitive_ask_clusters_asks_check", sql`${t.asks} >= 2`),
+    check("repetitive_ask_clusters_cohesion_check", sql`${t.cohesion} BETWEEN 0 AND 1`),
+    check("repetitive_ask_clusters_status_check", sql`${t.status} IN ('suggested', 'dismissed')`),
+    check("repetitive_ask_clusters_dismissed_check", sql`(${t.status} = 'dismissed') = (${t.dismissedAt} IS NOT NULL)`),
+    check("repetitive_ask_clusters_candidate_check", sql`${t.candidateAgentId} IS NULL OR ${t.candidateAgentId} <> ${t.agentId}`),
+  ],
+);
+export type RepetitiveAskClusterRow = typeof repetitiveAskClusters.$inferSelect;
+
+/** A bounded sample of a cluster's member spans (a join table): what slice 3's eval dataset is built from. */
+export const repetitiveAskClusterSpans = pgTable(
+  "repetitive_ask_cluster_spans",
+  {
+    clusterId: uuid("cluster_id")
+      .notNull()
+      .references(() => repetitiveAskClusters.id, { onDelete: "cascade" }),
+    spanId: uuid("span_id")
+      .notNull()
+      .references(() => traceSpans.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ name: "repetitive_ask_cluster_spans_pk", columns: [t.clusterId, t.spanId] }), index("repetitive_ask_cluster_spans_span_idx").on(t.spanId)],
+);
+
+// ---------------------------------------------------------------------------
 // Lane L7 (P14 + P16 lineage; ADR-0216 / ADR-0217 amendments, migration model_artifact_lineage)
 // ---------------------------------------------------------------------------
 
@@ -18656,6 +18815,60 @@ export const workflowTemplateVersions = pgTable(
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
+
+// ---------------------------------------------------------------------------
+// Lane L2 (ADR-0219 follow-up, P10): A2A role grants and per-person revocations. Migration `pending/a2a_role_grants`.
+// ---------------------------------------------------------------------------
+
+/**
+ * A role's access to a remote agent: the same shape as a direct `a2a_agent_grants` row (whole agent, or one skill),
+ * so a role grant can never exceed a direct one. Additive with direct grants, and bounded by `a2a_agent_revocations`
+ * (ADR-0019's rule: a revocation subtracts role-derived access only, never a direct grant).
+ */
+export const a2aAgentRoleGrants = pgTable(
+  "a2a_agent_role_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    skillId: text("skill_id"),
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_role_grants_uq").on(t.agentId, t.roleId, sql`COALESCE(${t.skillId}, '')`),
+    index("a2a_agent_role_grants_role_idx").on(t.roleId, t.agentId),
+  ],
+);
+export type A2aAgentRoleGrantRow = typeof a2aAgentRoleGrants.$inferSelect;
+
+/** one person's role-derived access to one remote agent, taken away without unassigning the role (ADR-0019) */
+export const a2aAgentRevocations = pgTable(
+  "a2a_agent_revocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => a2aAgents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** why, in the admin's words: shown with the revocation, as `agent_revocations.reason` is (PR #810 review) */
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("a2a_agent_revocations_uq").on(t.agentId, t.userId),
+    index("a2a_agent_revocations_user_idx").on(t.userId, t.agentId),
+    check("a2a_agent_revocations_reason_check", sql`${t.reason} IS NULL OR char_length(${t.reason}) BETWEEN 1 AND 500`),
+  ],
+);
+export type A2aAgentRevocationRow = typeof a2aAgentRevocations.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0327 addendum (lane E12, migration `decision_tables`) — business-authored decision tables. A table is bound to one
@@ -20120,6 +20333,32 @@ export const vendorAgentActions = pgTable(
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
 // ===== end ADR-0338 =====
 
+// ===== ADR-0358 (lane E39): AI adoption analytics =====
+/**
+ * The adoption-analytics privacy policy: one row (id `singleton`), read before every adoption read. Strict by default
+ * (ADR-0180): per-person ranking OFF, and any count of people below `min_cohort_size` (default 5) is suppressed.
+ * Turning ranking on or lowering the cohort is a relaxation (admin-only, `settings_relax` step-up, a required reason,
+ * audited in the same transaction). A missing row reads as the strict defaults; the first write inserts it.
+ * Row-level security: an admin principal, `system_task` and `migration` only.
+ */
+export const ADOPTION_POLICY_ID = "singleton";
+export const adoptionAnalyticsPolicy = pgTable(
+  "adoption_analytics_policy",
+  {
+    id: text("id").primaryKey().default(ADOPTION_POLICY_ID),
+    perPersonRanking: boolean("per_person_ranking").notNull().default(false),
+    minCohortSize: integer("min_cohort_size").notNull().default(5),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("adoption_analytics_policy_singleton_check", sql`${t.id} = 'singleton'`),
+    check("adoption_analytics_policy_cohort_check", sql`${t.minCohortSize} BETWEEN 1 AND 50`),
+  ],
+);
+export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
+// ===== end ADR-0358 (lane E39) adoption analytics =====
+
 // ===== ADR-0366 (lane E52): rogue-agent containment =====
 import {
   CONTAINMENT_AUTO_THRESHOLDS as CONTAINMENT_AUTO_THRESHOLDS_E52,
@@ -20183,7 +20422,8 @@ export const agentContainments = pgTable(
     index("agent_containments_agent_idx").on(t.agentId, t.status),
     index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
     index("agent_containments_virtual_key_idx").on(t.virtualKeyId, t.status),
-    index("agent_containments_created_idx").on(t.createdAt),
+    // the list's keyset (created_at DESC, id DESC), ADR-0031
+    index("agent_containments_created_idx").on(t.createdAt, t.id),
     index("agent_containments_release_approval_idx").on(t.releaseApprovalId),
   ],
 );

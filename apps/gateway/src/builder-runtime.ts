@@ -44,6 +44,7 @@
  * Spend: an agent message's `cost_usd` is the model cost of its turn; each
  * tool step carries its own measured cost; the monthly limit sums both.
  */
+import { MEMORY_DATA_PREAMBLE } from "./memory-governance.js";
 import { randomUUID } from "node:crypto";
 import {
   agentFallbacks,
@@ -80,6 +81,7 @@ import {
 import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provider";
 import { BUILDER_LIMITS, builderThreadContextId, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import { autonomyDispatchGate } from "./autonomy.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
 import { ensureSkillScanned, ensureSnapshotScanned, pinnedBodyWithheld } from "./skill-admission.js";
@@ -328,15 +330,24 @@ export async function buildSystemPromptWithSkills(
     // the person running the turn decides which private skills it may carry
     skillsForRun(db, agent, userId),
     db
-      .select({ content: builderAgentMemory.content })
+      .select({ content: builderAgentMemory.content, createdByUserId: builderAgentMemory.createdByUserId, expiresAt: builderAgentMemory.expiresAt })
       .from(builderAgentMemory)
-      .where(eq(builderAgentMemory.agentId, agent.id))
+      // ADR-0347: an expired memory item is never read back into a prompt (database clock)
+      .where(and(eq(builderAgentMemory.agentId, agent.id), sql`${builderAgentMemory.expiresAt} > now()`))
       .orderBy(desc(builderAgentMemory.createdAt))
       .limit(20),
     box ? Promise.resolve(box) : resolveToolbox(db, agent, userId),
   ]);
   const parts: string[] = [configuredPrompt(agent, skills)];
-  if (memory.length) parts.push(`## Memory (newest first)\n${memory.map((m) => `- ${m.content}`).join("\n")}`);
+  if (memory.length) {
+    // ADR-0347: memory is quoted data with its provenance, never instructions
+    parts.push(
+      `## Memory (newest first)\n${MEMORY_DATA_PREAMBLE}\n` +
+        memory
+          .map((m) => `- [written by user ${m.createdByUserId ?? "removed"}; expires ${m.expiresAt.toISOString()}] ${JSON.stringify(m.content)}`)
+          .join("\n"),
+    );
+  }
   const tools = toolboxPrompt(toolbox);
   if (tools) parts.push(tools);
   return { prompt: parts.join("\n\n"), skills, withheld };
@@ -553,6 +564,11 @@ async function withAgentGate(
       };
     }
   }
+
+  // ADR-0180 addendum (lane E51): oversight levels at runtime. A delegated or autonomous agent whose autonomy floors
+  // are not in place is refused before anything is dispatched, unless an admin relaxed its gate (fail closed)
+  const oversight = await autonomyDispatchGate(db, agent, userId, source);
+  if (oversight) return oversight;
 
   if (agent.monthlyLimitUsd == null) return body(model, null);
 
@@ -859,6 +875,29 @@ async function writeAgentMessage(seg: Segment, state: LoopState) {
  */
 async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"): Promise<Refusal | null> {
   const { db, userId } = seg;
+  // ADR-0366 (#1134 security review): a containment can land MID-TURN. The halt is read fresh before every model step
+  // and every tool call, so a contained agent makes no further call; the turn ends on the refusal, audited.
+  const [halt] = await db
+    .select({ haltedAt: builderAgents.haltedAt, haltedReason: builderAgents.haltedReason })
+    .from(builderAgents)
+    .where(eq(builderAgents.id, seg.agent.id));
+  if (halt?.haltedAt) {
+    await audit(
+      db,
+      userId,
+      seg.agent.id,
+      "builder-agent-halted-refused",
+      `${phase === "tool" ? "tool call" : "model step"} refused mid-turn: builder agent '${seg.agent.name}' is halted`,
+      { source: seg.source, phase, step: state.modelSteps, toolCalls: state.toolCalls, threadId: seg.thread.id },
+      "deny",
+    );
+    return {
+      ok: false,
+      status: 409,
+      error: "builder_agent_halted",
+      detail: `this agent was halted during the turn: ${halt.haltedReason ?? "(no reason recorded)"}. An administrator releases it.`,
+    };
+  }
   if (phase === "step") {
     const [fresh] = await db.select().from(agents).where(eq(agents.id, seg.model.id));
     const model = (fresh ?? seg.model) as AgentRow;
