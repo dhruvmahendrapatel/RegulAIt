@@ -513,6 +513,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "vendor_agent_actions.reason",
     // ADR-0313: the admin's note on a paid-call price
     "paid_call_prices.note",
+    // ADR-0366: a builder agent's halt reason and a containment's release reason
+    "builder_agents.halted_reason",
+    "agent_containments.release_reason",
+    "agent_containments.explanation",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",

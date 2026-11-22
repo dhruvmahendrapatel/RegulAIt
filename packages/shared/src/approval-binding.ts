@@ -113,6 +113,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "endpoint_addon_removal",
   // ADR-0338: disabling, quarantining or restoring an agent in its vendor platform (stageId = vendor-agent-action:<id>)
   "vendor_agent_control",
+  // ADR-0366: containing (halting) an agent seen acting outside its declared role (stageId = agent-containment:<id>)
+  "agent_containment",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -142,6 +144,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   robot_version: "robot version review",
   endpoint_addon_removal: "MCP server removal from endpoints",
   vendor_agent_control: "vendor agent disable, quarantine or restore",
+  agent_containment: "rogue-agent containment",
 };
 
 /**

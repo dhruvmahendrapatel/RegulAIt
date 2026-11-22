@@ -1345,6 +1345,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/retention-holds/release": "internal",
   "PUT /v1/execution/mode": "internal",
   "POST /v1/agents/:agentId/halt": "internal",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "internal",
+  "GET /v1/containments/:id": "internal",
+  "POST /v1/containments/:id/release": "internal",
   "POST /v1/agents/:agentId/unhalt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
@@ -2871,6 +2875,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/retention-holds/release": "automation",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "agents",
+  "GET /v1/containments/:id": "agents",
+  "POST /v1/containments/:id/release": "agents",
   "POST /v1/agents/:agentId/unhalt": "agents",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "servers",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",

@@ -32,6 +32,10 @@ concurrency:
   group: ha-failover-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
+
 jobs:
   native:
     name: ha / failover suite (native Postgres)
