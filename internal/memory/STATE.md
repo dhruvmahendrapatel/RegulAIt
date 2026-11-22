@@ -1,6 +1,6 @@
 ---
-phase: demo-prep-live-integrations-merged
-last_updated: 2026-11-07
+phase: parallel-build-orchestrated
+last_updated: 2026-11-21
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -18,6 +18,75 @@ roadmap: ../product/ROADMAP.md
 > PR #75. **Lesson for future sessions: update STATE.md at the same moment as the session log, not
 > at the end of a long batch** — a session that ended unexpectedly during that window would have
 > handed its successor a file describing a project with "no workload to deploy".
+
+## Snapshot (2026-11-21, 19:45 UTC) - read this first
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **Merged on 2026-11-21 (23 PRs, every merge audited against its released head):**
+  - Governance and security: #905 governed agent memory writes (ADR-0347), #1144 per-row link visibility and RLS on
+    decisions, #1142 browser origin pinning, #1130 plaintext-credential findings, #818 approval-rule and rate-limit
+    admin routes, #810 A2A role grants and revocations, #967 sandbox-only content extractor (ADR-0362), #923
+    remaining state machines and `GET /v1/state-machines`, #1002 scanner fixtures.
+  - Platform: #1145 MCP 2026-07-28 beside v1, #955 native Bedrock/Vertex/Mistral/Cohere/Qwen providers, #891 stage
+    deadlines with SLA escalation, #925 workflow replay check, #1122 published decision tables, #1131 repetitive-ask
+    detector, #1141 syslog over TLS, #1079 agent-risk register APIs, #963 AI adoption analytics API.
+  - Records: #1132, #1138, #1152 (D-2026-11-21-01 to -06), #1139, #1140.
+- **Sessions (owner, 2026-11-21):** the 50-session push ran until about 14:00 UTC; the owner then asked to wind down
+  and, at 18:50 UTC, to keep at most 10 worker sessions at a time. Running: builders E16 (#1028 disabled-user fix),
+  UI-C (first-load JS gate, ADR-0344), L1 (ABAC v5 session facts), E50 (memory trust floor, #1133), E51 (oversight
+  enforcement, #1135), E52 (rogue-agent containment, #1134); reviewers R2, R3 (code), S3, S4 (security). Every other
+  lane is archived with its PRs left open as drafts (about 78 open PRs); a lane is woken, nearest-to-merge first,
+  when a kept builder finishes.
+- **Stalls on 2026-11-21:** worker restarts (07:22-11:27 and 14:45-18:15 UTC) stopped the merge loop, and many builders
+  hit the account's weekly usage limit in the afternoon.
+- **Merge settings (owner, 2026-11-21):** branch ruleset `main-protection` is active on `main`: block force pushes,
+  restrict deletions, PR required (0 approvals, merge commits only), five required checks (`build-and-test`,
+  `ui enterprise / all`, `Dependency audit (pnpm)`, `Secret scan (gitleaks)`, `Scope and engine images`) from GitHub
+  Actions. Squash and rebase merging are off. **GitHub's merge queue is not available** because the repository is
+  user-owned, so the master's merge loop stays the merge path. Open consequence: the `assign-at-merge` fragment fold
+  (ADR-0252) was waiting on the merge queue and needs another trigger; 170+ fragments are still unfolded.
+- **Owner questions open (from parked lanes):** E26 content-trust floor on the shared-context write route (#1054);
+  E29 approvals/infra DB-check migration batch next?; E47 `privacyOpsEnabled` default (off per 2026-10-30, or on per
+  ADR-0180); E41 configurable halt threshold, self-update per source or per device group; L4 ATR 4.3.0 rule pack and
+  the pending engine-images release run; L6 Forge assign app, re-assign after PM workflow ends, Atlassian Guard key;
+  L2 close #1174 or keep; E20/E13 bundle ceiling 1,170 to 1,180 kB or wait for UI-C's first-load gate.
+- **AWS:** the owner asked to undeploy AWS to zero cost. This session has no valid AWS credentials, so nothing was
+  changed; the owner runs `internal/product/DEMO_TEARDOWN.md` T6, T7 (demo-sandbox account closure) and, if applied,
+  the demo-host stacks.
+
+## Snapshot (2026-11-20, 15:30 UTC) - superseded by the 2026-11-21 snapshot above
+
+> The recap below stopped at 2026-11-07 because recap entries now arrive as fragments (ADR-0252). 170 fragments are
+> waiting in `internal/fragments/` and fold into this file when an `assign-at-merge/<sha>` pull request merges. Those
+> PRs are held until the owner turns on the merge queue for `main`. Until then, this snapshot is the current picture.
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **How the build runs:** one master session dispatches about 20 builder lanes and six reviewer pairs
+  (`internal/process/orchestration/`). Each PR merges only after a code APPROVE and a SECURITY APPROVE at its head and
+  all-green checks. The master's merge loop merges it with a merge commit and audits the merge.
+  - 275 PRs have merged since 2026-11-01, 36 of them since 2026-11-19 (GitHub search `is:pr is:merged`, to
+    15:30 UTC).
+  - The 10-session cap is suspended by the owner (D-2026-11-20-01).
+- **Built by pillar** (on `main`, dev and demo only):
+  - **Pillar 1:** one governed decision core (ADR-0251) covers model, connector, MCP and A2A calls. Decision-core
+    approval rules run as one batched Cedar request (#1093). Also merged: MCP definition pinning, MCP 2026-07-28
+    conformance (#1066) and the portable agent credential, slice 1a (#1056).
+  - **Pillar 2:** the stage runner, and switching a rule-like step to its rule and serving it (#1062, #1084).
+    E49 pipeline runs are in review (#1095).
+  - **Pillar 3:** signed device-policy removal directives (#1085), device quarantine (#1087) and configured
+    detection responses (#1060).
+  - **Pillar 4:** context graph (E46) in review (#1092).
+  - **Pillar 5:** GitHub Copilot and Cursor vendor usage pull (#1069).
+  - **Pillar 7:** capability-combination exposure in the agent risk score (#1065) and Copilot Studio discovery
+    (#1094). E45 Robots (GUI-driving agents, ADR-0364) has S1 and S2 merged; the S3 browser runner is in review
+    (#1082). Free-form browsing is limited to 30 minutes and $2 a session (D-2026-11-19-03).
+  - **Pillar 8:** the inbound PM webhook has replay protection. Write-back and audit ingest are in open PRs.
+  - **UI:** external-portal second factor (#1070) and the red-team gate card (#1090). The known-UI-gap count is
+    computed now (#1067): 161 gap entries in `scripts/known-ui-gaps/*.json`, 151 of
+    them tracked on #453.
+- **Blocked on the owner:** enable the merge queue on `main` (ADR-0252). 55 merged migrations (`.sql` files) stay
+  unnumbered in `packages/db/migrations/pending/`, and outside CI they don't apply until it is on.
+- **Open queue:** 79 PRs, plus 7 from Dependabot. The current batch and lane roster are in `internal/process/orchestration/Status.md`.
 
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->

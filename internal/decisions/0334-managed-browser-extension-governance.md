@@ -3,7 +3,8 @@
 - **Status**: Proposed (owner direction 2026-11-15 via the lane E16 brief; surface (a) built, default off)
 - **Date**: 2026-11-15
 - **Index**: **Managed browser extension, surface (a): AI assistant sites in browser tabs. MV3, force-installed by the customer's browser management only; host permissions limited to the governed site catalogue; fails closed (blocks every governed site) until a signed, unexpired per-user policy says otherwise; corporate-account rules from the profile identity; DLP on the shared `dlp.secret.*` rules before a prompt leaves the browser; breach events tied to user, device and conversation; prompt capture off unless an admin turns it on (step-up, audited, on-screen notice). Off by default.**
-- **Built in**: lane E16, PR 1 of 2 (this ADR, `agents/browser/`, the gateway routes). Browser-driving agents (surface (b)) get their own ADR in PR 2.
+- **Built in**: lane E16 (this ADR, `agents/browser/`, the gateway routes). Browser-driving agents (surface (b)) are
+  **superseded by [ADR-0364](0364-governed-rpa-robots.md)** (lane E45; owner decision 2026-11-21): no separate ADR is written for them.
 - **Migration**: `pending/browser_governance.sql`, numbered at merge (ADR-0252)
 - **Related**: ADR-0055 and ADR-0195 (shadow-AI discovery, the endpoint agent's enrolment and pseudonyms), ADR-0298
   (on-device enforcement: signed policy, fail closed), ADR-0251 (one governed decision core), ADR-0176 (open source
@@ -23,7 +24,9 @@ as the gateway and the endpoint agent, with privacy and security as the core of 
 - **(a) AI assistants in browser tabs:** block a denied site, enforce corporate-account rules, block a prompt that
   matches a DLP rule before it leaves the browser, and record breaches tied to user, device and conversation.
 - **(b) Browser-driving agents:** record their actions as an auditable timeline and apply the same tool-call policies.
-  That is a later PR with its own ADR.
+  **Superseded by [ADR-0364](0364-governed-rpa-robots.md) §4-§7** (owner decision 2026-11-21, relayed by the master):
+  free-form browser control is the first-party, high-risk, opt-in `@playwright/mcp` server governed through the same
+  tool-call gate, with redacted screenshot evidence per call, and lane E45 builds it.
 
 A browser extension is a very privileged piece of software in a very hostile place. It runs beside every page the
 person opens, a page's script is attacker-controlled by default, and the person who installs or removes it is the
@@ -86,9 +89,10 @@ The manifest is generated from the governed site catalogue at build time and pin
 `POST /v1/browser-extension/policy` returns the policy for the device and the profile account it names. The gateway
 computes it deterministically, in the governed core's order (ADR-0251):
 
-1. **A disabled person gets nothing** (`user_disabled`). A profile account that matches no RegulAIt user
-   (case-insensitive email) gets **the org-wide site rules**, account-domain rules included, and every such issue is
-   audited (`browser-policy-unmatched-account`, pseudonym only): owner decision B1.
+1. **A disabled person gets nothing** (`user_disabled`). **Neither does an account RegulAIt does not recognise**
+   (`account_not_recognised`): a profile account that matches no RegulAIt user (case-insensitive email), or a
+   signed-out profile, gets a policy that denies every site, audited as `browser-policy-unrecognised-account`
+   (pseudonym only). This reverses owner decision B1, which gave such an account the org-wide rules (§14).
 2. **The execution posture** (the kernel's `executionGate`, the same kill switch every governed call obeys) can only
    remove access: a halted, read-only or approval-required deployment denies every site (`execution_posture`). A prompt
    sends data out, so it counts as a write, and the browser has no per-call approval queue.
@@ -255,7 +259,7 @@ builder: the eleven admin routes are `KNOWN_UI_GAPS` entries pointing at #453.
   rotation is the operator's file and active key id.
 - **Per-role site rules** (today a rule is org-wide; per-user entitlement comes from the user match and the posture).
 - **Firefox** is a later slice (owner decision B3; PENDING fragment), and Safari after it.
-- **Browser-driving agents** (surface (b)): their own ADR and PR.
+- **Browser-driving agents** (surface (b)): superseded by ADR-0364 (lane E45), not a follow-up of this ADR.
 
 ## 12. Review fixes (#867, 2026-11-18)
 
@@ -285,8 +289,53 @@ The security and code reviews at `4398879` asked for these; each is built and te
   are refused `invalid_body`. Issuing an enrolment token is a step-up. The `devices_enrolled` cap counter has its
   ADR-0200 exception comment.
 - **Filed as issues, not fixed here:** the `user_disabled` bypass through a personal account (it conflicts with owner
-  decision B1, so it is the owner's call); CORS and the gateway origin; audit flooding from bad-token registrations;
+  decision B1, so it is the owner's call; the owner reversed B1 on 2026-11-21, §14); CORS and the gateway origin; audit flooding from bad-token registrations;
   forged `block.html` events.
+
+## 13. Extension hardening (2026-11-21: issues #1029, #1030 and #1031)
+
+- **The gateway origin is pinned at build time (#1029).** The customer builds the extension they sign with
+  `scripts/build.mjs --gateway-origin https://…`. That origin becomes one more host permission. Only the worker uses
+  it: it is in neither the content-script nor the web-accessible matches. So the worker calls the gateway without CORS,
+  and the gateway needs no CORS handling. The same origin is compiled into the bundle (`src/guards.ts`), and a managed
+  `gatewayUrl` with any other origin is refused. A tampered managed configuration therefore cannot send the device's
+  key, enrolment token or reports anywhere else. A build with no pinned origin reaches no gateway and keeps every
+  governed site blocked (the strict default). Rule 9 compared two approaches:
+  - `@fastify/cors` (MIT, maintained), allowing `chrome-extension://<id>` on the four extension routes and the token
+    endpoint. Rejected: it adds a cross-origin surface and an extension-id setting to the gateway, and it would not stop
+    a changed `gatewayUrl`.
+  - `optional_host_permissions` with a runtime request. Rejected: it needs a user gesture, which a force-installed
+    extension cannot rely on, and it grants far more than one origin.
+- **Block-page records are checked (#1031).** The block page must be web-accessible for a redirect to reach it, so a
+  governed site could open it with any code. The worker now records a `blocked` event only when all of these hold:
+  - its own current verdict for that site is the same block with the same code;
+  - the message comes from a top-level frame;
+  - it is the first record for that site and code in a minute.
+  A site can no longer forge a block that the policy would not apply, or flood the queue.
+- **Unauthenticated refusals are coalesced (#1030).** A registration can be refused before any enrolment token is
+  known: no token, an unknown token, a malformed body, or governance off. For each code, the first such refusal in a
+  minute is audited, and the rest of that minute are counted. The count is written as one summary row
+  (`coalesced: true`, `suppressed: n`) when the minute ends. A refusal against a known token is still audited every
+  time. The counter is per process, and a count still open when the process exits is lost. That is accepted, because
+  the row bounds audit volume from unauthenticated callers and is not evidence of any one request.
+
+## 14. B1 reversed: an unrecognised account gets nothing (owner decision 2026-11-21, #1028)
+
+The #867 security review found that B1 let a disabled person around `user_disabled`. They enrol a new browser, or
+use one never bound to their work account, and sign it in with a personal account. That account matches no
+RegulAIt user, so B1 gave it the org-wide site rules. The owner reversed B1 on 2026-11-21 (relayed by the master),
+and because this is a security-checklist gap it is blocking under ADR-0180. As built:
+
+- `buildBrowserPolicy` allows a site only for a recognised, active RegulAIt user. A profile account that matches no
+  user, or no account at all, gets `account_not_recognised` on every site. A disabled user still gets
+  `user_disabled`.
+- The policy route audits each such issue as `browser-policy-unrecognised-account` (effect `deny`, pseudonym only,
+  and whether the profile was signed in). This replaces B1's `browser-policy-unmatched-account` allow row.
+- The block page says "Sign in with your work account".
+- No admin setting brings B1 back. A relaxation for, say, contractors with personal accounts would be its own
+  decision: a `settings_relax` step-up, off by default.
+- A regression test reproduces the bypass. With a site allowed and the admin disabled, a fresh device signed in with a
+  personal account, and a fresh signed-out device, both get every site denied.
 
 ## Consequences
 
@@ -300,7 +349,7 @@ The security and code reviews at `4398879` asked for these; each is built and te
 
 ## Owner decisions (2026-11-15, relayed by the master on #867)
 
-- **B1:** a browser profile signed in with an account that matches no RegulAIt user gets the org-wide site rules, not
+- **B1 (reversed 2026-11-21, §14):** a browser profile signed in with an account that matches no RegulAIt user gets the org-wide site rules, not
   a block everywhere. It stays audited, and corporate-account rules stay enforced where the org requires them. (Built:
   section 4. A matched but disabled person still gets nothing.)
 - **B2:** captured prompts are kept 30 days by default, as an admin setting, and deleted automatically after that; a
@@ -309,3 +358,7 @@ The security and code reviews at `4398879` asked for these; each is built and te
 - **B3:** Chromium-based browsers only for now; Firefox is a later slice, recorded as a PENDING fragment.
 - **B4:** one rotatable device-policy signer signs both browser and endpoint policies; lane E13 adopts it. (Built:
   section 4, `device-policy-signer.ts`.)
+- **Surface (b), 2026-11-21:** browser-driving agents belong to ADR-0364 (Robots, lane E45), which already decides
+  their policy (a high-risk, opt-in first-party `@playwright/mcp` server under the ADR-0251 gate, egress limited to the
+  authorised targets) and their timeline (per-call redacted screenshots as run evidence). E16 writes no separate ADR and
+  builds nothing for them; lane E16 continues with the extension's own follow-ups.

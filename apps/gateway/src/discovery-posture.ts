@@ -29,6 +29,9 @@ export interface DiscoverySettingsView {
   googleDirectoryTokens: boolean;
   /** ADR-0331: governed removal of flagged MCP servers from endpoints (off by default) */
   endpointAddonRemoval: boolean;
+  /** ADR-0338: governed vendor agent control (off by default) and its approval window in hours (24 by default) */
+  vendorAgentControl: boolean;
+  vendorAgentControlApprovalTtlHours: number;
   version: number;
   updatedAt: string | null;
 }
@@ -44,6 +47,8 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       endpointMcpConfig: false,
       googleDirectoryTokens: false,
       endpointAddonRemoval: false,
+      vendorAgentControl: false,
+      vendorAgentControlApprovalTtlHours: 24,
       version: 1,
       updatedAt: null,
     };
@@ -55,6 +60,8 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     endpointMcpConfig: row.endpointMcpConfigEnabled,
     googleDirectoryTokens: row.googleDirectoryTokensEnabled,
     endpointAddonRemoval: row.endpointAddonRemovalEnabled,
+    vendorAgentControl: row.vendorAgentControlEnabled,
+    vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };

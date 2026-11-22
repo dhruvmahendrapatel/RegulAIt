@@ -8,7 +8,7 @@
 - **Migration**: none in slice 1; slice 2 adds `pending/rule_step_detection.sql` (settings, suggestions and a scan index on `trace_spans`), numbered at merge
 - **Related**: [TOKEN_OPTIMIZATION_SPEC §8, §12](../product/TOKEN_OPTIMIZATION_SPEC.md), ADR-0172 (builder agents),
   ADR-0044 (eval harness), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security
-  checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), the repetitive-ask lane item (repetitive ask →
+  checklist), ADR-0251 (one governed decision core), ADR-0252 (merge-time numbering), ADR-0328 (repetitive ask →
   smaller model, the same shadow/approve/revert pattern)
 
 ## Context
@@ -152,10 +152,48 @@ induction over numeric ranges is deferred to a sandboxed engine image with sciki
     new `switch` and `revert` events) and the request's (`RULE_STEP_SWITCH_MACHINE`). A BEFORE UPDATE trigger
     freezes the request's suggestion, digest, request time and requester. A rescan leaves shadow and switched rows
     alone. The reasons are prose-scrubbed (ADR-0102). RLS: deployment-wide (ADR-0234 appendix).
-- Slice 4b (next): serve a switched rule through the dispatch core where the ADR-0119 semantic cache serves a
-  cached answer, so governance and the output PII and guardrail checks still run. An input the rule does not cover
-  goes to the AI. Record the `rule_replacement` technique in `cost_events`, and keep rule-served spans out of
-  detection and shadow counts. Switching to a published decision table follows it.
+- Slice 4b (built, compat path): a switched step is answered by its rule on the Anthropic- and OpenAI-shaped
+  (compat) surfaces.
+  - **When the rule answers.** Re-checked on every call:
+    - the suggestion is `switched` and its latest switch request is `switched`;
+    - the rule still hashes to the digest the reviewer approved;
+    - the input parses into the rule's fields, and an exact-match cell covers it.
+  - **When the AI answers instead:** a tool-bearing or tool-forcing turn, a structured-output request, a passthrough
+    call, and any input the rule does not cover. These go to the AI exactly as before.
+  - **Same gates as the semantic cache.** The rule's answer goes through the one dispatch core as a candidate
+    (`cachedResponse` plus `ruleStepServed`), the way an ADR-0119 cache hit does. Every input gate and the output PII
+    and guardrail checks still run on it. The span and the audit rows say a rule answered, never a cache.
+  - **Records.** A `rule_replacement` row in `cost_events` records the saving: the step's measured average AI cost
+    per run over its scan window. No `usage_events` row is written. The span carries a `ruleStep` attribute, and
+    detection and shadow measurement read only spans without it (`NOT_RULE_SERVED_SPAN`), so a rule never measures
+    itself.
+  - **Turning detection off does not unswitch a step.** Revert is the one way back to the AI, so a step's lifecycle
+    state is never contradicted by a hidden setting.
+- Slice 4c (built, native path): `/v1/agents/:agentId/invoke` serves a switched step the same way, after the
+  path's hoisted PII and privacy gates and before the semantic cache, through the same dispatch core with the same span
+  label, `rule_replacement` saving and audit row (`ruleStep` in its detail).
+  - **Only a plain single-turn dispatch qualifies.** The rule was measured on spans whose input is `body.input` alone,
+    so a conversation, a system prompt, attachments, a baseline or reference content each go to the AI.
+  - A passthrough user keeps every AI call, as on the compat path.
+- Slice 4d (built): a step can be switched to its **published decision table** instead of a detected rule.
+  - **Same lifecycle and queue.** `POST /v1/decision-tables/:id/switch` (admin, a person, step-up, a named active
+    administrator other than the requester) writes a `rule_step_switches` row whose subject is the published version
+    (`decision_table_version_id`; exactly one of it and `suggestion_id` is set, migration
+    `rule_step_switch_decision_table`). The approval is `object_type` `rule_step_switch`, bound to the version's body
+    digest. `POST /v1/decision-tables/:id/revert` takes the table out in one action. The table detail shows the latest
+    request (`switch`).
+  - **Bound to one version.** The decide path switches only while that version is still the published one and its body
+    still hashes to the approved digest; otherwise the request is recorded `stale`. Publishing a newer version reverts a
+    live switch of the old one in the same transaction, so a newly published table never answers without its own
+    approved switch, and the switch state never claims what the serve path no longer does.
+  - **One live switch per step.** A table switch is refused while the step's detected rule is switched or asked to be
+    (`step_switched_to_suggestion`), and the other way round (`step_switched_to_decision_table`). The two checks read
+    under different row locks, so two concurrent requests could both pass; the serve path then prefers the detected
+    rule, and either revert ends it (F1×S2, below rule 10's bar).
+  - **Serving** uses the same path, gates, span marker and saving as slices 4b and 4c. The table compiles with
+    `compileDecisionTable` to the same `InducedRule`; the saving is priced from the step's detector measurement when
+    there is one, else recorded as null. The span, saving and audit carry `{switchId, suggestionId,
+    decisionTableVersionId}`.
 
 ## Addendum: decision tables (owner approval 2026-11-17, competitor gap audit, Camunda row 6)
 
@@ -205,7 +243,7 @@ approval. This addendum records it; no new ADR.
   (the list under the ADR-0226 contract), `GET /v1/decision-tables/:id` (published and pending versions with readable
   rows and test cases, plus the latest 20 versions), `POST /v1/decision-tables/:id/versions`.
 - **Publishing changes no routing.** The AI still answers the step. Serving a published table in place of the AI is the
-  slice 4 switch, which will take either a suggestion or a published table and needs its own approval.
+  slice 4d switch, which needs its own approval and is bound to one version (above).
 - **Open source (ADR-0176, compared in the slice PR).** DMN evaluators (`@hbtgmbh/dmn-eval-js`, `js-feel`) are stale
   with open advisories; `json-rules-engine` is outside the maintenance window and evaluates rules at runtime; GoRules
   ZEN evaluates its own expression language in a native binary; `dmn-js` carries a watermark clause outside the

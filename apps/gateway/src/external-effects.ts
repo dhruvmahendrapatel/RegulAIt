@@ -19,6 +19,10 @@ export const EXTERNAL_WRITE_OPERATIONS = [
   "pm.add_comment",
   // ADR-0331: a device-policy signature (an endpoint directive acts on a developer's device only under one)
   "device_policy.sign_payload",
+  // ADR-0338: a vendor agent control call. `apply` (disable, quarantine) takes an agent out of service; `reverse`
+  // (restore) puts it back
+  "vendor_agent_control.apply",
+  "vendor_agent_control.reverse",
 ] as const;
 
 export type ExternalWriteOperation = (typeof EXTERNAL_WRITE_OPERATIONS)[number];
@@ -49,6 +53,13 @@ export interface ExternalWriteAudit<T> {
   summarize?: (result: T) => Record<string, unknown>;
 }
 
+/**
+ * ADR-0338 §7 (owner decision 2, 2026-11-17): the one declared exemption from the dial. An operation listed here only
+ * takes something out of service (it narrows), so it still runs while the dial is `read_only`, `require_approval` or
+ * `halted`; every other operation is refused outside `normal`. The external-effects barrier test pins this list.
+ */
+export const NARROWING_WRITE_OPERATIONS: readonly ExternalWriteOperation[] = ["vendor_agent_control.apply"];
+
 /** Re-read the dial after preparation, immediately before the provider call. */
 export async function runExternalWrite<T>(
   db: Db,
@@ -57,7 +68,7 @@ export async function runExternalWrite<T>(
   audit?: ExternalWriteAudit<T>,
 ): Promise<T> {
   const mode = await loadExecutionMode(db);
-  if (mode !== "normal") throw new ExternalEffectBlockedError(operation, mode);
+  if (mode !== "normal" && !NARROWING_WRITE_OPERATIONS.includes(operation)) throw new ExternalEffectBlockedError(operation, mode);
   if (!audit) return call();
   const record = (outcome: "performed" | "failed", extra: Record<string, unknown>) =>
     db.insert(auditLog).values({

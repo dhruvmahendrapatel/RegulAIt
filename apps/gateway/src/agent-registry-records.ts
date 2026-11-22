@@ -5,9 +5,9 @@
  * Staging runs inside the discovery run's fenced commit (`applyDiscoveryRunObservations`' `inCommit`), so records
  * land exactly when the run succeeds and never from a run that lost its lease.
  */
-import { AGENT_REGISTRIES_BY_KIND, DISCOVERY_PSEUDONYM_PREFIX, type AgentRegistry, type DiscoverySourceKind } from "@regulait/shared";
-import { agentRegistryRecords, and, eq, inArray, isNotNull, isNull, sql, type Db, type SQL } from "@regulait/db";
-import type { RegistryAgentRecord } from "./discovery-scanners.js";
+import { AGENT_REGISTRIES_BY_KIND, DISCOVERY_PSEUDONYM_PREFIX, REGISTRY_COMPONENT_KINDS, REGISTRY_COMPONENT_PROVIDERS, type AgentRegistry, type DiscoverySourceKind } from "@regulait/shared";
+import { agentRegistryRecordComponents, agentRegistryRecords, and, eq, inArray, isNotNull, isNull, sql, type Db, type SQL } from "@regulait/db";
+import type { RegistryAgentComponent, RegistryAgentRecord } from "./discovery-scanners.js";
 
 /**
  * A staged record's lifecycle, declared once (owner build rule 12). The state is derived from the row, never stored:
@@ -43,6 +43,9 @@ const ATTR_KEY = /^[a-zA-Z][a-zA-Z0-9_]{0,39}$/;
 const ATTR_KEYS_MAX = 16;
 const ATTR_STRING_MAX = 512;
 const ATTR_LIST_MAX = 20;
+/** ADR-0336 decision 3: at most this many components per staged agent, and per run */
+export const REGISTRY_COMPONENTS_PER_RECORD_MAX = 200;
+export const REGISTRY_COMPONENTS_PER_RUN_MAX = 50_000;
 const PSEUDONYM = new RegExp(`^${DISCOVERY_PSEUDONYM_PREFIX}[0-9a-f]{24}$`);
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -71,6 +74,7 @@ export function checkRegistryAgents(kind: DiscoverySourceKind, records: readonly
   if (list.length > REGISTRY_RECORDS_MAX) throw new RegistryRecordRefused(`at most ${REGISTRY_RECORDS_MAX} registry agents per run`);
   const seen = new Set<string>();
   const out: RegistryAgentRecord[] = [];
+  let componentCount = 0;
   for (const r of list) {
     if (!allowed.includes(r.registry)) throw new RegistryRecordRefused(`a ${kind} source may not report registry '${String(r.registry).slice(0, 40)}'`);
     const externalId = text(r.externalId, 1, 2048, "a registry agent's id");
@@ -93,17 +97,39 @@ export function checkRegistryAgents(kind: DiscoverySourceKind, records: readonly
     const key = `${r.registry}\u0000${externalId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ registry: r.registry, externalId, displayName, description, attributes });
+    const components = r.components === undefined ? undefined : checkComponents(r.components);
+    if (components) componentCount += components.length;
+    if (componentCount > REGISTRY_COMPONENTS_PER_RUN_MAX) throw new RegistryRecordRefused(`at most ${REGISTRY_COMPONENTS_PER_RUN_MAX} registry agent components per run`);
+    out.push({ registry: r.registry, externalId, displayName, description, attributes, ...(components ? { components } : {}) });
   }
   const completeOut = [...new Set(complete ?? [])].filter((c) => allowed.includes(c));
   return { records: out, complete: completeOut };
+}
+
+/** ADR-0336 decision 3: bound one agent's components; duplicates (same kind and reference) keep the first */
+function checkComponents(list: readonly RegistryAgentComponent[]): RegistryAgentComponent[] {
+  if (!Array.isArray(list) || list.length > REGISTRY_COMPONENTS_PER_RECORD_MAX) throw new RegistryRecordRefused(`at most ${REGISTRY_COMPONENTS_PER_RECORD_MAX} components per registry agent`);
+  const seen = new Set<string>();
+  const out: RegistryAgentComponent[] = [];
+  for (const c of list) {
+    if (!(REGISTRY_COMPONENT_KINDS as readonly string[]).includes(c.kind)) throw new RegistryRecordRefused(`'${String(c.kind).slice(0, 40)}' is not a component kind`);
+    const vendorRef = text(c.vendorRef, 1, 512, "a component's reference");
+    const displayName = text(c.displayName, 1, 256, "a component's name");
+    if (c.enabled != null && typeof c.enabled !== "boolean") throw new RegistryRecordRefused("a component's enabled flag must be a boolean or null");
+    if (c.providedBy != null && !(REGISTRY_COMPONENT_PROVIDERS as readonly string[]).includes(c.providedBy)) throw new RegistryRecordRefused("a component's provider must be maker or end_user");
+    const key = `${c.kind}\u0000${vendorRef}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind: c.kind, vendorRef, displayName, enabled: c.enabled ?? null, providedBy: c.providedBy ?? null });
+  }
+  return out;
 }
 
 /** upsert a run's records for its source, and mark absent what a COMPLETE read of a registry no longer lists */
 export async function stageRegistryRecords(t: Db, sourceId: string, runId: string, records: readonly RegistryAgentRecord[], complete: readonly AgentRegistry[]): Promise<{ staged: number; absent: number }> {
   for (let i = 0; i < records.length; i += 500) {
     const chunk = records.slice(i, i + 500);
-    await t
+    const ids = await t
       .insert(agentRegistryRecords)
       .values(
         chunk.map((r) => ({
@@ -126,7 +152,9 @@ export async function stageRegistryRecords(t: Db, sourceId: string, runId: strin
           absentSince: null,
           lastRunId: sql`excluded.last_run_id`,
         },
-      });
+      })
+      .returning({ id: agentRegistryRecords.id, registry: agentRegistryRecords.registry, externalId: agentRegistryRecords.externalId });
+    await replaceComponents(t, chunk, ids);
   }
   let absent = 0;
   if (complete.length) {
@@ -138,4 +166,23 @@ export async function stageRegistryRecords(t: Db, sourceId: string, runId: strin
     absent = gone.length;
   }
   return { staged: records.length, absent };
+}
+
+/**
+ * ADR-0336 decision 3, inside the run's fenced commit: for each record whose components were read completely
+ * (`components` set), the stored set becomes exactly that set; a record read partially (`components` undefined)
+ * keeps its stored set untouched.
+ */
+async function replaceComponents(t: Db, chunk: readonly RegistryAgentRecord[], ids: ReadonlyArray<{ id: string; registry: string; externalId: string }>): Promise<void> {
+  const idOf = new Map(ids.map((x) => [`${x.registry}\u0000${x.externalId}`, x.id]));
+  const complete = chunk.flatMap((r) => {
+    const id = idOf.get(`${r.registry}\u0000${r.externalId}`);
+    return id && r.components !== undefined ? [{ id, components: r.components }] : [];
+  });
+  if (!complete.length) return;
+  await t.delete(agentRegistryRecordComponents).where(inArray(agentRegistryRecordComponents.recordId, complete.map((c) => c.id)));
+  const rows = complete.flatMap((c) =>
+    c.components.map((x) => ({ recordId: c.id, kind: x.kind, vendorRef: x.vendorRef, displayName: x.displayName, enabled: x.enabled ?? null, providedBy: x.providedBy ?? null })),
+  );
+  for (let i = 0; i < rows.length; i += 1000) await t.insert(agentRegistryRecordComponents).values(rows.slice(i, i + 1000));
 }
