@@ -30,24 +30,6 @@ import v from "../../views.module.css";
 // G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
 const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
-async function deleteWithBody(path: string, body: unknown): Promise<void> {
-  const res = await fetch(path, {
-    method: "DELETE",
-    credentials: "include",
-    headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      payload = { raw: text };
-    }
-    throw new ApiError(res.status, payload);
-  }
-}
 
 export default function TeamsPage() {
   const teams = useTeams();
@@ -322,7 +304,7 @@ export default function TeamsPage() {
           setForceDelete(null);
           if (t)
             void act.run(
-              () => deleteWithBody(`/v1/teams/${t.id}`, { force: true, reason }),
+              () => api.del(`/v1/teams/${t.id}`, { force: true, reason }),
               "Team force-deleted — reason audited; context provenance retained",
             );
         }}
