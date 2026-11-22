@@ -4,12 +4,13 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
-- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; branch refreshed through main `267e12e4951d14c3f71531f3eeba9ffb4eb63022`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest mockup baseline main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
-- **Deep audit:** seven iterations, 70 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; current main has 151, with the added catalogue tracked separately. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **Deep audit:** seven iterations, 70 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 154. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** eight desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1340,7 +1341,7 @@ Also D-2026-11-22-01 controls REV-002: archive the definition, keep signed runs/
 - **Deferred / issue, no code**: ADM-004→#1187; ACC-004→#1188; ACC-002→#1192 (owner). Do not close by reducing the score.
 - **Agreed / delegated, awaiting implementation/retest**: UIW-03→E35; UIW-04/05→E50. UIW-02 has builder work plus ChatPage handoff, so it is not globally closed or solely delegated.
 - **Narrowed before fix/retest**: RUN-001 model-read alert exists; missing datasets/sources alerts remain. ADM-009 already warns immediate effect; add consequence review, not a speculative dry-run endpoint. UIW-07 must branch for project-less instances. UIS-03 is a modal+shortcut conflict. UIS-09 now includes the owner-approved dirty prompt, not only the busy guard. ACC-003 cannot weaken enforcement from the fabricated false baseline, but its “off” claim/live control still misrepresents unknown state. REV-002 now follows archival policy.
-- **Latest 23 numbered cards** remain awaiting response.
+- **Latest 23 numbered cards** remained awaiting response at iteration 7; the later reply is reconciled in iteration 8 below.
 
 #### Historical remedy claims need independent verification
 
@@ -1464,9 +1465,66 @@ Delivery should be small, reviewable slices after the security prerequisites: sh
 
 **Coverage limits:** this assessor inspected selected shell/Home/kit/settings/Inbox/workflow/list primitives and existing card/reply evidence. It did not manually review every page or function, run browser/native accessibility checks, interview users, benchmark vendors, test real integrations, or confirm a fix. These are concrete proposals for the builders and reviewer to challenge, not permission to merge, deploy, create a parallel lifecycle or declare UX completion.
 
+## UI handoff — iteration 8, 2026-11-22: Markdown mockups for Claude
+
+The owner asked for usable UI recommendations and Markdown mockups Claude can pick up. The
+[pickup index](mockups/README.md) now contains **eight task-focused desktop/phone wireframes**, based on main
+`6d81348a543cf923dbd6fb9e45e8f70206c95ce4`. Each includes the intended task, rationale, proposed wording,
+loading/empty/error/refusal/pending/partial/uncertain states, component reuse, backend dependencies and acceptance checks.
+This adds concrete designs to the existing 70 feedback cards and six UI/UX proposals; it adds no new bug claim.
+
+### Proposed screens and the reason for each change
+
+| Mockup | Recommendation and reason |
+| --- | --- |
+| [Home and navigation](mockups/01-home-and-navigation.md) | Put immediate work above the suite launcher. People should find a decision or resume a record without first learning internal suite names. Unknown counts must not look like no work. |
+| [Approvals and task detail](mockups/02-approvals-and-task-detail.md) | Keep scope, authority, exact consequences and the decision together; retain the recorded outcome when execution or refresh fails. This reduces wrong-request decisions and accidental repeat approval. |
+| [Workflow progress and recovery](mockups/03-workflow-progress-and-recovery.md) | Explain the current stage, blocker, responsible role and permitted next action. A failure needs recovery through the existing executor rather than an indefinite “executing” label. |
+| [Security settings and exceptions](mockups/04-security-settings-and-exceptions.md) | Review the selected old→new value against current policy. Keep supported relaxation narrow, explained, audited and expiring so friction can be tuned without accidental broad weakening. |
+| [Connections and credentials](mockups/05-connections-and-credentials.md) | Separate setup, destination editing and secret replacement. State the required credential shape and actual verification status so saved configuration is not mistaken for working provider access. |
+| [Lists and record context](mockups/06-lists-and-record-context.md) | Keep filters, place and loaded subject explicit. People must reach older work and return from detail without losing context or applying account A’s result to account B. |
+| [Sign-in and account linking](mockups/07-sign-in-and-account-linking.md) | Show available methods, support paste/password managers, finish required setup and explain independent approval. Reduce repeated entry and dead ends while preserving proof and linkage integrity. |
+| [Reports and costs](mockups/08-reports-and-costs.md) | Keep period, scope, provenance and retained run evidence visible. Users should distinguish list-price estimates from imported reported costs and understand archive or attribution consequences before acting. |
+
+### Claude’s current position and the feedback loop
+
+The [new response to iterations 4–6](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347)
+accepts **20 cards for implementation**, reports **IDM-002 and SSO-001 fixed by merged #1205**, and moves
+**CON-004 to triage-low #1212**. None is refuted. The response assessed short main `813b32769`; these mockups
+use the newer full baseline above. The discussion ledger now records every disposition and Claude’s scores.
+Reported fixes remain open for independent retest; this design pass does not establish closure.
+
+Preserve the narrowed scope: WFL-002's full server-preview contract is not in the assigned fix; WFL-003 is
+presentation because the server already refuses; SSO-004 is caller-specific eligibility presentation, with
+self/repeat-vote protection already enforced. CON-004 and ACC-002 remain owner-deferred issues. Where a mockup
+illustrates future contract work, label it as a dependency rather than silently expanding the implementation slice.
+
+The pack's [reply format](mockups/README.md#reply-format-for-claude) asks Claude to agree/narrow/disagree with
+source reasoning, name the assigned slice and missing contracts, provide state/accessibility evidence, then request
+an independent retest. Keep master-owned files untouched. An accepted design, merged PR or passing build alone
+cannot prove a user task is usable. HME-001 and the six design proposals still need a direct response.
+
+### Research, checks and limits
+
+The mockups apply the earlier primary-source best-practice/competition comparison and the current design guidelines.
+They reuse the existing kit, proof wrappers and E29 lifecycle pattern. No library, copied vendor UI, new state engine,
+product implementation, cloud write or external provider test was added. Existing current-main fixes are dependencies,
+not requests to duplicate them. All prototype values are synthetic.
+
+Required checks on the refreshed branch: whole workspace build passed; migration watermark guard passed;
+ADR-index tests **8/8 passed** (the upstream issue noted in iteration 7 is resolved on this baseline); all web bundle
+budgets passed. Gzip sizes: entry JS **40.59 kB**, entry CSS **6.01 kB**, first-load JS **134.97 kB**,
+first-paint JS **179.10 kB**. All nine mockup Markdown files passed relative-link, balanced-fence and pickup-completeness checks; `git diff --check` passed.
+Exact bundle bytes and check scope are recorded in the [iteration 8 validation record](evidence/2026-11-22/iteration8-mockups-validation.json).
+No new product tests were added for these static design documents.
+
+The route inventory now contains **154 routes**. This pass does not claim new whole-route browser coverage,
+complete page/function review, an implemented redesign, native assistive-technology validation or measured usability gains.
+Each mockup states what must be exercised on populated fixtures and what requires real user/device checks.
+
 ## Claude/Codex discussion ledger
 
-Claude’s response is now linked and reconciled for 46 numbered cards plus RUN-001. Latest 23 cards and HME-001 still await a direct response. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
+Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and the six design proposals still await a direct design response. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
 
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
@@ -1519,31 +1577,31 @@ Claude’s response is now linked and reconciled for 46 numbered cards plus RUN-
 | CXR-CST-004 | source; runtime acceptance open | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
 | CXR-CST-005 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
 
-| CXR-APR-001 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
-| CXR-APR-002 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
-| CXR-APR-003 | source; paging/scale runtime open | Awaiting response | Reported; no fix claimed |
-| CXR-WFL-001 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WFL-002 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WFL-003 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WFL-004 | mock-browser + source; consumer limits above | Awaiting response | Reported; no fix claimed |
+| CXR-APR-001 | mock-browser + source; consumer limits above | Agreed; Claude F×S=32; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; queue invalidation; independent retest open |
+| CXR-APR-002 | mock-browser + source; consumer limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; shared durable outcome without replay; independent retest open |
+| CXR-APR-003 | source; paging/scale runtime open | Agreed, lowest priority; Claude F×S=8; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: later DataList paging slice; independent retest open |
+| CXR-WFL-001 | mock-browser + source; consumer limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow slice; failed state and existing /advance recovery; independent retest open |
+| CXR-WFL-002 | mock-browser + source; consumer limits above | Narrowed; Claude F×S=15; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: enable Start and provisional preview; full server preview out of scope; independent retest open |
+| CXR-WFL-003 | mock-browser + source; consumer limits above | Agreed, UX only; Claude F×S=9; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow slice; canDrive presentation, server already refuses; independent retest open |
+| CXR-WFL-004 | mock-browser + source; consumer limits above | Agreed; Claude F×S=10; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow template dirty flag; corrected admin/governance source path; independent retest open |
 
-| CXR-WBK-001 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WBK-002 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WBK-003 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WBK-004 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-WBK-005 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-IDM-001 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-IDM-002 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
-| CXR-IDM-003 | mock-browser + source; branch limits above | Awaiting response | Reported; no fix claimed |
+| CXR-WBK-001 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; truthful workload read state; independent retest open |
+| CXR-WBK-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=15; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; batch result outside empty-queue branch; independent retest open |
+| CXR-WBK-003 | mock-browser + source; branch limits above | Agreed; Claude F×S=9; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; reassign principal kind; independent retest open |
+| CXR-WBK-004 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; scheduler copy only; independent retest open |
+| CXR-WBK-005 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; guard opposing bulk action; independent retest open |
+| CXR-IDM-001 | mock-browser + source; branch limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; direct/group membership and returned outcome; independent retest open |
+| CXR-IDM-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Fix reported, not independently retested; browser consumer retest open |
+| CXR-IDM-003 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; unknown counts and Retry; independent retest open |
 
-| CXR-SSO-001 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-SSO-002 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-SSO-003 | source; maintenance runtime open | Awaiting response | Reported; no fix claimed |
-| CXR-SSO-004 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-CON-001 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-CON-002 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-CON-003 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
-| CXR-CON-004 | mock-browser + source; contract limits above | Awaiting response | Reported; no fix claimed |
+| CXR-SSO-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=25; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Fix reported, not independently retested; exact proof/retry retest open |
+| CXR-SSO-002 | mock-browser + source; contract limits above | Agreed, security fields; Claude F×S=18; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; intentional changed-key writes and fresh baseline; independent retest open |
+| CXR-SSO-003 | source; maintenance runtime open | Agreed; Claude F×S=21; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; existing edit forms/PATCH/proof, no new screen; independent retest open |
+| CXR-SSO-004 | mock-browser + source; contract limits above | Narrowed; Claude F×S=6; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; hide own approval and add caller vote projection; server protection already exists; independent retest open |
+| CXR-CON-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=24; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; method-specific credential copy; independent retest open |
+| CXR-CON-002 | mock-browser + source; contract limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; required organisation URL in schema and UI; independent retest open |
+| CXR-CON-003 | mock-browser + source; contract limits above | Agreed; Claude F×S=6; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; encode webhook path segment; independent retest open |
+| CXR-CON-004 | mock-browser + source; contract limits above | Agreed, triage-low; Claude F×S=4; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Deferred to [#1212](https://github.com/dhruvmahendrapatel/RegulAIt/issues/1212); no standalone code fix |
 
 | CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
 | CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Awaiting response | Reported; shared status-honesty scope; no fix claimed |
