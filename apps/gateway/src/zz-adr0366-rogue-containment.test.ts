@@ -537,6 +537,8 @@ describe("ADR-0366 slice 2: containing a virtual key (unregistered AI traffic)",
     const ok = await decide(asked.json().approvalId, "approved", approverId);
     expect(ok.statusCode, ok.body).toBe(200);
     expect((await call(k.header)).json().error).not.toBe("virtual_key_halted");
+    // the one audited unhalt: the key's own history reads HALTED … LIFTED
+    expect((await auditFor(k.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.virtualKeyUnhalted);
     await setPolicy({ containmentAutoSeverity: "critical" });
   });
 
