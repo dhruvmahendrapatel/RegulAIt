@@ -66,7 +66,7 @@ export const ORG_PAGE_OWN_ENDPOINT: readonly PageRelaxRule[] = [
 
 /** settings the page shows through their `orgSettingSpecs` rows (the same strict/relaxed pill each row shows) */
 export const ORG_PAGE_SPEC_TABS: ReadonlyArray<{ tab: OrgTab; keys: readonly string[] }> = [
-  { tab: "data", keys: ["piiInternationalCategories"] },
+  { tab: "data", keys: ["piiInternationalCategories", "privacyOpsEnabled", "dsrSlaDays"] },
   { tab: "gates", keys: ["approvalSignatureMode", "toolApprovalSensitiveQuorum", "approvalTtlHours", "approvalBulkMaxItems", "approvalBulkSensitiveBlocked"] },
 ];
 

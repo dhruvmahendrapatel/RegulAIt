@@ -16,6 +16,7 @@
  * then a 422 with the raw output — never a half-created run.
  */
 
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import type { FastifyInstance } from "fastify";
 import {
   agentGrants,
@@ -455,6 +456,7 @@ export function registerDecomposeRoutes(
     const attempt = async (retryErrors: string[] | null) =>
       // ADR-0188 S4: the person's request for a draft plan: one lead dispatch, no run or agent chain exists yet (the run's workers act under grants) — decided as the person (no delegation grant).
       executeGovernedDispatch(db, opts.dataKey, {
+        principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
         userId,
         served: lead,
         requestedAgentId: lead.id,

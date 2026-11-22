@@ -77,6 +77,8 @@ import {
   type AbacResourceAttrs,
 } from "@regulait/policy-kernel/abac";
 import type { AbacDecision, ActorAbacVerdict, ActorLinkFacts, GovernedActor } from "@regulait/policy-kernel";
+import { AGENT_RESPONSE_TABLE, isResponseRelaxation, responseOfPolicyMode, type PolicyResponseMode } from "@regulait/policy-kernel";
+import { parseAgentGuidance } from "@regulait/shared";
 import { projectClassifications } from "./projects.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { aiTrainingCurrentFor } from "./ai-literacy.js";
@@ -119,6 +121,8 @@ export async function loadActiveAbacPolicies(db: Db): Promise<AbacPolicy[]> {
       timezone: abacPolicyVersions.timezone,
       version: abacPolicyVersions.version,
       approverUserId: abacPolicyVersions.approverUserId,
+      guidanceMessage: abacPolicyVersions.guidanceMessage,
+      guidanceAlternative: abacPolicyVersions.guidanceAlternative,
     })
     .from(abacPolicies)
     .innerJoin(abacPolicyVersions, eq(abacPolicyVersions.id, abacPolicies.activeVersionId))
@@ -147,6 +151,10 @@ export async function loadActiveAbacPolicies(db: Db): Promise<AbacPolicy[]> {
     approverUserId: r.approverUserId,
     approverName: r.approverUserId ? (approverName.get(r.approverUserId) ?? null) : null,
     description: r.description,
+    // ADR-0354: the stored guidance (validated at write time, CHECK-bounded in the database)
+    guidance: r.guidanceMessage
+      ? { message: r.guidanceMessage, ...(r.guidanceAlternative ? { alternative: r.guidanceAlternative } : {}) }
+      : null,
   }));
 }
 
@@ -343,15 +351,19 @@ export type GovernedAbacTarget =
 /**
  * ADR-0251 slice 4 — the Cedar request for a model, connector or A2A call (actions `ModelInvoke`, `ConnectorCall`,
  * `A2aMessage`, schema v5). The sponsor and project facts come from `sponsorAndProjectFacts`, the same reader
- * `assembleAbacRequest` uses for a tool call. The governed core decides from below the routes, so it does not know the
- * request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`), its delegation chain or its rate
- * consumption, and it evaluates the sponsor as `User`. Those read as their strict values here, and a v5 policy that can
- * reach these calls is refused at write time if it reads any of them (review #836), so a forbid can never validate and
- * then silently never fire.
+ * `assembleAbacRequest` uses for a tool call.
+ *
+ * Slice 4b: the request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) come from the route that
+ * knows the request (`abacPrincipalFromRequest`), and `context.actorChain` / `delegationDepth` from the stored
+ * delegation chain, exactly as for a tool call. A call with no request behind it (a worker loop, a builder turn, an
+ * internal dispatch) supplies none, and each fact then reads as its STRICT value (origin "unknown", no second factor,
+ * no address, a person acting directly), so a forbid conditioned on a missing fact fires rather than silently
+ * passing (fail closed, ADR-0180). The rate-consumption figure is still not supplied (it reads 0), and a v5 policy
+ * that can reach these calls is refused at write time if it reads it (kernel `ABAC_GOVERNED_UNSUPPLIED_FACTS`).
  */
 export async function assembleGovernedAbacRequest(
   db: Db,
-  args: { userId: string; target: GovernedAbacTarget; projectId: string | null; at?: Date },
+  args: GovernedAbacCallArgs & { at?: Date },
 ): Promise<AbacRequest> {
   const { userId, target, projectId } = args;
   const [facts, resourceRow] = await Promise.all([
@@ -388,28 +400,52 @@ export async function assembleGovernedAbacRequest(
       : target.type === "connector"
         ? { ...shared, type: "Connector", providerKind: row.providerKind ?? "", operation: target.operation }
         : { ...shared, type: "RemoteAgent", skillId: target.skillId };
+  const principal = args.principal ?? null;
   return {
-    // the facts the core cannot know read as their strict values; a v5 policy that can reach this call may not read
-    // them at all (kernel ABAC_GOVERNED_UNSUPPLIED_FACTS refuses it at write time), so these never decide anything
-    principal: { ...facts.sponsor, sessionOrigin: "unknown", mfaCompleted: false },
+    // a missing session fact reads as its strict value (fail closed), the same defaults as a tool call
+    principal: { ...facts.sponsor, sessionOrigin: principal?.sessionOrigin ?? "unknown", mfaCompleted: principal?.mfaCompleted === true },
     governed,
-    context: { deployModes: facts.derived.deployModes, environments: facts.derived.environments, rateLimitUsagePct: 0, clientIp: null },
+    context: {
+      deployModes: facts.derived.deployModes,
+      environments: facts.derived.environments,
+      // not supplied for a governed call; a v5 policy that can reach one may not read it (refused at write time)
+      rateLimitUsagePct: 0,
+      clientIp: principal?.clientIp ?? null,
+    },
+    delegation: abacDelegationContextOf(args.actor ?? null),
     ...(args.at ? { at: args.at } : {}),
   };
+}
+
+/** ADR-0251 slice 4b — what the governed core knows about one model, connector or A2A call */
+export interface GovernedAbacCallArgs {
+  userId: string;
+  target: GovernedAbacTarget;
+  projectId: string | null;
+  /** the request's session facts, from the route (`abacPrincipalFromRequest`); absent = no request: strict values */
+  principal?: AbacPrincipalContext | null;
+  /** the stored delegation chain the call is made under (`actorForGrant`); absent = the person acting directly */
+  actor?: GovernedActor | null;
 }
 
 /**
  * ADR-0251 slice 4 — the ABAC verdict for a model, connector or A2A call: null when no active policy can apply to one
  * (no active v5 policy), so an install without such policies pays only the policy load. Pure evaluation errors fail
  * closed inside the engine (`abac-engine-error`).
+ *
+ * Slice 4b (ADR-0188 decision 18, as on a tool call): the sponsor is evaluated as `User`; then, for a delegated call,
+ * each actor of the chain is evaluated as `Agent` against the same policies. The call is refused by the sponsor's
+ * verdict first, else by the first actor whose verdict is not a permit (an identity that cannot be read refuses,
+ * `abac-engine-error`).
  */
-export async function evaluateAbacForGovernedCall(
-  db: Db,
-  args: { userId: string; target: GovernedAbacTarget; projectId: string | null },
-): Promise<AbacDecision | null> {
+export async function evaluateAbacForGovernedCall(db: Db, args: GovernedAbacCallArgs): Promise<AbacDecision | null> {
   const policies = (await loadActiveAbacPolicies(db)).filter((p) => hasGovernedActions(p.schemaVersion));
   if (policies.length === 0) return null;
-  return evaluateAbac(policies, await assembleGovernedAbacRequest(db, args));
+  const request = await assembleGovernedAbacRequest(db, args);
+  const sponsor = evaluateAbac(policies, request);
+  if (!sponsor || sponsor.effect !== "permit" || !args.actor) return sponsor;
+  const chain = await evaluateAbacForChain(db, args.actor, request, policies);
+  return chain.links.find((l) => l.abacDecision)?.abacDecision ?? sponsor;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +676,51 @@ const versionBodySchema = z.object({
   timezone: z.string().trim().min(1).max(64).default("UTC"),
   approverUserId: z.string().uuid().nullish(),
   testCases: z.array(testCaseSchema).max(100).optional(),
+  /** ADR-0354 — advise and correct only: the static text returned to the agent (validated by parseAgentGuidance) */
+  guidance: z.unknown().optional(),
 });
+
+/**
+ * ADR-0354 — the graduated responses whose side effect (end the session, quarantine the agent) is wired in a later
+ * slice. Until then a policy naming one is refused at write time rather than stored and silently answered as a plain
+ * deny: an admin must never believe a session is being ended when it is not.
+ */
+const RESPONSES_NOT_YET_ENFORCED: ReadonlySet<string> = new Set(["block_session", "disable"]);
+
+type ResponseFields =
+  | { ok: true; guidanceMessage: string | null; guidanceAlternative: string | null }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+/** ADR-0354 — the response table's guidance rules for one policy version body, checked before anything is stored */
+export function responseFieldsOf(mode: string, guidance: unknown): ResponseFields {
+  if (RESPONSES_NOT_YET_ENFORCED.has(mode)) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "response_not_yet_enforced",
+        detail: `mode '${mode}' is declared (ADR-0354) but its side effect is not wired yet, so it cannot be stored. Use 'forbid' for now.`,
+      },
+    };
+  }
+  const spec = AGENT_RESPONSE_TABLE[responseOfPolicyMode(mode as PolicyResponseMode)];
+  if (spec.guidance === "none") {
+    if (guidance !== undefined && guidance !== null) {
+      return { ok: false, status: 422, body: { error: "guidance_not_allowed", detail: `mode '${mode}' returns no guidance to the agent` } };
+    }
+    return { ok: true, guidanceMessage: null, guidanceAlternative: null };
+  }
+  const parsed = parseAgentGuidance(guidance);
+  if (!parsed.ok) return { ok: false, status: 422, body: { error: "invalid_guidance", errors: parsed.errors, findings: parsed.findings } };
+  const alt = parsed.guidance.alternative ?? null;
+  if (spec.alternative === "required" && !alt) {
+    return { ok: false, status: 422, body: { error: "alternative_required", detail: "a 'correct' policy must name the safe alternative the agent can take" } };
+  }
+  if (spec.alternative === "none" && alt) {
+    return { ok: false, status: 422, body: { error: "alternative_not_allowed", detail: `mode '${mode}' does not carry an alternative` } };
+  }
+  return { ok: true, guidanceMessage: parsed.guidance.message, guidanceAlternative: alt };
+}
 
 const createPolicySchema = versionBodySchema.extend({
   name: z.string().trim().min(1).max(200),
@@ -763,6 +843,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         detail: "a require_approval policy must name the approver its paused calls route to",
       });
     }
+    const response = responseFieldsOf(body.mode, body.guidance);
+    if (!response.ok) return reply.status(response.status).send(response.body);
     const [existing] = await db.select().from(abacPolicies).where(eq(abacPolicies.name, body.name));
     if (existing) return reply.status(409).send({ error: "policy_exists", policy: existing });
 
@@ -778,9 +860,11 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         version: 1,
         source: body.source,
         schemaVersion: body.schemaVersion,
-        mode: body.mode as "forbid" | "require_approval",
+        mode: body.mode as PolicyResponseMode,
         timezone: body.timezone,
         approverUserId: body.approverUserId ?? null,
+        guidanceMessage: response.guidanceMessage,
+        guidanceAlternative: response.guidanceAlternative,
         testCases: body.testCases ?? null,
         authorUserId: actor,
       })
@@ -809,6 +893,8 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
     if (body.mode === "require_approval" && !body.approverUserId) {
       return reply.status(422).send({ error: "approver_required" });
     }
+    const response = responseFieldsOf(body.mode, body.guidance);
+    if (!response.ok) return reply.status(response.status).send(response.body);
     const maxRows = await db
       .select({ max: sql<number>`coalesce(max(${abacPolicyVersions.version}), 0)` })
       .from(abacPolicyVersions)
@@ -822,9 +908,11 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         version: nextVersion,
         source: body.source,
         schemaVersion: body.schemaVersion,
-        mode: body.mode as "forbid" | "require_approval",
+        mode: body.mode as PolicyResponseMode,
         timezone: body.timezone,
         approverUserId: body.approverUserId ?? null,
+        guidanceMessage: response.guidanceMessage,
+        guidanceAlternative: response.guidanceAlternative,
         testCases: body.testCases ?? null,
         authorUserId: actor,
       })
@@ -885,11 +973,24 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
 
     const [previous] = policy.activeVersionId
       ? await db
-          .select({ version: abacPolicyVersions.version })
+          .select({ version: abacPolicyVersions.version, mode: abacPolicyVersions.mode })
           .from(abacPolicyVersions)
           .where(eq(abacPolicyVersions.id, policy.activeVersionId))
       : [];
     const rollingBack = previous != null && previous.version > target.version;
+    // ADR-0354 (ADR-0180): activating a version whose response restricts LESS than the live one (block → advise,
+    // forbid → require_approval) is a relaxation, so it is a settings_relax step-up bound to the exact change
+    const relaxes =
+      previous != null &&
+      policy.enabled &&
+      isResponseRelaxation(responseOfPolicyMode(previous.mode as PolicyResponseMode), responseOfPolicyMode(target.mode as PolicyResponseMode));
+    if (relaxes) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { abacPolicyId: policyId, values: { mode: { from: previous!.mode, to: target.mode }, version: target.version } },
+      });
+      if (!su.ok) return reply;
+    }
 
     await db
       .update(abacPolicies)
@@ -905,6 +1006,9 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
         from: previous?.version ?? null,
         to: target.version,
         rollback: rollingBack,
+        // ADR-0354: the response before and after, and whether the change relaxed it (step-up above)
+        mode: { from: previous?.mode ?? null, to: target.mode },
+        relaxed: relaxes,
         // ADR-0059: whether anyone previewed WHO this would newly block, before
         // it went live. Recorded on every activation, previewed or not — the
         // omission has to be as legible as the preview.

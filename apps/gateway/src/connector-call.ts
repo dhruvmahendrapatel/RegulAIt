@@ -43,6 +43,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
+import type { AbacPrincipalContext } from "./abac-principal.js";
 import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import {
@@ -58,8 +59,8 @@ import {
   usageEvents,
   type Db,
 } from "@regulait/db";
-import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRules, type GovernedResource } from "@regulait/policy-kernel";
-import { governedEvaluateResource, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
+import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
+import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -83,6 +84,7 @@ import {
   CONTENT_TRUST_REFUSAL_CODE,
   CONTENT_TRUST_RULE_ID,
   contentTrustRefusalReason,
+  PROCESSING_NOT_PERMITTED,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
 import { killSwitchState, loadExecutionDial, postureOf } from "./execution-posture.js";
@@ -209,6 +211,11 @@ export interface GovernedConnectorCallArgs {
    * Absent = the person's own call (`actor: null`).
    */
   delegationGrantId?: string | undefined;
+  /**
+   * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`), for the ABAC v5 request. Absent
+   * (an in-process caller with no request) = each reads as its strict value.
+   */
+  principal?: AbacPrincipalContext | null | undefined;
   /**
    * ADR-0193 P1 — the causal context this call runs in (a builder thread). Its result is recorded under it, and a
    * WRITE is refused when the context already holds content from a source below the write floor. Absent = the
@@ -465,6 +472,18 @@ export async function executeGovernedConnectorCall(
     // otherwise).
     const dial = await loadExecutionDial(db);
     const connectorLiteracy = await literacySlot(db, userId); // ADR-0182 A14
+    // ADR-0188 S4: a delegated call carries the stored chain, read now (before the
+    // governed core, whose ABAC request carries it, ADR-0251 slice 4b); a grant that cannot be read refuses
+    let delegatedActor: GovernedActor | null = null;
+    let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
+    if (args.delegationGrantId) {
+      try {
+        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: connector.pricePerCallUsd != null });
+      } catch (err) {
+        if (!(err instanceof DelegationRefusedError)) throw err;
+        delegationRefusal = delegationRefusalDecision(err);
+      }
+    }
     // ADR-0251 — the one governed core's restrictions for this call, loaded BEFORE the consent binding so a matching
     // approval rule's id enters the consent's context digest. A load that fails is a deny (`governed-core-error`).
     const coreResource: GovernedResource = { type: "connector", id: connectorId, name: connector.name, operation: body.operation };
@@ -472,12 +491,23 @@ export async function executeGovernedConnectorCall(
     let coreError: unknown = null;
     try {
       // the window is counted once, under the rate lock, by governedEvaluateResource below (hard windows)
-      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, projectId, counts: false });
+      coreRestrictions = await loadResourceRestrictions(db, {
+        userId,
+        resource: coreResource,
+        projectId,
+        counts: false,
+        facts: { principal: args.principal ?? null, actor: delegatedActor },
+      });
     } catch (err) {
       coreError = err;
     }
     const dialHolds = dial.mode === "require_approval" && body.operation === "write";
-    const matchedRules = coreRestrictions ? matchingResourceApprovalRules(coreResource, coreRestrictions.approvalRules) : [];
+    // ADR-0239 slice 2b: on Cedar, sharing the kernel's one request; an engine error binds no consent here, and the
+    // kernel refuses the call on the same error (governedEvaluateResource below)
+    const matchVerdict = coreRestrictions
+      ? matchingResourceApprovalRulesWith(coreRestrictions.approvalRuleEvaluator, coreResource, coreRestrictions.approvalRules)
+      : null;
+    const matchedRules = matchVerdict?.kind === "matched" ? matchVerdict.rules : [];
     // ADR-0251 review #715 finding 1 — EVERY NAMED APPROVER SIGNS. The dial's approver and each matching rule's approver
     // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
     // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.
@@ -511,17 +541,6 @@ export async function executeGovernedConnectorCall(
     // the consent this call still lacks (dial first, then rules by specificity); null when nothing is missing
     const missing = bindings.find((b) => b.binding.approvedApprovalId === null) ?? null;
     binding = missing?.binding ?? bindings[0]?.binding ?? null;
-    // ADR-0188 S4: a delegated call carries the stored chain, read now; a grant that cannot be read refuses
-    let delegatedActor: GovernedActor | null = null;
-    let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
-    if (args.delegationGrantId) {
-      try {
-        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: connector.pricePerCallUsd != null });
-      } catch (err) {
-        if (!(err instanceof DelegationRefusedError)) throw err;
-        delegationRefusal = delegationRefusalDecision(err);
-      }
-    }
     const entitlement = delegationRefusal
       ? (delegationRefusal as ReturnType<typeof evaluateConnector>)
       : evaluateConnector({
@@ -1017,6 +1036,19 @@ export async function executeGovernedConnectorCall(
           pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
         });
       }
+    }
+
+    // ADR-0224 addendum (2026-11-20): the processing limit (records of processing), through the governed core's one
+    // check path, on what would leave the gateway (after any redaction). After the PII-mode rung, so a cascade `block`
+    // has already refused; before guardrails and provider.invoke, so a refusal executes nothing and bills nothing.
+    const processingRefusal = await governedProcessingLimit(db, {
+      userId,
+      target: { type: "connector", connectorId, connectorName: connector.name, operation: body.operation },
+      projectId,
+      input: JSON.stringify({ object: effectiveInvocation.object ?? null, payload: effectiveInvocation.payload ?? null }),
+    });
+    if (processingRefusal) {
+      return out.status(processingRefusal.status).send({ decision, error: processingRefusal.error, detail: processingRefusal.detail });
     }
 
     // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
@@ -1551,6 +1583,8 @@ export async function executeGovernedConnectorCall(
     // A refusal ABOUT the input does not store the input — storing the very
     // payload a block refused would defeat the block (ADR-0070 rule 3).
     const inputRefused = errCode === "pii_blocked" || errCode === "guardrail_blocked" || errCode === "pii_transform_refused" ||
+      // ADR-0224 addendum: personal data no record of processing permits is not stored by the refusal either
+      errCode === PROCESSING_NOT_PERMITTED ||
       // ADR-0186 decision 32: the refused input carries a credential
       errCode === CREDENTIAL_AUDIENCE_ERROR;
     const resultBody = (outcome.body["result"] as { body?: unknown } | undefined)?.body;

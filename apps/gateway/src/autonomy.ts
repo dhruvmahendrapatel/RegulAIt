@@ -28,6 +28,14 @@
  *     another person's agent is audited as well.
  *   - the monitor loader for `autonomy_declared_below_observed` (per agent) and
  *     `autonomy_floor_unmet` (per use case and agent).
+ *   - ADR-0180 addendum (2026-11-21, lane E51): `autonomyDispatchGate`, run by
+ *     the builder agent gate before every turn, resume and scheduled or channel
+ *     run, so before the governed core is asked about any model call. A
+ *     `delegated` or `autonomous` agent with an unmet floor is refused (403
+ *     `autonomy_floor_unmet`, audited) unless an admin relaxed the gate for it
+ *     (PUT .../autonomy/enforcement: admin, step-up to relax, audited, the
+ *     transitions in AUTONOMY_ENFORCEMENT_MACHINE). An error checking the
+ *     floors refuses the run (503 `autonomy_floor_unverifiable`): fail closed.
  *
  * Open-source check (ADR-0176): none fits, because this is governance logic
  * over our own schema; the statistics it needs are counts.
@@ -65,6 +73,12 @@ import {
 } from "@regulait/db";
 import {
   ASSURANCE_DEFAULTS,
+  AUTONOMY_DISPATCH_ERRORS,
+  AUTONOMY_DISPATCH_RULE_IDS,
+  AUTONOMY_ENFORCEMENT_MACHINE,
+  autonomyDispatchVerdict,
+  autonomyEnforcementChangeSchema,
+  autonomyEnforcementView,
   AUTONOMY_AGENTIC_TEST_CLASSES,
   AUTONOMY_GUARDRAIL_DETECTORS,
   AUTONOMY_OBSERVATION_WINDOW_DAYS,
@@ -98,6 +112,8 @@ import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold 
 import { connectorOperations } from "./builder-tools.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { loadCardsForSubject } from "./mrm.js";
+import { errMessage } from "./err-serializer.js";
+import { requireStepUp } from "./step-up.js";
 
 const DAY_MS = 86_400_000;
 /** chat providers whose incoming message can start an agent (outlook and email are send-only, ADR-0121) */
@@ -384,6 +400,76 @@ const _autonomyFloorForContract: AutonomyFloorForFn<Db> = autonomyFloorFor;
 void _autonomyFloorForContract;
 
 // ---------------------------------------------------------------------------
+// Enforcement at dispatch (ADR-0180 addendum, lane E51)
+// ---------------------------------------------------------------------------
+
+export interface AutonomyGateRefusal {
+  ok: false;
+  status: 403 | 503;
+  error: (typeof AUTONOMY_DISPATCH_ERRORS)[keyof typeof AUTONOMY_DISPATCH_ERRORS];
+  detail: string;
+}
+
+/**
+ * The oversight gate on a builder agent's run, decided from a FRESH read of the agent (a relaxation or a new
+ * tool added mid-conversation counts). Returns null to proceed, or an audited refusal:
+ *   - 403 `autonomy_floor_unmet`: the agent is delegated or autonomous and a floor is unmet, with the gate enforced;
+ *   - 503 `autonomy_floor_unverifiable`: the floors could not be checked (fail closed).
+ * A run allowed only because an admin relaxed the gate is audited as an allow with the unmet floors.
+ * Assist and supervised agents are never refused here (their unmet floors stay conditions and monitor findings).
+ */
+export async function autonomyDispatchGate(
+  db: Db,
+  agent: Pick<BuilderAgentRow, "id" | "name">,
+  userId: string,
+  source: string,
+): Promise<AutonomyGateRefusal | null> {
+  const audit = (effect: "allow" | "deny", ruleId: string, reason: string, detail: Record<string, unknown>) =>
+    db.insert(auditLog).values({
+      userId,
+      objectType: "builder_agent",
+      objectId: agent.id,
+      detail: { phase: "autonomy-gate", source, ...detail, receiptClass: "decision" },
+      effect,
+      ruleId,
+      ruleChain: [],
+      reason,
+    });
+  let verdict: ReturnType<typeof autonomyDispatchVerdict>;
+  let effective: AutonomyClass;
+  try {
+    const [fresh] = await db.select().from(builderAgents).where(eq(builderAgents.id, agent.id));
+    if (!fresh) throw new Error("the builder agent no longer exists");
+    const now = new Date();
+    const facts = (await loadAutonomyFacts(db, [fresh], now)).get(fresh.id)!;
+    const a = await agentAutonomy(db, fresh, facts, now);
+    effective = a.effective;
+    verdict = autonomyDispatchVerdict({ agentName: fresh.name, effective, floors: a.floors, enforcement: fresh.autonomyEnforcement });
+  } catch (err) {
+    const detail = `the autonomy floors of builder agent '${agent.name}' could not be checked, so the run is refused`;
+    try {
+      await audit("deny", AUTONOMY_DISPATCH_RULE_IDS.unverifiable, detail, { error: errMessage(err) });
+    } catch {
+      // the refusal stands even if its audit row cannot be written
+    }
+    return { ok: false, status: 503, error: AUTONOMY_DISPATCH_ERRORS.unverifiable, detail };
+  }
+  if (verdict.kind === "allow") return null;
+  const unmetFloors = verdict.unmet.map((f) => f.id);
+  if (verdict.kind === "allow_relaxed") {
+    await audit(
+      "allow",
+      AUTONOMY_DISPATCH_RULE_IDS.relaxed,
+      `builder agent '${agent.name}' (${effective}) ran with ${unmetFloors.length} autonomy floor control(s) unmet, because an admin relaxed its gate`,
+      { autonomyClass: effective, unmetFloors, enforcement: "relaxed" },
+    );
+    return null;
+  }
+  await audit("deny", AUTONOMY_DISPATCH_RULE_IDS.blocked, verdict.detail, { autonomyClass: effective, unmetFloors, enforcement: "enforced" });
+  return { ok: false, status: 403, error: AUTONOMY_DISPATCH_ERRORS.blocked, detail: verdict.detail };
+}
+
+// ---------------------------------------------------------------------------
 // The monitor
 // ---------------------------------------------------------------------------
 
@@ -486,12 +572,13 @@ async function stewardAgent(db: Db, req: FastifyRequest, reply: FastifyReply): P
   return { agent, viewer };
 }
 
-async function autonomyView(db: Db, agent: BuilderAgentRow, now: Date): Promise<BuilderAgentAutonomyView> {
+async function autonomyView(db: Db, agent: BuilderAgentRow, now: Date, viewer: Viewer): Promise<BuilderAgentAutonomyView> {
   const facts = (await loadAutonomyFacts(db, [agent], now)).get(agent.id)!;
   const a = await agentAutonomy(db, agent, facts, now);
-  const [declarer] = agent.autonomyDeclaredBy
-    ? await db.select({ id: users.id, name: users.displayName }).from(users).where(eq(users.id, agent.autonomyDeclaredBy))
-    : [];
+  const userName = async (id: string | null) =>
+    id ? (await db.select({ id: users.id, name: users.displayName }).from(users).where(eq(users.id, id)))[0] : undefined;
+  const declarer = await userName(agent.autonomyDeclaredBy);
+  const relaxer = await userName(agent.autonomyRelaxedBy);
   const useCases = agent.projectId
     ? await db
         .select({ id: aiUseCases.id, name: aiUseCases.name, status: aiUseCases.status })
@@ -515,6 +602,15 @@ async function autonomyView(db: Db, agent: BuilderAgentRow, now: Date): Promise<
     floors: a.floors,
     useCases,
     scope: AUTONOMY_SCOPE_NOTE,
+    enforcement: autonomyEnforcementView({
+      state: agent.autonomyEnforcement,
+      effective: a.effective,
+      floors: a.floors,
+      relaxedBy: relaxer ? { id: relaxer.id, name: relaxer.name } : null,
+      relaxedAt: agent.autonomyRelaxedAt,
+      reason: agent.autonomyEnforcementReason,
+      viewerIsAdmin: viewer.isAdmin,
+    }),
   };
 }
 
@@ -522,6 +618,7 @@ async function autonomyView(db: Db, agent: BuilderAgentRow, now: Date): Promise<
  * Routes (classified in route-classes.ts and openapi-registry.ts, A8 block):
  *   GET /v1/builder/agents/:id/autonomy  non-admin class; the steward (owner) or an admin, in-handler
  *   PUT /v1/builder/agents/:id/autonomy  non-admin class; the steward (owner) or an admin, in-handler; audited
+ *   PUT /v1/builder/agents/:id/autonomy/enforcement  ADMIN class (the default gate); relax needs a step-up; audited
  */
 export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/builder/agents/:id/autonomy", async (req, reply) => {
@@ -541,7 +638,80 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
         reason: `admin read the autonomy class of builder agent '${agent.name}'`,
       });
     }
-    return { autonomy: await autonomyView(db, agent, new Date()) };
+    return { autonomy: await autonomyView(db, agent, new Date(), viewer) };
+  });
+
+  // ADR-0180 addendum (E51): relax or restore the oversight gate. Admin only (the route is not in NON_ADMIN_ROUTES);
+  // relaxing loosens a strict default, so it also takes a `settings_relax` step-up bound to this agent. The state
+  // change is a guarded UPDATE from the machine's source states, committed with its audit row.
+  app.put("/v1/builder/agents/:id/autonomy/enforcement", async (req, reply) => {
+    const got = await stewardAgent(db, req, reply);
+    if (!got) return;
+    const { agent, viewer } = got;
+    const parsed = autonomyEnforcementChangeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_autonomy_enforcement_change", detail: parsed.error.issues.map((i) => i.message).join("; ") });
+    }
+    const { event, reason } = parsed.data;
+    const from = agent.autonomyEnforcement;
+    if (!AUTONOMY_ENFORCEMENT_MACHINE.can(from, event)) {
+      return reply.status(409).send({
+        error: "illegal_transition",
+        detail: AUTONOMY_ENFORCEMENT_MACHINE.describe(from).transitions.find((t) => t.event === event)!.reason,
+        lifecycle: AUTONOMY_ENFORCEMENT_MACHINE.describe(from),
+      });
+    }
+    if (event === "relax") {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { builderAgentId: agent.id, values: { autonomyEnforcement: "relaxed" } } });
+      if (!su.ok) return reply;
+    }
+    const to = AUTONOMY_ENFORCEMENT_MACHINE.next(from, event);
+    const now = new Date();
+    let view: BuilderAgentAutonomyView | null;
+    try {
+      view = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(builderAgents)
+          .set({
+            autonomyEnforcement: to,
+            autonomyRelaxedBy: to === "relaxed" ? viewer.userId : null,
+            autonomyRelaxedAt: to === "relaxed" ? now : null,
+            autonomyEnforcementReason: reason,
+            updatedAt: now,
+          })
+          // a concurrent change matches no row and is reported, never overwritten
+          .where(and(eq(builderAgents.id, agent.id), inArray(builderAgents.autonomyEnforcement, [...AUTONOMY_ENFORCEMENT_MACHINE.sourcesOf(event)])))
+          .returning();
+        if (!updated) return null;
+        await tx.insert(auditLog).values({
+          userId: viewer.userId,
+          objectType: "builder_agent",
+          objectId: agent.id,
+          // the stored (scrubbed) reason, never the raw request text
+          detail: { event, from, to, reason: updated.autonomyEnforcementReason },
+          effect: "allow",
+          ruleId: AUTONOMY_DISPATCH_RULE_IDS.changed,
+          ruleChain: [],
+          reason:
+            event === "relax"
+              ? `admin relaxed the autonomy gate of builder agent '${agent.name}': unmet floors no longer block its runs (each run is audited)`
+              : `admin restored the autonomy gate of builder agent '${agent.name}': unmet floors block its delegated or autonomous runs again`,
+        });
+        return autonomyView(tx as unknown as Db, updated, now, viewer);
+      });
+    } catch (e) {
+      if (isCheckViolation(e, "builder_agents_autonomy_relaxed_ck")) {
+        return reply.status(422).send({
+          error: "autonomy_reason_too_long",
+          detail: "the reason is longer than 2000 characters once credentials in it are redacted; shorten it",
+        });
+      }
+      throw e;
+    }
+    if (!view) {
+      return reply.status(409).send({ error: "autonomy_enforcement_changed", detail: "someone changed this agent's autonomy gate meanwhile; reload and try again" });
+    }
+    return { autonomy: view };
   });
 
   app.put("/v1/builder/agents/:id/autonomy", async (req, reply) => {
@@ -574,7 +744,7 @@ export function registerAutonomyRoutes(app: FastifyInstance, db: Db): void {
           })
           .where(eq(builderAgents.id, agent.id))
           .returning();
-        const v = await autonomyView(tx as unknown as Db, updated!, now);
+        const v = await autonomyView(tx as unknown as Db, updated!, now, viewer);
         await tx.insert(auditLog).values({
           userId: viewer.userId,
           objectType: "builder_agent",

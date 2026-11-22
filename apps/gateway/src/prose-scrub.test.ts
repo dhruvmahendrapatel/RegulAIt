@@ -509,6 +509,12 @@ describe("6. the covered / NOT-covered inventory", () => {
     "mrm_retest_runs.reason",
     // ADR-0331: the admin's reason for removing an MCP server from endpoints
     "endpoint_addon_removals.reason",
+    // ADR-0338: the admin's reason for a vendor agent control action
+    "vendor_agent_actions.reason",
+    // ADR-0366: a builder agent's halt reason and a containment's release reason
+    "builder_agents.halted_reason",
+    "agent_containments.release_reason",
+    "agent_containments.explanation",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -543,6 +549,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    "a2a_agent_revocations.reason",
     // ADR-0327 addendum — a decision-table version's proposal reason
     "decision_table_versions.reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
@@ -610,6 +617,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
     // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
     "agent_identity_links.note",
     "agent_identity_links.decision_note",

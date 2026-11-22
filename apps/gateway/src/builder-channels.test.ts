@@ -209,7 +209,8 @@ async function bind(agent: string, provider: "slack" | "teams", connectionId: st
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
-  k = await builderKit("bld-chan");
+  // ADR-0180 addendum (E51): channel and schedule agents are autonomous; this suite is not about oversight
+  k = await builderKit("bld-chan", { relaxAutonomyGate: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   // ADR-0181: the org PII floor ships at block, and a block-mode reply is withheld from
   // chat. This file pins the channel round trip, so the floor is set off explicitly.

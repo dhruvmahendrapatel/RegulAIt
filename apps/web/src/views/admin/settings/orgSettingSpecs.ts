@@ -654,6 +654,27 @@ export const CORE_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     control: onOff("On", "Off"),
     isRelaxed: notEqual(false),
   },
+  // ADR-0224 (owner 10-30): ships off; turning it off once on is a settings_relax step-up (gateway `fromStored`)
+  privacyOpsEnabled: {
+    key: "privacyOpsEnabled",
+    label: "Processing limit",
+    strictDefault: false,
+    strict: "Off as shipped. On, personal data with no record of processing is refused.",
+    relaxed: "Off lets personal data through without a record.",
+    control: onOff("On", "Off"),
+    isRelaxed: () => false,
+    looser: (v, b) => b === true && v === false,
+  },
+  dsrSlaDays: {
+    key: "dsrSlaDays",
+    label: "Data-subject request due (days)",
+    strictDefault: 30,
+    strict: "30 days (GDPR Art. 12(3)).",
+    relaxed: "Longer answers the person later.",
+    control: { kind: "int", min: 1, max: 90, unit: "days" },
+    isRelaxed: atMost(30),
+    looser: largerLooser,
+  },
 };
 
 export const ALL_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
