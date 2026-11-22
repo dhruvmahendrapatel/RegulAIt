@@ -702,6 +702,7 @@ import {
   registerCustomClassifierRoutes,
 } from "./custom-classifiers.js";
 import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
+import { registerAiAppRiskRoutes } from "./ai-app-risk.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -6557,6 +6558,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssuranceSettingsRoutes(app, db);
   // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
   registerSensitivityLabelRoutes(app, db);
+  // ADR-0363 slice 3: AI app risk attributes and the risk-ranked shadow-AI inventory (read-only; UI is a #453 gap)
+  registerAiAppRiskRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);

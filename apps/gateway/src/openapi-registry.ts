@@ -1474,6 +1474,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/sensitivity-labels/settings": "internal",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "internal",
+  "GET /v1/ai-app-risk": "internal",
+  "GET /v1/shadow-ai/risk": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -2984,6 +2986,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/sensitivity-labels/settings": "org",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "org",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "org",
+  "GET /v1/ai-app-risk": "org",
+  "GET /v1/shadow-ai/risk": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",
