@@ -385,11 +385,22 @@ export async function runSkillAdmissionRescan(db: Db, opts: { limit?: number } =
     out.examined++;
     const a = admitSkillText(s, s.admittedDigest);
     if (engineOn && a.state !== "refused") await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: s.id, digest: a.digest });
-    // conditional on the text this verdict is for (a concurrent edit wins)
-    await db
+    // conditional on the text this verdict is for (a concurrent edit wins), and (ADR-0348) on the admission it was
+    // computed from: an admin's admit that commits after the read above is not reverted to held
+    const written = await db
       .update(builderSkills)
       .set(admissionColumns(a))
-      .where(and(eq(builderSkills.id, s.id), eq(builderSkills.name, s.name), eq(builderSkills.body, s.body)));
+      .where(
+        and(
+          eq(builderSkills.id, s.id),
+          eq(builderSkills.name, s.name),
+          eq(builderSkills.body, s.body),
+          eq(builderSkills.admissionState, s.admissionState),
+          s.admittedDigest === null ? isNull(builderSkills.admittedDigest) : eq(builderSkills.admittedDigest, s.admittedDigest),
+        ),
+      )
+      .returning({ id: builderSkills.id });
+    if (written.length === 0) continue; // changed meanwhile: the next pass adjudicates what is there now
     if (a.state === "held" || a.state === "refused") {
       if (a.state === "held") out.held++;
       else out.refused++;

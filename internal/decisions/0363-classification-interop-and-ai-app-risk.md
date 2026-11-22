@@ -166,3 +166,7 @@ What exists and is reused (repo search, 2026-11-17):
   decide hooks), the `classifiers` argument at every `evaluateGuardrails` site (`guardrails.ts`, `regulait-llm.ts`,
   `cost-import.ts`), migration `custom_classifiers`. Tests: `custom-classifiers.test.ts` (shared),
   `zz-adr0363-custom-classifiers.test.ts`, and the CHECK equality in `adr0348-state-machines.test.ts`.
+- Slice 3: `packages/shared/src/ai-app-risk.ts` (attributes, the factor score) and `ai-app-risk-data.ts` (the curated
+  dataset v1, deep-frozen and pinned by count and hash), with `ai-app-risk.test.ts`; `apps/gateway/src/ai-app-risk.ts`
+  (two read-only routes: the dataset, and the risk-ranked shadow-AI inventory with suggested, never applied, site
+  rules). Test: `zz-adr0363-ai-app-risk.test.ts`. UI gaps: `scripts/known-ui-gaps/adr-0363-e44-ai-app-risk.json`.

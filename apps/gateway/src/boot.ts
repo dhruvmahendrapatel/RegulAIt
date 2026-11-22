@@ -61,7 +61,7 @@ import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 import { describePublicUrl, resolvePublicUrl } from "./public-url.js";
 import { describeDataKey, verifyDataKeyOnBoot, type DataKeyBootResult } from "./data-key.js";
 import { Scheduler, resolveSchedulerConfig, syncSchedulerJobs } from "./scheduler.js";
-import { startStageRetryWorker, stageRetryWorkerEnabled, warmStageQueueSender, type StageRetryWorker } from "./workflows-queue.js";
+import { startStageDeadlineWorker, startStageRetryWorker, stageRetryWorkerEnabled, warmStageQueueSender, type StageRetryWorker } from "./workflows-queue.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-chain.js";
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
@@ -355,8 +355,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   });
   // ADR-0283: the workflow retry worker, registered before listen for the same reason
   let retryWorker: StageRetryWorker | null = null;
+  let deadlineWorker: StageRetryWorker | null = null;
   app.addHook("onClose", async () => {
     if (retryWorker) await retryWorker.stop();
+    if (deadlineWorker) await deadlineWorker.stop();
   });
 
   // Audit anchoring is DEFAULT-ON and deliberately does NOT ride the ADR-0064
@@ -519,6 +521,13 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       retryWorker = await startStageRetryWorker(db);
     } catch (err) {
       console.error(`[regulait] workflow retry worker did not start: ${errLine(err)}`);
+    }
+    // ADR-0340 slice 2: stage deadlines, under the same switch. A worker that does not start leaves the timers
+    // queued: a stage simply escalates late, and nothing it gates is affected.
+    try {
+      deadlineWorker = await startStageDeadlineWorker(db);
+    } catch (err) {
+      console.error(`[regulait] workflow deadline worker did not start: ${errLine(err)}`);
     }
   }
   // The sender starts here, not inside the first failing stage's transaction. Best-effort: a send that still finds no

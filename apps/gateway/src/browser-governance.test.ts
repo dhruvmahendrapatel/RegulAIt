@@ -45,10 +45,12 @@ describe("ADR-0334 per-user policy", () => {
     expect(browserPolicySchema.safeParse(p).success).toBe(true);
   });
 
-  it("B1: an unmatched account gets the org-wide rules (account domains kept); a disabled person and a halted or read-only deployment get nothing", () => {
-    const unmatched = buildBrowserPolicy(base({ user: null }));
-    expect(unmatched.sites).toEqual(buildBrowserPolicy(base()).sites);
-    expect(unmatched.sites.find((s) => s.siteId === "ep-poe-web")).toEqual({ siteId: "ep-poe-web", decision: "allow", denyReason: null, accountDomains: ["example.com"] });
+  it("#1028 (B1 reversed): an unmatched or empty account, a disabled person and a halted or read-only deployment get nothing", () => {
+    // the org has an allowed site; an account that matches no user must still get no site at all
+    for (const profileEmail of ["someone@personal.example", ""]) {
+      const unmatched = buildBrowserPolicy(base({ user: null, profileEmail }));
+      expect(unmatched.sites.every((s) => s.decision === "deny" && s.denyReason === "account_not_recognised" && s.accountDomains.length === 0), profileEmail).toBe(true);
+    }
     const disabled = buildBrowserPolicy(base({ user: { id: randomUUID(), disabled: true } }));
     expect(disabled.sites.every((s) => s.decision === "deny" && s.denyReason === "user_disabled")).toBe(true);
     for (const mode of ["halted", "read_only", "require_approval"] as const) {
