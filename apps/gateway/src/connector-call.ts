@@ -43,6 +43,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
+import type { AbacPrincipalContext } from "./abac-principal.js";
 import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import {
@@ -57,7 +58,9 @@ import {
   governancePolicyEpoch,
   usageEvents,
   type Db,
+  type PaidCallPriceRow,
 } from "@regulait/db";
+import { paidPriceForConnector, releasePaidCall, reservePaidCall, runIdOfCall, settlementAmount, settlePaidCall } from "./paid-calls.js";
 import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
 import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
@@ -210,6 +213,11 @@ export interface GovernedConnectorCallArgs {
    * Absent = the person's own call (`actor: null`).
    */
   delegationGrantId?: string | undefined;
+  /**
+   * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`), for the ABAC v5 request. Absent
+   * (an in-process caller with no request) = each reads as its strict value.
+   */
+  principal?: AbacPrincipalContext | null | undefined;
   /**
    * ADR-0193 P1 — the causal context this call runs in (a builder thread). Its result is recorded under it, and a
    * WRITE is refused when the context already holds content from a source below the write floor. Absent = the
@@ -466,6 +474,18 @@ export async function executeGovernedConnectorCall(
     // otherwise).
     const dial = await loadExecutionDial(db);
     const connectorLiteracy = await literacySlot(db, userId); // ADR-0182 A14
+    // ADR-0188 S4: a delegated call carries the stored chain, read now (before the
+    // governed core, whose ABAC request carries it, ADR-0251 slice 4b); a grant that cannot be read refuses
+    let delegatedActor: GovernedActor | null = null;
+    let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
+    if (args.delegationGrantId) {
+      try {
+        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: connector.pricePerCallUsd != null });
+      } catch (err) {
+        if (!(err instanceof DelegationRefusedError)) throw err;
+        delegationRefusal = delegationRefusalDecision(err);
+      }
+    }
     // ADR-0251 — the one governed core's restrictions for this call, loaded BEFORE the consent binding so a matching
     // approval rule's id enters the consent's context digest. A load that fails is a deny (`governed-core-error`).
     const coreResource: GovernedResource = { type: "connector", id: connectorId, name: connector.name, operation: body.operation };
@@ -473,7 +493,13 @@ export async function executeGovernedConnectorCall(
     let coreError: unknown = null;
     try {
       // the window is counted once, under the rate lock, by governedEvaluateResource below (hard windows)
-      coreRestrictions = await loadResourceRestrictions(db, { userId, resource: coreResource, projectId, counts: false });
+      coreRestrictions = await loadResourceRestrictions(db, {
+        userId,
+        resource: coreResource,
+        projectId,
+        counts: false,
+        facts: { principal: args.principal ?? null, actor: delegatedActor },
+      });
     } catch (err) {
       coreError = err;
     }
@@ -517,17 +543,6 @@ export async function executeGovernedConnectorCall(
     // the consent this call still lacks (dial first, then rules by specificity); null when nothing is missing
     const missing = bindings.find((b) => b.binding.approvedApprovalId === null) ?? null;
     binding = missing?.binding ?? bindings[0]?.binding ?? null;
-    // ADR-0188 S4: a delegated call carries the stored chain, read now; a grant that cannot be read refuses
-    let delegatedActor: GovernedActor | null = null;
-    let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
-    if (args.delegationGrantId) {
-      try {
-        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: connector.pricePerCallUsd != null });
-      } catch (err) {
-        if (!(err instanceof DelegationRefusedError)) throw err;
-        delegationRefusal = delegationRefusalDecision(err);
-      }
-    }
     const entitlement = delegationRefusal
       ? (delegationRefusal as ReturnType<typeof evaluateConnector>)
       : evaluateConnector({
@@ -1262,8 +1277,27 @@ export async function executeGovernedConnectorCall(
 
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
     // surfaces as 502 — the same discipline as a failed model dispatch.
+    // ADR-0313: a PAID connector reserves its worst-case charge against the call's project budget and run cap before
+    // anything is sent (and before a held approval is spent); over budget, or no budget at all, is a refusal routed to
+    // the approvals queue. A hold this path does not settle or release is released by the sweeper at its TTL.
+    const paidPrice = await paidPriceForConnector(db, connectorId);
+    let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow } | null = null;
+    if (paidPrice) {
+      const reserved = await reservePaidCall(db, {
+        price: paidPrice,
+        userId,
+        projectId: projectId ?? null,
+        runId: runIdOfCall(args),
+        subject: { kind: "connector", connectorId },
+      });
+      if (!reserved.ok) return out.status(reserved.status).send({ decision, error: reserved.error, detail: reserved.detail });
+      paidHold = reserved;
+    }
     const spent = await consumeHeld();
-    if (spent) return spent;
+    if (spent) {
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "not_executed");
+      return spent;
+    }
     let result;
     try {
       if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
@@ -1277,6 +1311,8 @@ export async function executeGovernedConnectorCall(
       );
       result = await provider.invoke(effectiveInvocation);
     } catch (err) {
+      // ADR-0313: a failed call bills nothing, so its hold is released
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed");
       if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
         policyChanged = true;
         await auditPolicyChangedAfterDecision(db, "execution");
@@ -1397,7 +1433,9 @@ export async function executeGovernedConnectorCall(
 
       // pillar 5 actuals: an allowed, executed call bills the connector's flat
       // list price. Unpriced → null, never an invented figure (agents' rule).
-      const costUsd = connector.pricePerCallUsd ?? null;
+      // ADR-0313: a paid connector bills its quoted price (never above its hold) instead of the flat list price
+      const paidSettlement = paidHold ? settlementAmount(paidHold.price, paidHold.heldUsd, undefined) : null;
+      const costUsd = paidSettlement ? paidSettlement.amountUsd : (connector.pricePerCallUsd ?? null);
       const [connectorUsageRow] = await evidenceDb.insert(usageEvents).values({
         // ADR-0188 S4: the acting agent, when one acts (decision 9)
         ...actorColumns(),
@@ -1409,6 +1447,8 @@ export async function executeGovernedConnectorCall(
         projectId,
         detail: {
           status: result.status,
+          // ADR-0313 / ADR-0312: the run this call was made in, so the run's cap and cost per outcome see the spend
+          ...(runIdOfCall(args) ? { runId: runIdOfCall(args) } : {}),
           ...(!policyChanged && body.object ? { object: body.object } : {}),
           providerKind: connector.providerKind,
           ...(policyChanged ? { withheld: true, reason: "policy_changed" } : {}),
@@ -1432,6 +1472,10 @@ export async function executeGovernedConnectorCall(
       // in the same call that inserted it. Never a recomputed price.
       sink.usageEventId = connectorUsageRow?.id ?? null;
       sink.costUsd = costUsd;
+      if (paidHold && paidSettlement) {
+        await settlePaidCall(evidenceDb as unknown as Db, { holdId: paidHold.holdId, userId, amountUsd: paidSettlement.amountUsd,
+          usageEventId: connectorUsageRow?.id ?? null, capped: false, reported: false });
+      }
       // ADR-0188 S4 (decision 22): settled along the chain in the usage row's transaction
       if (args.delegationGrantId && connectorUsageRow) {
         await settleDelegationCharge(evidenceDb, { usageEventId: connectorUsageRow.id, leafGrantId: args.delegationGrantId, amountMicros: usdToMicros(costUsd) });

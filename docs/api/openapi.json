@@ -88,6 +88,9 @@
       "name": "spend"
     },
     {
+      "name": "state-machines"
+    },
+    {
       "name": "usage-events"
     },
     {
@@ -1140,7 +1143,7 @@
                 "robot_version",
                 "endpoint_addon_removal",
                 "vendor_agent_control",
-                "saas_finding_review"
+                "agent_containment"
               ]
             }
           },
@@ -2972,6 +2975,40 @@
         "responses": {
           "400": {
             "description": "Request body failed schema validation."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
+    "/v1/state-machines": {
+      "get": {
+        "operationId": "getV1StateMachines",
+        "summary": "GET /v1/state-machines",
+        "tags": [
+          "state-machines"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "403": {
+            "description": "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited."
           },
           "429": {
             "description": "Rate limited. Retry after the `retry-after` header."

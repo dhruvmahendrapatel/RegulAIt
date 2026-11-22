@@ -40,7 +40,7 @@ describe("ADR-0334 send decision", () => {
   });
 
   it("has words for every block code and never shows a code as the title", () => {
-    for (const code of ["site_denied", "no_site_rule", "execution_posture", "user_disabled", "account_not_allowed", "account_signed_out", "site_not_in_policy", "no_valid_policy"]) {
+    for (const code of ["site_denied", "no_site_rule", "execution_posture", "user_disabled", "account_not_recognised", "account_not_allowed", "account_signed_out", "site_not_in_policy", "no_valid_policy"]) {
       expect(BLOCK_COPY_CODES).toContain(code);
       expect(blockCopy(code).title).not.toMatch(/_/);
     }

@@ -115,6 +115,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "vendor_agent_control",
   // ADR-0337 §5 slice 3b: a SaaS entitlement finding raised for a recorded decision (stageId = saas-finding-review:<id>)
   "saas_finding_review",
+  // ADR-0366: containing (halting) an agent seen acting outside its declared role (stageId = agent-containment:<id>)
+  "agent_containment",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -145,6 +147,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   endpoint_addon_removal: "MCP server removal from endpoints",
   vendor_agent_control: "vendor agent disable, quarantine or restore",
   saas_finding_review: "SaaS entitlement finding (remove the grant, or accept the risk)",
+  agent_containment: "rogue-agent containment",
 };
 
 /**

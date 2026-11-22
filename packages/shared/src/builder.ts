@@ -128,7 +128,13 @@ export const builderSetSubagentsSchema = z
 
 export const builderSetSkillsSchema = z.object({ skillIds: z.array(z.string().uuid()).max(50) }).strict();
 
-export const builderAddMemorySchema = z.object({ content: z.string().trim().min(1).max(2000) }).strict();
+export const builderAddMemorySchema = z
+  .object({
+    content: z.string().trim().min(1).max(2000),
+    /** ADR-0347: ask for a SHORTER expiry than the policy's, in hours; longer than the policy is refused */
+    expiresInHours: z.number().int().min(1).max(8760).optional(),
+  })
+  .strict();
 
 export const builderCreateScheduleSchema = z
   .object({

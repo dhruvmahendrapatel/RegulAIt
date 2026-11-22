@@ -59,6 +59,8 @@ export const DISCOVERY_EVIDENCE_KINDS = [
   "saas_inventory",
   "idp_app_grant",
   "ml_platform_inventory",
+  // ADR-0336 slice 4: a plaintext credential found in a staged agent's configuration, reported by location only
+  "agent_config",
 ] as const;
 export type DiscoveryEvidenceKind = (typeof DISCOVERY_EVIDENCE_KINDS)[number];
 
@@ -154,10 +156,13 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   agent_registry_gemini: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "Google Gemini Enterprise agents" },
   agent_registry_agentcore: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "AWS Bedrock AgentCore runtimes" },
   // ADR-0336 (E17): the agent platforms; each also stages the agent's components (agent_registry_record_components)
+  // ADR-0336 slice 4: the OpenAI and n8n adapters report a plaintext credential in an agent's configuration
+  // (`agent_config`, subject `system` = the staged record's external id), by location and rule only. Copilot Studio
+  // and Agentforce read no content column, so they declare nothing until they scan (#1130 R9 [3])
   agent_registry_copilot_studio: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Copilot Studio agents (Power Platform Dataverse)" },
   agent_registry_agentforce: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Salesforce Agentforce agents" },
-  agent_registry_openai: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
-  agent_registry_n8n: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "n8n AI agent workflows" },
+  agent_registry_openai: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
+  agent_registry_n8n: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "n8n AI agent workflows" },
 });
 
 /**

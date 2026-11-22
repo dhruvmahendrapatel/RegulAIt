@@ -20,7 +20,8 @@ import {
 } from "@regulait/cloud-discovery";
 import { checkSaasEntitlementBatch, type SaasEntitlementBatch } from "@regulait/shared";
 import { DISCOVERY_SCANNERS, type ScanContext } from "./discovery-scanners.js";
-import { M365_PERMISSION_RESOURCES, M365_USAGE_READ, SAAS_ENTITLEMENT_SCANNERS, SALESFORCE_WRITE_PERMISSIONS, USAGE_NOT_OBSERVED, WORKSPACE_USAGE_READ, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
+import { M365_PERMISSION_RESOURCES, M365_USAGE_READ, SAAS_ENTITLEMENT_SCANNERS, USAGE_NOT_OBSERVED, WORKSPACE_USAGE_READ, readOnlyFetch, slackWriteScope } from "./saas-entitlement-readers.js";
+import { SALESFORCE_PERMISSIONS_QUERY, WRITE_SYSTEM_PERMISSIONS } from "./salesforce-org.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000e18";
 const CLIENT = "00000000-0000-4000-8000-000000000e19";
@@ -532,29 +533,33 @@ describe("ADR-0337 entitlement_salesforce", () => {
   const USER = "0055g00000AbCdEAAA";
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const credential = { mode: "static" as const, publicConfig: { clientId: "3MVG9consumerKeyForTests_000", username: "integration@acme.example" }, secret: privateKey.export({ type: "pkcs8", format: "pem" }).toString() };
-  const source = { id: "s-sf", name: "sf", kind: "entitlement_salesforce" as const, target: { loginUrl: "https://login.salesforce.com", orgId: ORG }, scope: { orgLevel: true, include: [] as string[] } };
   const INSTANCE = "https://acme.my.salesforce.com";
+  const source = { id: "s-sf", name: "sf", kind: "entitlement_salesforce" as const, target: { environment: "production", myDomain: INSTANCE, orgId: ORG }, scope: { orgLevel: true, include: [] as string[] } };
 
-  function fakeSalesforce(perms: Record<string, boolean>, over?: (url: URL, q: string) => Response | null) {
+  function fakeSalesforce(perms: Record<string, boolean>, over?: (url: URL, q: string) => Response | null, objectWrites: unknown[] = []) {
     const accessToken = `00D!${randomBytes(16).toString("hex")}`;
     const assertions: string[] = [];
     const queries: string[] = [];
+    const hosts: string[] = [];
     const f = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = urlOf(input);
-      if (url.hostname === "login.salesforce.com" && url.pathname === "/services/oauth2/token") {
+      hosts.push(url.host);
+      if (url.origin === INSTANCE && url.pathname === "/services/oauth2/token") {
         assertions.push(new URLSearchParams(String(init?.body)).get("assertion") ?? "");
-        return json({ access_token: accessToken, instance_url: INSTANCE, id: `https://login.salesforce.com/id/${ORG}/${USER}`, token_type: "Bearer" });
+        // a vendor-named instance elsewhere is never used (#890 R4 [2]): every later call goes to the My Domain
+        return json({ access_token: accessToken, instance_url: "https://elsewhere.my.salesforce.com", id: `https://login.salesforce.com/id/${ORG}/${USER}`, token_type: "Bearer" });
       }
       if (url.origin === INSTANCE && url.pathname.startsWith("/services/data/v62.0/query")) {
         const q = url.searchParams.get("q") ?? "";
         queries.push(q || url.pathname);
         const o = over?.(url, q);
         if (o) return o;
-        if (q.includes("FROM PermissionSet ")) return json({ done: true, records: [{ ...Object.fromEntries(SALESFORCE_WRITE_PERMISSIONS.map((p) => [p, false])), ...perms }] });
+        if (q === SALESFORCE_PERMISSIONS_QUERY) return json({ done: true, records: [{ ...Object.fromEntries(WRITE_SYSTEM_PERMISSIONS.map((p) => [p, false])), ...perms }] });
+        if (q.includes("FROM ObjectPermissions")) return json({ done: true, records: objectWrites });
         if (q.includes("FROM ConnectedApplication")) {
-          return json({ done: false, nextRecordsUrl: "/services/data/v62.0/query/01gxx-2000", records: [{ Id: "0H4AGENT0000001AAA", Name: "Sales agent", OptionsAllowAdminApprovedUsersOnly: false }] });
+          return json({ done: false, nextRecordsUrl: "/services/data/v62.0/query/01gxx00000000AB-2000", records: [{ Id: "0H4AGENT0000001AAA", Name: "Sales agent", OptionsAllowAdminApprovedUsersOnly: false }] });
         }
-        if (url.pathname === "/services/data/v62.0/query/01gxx-2000") return json({ done: true, records: [{ Id: "0H4LOCKED000002AAA", Name: "Locked app", OptionsAllowAdminApprovedUsersOnly: true }] });
+        if (url.pathname === "/services/data/v62.0/query/01gxx00000000AB-2000") return json({ done: true, records: [{ Id: "0H4LOCKED000002AAA", Name: "Locked app", OptionsAllowAdminApprovedUsersOnly: true }] });
         if (q.includes("FROM SetupEntityAccess")) {
           return json({
             done: true,
@@ -567,14 +572,15 @@ describe("ADR-0337 entitlement_salesforce", () => {
       }
       return json({}, 404);
     }) as typeof fetch;
-    return { f, accessToken, assertions, queries };
+    return { f, accessToken, assertions, queries, hosts };
   }
 
   it("reads connected apps, self-authorisation and pre-authorisations with a read-only user; never selects a token field", async () => {
     const sf = fakeSalesforce({});
     const { ctx, calls } = ctxFor({ fetch: sf.f, source, credential });
     const res = await scanner("entitlement_salesforce").run(ctx);
-    expect(res.credentialWriteScope).toBe("unverified");
+    // both shared checks passed (no write system permission, no object-level write): read_only (#890 R4 [1])
+    expect(res.credentialWriteScope).toBe("read_only");
     const batch = checkSaasEntitlementBatch(res.entitlements, "salesforce");
     // no read-only usage source here: use is not observed, said so (ADR-0337 §5)
     expect(batch.usage).toEqual({ coverage: "none", windowStart: null, note: USAGE_NOT_OBSERVED.salesforce, apps: [] });
@@ -583,17 +589,22 @@ describe("ADR-0337 entitlement_salesforce", () => {
       ["0H4AGENT0000001", [" connected_app:self_authorize", "profile:System_Administrator connected_app:preauthorized"]],
       ["0H4LOCKED000002", ["permission_set:Sales_Agents connected_app:preauthorized"]],
     ]);
-    // the JWT bearer assertion names the consumer key, the integration user and the login audience
+    // the shared JWT helper: consumer key, user, production audience, a 2-minute life and a fresh jti
     const claims = JSON.parse(Buffer.from(sf.assertions[0]!.split(".")[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
     expect(claims).toMatchObject({ iss: credential.publicConfig.clientId, sub: credential.publicConfig.username, aud: "https://login.salesforce.com" });
+    expect((claims.exp as number) - (claims.iat as number)).toBe(120);
+    expect(typeof claims.jti).toBe("string");
+    // only the My Domain is ever called; the vendor's instance_url is ignored
+    expect(new Set(sf.hosts)).toEqual(new Set(["acme.my.salesforce.com"]));
     // nothing that could revoke a token (DeleteToken, RequestToken, AccessToken) is ever queried; every API call is a GET
     expect(sf.queries.join(" ")).not.toMatch(/OauthToken|DeleteToken|RequestToken/);
-    expect(calls.methods.filter(([h]) => h === "acme.my.salesforce.com").every(([, m]) => m === "GET")).toBe(true);
+    // the token exchange is the one POST (to the My Domain's token endpoint); every API call is a GET
+    expect(calls.methods.filter(([h, m]) => h === "acme.my.salesforce.com" && m !== "GET")).toEqual([["acme.my.salesforce.com", "POST"]]);
     expect(calls.secrets).toEqual(expect.arrayContaining([sf.accessToken, sf.assertions[0]]));
     expect(calls.raw.join("")).not.toContain(sf.accessToken);
   });
 
-  it.each(SALESFORCE_WRITE_PERMISSIONS)("an integration user holding %s is refused before any app is read (decision 7)", async (perm) => {
+  it.each([...WRITE_SYSTEM_PERMISSIONS])("an integration user holding %s is refused before any app is read (decision 7)", async (perm) => {
     const sf = fakeSalesforce({ [perm]: true });
     const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: sf.f, source, credential }).ctx);
     expect(res.credentialWriteScope).toBe("write");
@@ -601,11 +612,35 @@ describe("ADR-0337 entitlement_salesforce", () => {
     expect(sf.queries.some((q) => q.includes("ConnectedApplication"))).toBe(false);
   });
 
-  it("refuses another org's token, a bad login host, and a non-PKCS#8 key", async () => {
+  it("object-level write on any object refuses the credential too (#890 R4 [1])", async () => {
+    const sf = fakeSalesforce({}, undefined, [{ Id: "110xx0000000001AAA", SobjectType: "Account" }]);
+    const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: sf.f, source, credential }).ctx);
+    expect(res.credentialWriteScope).toBe("write");
+    expect(res.readOutcomes![0]!.detail).toMatch(/write on Account/);
+    expect(sf.queries.some((q) => q.includes("ConnectedApplication"))).toBe(false);
+  });
+
+  it("an unreadable permission check reads nothing else and stays unverified", async () => {
+    const sf = fakeSalesforce({}, (_u, q) => (q === SALESFORCE_PERMISSIONS_QUERY ? json({ done: true, records: [] }) : null));
+    const res = await scanner("entitlement_salesforce").run(ctxFor({ fetch: sf.f, source, credential }).ctx).catch((e: Error) => e);
+    // nothing could be read: the run fails with the reason rather than reporting an empty graph
+    expect(String(res instanceof Error ? res.message : res.credentialWriteScope)).toMatch(/permission check|unverified/);
+    expect(sf.queries.some((q) => q.includes("ConnectedApplication"))).toBe(false);
+  });
+
+  it("refuses another org's token, a target that names no My Domain, a key that is not RSA and a non-PKCS#8 key", async () => {
     await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source: { ...source, target: { ...source.target, orgId: "00D5g000009ZzZzEAA" } }, credential }).ctx)).rejects.toThrow(/another org/);
-    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://evil.example", orgId: ORG }, { orgLevel: true, include: [] })).toMatch(/loginUrl/);
-    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://acme.my.salesforce.com/x", orgId: ORG }, { orgLevel: true, include: [] })).toMatch(/loginUrl/);
-    expect(scanner("entitlement_salesforce").validateTarget!({ loginUrl: "https://acme.sandbox.my.salesforce.com", orgId: ORG }, { orgLevel: true, include: [] })).toBeNull();
+    const v = (target: Record<string, string>) => scanner("entitlement_salesforce").validateTarget!(target, { orgLevel: true, include: [] });
+    expect(v({ environment: "production", myDomain: "https://login.salesforce.com", orgId: ORG })).toMatch(/myDomain/);
+    expect(v({ environment: "production", myDomain: "https://evil.example", orgId: ORG })).toMatch(/myDomain/);
+    expect(v({ myDomain: INSTANCE, orgId: ORG })).toMatch(/environment/);
+    expect(v({ environment: "sandbox", myDomain: "https://acme--uat.sandbox.my.salesforce.com", orgId: ORG })).toBeNull();
+    expect(v({ environment: "production", myDomain: INSTANCE, orgId: "nope" })).toMatch(/orgId/);
+    // the shared helper's key check is in force: a key that is not RSA is refused (its RSA size rule, under 2048 bits
+    // refused, is pinned in the helper's own suite through rsaKeyStrongEnough, without generating a weak key here)
+    const notRsa = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: notRsa } }).ctx)).rejects.toThrow(/RSA private key of at least 2048 bits/);
     await expect(scanner("entitlement_salesforce").run(ctxFor({ fetch: fakeSalesforce({}).f, source, credential: { ...credential, secret: "not a key" } }).ctx)).rejects.toThrow(/PKCS#8/);
   });
 });
+

@@ -22,7 +22,7 @@
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp } from "./totp-sign-in";
-import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin } from "./admin-api";
+import { ADMIN_EMAIL, asSteppedUpAdmin, grantBuilderAgentAsAdmin, relaxAutonomyGateAsAdmin } from "./admin-api";
 import { steppedUpAs } from "./demo-credentials";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -284,7 +284,8 @@ test("chat answers through the governed core with its cost, and the thread is in
   // and step-up have usually spent the current and next steps, so nextCode() waits up to ~60 s for a fresh one (the
   // replay control working as designed). On the 60 s default that wait alone timed the test out (#851 CI, 2026-11-15).
   // Same budget as the other step-up journeys (phase6-builder-tools.spec.ts); no assertion changes.
-  test.setTimeout(120_000);
+  // a second stepped-up admin act (the gate relaxation, E51) can wait out one more TOTP step
+  test.setTimeout(180_000);
   const { page, track } = await danaSession(browser);
   // ADR-0188 S4: the agent acts only within grants of its own (the strict default) — Ada grants it the model
   // Dana chose, as an admin does, through the identity grants route (stepped up, from her signed-in page)
@@ -297,6 +298,10 @@ test("chat answers through the governed core with its cost, and the thread is in
     { agents: [{ agentId: configured.modelAgent.id as string, allowedModes: ["chat"] }] },
     adminPage?.request,
   );
+  // ADR-0180 addendum (lane E51): the template's sub-agent makes this agent delegated (and the schedule turned on
+  // above, autonomous), and an agent of either class whose autonomy floors are not in place is refused
+  // (403 autonomy_floor_unmet). This journey is about chat and spend, so Ada relaxes the gate, as an admin does.
+  await relaxAutonomyGateAsAdmin(state.baseUrl, state.passwords.admin, agentId, "e2e: the chat and spend journey", adminPage?.request);
   await page.goto(`/ui/builder/agents/${agentId}`);
   await expect(page.getByRole("heading", { level: 1, name: AGENT })).toBeVisible();
 
