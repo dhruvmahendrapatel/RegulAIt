@@ -109,6 +109,12 @@
     "limit": "8.7 kB"
   },
   {
+    "name": "chunk: ConnectorCataloguePage",
+    "path": "dist/assets/ConnectorCataloguePage-????????.js",
+    "gzip": true,
+    "limit": "6.8 kB"
+  },
+  {
     "name": "chunk: CopilotRedteamGateCard",
     "path": "dist/assets/CopilotRedteamGateCard-????????.js",
     "gzip": true,
