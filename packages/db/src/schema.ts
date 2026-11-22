@@ -10560,6 +10560,13 @@ export const virtualKeys = pgTable(
     }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    // --- ADR-0366 slice 2 (pending/rogue_agent_containment_b_keys.sql): a REVERSIBLE halt -----------------------
+    /** a rogue-agent containment of this key: NULL = not halted. Unlike `revoked_at` (permanent) a halt is lifted by an
+     * approved release; while set the key authenticates nothing (`virtual_key_halted`). CHECK: no halt without a
+     * reason, as on `agents`. */
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
@@ -20531,7 +20538,7 @@ import {
 /**
  * One containment of one agent for one signal (ADR-0366). Created `proposed` (filed in the Approvals Queue) or
  * `contained` (automatic, at or above the org threshold); `released` and `declined` are terminal
- * (`CONTAINMENT_MACHINE`). Exactly one of `agent_id` / `builder_agent_id` is set (CHECK).
+ * (`CONTAINMENT_MACHINE`). Exactly one of `agent_id` / `builder_agent_id` / `virtual_key_id` is set (CHECK).
  *
  * ADR-0200 exceptions: `explanation` and `evidence` are the point-in-time snapshot of the signal as it was decided
  * (the alert's live detail is refreshed and later resolved); `signal_rule_id` / `signal_ref_id` are the producing
@@ -20546,6 +20553,8 @@ export const agentContainments = pgTable(
     subjectKind: text("subject_kind", { enum: CONTAINMENT_SUBJECT_KINDS_E52 }).notNull(),
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    /** slice 2: a contained virtual key */
+    virtualKeyId: uuid("virtual_key_id").references(() => virtualKeys.id, { onDelete: "cascade" }),
     signalSource: text("signal_source", { enum: CONTAINMENT_SIGNAL_SOURCES_E52 }).notNull(),
     signalRuleId: text("signal_rule_id").notNull(),
     signalRefId: text("signal_ref_id").notNull(),
@@ -20579,6 +20588,7 @@ export const agentContainments = pgTable(
     uniqueIndex("agent_containments_signal_uq").on(t.signalSource, t.signalRefId),
     index("agent_containments_agent_idx").on(t.agentId, t.status),
     index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
+    index("agent_containments_virtual_key_idx").on(t.virtualKeyId, t.status),
     // the list's keyset (created_at DESC, id DESC), ADR-0031
     index("agent_containments_created_idx").on(t.createdAt, t.id),
     index("agent_containments_release_approval_idx").on(t.releaseApprovalId),

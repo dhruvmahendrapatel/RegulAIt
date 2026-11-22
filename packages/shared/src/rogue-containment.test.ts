@@ -68,10 +68,21 @@ describe("ADR-0366 rogue-agent containment (pure)", () => {
     });
   });
 
-  it("unregistered traffic and every other rule produce no signal (no agent to contain)", () => {
-    expect(
-      containmentSignalFromAlert({ id: "a3", ruleId: "unregistered_ai_traffic", subjectKey: `project:${AGENT}`, severity: "medium", detail: {} }),
-    ).toBeNull();
+  it("maps unregistered traffic on a virtual key to a key containment (slice 2); a project or user subject is not mapped", () => {
+    const key = { id: "a6", ruleId: "unregistered_ai_traffic", subjectKey: `virtual_key:${AGENT}`, severity: "medium" };
+    expect(containmentSignalFromAlert({ ...key, detail: { subjectType: "virtual_key", subjectId: AGENT, modelCalls: 3, mcpCalls: 1, windowDays: 7 } })).toMatchObject({
+      subject: { kind: "virtual_key", id: AGENT },
+      severity: "medium",
+      evidence: { modelCalls: 3, mcpCalls: 1, windowDays: 7 },
+    });
+    // the subject key and the detail must agree
+    const other = "22222222-2222-4333-8444-555555555555";
+    expect(containmentSignalFromAlert({ ...key, subjectKey: `virtual_key:${other}`, detail: { subjectType: "virtual_key", subjectId: AGENT } })).toBeNull();
+    expect(containmentSignalFromAlert({ ...key, subjectKey: `project:${AGENT}`, detail: { subjectType: "project", subjectId: AGENT } })).toBeNull();
+    expect(containmentSignalFromAlert({ ...key, subjectKey: `user:${AGENT}`, detail: { subjectType: "user", subjectId: AGENT } })).toBeNull();
+  });
+
+  it("every other rule produces no signal", () => {
     expect(containmentSignalFromAlert({ id: "a4", ruleId: "stale_credentials", subjectKey: "k", severity: "medium", detail: { agentId: AGENT } })).toBeNull();
     // a malformed agent id is not trusted
     expect(

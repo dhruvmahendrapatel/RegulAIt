@@ -31,6 +31,7 @@ import {
   runMigrations,
   sql,
   users,
+  virtualKeys,
   type Db,
 } from "@regulait/db";
 import { BATCH4_STRICT_DEFAULTS } from "@regulait/shared";
@@ -59,6 +60,7 @@ const restores: Array<() => Promise<unknown>> = [];
 const alertIds: string[] = [];
 const builderIds: string[] = [];
 const agentIds: string[] = [];
+const keyIds: string[] = [];
 
 type Method = "GET" | "POST" | "PUT";
 async function as(who: string, args: StepUpCheckArgs | null, method: Method, url: string, payload?: unknown) {
@@ -154,6 +156,7 @@ afterAll(async () => {
     if (alertIds.length) await db.delete(governanceAlerts).where(inArray(governanceAlerts.id, alertIds));
     if (builderIds.length) await db.delete(builderAgents).where(inArray(builderAgents.id, builderIds));
     if (agentIds.length) await db.delete(agents).where(inArray(agents.id, agentIds));
+    if (keyIds.length) await db.delete(virtualKeys).where(inArray(virtualKeys.id, keyIds));
     for (const id of [adminId, approverId, stewardId]) if (id) await db.update(users).set({ totpEnabled: false }).where(eq(users.id, id));
     for (const r of restores.reverse()) await r();
   }
@@ -474,5 +477,98 @@ describe("ADR-0366: release needs approval (owner decision 2026-11-21)", () => {
     expect((await as(adminId, null, "GET", "/v1/containments?before=not-a-cursor")).statusCode).toBe(400);
     const steward = await as(stewardId, null, "GET", "/v1/containments");
     expect(steward.statusCode).toBe(403);
+  });
+});
+
+describe("ADR-0366 slice 2: containing a virtual key (unregistered AI traffic)", () => {
+  async function key(label: string) {
+    const r = await app.inject({ method: "POST", url: "/v1/virtual-keys", headers: AUTH, payload: { name: `a366-${label}-${RUN}`, userId: stewardId } });
+    expect(r.statusCode, r.body).toBe(201);
+    keyIds.push(r.json().id);
+    return { id: r.json().id as string, header: { authorization: `Bearer ${r.json().token as string}` } };
+  }
+  const trafficAlert = (keyId: string) =>
+    db
+      .insert(governanceAlerts)
+      .values({
+        ruleId: "unregistered_ai_traffic",
+        subjectKey: `virtual_key:${keyId}`,
+        severity: "medium",
+        title: "a366 unregistered traffic",
+        detail: { subjectType: "virtual_key", subjectId: keyId, modelCalls: 4, mcpCalls: 0, windowDays: 7 },
+        firstDetectedAt: new Date(),
+        lastDetectedAt: new Date(),
+      })
+      .returning({ id: governanceAlerts.id })
+      .then(([r]) => (alertIds.push(r!.id), r!.id));
+  const call = (header: { authorization: string }) => app.inject({ method: "GET", url: "/v1/virtual-keys", headers: header });
+
+  it("a medium signal is a proposal by default: the key keeps working until an admin approves, then it is halted", async () => {
+    await setPolicy({ containmentAutoSeverity: "critical", containmentApproverUserId: approverId });
+    const k = await key("propose");
+    expect((await call(k.header)).json().error).not.toBe("virtual_key_halted");
+    const alertId = await trafficAlert(k.id);
+    expect(await containAlerts(db, [alertId])).toMatchObject({ proposed: 1 });
+    const c = (await containmentOf(alertId))!;
+    expect(c).toMatchObject({ subjectKind: "virtual_key", virtualKeyId: k.id, status: "proposed" });
+    const [ap] = await db.select().from(approvals).where(eq(approvals.id, c.approvalId!));
+    expect(ap!.userId).toBe(stewardId); // the key's owner is its steward
+    expect((await decide(c.approvalId!, "approved", stewardId)).statusCode).toBe(403);
+    const ok = await decide(c.approvalId!, "approved", approverId);
+    expect(ok.statusCode, ok.body).toBe(200);
+    const refused = await call(k.header);
+    expect(refused.statusCode).toBe(401);
+    expect(refused.json().error).toBe("virtual_key_halted");
+    const [row] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, k.id));
+    expect(row!.revokedAt).toBeNull(); // halted, never revoked: reversible
+    expect((await auditFor(k.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.virtualKeyHalted);
+  });
+
+  it("at a medium threshold it is halted at once, and an approved release makes the key work again", async () => {
+    await setPolicy({ containmentAutoSeverity: "medium" });
+    const k = await key("auto");
+    const alertId = await trafficAlert(k.id);
+    expect(await containAlerts(db, [alertId])).toMatchObject({ autoContained: 1 });
+    expect((await call(k.header)).json().error).toBe("virtual_key_halted");
+    // #1196 review [1]: the admin list shows the contained key as halted (with why), never active
+    type Listed = { id: string; active: boolean; haltedAt: string | null; haltedReason: string | null };
+    const keysAt = async (state: string) => {
+      const out: Listed[] = [];
+      let next = "";
+      for (let guard = 0; guard < 50; guard++) {
+        const res = await app.inject({ method: "GET", url: `/v1/virtual-keys?limit=100&count=exact&state=${state}${next}`, headers: AUTH });
+        expect(res.statusCode, res.body).toBe(200);
+        const body = res.json();
+        out.push(...(body.items as Listed[]));
+        if (body.nextCursor) next = `&cursor=${encodeURIComponent(body.nextCursor)}`;
+        else if (body.nextOffset !== null && body.nextOffset !== undefined) next = `&offset=${body.nextOffset}`;
+        else break;
+      }
+      return out.filter((x) => x.id === k.id);
+    };
+    const [halted] = await keysAt("halted");
+    expect(halted).toMatchObject({ active: false });
+    expect(halted!.haltedAt).not.toBeNull();
+    expect(halted!.haltedReason).toContain("contained (ADR-0366)");
+    expect(await keysAt("active")).toHaveLength(0);
+    const c = (await containmentOf(alertId))!;
+    const asked = await as(adminId, releaseStep(c.id), "POST", `/v1/containments/${c.id}/release`, { reason: `a366 key reviewed ${RUN}` });
+    expect(asked.statusCode, asked.body).toBe(202);
+    expect((await call(k.header)).json().error).toBe("virtual_key_halted"); // still halted while pending
+    const ok = await decide(asked.json().approvalId, "approved", approverId);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await call(k.header)).json().error).not.toBe("virtual_key_halted");
+    // the one audited unhalt: the key's own history reads HALTED … LIFTED
+    expect((await auditFor(k.id)).map((a) => a.ruleId)).toContain(CONTAINMENT_RULE_IDS.virtualKeyUnhalted);
+    await setPolicy({ containmentAutoSeverity: "critical" });
+  });
+
+  it("a revoked key is not contained (nothing to halt) and a project subject is not mapped", async () => {
+    await setPolicy({ containmentAutoSeverity: "medium" });
+    const k = await key("revoked");
+    await db.update(virtualKeys).set({ revokedAt: new Date() }).where(eq(virtualKeys.id, k.id));
+    const alertId = await trafficAlert(k.id);
+    expect(await containAlerts(db, [alertId])).toMatchObject({ skipped: 1, autoContained: 0 });
+    await setPolicy({ containmentAutoSeverity: "critical" });
   });
 });
