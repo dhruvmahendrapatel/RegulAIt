@@ -66,6 +66,7 @@ const STRICT_SQL = sql`UPDATE org_settings SET isolation_enforcement = 'enforce'
   isolation_floor_public = 'user_space_kernel', isolation_floor_internal = 'user_space_kernel',
   isolation_floor_confidential = 'user_space_kernel', isolation_floor_regulated = 'microvm',
   isolation_floor_mcp_stdio = 'user_space_kernel', isolation_floor_engine_worker = 'user_space_kernel',
+  isolation_floor_robot_browser = 'user_space_kernel',
   executor_attestation_max_age_minutes = 120`;
 
 /** one relaxed value per relaxable setting (enforcement has none: `warn` is retired, OWNER DECISION A) */
@@ -76,6 +77,7 @@ const RELAXED: Record<Exclude<IsolationSettingKey, "isolationEnforcement">, unkn
   isolationFloorRegulated: "user_space_kernel",
   isolationFloorMcpStdio: "hardened_container",
   isolationFloorEngineWorker: "hardened_container",
+  isolationFloorRobotBrowser: "hardened_container",
   executorAttestationMaxAgeMinutes: 1440,
 };
 
@@ -158,12 +160,12 @@ describe("ADR-0190 migration 0183 on a freshly migrated database", () => {
     expect(Number(rows<{ w: string }>(applied)[0]!.w)).toBeGreaterThanOrEqual(MIGRATION_WHEN);
   });
 
-  it("seeds the three shipped profiles as version 1, byte for byte with the shared bodies", async () => {
+  it("seeds the shipped profiles as version 1, byte for byte with the shared bodies", async () => {
     const res = await db.execute(
       sql`select name, version, body, digest, min_class, shipped, retired_at from execution_profiles where shipped order by name`,
     );
     const seeded = rows<{ name: string; version: number; body: string; digest: string; min_class: string; shipped: boolean; retired_at: unknown }>(res);
-    expect(seeded.map((r) => r.name)).toEqual(["engine-worker", "restricted", "restricted-microvm"]);
+    expect(seeded.map((r) => r.name)).toEqual(["engine-worker", "restricted", "restricted-microvm", "robot-browser"]);
     for (const r of seeded) {
       const body = SHIPPED_EXECUTION_PROFILES[r.name as keyof typeof SHIPPED_EXECUTION_PROFILES];
       expect(r.body, r.name).toBe(canonicalExecutionProfile(body));

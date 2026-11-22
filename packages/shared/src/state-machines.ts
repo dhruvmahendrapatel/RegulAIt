@@ -456,7 +456,12 @@ export const ROBOT_RUN_MACHINE = defineMachine({
     start: { from: ["queued"], to: "running", by: ["system"], summary: "The sandbox placement was accepted and the runner started." },
     succeed: { from: ["running"], to: "succeeded", by: ["worker"], summary: "Every step ran and the outputs matched the output schema." },
     fail: { from: ["running"], to: "failed", by: ["worker"], summary: "A step failed; the run stopped with evidence." },
-    time_out: { from: ["running"], to: "timed_out", by: ["worker", "system"], summary: "The run hit its wall-clock or step limit." },
+    time_out: {
+      from: ["queued", "running"],
+      to: "timed_out",
+      by: ["worker", "system"],
+      summary: "The run hit its wall-clock or step limit, or the stale-run sweep ended a run no gateway still holds.",
+    },
     cancel: {
       from: ["queued", "running"],
       to: "cancelled",

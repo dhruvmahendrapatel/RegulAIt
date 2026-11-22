@@ -92,6 +92,7 @@ import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
+import { isRobotsServerRow, ROBOT_TOOL_CALL_DEADLINE_MS } from "./robots-mcp.js";
 import {
   attemptsForToolKind,
   classifyUpstreamError,
@@ -127,6 +128,7 @@ import { loadEntitlements } from "./entitlements.js";
 import {
   executeGovernedProtocolCall,
   installProtocolSurface,
+  trackCallerRequest,
   isReservedToolName,
   protocolCapabilities,
   protocolOutcomeResult,
@@ -239,6 +241,16 @@ function toolKind(tool: Tool): "read" | "write" {
  * both gates on its own (a retry attempt must never become a bypass); on the
  * allow path that is one extra read, on the refuse path it is never reached.
  */
+/**
+ * ADR-0364 S3: the deadline one tools/call gets. A robot tool runs a whole sandboxed browser run (placement, up to a
+ * 5-minute wall clock, its margin), which the generic `mcpCallToolMs` would sever mid-run; it gets the run's own
+ * bound instead (never less than the generic one). Every tool still has one attempt.
+ */
+export function toolCallBudgetMs(serverRow: { transport: string; url: string }): number {
+  const generic = timeouts().mcpCallToolMs;
+  return isRobotsServerRow(serverRow) ? Math.max(generic, ROBOT_TOOL_CALL_DEADLINE_MS) : generic;
+}
+
 export async function preflightUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
@@ -385,8 +397,9 @@ export async function connectUpstream(
       await assertAdmitted(db, serverRow.id);
       return guardedMcpConnect(db, serverRow, {
         connectDeadlineMs: deadlineMs,
-        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt
-        ...(serverRow.transport === "stdio" && opts.placement
+        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt. ADR-0364 S3: the first-party
+        // Robots server gets the same context, because a tools/call there places a robot_browser run for that call
+        ...((serverRow.transport === "stdio" || serverRow.transport === "first_party") && opts.placement
           ? { placement: { ...(await stdioPlacementContext(db, opts.placement)), linkedOfferId: opts.placement.linkedOfferId ?? null } }
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
@@ -739,6 +752,13 @@ export async function executeGovernedToolCall(
      * exception). Absent = a caller gated elsewhere (a run's worker loop: its run was gated when it was planned).
      */
     planGate?: { engineInstanceId: string | null } | undefined;
+    /**
+     * ADR-0364 S3 (review B) — the caller's abort: its cancellation, its own request timeout (the SDK client's default
+     * is 60 s, below a robot run's bound) or its connection closing. Passed to the upstream `tools/call` with the
+     * deadline, so the upstream is told to stop (`notifications/cancelled`); a robot tool's run is cancelled by it
+     * (`startRobotRun`). Absent = only the deadline bounds the call (a worker loop).
+     */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -1661,12 +1681,15 @@ async function executeGovernedToolCallInner(
         ({ deadlineMs }) =>
           upstream!.callTool({ name: toolName, arguments: preparedPii?.effectiveArguments ?? args.arguments }, undefined, {
             timeout: deadlineMs,
+            // the caller's abort beside the deadline: whichever comes first ends the call, and the SDK tells the
+            // upstream (`notifications/cancelled`)
+            ...(args.signal ? { signal: args.signal } : {}),
           }),
         {
           // G2: by far the most generous of the three deadlines, because this is
           // the upstream doing real work — a build, a query, a scan. A bound that
           // severs legitimate work is worse than the hang it replaced.
-          budgetMs: timeouts().mcpCallToolMs,
+          budgetMs: toolCallBudgetMs(serverRow),
           maxAttempts: attemptsForToolKind(kind),
           // ADR-0185 G5: the call is one upstream operation on /metrics. The
           // connect before it is observed separately, once per attempt, inside
@@ -1683,8 +1706,23 @@ async function executeGovernedToolCallInner(
       // A `try`/`catch` rather than `.catch()`: an async `.catch` handler that
       // rethrows still widens the inferred type to include `undefined`, which
       // no longer satisfies the SDK's `tools/call` handler signature.
-      await operationFailed(err);
-      // ADR-0313: a failed call bills nothing, so its hold is released
+      // A caller that gave up is not the upstream failing: nothing is charged to its breaker, and the cancel is
+      // audited (the upstream was told to stop; what it had done by then is its own).
+      if (args.signal?.aborted) {
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          effect: "deny",
+          ruleId: "mcp-call-cancelled-by-caller",
+          ruleChain: [],
+          reason: "the caller cancelled the tools/call (or its connection closed) before the upstream answered; the upstream was told to stop",
+          detail: { projectId, phase: "tools/call", receiptClass: "decision" },
+        });
+      } else {
+        await operationFailed(err);
+      }
+      // ADR-0313: a failed (or cancelled) call bills nothing, so its hold is released
       if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed");
       if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
       throw err;
@@ -2598,6 +2636,8 @@ export async function callToolForCaller(
   ctx: McpToolCaller,
   toolName: string,
   args: Record<string, unknown> | undefined,
+  /** ADR-0364 S3 (review B): the caller's abort (cancel, timeout, closed connection), passed to the upstream */
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const { db, userId, serverId, projectId, workloadGrantId, planGateEngineInstance } = ctx;
   // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
@@ -2628,6 +2668,7 @@ export async function callToolForCaller(
     // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
     // with no grant resolves to no grant and is refused in the core (never decided as the person)
     ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+    ...(signal ? { signal } : {}),
   }).catch(async (err: unknown) => {
     // AER-024: the reply is already hijacked, so the primitive's admission
     // hold / egress refusal cannot be the pre-hijack 403 the manifest path
@@ -2997,7 +3038,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         serverId,
         projectId,
         listTools: () => listToolsForCaller(caller),
-        callTool: (name, args) => callToolForCaller(caller, name, args),
+        callTool: (name, args, signal) => callToolForCaller(caller, name, args, signal),
         closeUpstream: closeUpstreamSession,
       });
     }
@@ -3007,11 +3048,21 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     );
     // ADR-0185 G3: every non-tool request is decided by the protocol primitive
     // (refused, disabled, or governed exactly like a tool call)
+    // ADR-0364 S3 (review B): the caller's cancellation scope. A client cancels (or times out) with a
+    // `notifications/cancelled` on a LATER HTTP request; it reaches the call only within the same user, server and
+    // credential, so no caller can cancel another's call
+    const cancelScope = [
+      userId,
+      serverId,
+      req.authCtx.via,
+      req.authCtx.apiKeyId ?? req.authCtx.virtualKeyId ?? req.authCtx.delegationGrantId ?? req.authCtx.workloadCredentialId ?? "",
+    ].join("\u0000");
     const protocolSurface = installProtocolSurface(proxy, {
       db,
       userId,
       serverId,
       projectId,
+      cancelScope,
       call: async (method, params, extra) => {
         const protocolTrace = await beginTrace(db, {
           kind: "tool",
@@ -3032,6 +3083,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
           trace: protocolTrace,
           relay: extra.relay,
           progressToken: extra.progressToken,
+          signal: extra.signal,
           // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
           ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
@@ -3052,9 +3104,16 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     });
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => listToolsForCaller(caller));
-    proxy.setRequestHandler(CallToolRequestSchema, async (request) =>
-      callToolForCaller(caller, request.params.name, request.params.arguments),
-    );
+    proxy.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      // ADR-0364 S3 (review B): the call ends when the caller cancels it (by id, from any later request of the same
+      // caller), times out on its side, or closes its connection; the abort reaches the upstream (a robot run cancels)
+      const tracked = trackCallerRequest(cancelScope, extra.requestId, extra.signal);
+      try {
+        return await callToolForCaller(caller, request.params.name, request.params.arguments, tracked.signal);
+      } finally {
+        tracked.done();
+      }
+    });
 
     // Stateless mode: one transport per request, no session tracking yet.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
