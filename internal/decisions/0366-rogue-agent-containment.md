@@ -216,10 +216,30 @@ As built (#1134, second update):
   snapshot. A registry agent with no steward gets an unrouted proposal (the alert and automatic containment still
   apply).
 
+## Slice 2: containing a virtual key (lane E52, branch `builder/e52-rogue-containment-s2`)
+
+1. **Signal.** `unregistered_ai_traffic` whose subject is a **virtual key** (`virtual_key:<id>`, traffic attributed to
+   no project, so no approved use case covers it) maps to a containment of that key, at the monitor's severity
+   (`medium`). The subject key and the finding's detail must name the same key. A finding whose subject is a project
+   or a user is still not mapped: halting a whole project or a person is wider than the finding.
+2. **Action.** `virtual_keys` gains ADR-0124's three halt columns (same CHECK as `agents`). A key is **halted, never
+   revoked**: `revoked_at` is permanent, and the owner decision of 2026-11-21 makes every containment reversible by an
+   approved release. `resolveVirtualKey`, the one place a `rglv_` token is resolved, refuses a halted key with the new
+   holder-facing refusal `virtual_key_halted`. `haltVirtualKeyInTx` is audited `execution-virtual-key-halted`.
+   An approved release lifts it through `unhaltVirtualKeyInTx` (audited `execution-virtual-key-unhalted` with the
+   previous reason), the same one-unhalt-per-subject rule as slice 1's review fixes; there is no other key unhalt path.
+3. **Paths.** Unchanged from slice 1 and its addendum: a proposal by default (the key's owner is the steward who may
+   not decide it), automatic at or above the threshold, release by approval. A revoked key is not contained (nothing
+   to halt).
+4. **Data.** Migration `pending/rogue_agent_containment_b_keys.sql` (sorts after slice 1's file): the key halt columns
+   and `agent_containments.virtual_key_id`, with the subject CHECKs widened to three kinds.
+
 ## Follow-ups (later slices)
 
 - Lane E40's behaviour-baseline findings (open PR #966) as a `behaviour_baseline` signal source once it merges and
   leaves shadow mode.
-- Containment of a virtual key or a project for `unregistered_ai_traffic`.
+- Containment of a project for `unregistered_ai_traffic` (the virtual key is slice 2).
 - Re-evaluating a refreshed episode whose severity escalated (slice 1 decides at raise).
+- A halted builder agent's export/import carry-over (#1134 security review [6], triage-low: an import creates a new,
+  unhalted agent that the monitor must flag again). Not built in slice 2.
 - The admin screen (#453): containments list, release with step-up, policy settings.
