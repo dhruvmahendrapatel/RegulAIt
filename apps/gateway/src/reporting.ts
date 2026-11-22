@@ -256,9 +256,11 @@ export async function computeReport(db: Db, input: ComputeReportInput): Promise<
       ...(projectIds === null
         ? []
         : [
-            sql`${auditLog.detail} ->> 'projectId' = ANY(${sql.raw(
-              `ARRAY[${(projectIds.length ? projectIds : [ZERO_UUID]).map((p) => `'${assertUuid(p)}'`).join(",")}]::text[]`,
-            )})`,
+            // bound parameters, still uuid-validated (Codex review S-10)
+            sql`${auditLog.detail} ->> 'projectId' = ANY(ARRAY[${sql.join(
+              (projectIds.length ? projectIds : [ZERO_UUID]).map((p) => sql`${assertUuid(p)}`),
+              sql`, `,
+            )}]::text[])`,
           ]),
     );
     const [counts, denies] = await Promise.all([
@@ -558,7 +560,8 @@ export const REPORT_SCHEDULE_SWEEP_NOTE =
  *
  * NOTE ON AUTHORITY. `generateReport` takes the ACTOR, and the actor's
  * entitlement decides the effective scope of what is produced. Driven by the
- * scheduler there is no human caller, so `isAdmin` defaults to true — a
+ * scheduler there is no human caller, so the scheduler passes `isAdmin: true`
+ * explicitly (there is no default, ADR-0180) — a
  * schedule is an admin-authored object (authoring one is not in
  * NON_ADMIN_ROUTES) and generating it at the definition's declared scope is
  * precisely what the admin who authored it asked for. Driven by the endpoint,
@@ -567,14 +570,14 @@ export const REPORT_SCHEDULE_SWEEP_NOTE =
  */
 export async function runDueReportSchedules(
   db: Db,
-  opts: { actorUserId: string | null; isAdmin?: boolean; now?: Date },
+  opts: { actorUserId: string | null; isAdmin: boolean; now?: Date },
 ): Promise<{
   generated: Array<{ scheduleId: string; runId: string; definition: string }>;
   skipped: Array<{ scheduleId: string; reason: string }>;
 }> {
   // M-075: schedules are due by the database clock, as the rows they read are stamped
   const now = opts.now ?? (await databaseNow(db));
-  const isAdmin = opts.isAdmin ?? true;
+  const isAdmin = opts.isAdmin;
   const due = await db.select().from(reportSchedules).where(eq(reportSchedules.enabled, true));
   const generated: Array<{ scheduleId: string; runId: string; definition: string }> = [];
   const skipped: Array<{ scheduleId: string; reason: string }> = [];
