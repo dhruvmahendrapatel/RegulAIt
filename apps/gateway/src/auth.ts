@@ -1417,11 +1417,20 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // success: reset lockout state, and upgrade a hash written with older
     // scrypt parameters while the plaintext is in hand (ADR-0025 addendum).
     // passwordUpdatedAt is left alone: the password itself did not change.
-    const rehash = passwordNeedsRehash(user.passwordHash) ? await hashPassword(body.password) : null;
-    await db
-      .update(users)
-      .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null, ...(rehash ? { passwordHash: rehash } : {}) })
-      .where(eq(users.id, user.id));
+    // The rehash runs before any TOTP step on purpose: the password is already
+    // proven, and the stored value changes only in cost, never in meaning.
+    await db.update(users).set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null }).where(eq(users.id, user.id));
+    if (user.passwordHash && passwordNeedsRehash(user.passwordHash)) {
+      const rehash = await hashPassword(body.password);
+      // Compare-and-set (R3 #1194): `user` was read before the slow derivation,
+      // so a password change or admin reset may have landed meanwhile. Write the
+      // upgraded hash only if the stored hash is still the one just verified;
+      // otherwise the newer password wins and nothing is written.
+      await db
+        .update(users)
+        .set({ passwordHash: rehash })
+        .where(and(eq(users.id, user.id), eq(users.passwordHash, user.passwordHash)));
+    }
 
     if (user.totpEnabled) {
       // two-step: password accepted → short-lived pending-MFA token, no cookie

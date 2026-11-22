@@ -9,6 +9,9 @@
  *  2. right password on a legacy hash: 200, stored hash now `scrypt$131072$8$1$`,
  *     and the new hash verifies the same password.
  *  3. a second sign-in does not rewrite a current hash.
+ *  4. (R3 #1194) a password change that lands between verify and the rehash
+ *     write survives: the sign-in still succeeds, the stored hash is the newer
+ *     one, and the old password no longer verifies against it.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -16,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, scryptSync } from "node:crypto";
 import { createDb, eq, runMigrations, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { verifyPassword } from "./auth.js";
+import { hashPassword, verifyPassword } from "./auth.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -84,4 +87,55 @@ describe("S-08: rehash on successful password sign-in", () => {
     expect(res.statusCode, res.body).toBe(200);
     expect(await storedHash()).toBe(before);
   });
+
+  it("a password change landing between verify and the rehash write is not overwritten (compare-and-set)", async () => {
+    // a second, legacy-hashed account, signed in through an app whose db runs a
+    // password change at the first users update of the login (the lockout reset,
+    // which sits after verify and before the rehash write)
+    const raceEmail = `s08-race-${Date.now()}@example.com`;
+    const created = await app.inject({ method: "POST", headers: ADMIN, url: "/v1/users", payload: { email: raceEmail, displayName: "S08 Race" } });
+    expect(created.statusCode, created.body).toBe(201);
+    const raceId = created.json().id as string;
+    const OLD = "Rg1-old-" + randomBytes(6).toString("hex");
+    const NEW = "Rg1-new-" + randomBytes(6).toString("hex");
+    await db
+      .update(users)
+      .set({ passwordHash: legacyHash(OLD), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
+      .where(eq(users.id, raceId));
+    const newerHash = await hashPassword(NEW);
+    let armed = true;
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "update") {
+          const v = Reflect.get(target, prop, receiver);
+          return typeof v === "function" ? v.bind(target) : v;
+        }
+        return (table: unknown) => {
+          const real = target.update(table as typeof users);
+          if (!armed || table !== users) return real;
+          armed = false;
+          return {
+            set: (values: Parameters<typeof real.set>[0]) => ({
+              where: async (cond: Parameters<ReturnType<typeof real.set>["where"]>[0]) => {
+                await target.update(users).set({ passwordHash: newerHash }).where(eq(users.id, raceId));
+                return real.set(values).where(cond);
+              },
+            }),
+          };
+        };
+      },
+    }) as Db;
+    const racingApp = buildApp(racingDb, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+    try {
+      const res = await racingApp.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { identifier: raceEmail, password: OLD } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(armed).toBe(false); // the change really ran inside the window
+      const stored = (await db.select({ h: users.passwordHash }).from(users).where(eq(users.id, raceId)))[0]!.h;
+      expect(stored).toBe(newerHash);
+      expect(await verifyPassword(NEW, stored)).toBe(true);
+      expect(await verifyPassword(OLD, stored)).toBe(false);
+    } finally {
+      await racingApp.close();
+    }
+  }, 60_000);
 });
