@@ -2088,6 +2088,9 @@ export const auditLog = pgTable(
         "agent_containment",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0357 (lane E38): a governance-config export, plan (dry run) or apply, and each object an apply changes
+        // (objectId = null; the detail names the section and key). Plain text column — no DDL.
+        "governance_config",
         // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
         // changes (objectId = the device). Plain text column — no DDL.
         "endpoint_device",
