@@ -40,10 +40,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  agentContainments,
   agents,
   and,
   auditLog,
   eq,
+  inArray,
   isNotNull,
   mcpTools,
   mcpServers,
@@ -159,6 +161,57 @@ export async function haltAgentInTx(
       "put a deliberately-disabled agent back into service.",
   };
 }
+
+/**
+ * ADR-0124's agent UNHALT, inside the caller's transaction (extracted for ADR-0366, so an approved containment release
+ * lifts a halt through the one implementation the route uses and writes the same `execution-agent-unhalted` row on
+ * the agent, with the previous reason). Locks the row; writes nothing when it is not halted. Null for an unknown agent.
+ * The containment guard is the caller's: the route refuses while a containment holds the agent
+ * (`openContainmentsHolding`), and the release lifts only its own containment's halt.
+ */
+export async function unhaltAgentInTx(
+  tx: Db,
+  agentId: string,
+  reason: string,
+  actor: HaltActor,
+): Promise<{ changed: boolean; name: string; enabled: boolean; previousReason: string | null } | null> {
+  const [before] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+  if (!before) return null;
+  if (!before.haltedAt) return { changed: false, name: before.name, enabled: before.enabled, previousReason: null };
+  await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null }).where(eq(agents.id, agentId));
+  await tx.insert(auditLog).values({
+    userId: actor.userId ?? "00000000-0000-0000-0000-000000000000",
+    objectType: "agent",
+    objectId: agentId,
+    detail: { via: actor.via, previousReason: before.haltedReason, ...actor.detail, receiptClass: "configuration" },
+    effect: "allow",
+    ruleId: EXECUTION_CONTROL_RULE_IDS.agentUnhalted,
+    ruleChain: [],
+    reason: `agent '${before.name}' halt LIFTED: ${reason} (was halted for: ${before.haltedReason})`,
+  });
+  return { changed: true, name: before.name, enabled: before.enabled, previousReason: before.haltedReason };
+}
+
+/**
+ * ADR-0366 (#1134 security review): the open rogue-agent containments (contained, or with a release pending) that hold
+ * this agent. While any exists, ADR-0124's unhalt route defers to the containment: lifting that halt takes an approved
+ * release (`POST /v1/containments/:id/release`, a second administrator, an MFA step-up), never one admin alone.
+ */
+export async function openContainmentsHolding(db: Pick<Db, "select">, agentId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: agentContainments.id })
+    .from(agentContainments)
+    .where(and(eq(agentContainments.agentId, agentId), inArray(agentContainments.status, ["contained", "release_pending"])));
+  return rows.map((r) => r.id);
+}
+
+const heldByContainment = (ids: string[]) => ({
+  error: "held_by_containment",
+  containmentIds: ids,
+  detail:
+    "this halt is held by a rogue-agent containment; lifting it needs an approved release — " +
+    "POST /v1/containments/:id/release, decided by a second administrator (ADR-0366)",
+});
 
 export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
   const audit = async (
@@ -374,6 +427,9 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
     // ADR-0186 A: lifting a halt loosens a protection: a settings_relax step-up bound to this agent
     const stepUp = { kind: "settings_relax" as const, facts: { agentId, values: { halted: false } } };
     const [held] = await db.select({ haltedAt: agents.haltedAt }).from(agents).where(eq(agents.id, agentId));
+    // ADR-0366: refused before the step-up is spent, and again under the lock below
+    const holding = held?.haltedAt ? await openContainmentsHolding(db, agentId) : [];
+    if (holding.length) return reply.status(409).send(heldByContainment(holding));
     let cleared = false;
     if (held?.haltedAt) {
       const su = await requireStepUp(db, req, reply, stepUp);
@@ -388,18 +444,14 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
       }
       // the step-up was decided on the unlocked read: a halt that landed before the lock is decided
       // again on the locked row, so a halt is never lifted without one
+      // a containment that landed after the unlocked read still holds the halt
+      const holdingNow = await openContainmentsHolding(tx as unknown as Db, agentId);
+      if (holdingNow.length) return { held: holdingNow };
       if (!cleared) {
         const again = await checkStepUp(db, req, stepUp);
         if (!again.ok) return { refused: again };
       }
-      await tx.update(agents).set({ haltedAt: null, haltedReason: null, haltedByUserId: null })
-        .where(eq(agents.id, agentId));
-      await audit(
-        tx, req.authCtx.userId ?? null, "agent", agentId,
-        EXECUTION_CONTROL_RULE_IDS.agentUnhalted, "allow",
-        `agent '${before.name}' halt LIFTED: ${body.reason} (was halted for: ${before.haltedReason})`,
-        { via: req.authCtx.via, previousReason: before.haltedReason },
-      );
+      await unhaltAgentInTx(tx as unknown as Db, agentId, body.reason, { userId: req.authCtx.userId ?? null, via: req.authCtx.via });
       return {
         agentId, halted: false, changed: true,
         note: before.enabled
@@ -409,6 +461,7 @@ export function registerExecutionControlRoutes(app: FastifyInstance, db: Db) {
       };
     });
     if (result && "refused" in result && result.refused) return reply.status(result.refused.status).send(result.refused.body);
+    if (result && "held" in result && result.held) return reply.status(409).send(heldByContainment(result.held));
     return result ?? reply.status(404).send({ error: "unknown_agent" });
   });
 

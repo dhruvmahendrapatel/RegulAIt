@@ -2070,6 +2070,9 @@ export const auditLog = pgTable(
         "browser_governance",
         // ADR-0331: a governed add-on removal (created, cancelled; objectId = the removal). Plain text column — no DDL.
         "endpoint_addon_removal",
+        // ADR-0366: a rogue-agent containment (filed, contained, declined, released; objectId = the containment).
+        // Plain text column — no DDL.
+        "agent_containment",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
         // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
@@ -5248,6 +5251,13 @@ export const orgSettings = pgTable(
      * `stale_credentials` rule raises one alert episode per flagged
      * credential; false = it only shows flags on the inventory page. */
     staleCredentialAlerts: boolean("stale_credential_alerts").notNull().default(true),
+    /** ADR-0366: automatic rogue-agent containment at or above this severity ('critical' by default, ADR-0180);
+     * 'off' = every signal is only a proposal. */
+    containmentAutoSeverity: text("containment_auto_severity", { enum: CONTAINMENT_AUTO_THRESHOLDS_E52 })
+      .notNull()
+      .default("critical"),
+    /** ADR-0366: the administrator containment proposals are routed to; NULL = recorded unrouted. */
+    containmentApproverUserId: uuid("containment_approver_user_id").references(() => users.id, { onDelete: "set null" }),
     /** ADR-0175 A15: the grid region whose `energy_factors` intensity
      * overrides the org default for the energy estimate. NULL = default. */
     energyRegion: text("energy_region"),
@@ -6116,8 +6126,13 @@ export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 // refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
 // behaviour exactly.
 
-/** what a matching ABAC policy does to a call the RBAC layer already allowed */
-export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+/**
+ * What a matching ABAC policy does to a call the RBAC layer already allowed. ADR-0354 adds the graduated responses
+ * (the declared table is `@regulait/policy-kernel`'s `AGENT_RESPONSE_TABLE`; the kernel's `POLICY_RESPONSES` is the
+ * same list, pinned by a test): advise allows with guidance, correct denies with a safe alternative, block_session
+ * denies and ends the session, disable denies and quarantines the agent. None widens access.
+ */
+export const ABAC_POLICY_MODES = ["advise", "require_approval", "correct", "forbid", "block_session", "disable"] as const;
 
 /** Shared-lockable policy generation for exact-action approval consumption. */
 export const governancePolicyEpoch = pgTable("governance_policy_epoch", {
@@ -6161,6 +6176,12 @@ export const abacPolicyVersions = pgTable(
     /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
      * approver a paused call routes to — the SAME queue, not a parallel one */
     approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0354 — the static, admin-reviewed text an `advise` or `correct` response returns to the agent. Plain text
+     * (validated by `parseAgentGuidance`; the CHECKs refuse markup and bound the length). Required for advise and
+     * correct, NULL for every other mode (DB CHECK). */
+    guidanceMessage: text("guidance_message"),
+    /** ADR-0354 — `correct` only: the approved route the agent may take instead. Advisory text, never a grant. */
+    guidanceAlternative: text("guidance_alternative"),
     /** policy unit tests travelling WITH the version they describe */
     testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
     authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -6169,7 +6190,18 @@ export const abacPolicyVersions = pgTable(
   (t) => [
     uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
     index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
-    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_mode_check",
+      sql`${t.mode} IN ('advise','require_approval','correct','forbid','block_session','disable')`,
+    ),
+    check(
+      "abac_policy_versions_guidance_check",
+      sql`CASE ${t.mode} WHEN 'advise' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NULL WHEN 'correct' THEN ${t.guidanceMessage} IS NOT NULL AND ${t.guidanceAlternative} IS NOT NULL ELSE ${t.guidanceMessage} IS NULL AND ${t.guidanceAlternative} IS NULL END`,
+    ),
+    check(
+      "abac_policy_versions_guidance_text_check",
+      sql`(${t.guidanceMessage} IS NULL OR (char_length(${t.guidanceMessage}) BETWEEN 1 AND 500 AND ${t.guidanceMessage} !~ '[<>[:cntrl:]]')) AND (${t.guidanceAlternative} IS NULL OR (char_length(${t.guidanceAlternative}) BETWEEN 1 AND 300 AND ${t.guidanceAlternative} !~ '[<>[:cntrl:]]'))`,
+    ),
     check(
       "abac_policy_versions_approver_check",
       sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
@@ -12195,6 +12227,13 @@ export const builderAgents = pgTable(
     autonomyRelaxedAt: timestamp("autonomy_relaxed_at", { withTimezone: true }),
     /** the admin's reason for the latest change (relax or restore), prose-scrubbed by the db handle */
     autonomyEnforcementReason: text("autonomy_enforcement_reason"),
+    // --- ADR-0366 (pending/rogue_agent_containment.sql): the builder agent's own halt --------
+    /** the ADR-0124 halt for one builder agent: NULL = not halted. Set by a rogue-agent containment (or an admin);
+     * every turn (chat, schedule, inbound message, resume) is refused while set. The DB CHECK makes "halted with no
+     * reason" unrepresentable, as on `agents`. */
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     index("builder_agents_owner_idx").on(t.ownerUserId),
@@ -20312,3 +20351,71 @@ export const adoptionAnalyticsPolicy = pgTable(
 );
 export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
 // ===== end ADR-0358 (lane E39) adoption analytics =====
+
+// ===== ADR-0366 (lane E52): rogue-agent containment =====
+import {
+  CONTAINMENT_AUTO_THRESHOLDS as CONTAINMENT_AUTO_THRESHOLDS_E52,
+  CONTAINMENT_SEVERITIES as CONTAINMENT_SEVERITIES_E52,
+  CONTAINMENT_SIGNAL_SOURCES as CONTAINMENT_SIGNAL_SOURCES_E52,
+  CONTAINMENT_STATES as CONTAINMENT_STATES_E52,
+  CONTAINMENT_SUBJECT_KINDS as CONTAINMENT_SUBJECT_KINDS_E52,
+} from "@regulait/shared";
+
+/**
+ * One containment of one agent for one signal (ADR-0366). Created `proposed` (filed in the Approvals Queue) or
+ * `contained` (automatic, at or above the org threshold); `released` and `declined` are terminal
+ * (`CONTAINMENT_MACHINE`). Exactly one of `agent_id` / `builder_agent_id` is set (CHECK).
+ *
+ * ADR-0200 exceptions: `explanation` and `evidence` are the point-in-time snapshot of the signal as it was decided
+ * (the alert's live detail is refreshed and later resolved); `signal_rule_id` / `signal_ref_id` are the producing
+ * rule and record, kept FK-free so a behaviour-baseline finding (lane E40) can be a source without a schema change,
+ * and so an alert's deletion cannot erase why an agent was halted (`alert_id` is the FK and is set null).
+ * Row-level security (ADR-0234): admin, `system_task` and `migration` only.
+ */
+export const agentContainments = pgTable(
+  "agent_containments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: CONTAINMENT_SUBJECT_KINDS_E52 }).notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    builderAgentId: uuid("builder_agent_id").references(() => builderAgents.id, { onDelete: "cascade" }),
+    signalSource: text("signal_source", { enum: CONTAINMENT_SIGNAL_SOURCES_E52 }).notNull(),
+    signalRuleId: text("signal_rule_id").notNull(),
+    signalRefId: text("signal_ref_id").notNull(),
+    alertId: uuid("alert_id").references(() => governanceAlerts.id, { onDelete: "set null" }),
+    severity: text("severity", { enum: CONTAINMENT_SEVERITIES_E52 }).notNull(),
+    /** the threshold in force when the signal was decided (evidence) */
+    thresholdAtDecision: text("threshold_at_decision", { enum: CONTAINMENT_AUTO_THRESHOLDS_E52 }).notNull(),
+    automatic: boolean("automatic").notNull(),
+    status: text("status", { enum: CONTAINMENT_STATES_E52 }).notNull(),
+    explanation: text("explanation").notNull(),
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** the queue row for a proposal; NULL for an automatic containment or an unrouted proposal */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** whether this containment set the halt (false = the agent was already halted when it was contained) */
+    haltApplied: boolean("halt_applied").notNull().default(false),
+    containedAt: timestamp("contained_at", { withTimezone: true }),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** owner decision 2026-11-21: a release is a request (who asked, when, its approval), decided by another admin */
+    releaseRequestedByUserId: uuid("release_requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releaseRequestedAt: timestamp("release_requested_at", { withTimezone: true }),
+    releaseApprovalId: uuid("release_approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** the administrator who APPROVED the release */
+    releasedByUserId: uuid("released_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** the requester's reason */
+    releaseReason: text("release_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_containments_signal_uq").on(t.signalSource, t.signalRefId),
+    index("agent_containments_agent_idx").on(t.agentId, t.status),
+    index("agent_containments_builder_agent_idx").on(t.builderAgentId, t.status),
+    // the list's keyset (created_at DESC, id DESC), ADR-0031
+    index("agent_containments_created_idx").on(t.createdAt, t.id),
+    index("agent_containments_release_approval_idx").on(t.releaseApprovalId),
+  ],
+);
+export type AgentContainmentRow = typeof agentContainments.$inferSelect;
+// ===== end ADR-0366 =====
