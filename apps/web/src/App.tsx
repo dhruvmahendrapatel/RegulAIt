@@ -119,6 +119,9 @@ const ConnectorCataloguePage = screen(() => import("./views/admin/integrations/C
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
 const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
+// ADR-0246 (P27): a server's definition pins, in the MCP pinning chunk rather than admin-integrations (ADR-0344 budgets)
+const McpDefinitionPinsPage = screen(() => import("./views/admin/integrations/McpPinning"), "McpDefinitionPinsPage");
+const McpPinningPage = screen(() => import("./views/admin/integrations/McpPinning"), "McpPinningPage");
 const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
 const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
 const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
@@ -350,6 +353,8 @@ function ApplicationRoutes() {
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
                 <Route path="connectors/catalogue" element={<ConnectorCataloguePage />} />
+                <Route path="mcp-servers/pinning" element={<McpPinningPage />} />
+                <Route path="mcp-servers/definition-pins/:serverId" element={<McpDefinitionPinsPage />} />
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />

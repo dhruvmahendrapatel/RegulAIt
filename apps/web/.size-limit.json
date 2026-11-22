@@ -229,6 +229,12 @@
     "limit": "4.3 kB"
   },
   {
+    "name": "chunk: McpPinning",
+    "path": "dist/assets/McpPinning-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
     "name": "chunk: ModelRateLimits",
     "path": "dist/assets/ModelRateLimits-????????.js",
     "gzip": true,
