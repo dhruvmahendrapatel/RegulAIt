@@ -67,16 +67,33 @@ describe("ADR-0251 composeResourceDecision", () => {
     expect(d.effect).toBe("deny");
   });
 
-  it("review #836: an ABAC require_approval refuses in the kernel; no consent or queue releases it, and the chain says deny", () => {
+  it("slice 4c: an ABAC require_approval HOLDS the call with the policy's approver and is released by a bound consent", () => {
+    const hold = { effect: "require_approval" as const, policyId: "pol-h", policyName: "hold", approverUserId: APPROVER, approverName: "Ana" };
+    const held = composeResourceDecision(input({ abacDecision: hold, canQueue: true }));
+    expect(held).toMatchObject({ effect: "require_approval", ruleId: "pol-h", approverUserId: APPROVER, approverName: "Ana" });
+    expect(held.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "require-approval", grantId: "pol-h" });
+    // released only by the consent the gateway found for every binding (the ABAC one included)
+    const released = composeResourceDecision(input({ abacDecision: hold, canQueue: true, approvedApprovalId: "appr-1" }));
+    expect(released.effect).toBe("allow");
+    expect(released.ruleChain.at(-1)).toEqual({ rule: "approval", outcome: "satisfied-by-approval", grantId: "appr-1" });
+    // a matching rule beside it: the ABAC approver is asked first, both are listed in the chain
+    const both = composeResourceDecision(input({ abacDecision: hold, canQueue: true, approvalRules: [rule({ approverUserId: "other" })] }));
+    expect(both).toMatchObject({ effect: "require_approval", ruleId: "pol-h", approverUserId: APPROVER, matchedApprovalRuleIds: ["rule-1"] });
+    // the dial's hold still governs the release (the entitlement decides it)
+    const dial = { effect: "require_approval" as const, ruleId: "execution-require-approval", reason: "dial", approverUserId: "dialer", ruleChain: [] };
+    expect(composeResourceDecision(input({ base: dial, abacDecision: hold, canQueue: true, approvedApprovalId: "appr-1" }))).toMatchObject({ effect: "require_approval", approverUserId: "dialer" });
+  });
+
+  it("slice 4c: an ABAC hold refuses where nothing can queue it, or where the policy names no approver (fail closed)", () => {
     const hold = { effect: "require_approval" as const, policyId: "pol-h", policyName: "hold", approverUserId: APPROVER };
-    for (const over of [{}, { canQueue: true }, { approvedApprovalId: "appr-1" }, { approvalRules: [rule()], approvedApprovalId: "appr-1", canQueue: true }]) {
-      const d = composeResourceDecision(input({ abacDecision: hold, ...over }));
-      expect(d, JSON.stringify(over)).toMatchObject({ effect: "deny", ruleId: "pol-h" });
-      expect(d.ruleChain.some((t) => t.outcome === "satisfied-by-approval")).toBe(false);
-      expect(d.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "deny", grantId: "pol-h" });
-    }
+    const unqueueable = composeResourceDecision(input({ abacDecision: hold, canQueue: false }));
+    expect(unqueueable).toMatchObject({ effect: "deny", ruleId: "pol-h" });
+    expect(unqueueable.ruleChain.some((t) => t.outcome === "satisfied-by-approval")).toBe(false);
+    const orphan = composeResourceDecision(input({ abacDecision: { ...hold, approverUserId: null }, canQueue: true, approvedApprovalId: "appr-1" }));
+    expect(orphan).toMatchObject({ effect: "deny", ruleId: "pol-h" });
+    expect(orphan.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "deny", grantId: "pol-h" });
     // an exhausted window still refuses first, as a rate limit
-    expect(composeResourceDecision(input({ abacDecision: hold, rateLimits: [limit({ currentCount: 2 })] })).ruleId).toBe("lim-1");
+    expect(composeResourceDecision(input({ abacDecision: hold, canQueue: true, rateLimits: [limit({ currentCount: 2 })] })).ruleId).toBe("lim-1");
   });
 
   it("ABAC forbid refuses; ABAC permit changes nothing", () => {

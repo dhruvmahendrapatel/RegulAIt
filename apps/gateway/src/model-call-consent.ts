@@ -74,6 +74,19 @@ export interface ModelConsentBinding {
   retired: RetiredApproval[];
 }
 
+/** ADR-0251 slice 4c — an ABAC `require_approval` verdict on a governed call, as a consent binds it */
+export interface GovernedAbacHold {
+  policyId: string;
+  policyVersion: number | null;
+  approverUserId: string;
+}
+
+/** the ABAC hold a verdict asks for, or null (no hold, or a hold that names no approver: the kernel refuses that) */
+export function abacHoldOf(d: { effect: string; policyId?: string | null; policyVersion?: number | null; approverUserId?: string | null } | null | undefined): GovernedAbacHold | null {
+  if (d?.effect !== "require_approval" || !d.policyId || !d.approverUserId) return null;
+  return { policyId: d.policyId, policyVersion: d.policyVersion ?? null, approverUserId: d.approverUserId };
+}
+
 export interface ModelConsentState {
   bindings: ModelConsentBinding[];
   /** every required approver holds an approved, bound consent */
@@ -102,6 +115,8 @@ async function modelConsentBinding(
     invocation: ModelInvocation;
     approverUserId: string;
     ruleIds: string[];
+    /** ADR-0251 slice 4c: the ABAC policy version this consent answers to (the ABAC hold's binding only) */
+    abacPolicy?: GovernedAbacHold | undefined;
   },
 ): Promise<ModelConsentBinding> {
   const args = { agentId: input.target.agentId, ...canonicalInvocation(input.invocation) };
@@ -110,6 +125,9 @@ async function modelConsentBinding(
   const org = await loadOrgSettings(db);
   const contextDigest = approvalContextDigest({
     ruleVersions: input.ruleIds.map((ruleId) => ({ ruleId, activeVersionId: null })),
+    // ADR-0251 slice 4c: an ABAC hold's consent is bound to the policy VERSION that held the call (versions are
+    // immutable rows, so a new version, a deactivation or a re-activation changes the digest and the consent is stale)
+    ...(input.abacPolicy ? { abacPolicies: [{ policyId: input.abacPolicy.policyId, version: input.abacPolicy.policyVersion, source: "" }] } : {}),
     requiredApproverUserId: input.approverUserId,
     approvalScope: "action",
     orgDualControl: { signatureMode: org.approvalSignatureMode, sensitiveQuorum: org.toolApprovalSensitiveQuorum },
@@ -144,14 +162,26 @@ async function modelConsentBinding(
   };
 }
 
-/** One binding per distinct required approver: each matching rule's approver (ADR-0251 review #715 finding 1). */
+/**
+ * One binding per distinct required approver: each matching rule's approver (ADR-0251 review #715 finding 1), and,
+ * first, an ABAC hold's approver (slice 4c). The ABAC binding is always its own, so its consent carries the policy
+ * version and no rule's consent can release it (nor it a rule's).
+ */
 export async function modelConsentState(
   db: Db,
-  input: { userId: string; target: ModelCallTarget; projectId: string | null; invocation: ModelInvocation; matchedRules: readonly ResourceApprovalRule[] },
+  input: {
+    userId: string;
+    target: ModelCallTarget;
+    projectId: string | null;
+    invocation: ModelInvocation;
+    matchedRules: readonly ResourceApprovalRule[];
+    abacHold?: GovernedAbacHold | null;
+  },
 ): Promise<ModelConsentState> {
-  const required: Array<{ approverUserId: string; ruleIds: string[] }> = [];
+  const required: Array<{ approverUserId: string; ruleIds: string[]; abacPolicy?: GovernedAbacHold }> = [];
+  if (input.abacHold) required.push({ approverUserId: input.abacHold.approverUserId, ruleIds: [input.abacHold.policyId], abacPolicy: input.abacHold });
   for (const r of input.matchedRules) {
-    const slot = required.find((x) => x.approverUserId === r.approverUserId);
+    const slot = required.find((x) => x.approverUserId === r.approverUserId && !x.abacPolicy);
     if (slot) slot.ruleIds.push(r.id);
     else required.push({ approverUserId: r.approverUserId, ruleIds: [r.id] });
   }

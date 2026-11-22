@@ -44,6 +44,7 @@
 import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
 import type { AbacPrincipalContext } from "./abac-principal.js";
+import { abacHoldOf, type GovernedAbacHold } from "./model-call-consent.js";
 import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import {
@@ -259,6 +260,8 @@ async function connectorWriteBinding(
     approverUserId: string | null;
     /** the "rules" that demanded this consent: the dial's hold and/or ADR-0251 approval rules, in a stable order */
     ruleIds: readonly string[];
+    /** ADR-0251 slice 4c: the ABAC policy version this consent answers to (the ABAC hold's binding only) */
+    abacPolicy?: GovernedAbacHold | undefined;
   },
 ): Promise<ConnectorWriteBinding> {
   const { connector } = input;
@@ -277,6 +280,8 @@ async function connectorWriteBinding(
     // the dial's hold and/or the ADR-0251 approval rules that demanded this consent (the dial alone is byte-identical
     // to the pre-ADR-0251 digest)
     ruleVersions: input.ruleIds.map((ruleId) => ({ ruleId, activeVersionId: null })),
+    // ADR-0251 slice 4c: an ABAC hold's consent is bound to the policy VERSION that held the call (immutable rows)
+    ...(input.abacPolicy ? { abacPolicies: [{ policyId: input.abacPolicy.policyId, version: input.abacPolicy.policyVersion, source: "" }] } : {}),
     requiredApproverUserId: input.approverUserId,
     approvalScope: "action",
     // ADR-0186 A: the org's signing and sensitive quorum, as for an MCP consent
@@ -512,13 +517,16 @@ export async function executeGovernedConnectorCall(
     // is a separate required consent: one binding per distinct approver (its context digest names that approver and the
     // rules that demanded it), and the call is released only when every one of them holds an approved, bound consent.
     // One approver can never release a call another approver was named for.
-    const required: Array<{ approverUserId: string | null; ruleIds: string[] }> = [];
+    const required: Array<{ approverUserId: string | null; ruleIds: string[]; abacPolicy?: GovernedAbacHold }> = [];
     const requireFrom = (approverUserId: string | null, ruleId: string) => {
-      const slot = required.find((r) => r.approverUserId === approverUserId);
+      const slot = required.find((r) => r.approverUserId === approverUserId && !r.abacPolicy);
       if (slot) slot.ruleIds.push(ruleId);
       else required.push({ approverUserId, ruleIds: [ruleId] });
     };
     if (dialHolds) requireFrom(dial.approverUserId, "execution-require-approval");
+    // ADR-0251 slice 4c: an ABAC hold is its own required consent (never merged), bound to the policy version
+    const abacHold = abacHoldOf(coreRestrictions?.abacDecision);
+    if (abacHold) required.push({ approverUserId: abacHold.approverUserId, ruleIds: [abacHold.policyId], abacPolicy: abacHold });
     for (const r of matchedRules) requireFrom(r.approverUserId, r.id);
     bindings = await Promise.all(
       required.map(async (r) => ({
@@ -531,6 +539,7 @@ export async function executeGovernedConnectorCall(
           preparedPii: preparedPii ? { argumentsDigest: preparedPii.argumentsDigest, argumentsPreview: preparedPii.argumentsPreview } : null,
           approverUserId: r.approverUserId,
           ruleIds: r.ruleIds,
+          ...(r.abacPolicy ? { abacPolicy: r.abacPolicy } : {}),
         }),
       })),
     );
