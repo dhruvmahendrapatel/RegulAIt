@@ -156,4 +156,48 @@ test("UIS-09: a Modal whose save is in flight ignores Escape and keeps Cancel di
   await page.waitForTimeout(300);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Name")).toHaveValue("Renamed server");
+  // busy wins over dirty: no discard prompt while the save is in flight
+  await expect(page.getByRole("dialog", { name: "Discard changes?" })).toHaveCount(0);
+});
+
+test.describe("UIS-09: unsaved changes ask before the dialog closes (owner, 2026-11-22)", () => {
+  const open = async (page: Page) => {
+    await mockGateway(page);
+    await page.goto("/ui/admin/mcp-servers");
+    await page.getByRole("button", { name: "Edit MCP server Fixture server" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit MCP server “Fixture server”" });
+    await expect(dialog).toBeVisible();
+    return dialog;
+  };
+  const prompt = (page: Page) => page.getByRole("dialog", { name: "Discard changes?" });
+
+  test("dirty: Escape asks; Keep editing (focused by default) keeps the draft", async ({ page }) => {
+    const dialog = await open(page);
+    await dialog.getByLabel("Name").fill("Renamed server");
+    await page.keyboard.press("Escape");
+    await expect(prompt(page)).toBeVisible();
+    const keep = prompt(page).getByRole("button", { name: "Keep editing" });
+    await expect(keep).toBeFocused();
+    await keep.click();
+    await expect(prompt(page)).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Name")).toHaveValue("Renamed server");
+    expect(await dialog.evaluate((d) => d.contains(document.activeElement))).toBe(true);
+  });
+
+  test("dirty: Discard closes the dialog", async ({ page }) => {
+    const dialog = await open(page);
+    await dialog.getByLabel("Name").fill("Renamed server");
+    await page.keyboard.press("Escape");
+    await prompt(page).getByRole("button", { name: "Discard" }).click();
+    await expect(prompt(page)).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("clean: Escape closes at once, with no prompt", async ({ page }) => {
+    const dialog = await open(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(prompt(page)).toHaveCount(0);
+  });
 });

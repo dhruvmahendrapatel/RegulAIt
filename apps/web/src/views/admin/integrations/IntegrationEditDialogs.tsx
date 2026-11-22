@@ -46,6 +46,7 @@ export function EditServerDialog(props: { server: McpServer; onClose: () => void
       title={`Edit MCP server “${s.name}”`}
       onClose={props.onClose}
       busy={act.busy}
+      dirty={name !== s.name || url !== s.url}
       actions={
         <>
           <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
@@ -106,6 +107,7 @@ export function ReplaceTokenDialog(props: { kind: "git" | "pm"; connection: { na
       title={`Replace the token for “${c.name}”?`}
       onClose={props.onClose}
       busy={act.busy}
+      dirty={token !== ""}
       actions={
         <>
           <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
@@ -183,6 +185,7 @@ export function EditGitDialog(props: { connection: GitConnection; onClose: () =>
       title={`Edit git connection “${c.name}”`}
       onClose={props.onClose}
       busy={act.busy}
+      dirty={token !== "" || baseUrl !== (c.baseUrl ?? "")}
       actions={
         <>
           <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
@@ -328,12 +331,14 @@ export function RotateSecretDialog(props: { connection: PmConnection; onClose: (
 export function EditPmDialog(props: { connection: PmConnection; onClose: () => void }) {
   const act = useAction();
   const c = props.connection;
-  const [f, setF] = useState({
+  // the saved values as the form first shows them: what `dirty` compares the draft with
+  const [initial] = useState(() => ({
     project: c.project,
     baseUrl: c.baseUrl ?? "",
     apiVersion: c.apiVersion ? String(c.apiVersion) : "",
     driftResolution: c.driftResolution ?? "manual",
-  });
+  }));
+  const [f, setF] = useState(initial);
   const [token, setToken] = useState("");
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
   const moves = (f.baseUrl.trim() || null) !== (c.baseUrl ?? null);
@@ -363,6 +368,7 @@ export function EditPmDialog(props: { connection: PmConnection; onClose: () => v
       title={`Edit PM connection “${c.name}”`}
       onClose={props.onClose}
       busy={act.busy}
+      dirty={token !== "" || (Object.keys(f) as (keyof typeof f)[]).some((k) => f[k] !== initial[k])}
       actions={
         <>
           <Button disabled={act.busy} onClick={props.onClose}>Cancel</Button>
