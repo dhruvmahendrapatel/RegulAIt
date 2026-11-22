@@ -536,7 +536,7 @@ describe("ADR-0366 slice 2: containing a virtual key (unregistered AI traffic)",
       const out: Listed[] = [];
       let next = "";
       for (let guard = 0; guard < 50; guard++) {
-        const res = await app.inject({ method: "GET", url: `/v1/virtual-keys?limit=100&state=${state}${next}`, headers: AUTH });
+        const res = await app.inject({ method: "GET", url: `/v1/virtual-keys?limit=100&count=exact&state=${state}${next}`, headers: AUTH });
         expect(res.statusCode, res.body).toBe(200);
         const body = res.json();
         out.push(...(body.items as Listed[]));
