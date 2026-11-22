@@ -23,6 +23,7 @@
  * NON_ADMIN_ROUTES), and the draft route refuses 409 until an admin turns on
  * `agentSetupAssistEnabled` through PUT /v1/org/settings (step-up, audited).
  */
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import type { FastifyInstance } from "fastify";
 import { agents, and, auditLog, eq, modelCredentials, projectMembers, projects, type Db } from "@regulait/db";
 import {
@@ -108,6 +109,7 @@ export function registerAgentSetupAssistRoutes(app: FastifyInstance, db: Db, opt
         } else {
           // a direct call the admin asked for: decided as the person, no agent principal acts
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,

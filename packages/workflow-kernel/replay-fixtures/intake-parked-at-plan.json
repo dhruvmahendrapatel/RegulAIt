@@ -1,0 +1,106 @@
+{
+  "fixture": 1,
+  "name": "intake-parked-at-plan",
+  "note": "in flight: resting in plan-only mode (ADR-0079)",
+  "definition": {
+    "workflow": "intake-to-merge",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "plan",
+        "type": "planning"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "build",
+        "type": "automated_build",
+        "scope": "requirements"
+      },
+      {
+        "id": "branch",
+        "type": "git_operation",
+        "action": "create_branch",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "pr",
+        "type": "git_operation",
+        "action": "open_pr",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "checks",
+        "type": "automated_check",
+        "checks": [
+          "unit",
+          "lint"
+        ],
+        "retry": {
+          "maxAttempts": 2,
+          "delaySeconds": 30,
+          "backoff": true,
+          "maxDelaySeconds": 3600
+        }
+      },
+      {
+        "id": "merge-approval",
+        "type": "human_approval",
+        "approvers": [
+          "00000000-0000-4000-8000-0000000000a1"
+        ],
+        "quorum": "any"
+      },
+      {
+        "id": "merge",
+        "type": "git_operation",
+        "action": "merge",
+        "connection": "gh",
+        "repo": "acme/app",
+        "strategy": "merge"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "blocked_on_plan",
+      "currentStageIndex": 1,
+      "stageStatuses": [
+        "completed",
+        "active",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "pending"
+      ],
+      "artifactVersions": {}
+    },
+    "statuses": [
+      "blocked_on_plan"
+    ]
+  }
+}

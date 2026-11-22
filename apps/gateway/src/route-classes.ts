@@ -742,6 +742,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/openapi.json",
   "GET /v1/api/versioning",
   "GET /v1/me",
+  // ADR-0348: the declared lifecycle tables (definitions only, no record), for every signed-in caller and agent
+  "GET /v1/state-machines",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
@@ -802,6 +804,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // every other builder route above.
   "GET /v1/builder/agents/:id/autonomy",
   "PUT /v1/builder/agents/:id/autonomy",
+  // DELIBERATELY ABSENT, so ADMIN-ONLY (ADR-0180 addendum, lane E51): PUT
+  // /v1/builder/agents/:id/autonomy/enforcement. Relaxing the oversight gate
+  // loosens a strict default; it takes a step-up and is audited.
   //
   // --- A10: risk tolerance and acceptance ------------------------------------
   // The acceptance HISTORY reads like the risk detail: owner-or-admin in the

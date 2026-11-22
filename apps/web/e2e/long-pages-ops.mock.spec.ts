@@ -168,7 +168,9 @@ test.describe("Engines", () => {
   test("an executor's self-test history: five rows in its detail, the full list control on its own page", async ({ page }) => {
     const cap = await mockOps(page);
     await page.goto("/ui/admin/engines?tab=isolation");
-    await page.getByRole("button", { name: /^Manage/ }).first().click();
+    // the executor fixture by its exact name: the tab's project and executor lists load independently, so the first
+    // "Manage…" button is a project's whenever the projects list renders first
+    await page.getByRole("button", { name: "Manage executor gvisor-a", exact: true }).click();
     await expect(page.getByText("Self-test history · 26 self-test reports")).toBeVisible();
     await page.getByRole("link", { name: "View all self-test reports" }).click();
     await expect(page).toHaveURL(new RegExp(`/ui/admin/engines/executors/${EXECUTOR_ID}/attestations$`));

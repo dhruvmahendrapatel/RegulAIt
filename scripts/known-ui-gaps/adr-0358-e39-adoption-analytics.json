@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0358",
+  "lane": "E39",
+  "tracking": "ADR-0358 (lane E39): API-only by the lane brief (rule 3); the adoption analytics screen is for the design builder on #453",
+  "gaps": {
+    "GET /v1/adoption/active-users": "shows metered active users per AI tool over time (day, week or month), optionally per team or project; small cohorts suppressed",
+    "GET /v1/adoption/top-tools": "ranks the AI tools in use by active users (metered) and, separately, imported vendors by active accounts",
+    "GET /v1/adoption/seats": "shows seat utilisation per vendor from imported lines: licensed, active, idle and active without a seat",
+    "GET /v1/adoption/people": "the per-person adoption ranking, refused unless an admin turned it on; each read is audited",
+    "GET /v1/adoption/policy": "shows the adoption privacy policy (per-person ranking, minimum cohort size) against its strict defaults",
+    "PUT /v1/adoption/policy": "sets the adoption privacy policy; relaxing it needs a step-up and a reason, and is audited"
+  }
+}

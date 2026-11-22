@@ -194,6 +194,7 @@ import { registerClassicalDriftRoutes } from "./classical-drift.js";
 import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRuleStepRoutes } from "./rule-steps.js";
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
+import { registerRepetitiveAskRoutes } from "./repetitive-asks.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -502,6 +503,7 @@ import {
 } from "./mcp-admission.js";
 import { registerMcpToolSyncRoutes } from "./mcp-tool-sync.js";
 import { registerMcpDefinitionPinRoutes } from "./mcp-definition-pins.js";
+import { registerAgentRiskProofRoutes } from "./agent-risk-proof-routes.js";
 import { registerMcpHighRiskRoutes } from "./mcp-high-risk.js";
 import { registerMcpSapBusinessRoutes } from "./mcp-sap-business.js";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
@@ -576,6 +578,7 @@ import {
 } from "./org-settings.js";
 import { registerAppearanceRoutes } from "./appearance.js";
 import { registerModelRateLimitRoutes } from "./model-rate-limits.js";
+import { registerResourceRuleRoutes } from "./resource-rule-routes.js";
 import { registerUsageExtractorRoutes } from "./usage-extractors.js";
 // ADR-0202 decision 4 — the per-beat simulated fallback for the hosted demo (admin-only, audited)
 import { registerDemoBeatRoutes } from "./demo-beats.js";
@@ -658,6 +661,7 @@ import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
 import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
+import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
@@ -674,12 +678,20 @@ import {
   vendorAgentControlApprovalLabels,
   type VendorAgentControlDeps,
 } from "./vendor-agent-control.js";
+import {
+  applyContainmentDecision,
+  containmentApprovalLabels,
+  precheckContainmentDecision,
+  registerContainmentRoutes,
+} from "./rogue-containment.js";
 // ADR-0310 (G2): vendor-native managed settings bundles
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
+import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
@@ -698,6 +710,7 @@ import {
   registerCustomClassifierRoutes,
 } from "./custom-classifiers.js";
 import { registerSensitivityLabelRoutes } from "./sensitivity-labels.js";
+import { registerAiAppRiskRoutes } from "./ai-app-risk.js";
 import { registerRiskTreatmentSettingsRoutes } from "./risk-treatment-settings.js";
 import { decideApprovalWithMeasuredSchema, registerConditionMetricRoutes } from "./condition-metrics.js";
 import { registerRequiredTestRoutes } from "./required-tests.js";
@@ -4694,6 +4707,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
     );
+    // ADR-0366: what a rogue-agent containment proposal asks the approver to approve
+    const containmentLabel = await containmentApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "agent_containment").map((r) => r.stageId),
+    );
     const sodOverrideLabelFor = (stageId: string | null): string | null => {
       if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
       return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
@@ -4776,6 +4794,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
       // ADR-0022: this row reached the caller via an active delegation —
@@ -5284,6 +5303,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0366 — a rogue-agent containment or its release: only an active administrator decides, never the agent's
+    // steward nor the release's requester, with an MFA `approval_decide` step-up (owner decision 2026-11-21)
+    if (row.objectType === "agent_containment") {
+      const refusal = await precheckContainmentDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0173 batch 2b — `cannot_approve_own_prompt_commit`, keyed on the
     // DECIDER so the commit's author cannot reach its promotion through
     // delegation or the admin override above.
@@ -5690,6 +5715,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
+      // ADR-0366: a proposal approved = the agent is halted (ADR-0124's halt), denied = it keeps running; a release
+      // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
+      if (updated.objectType === "agent_containment") {
+        await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {
@@ -5979,6 +6009,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRuleStepRoutes(app, db);
   registerDecisionTableRoutes(app, db);
   registerDecisionTableSwitchRoutes(app, db);
+  registerRepetitiveAskRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
@@ -6275,6 +6306,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerMcpToolSyncRoutes(app, db);
   // ADR-0246: definition pinning (rug-pull detection) — the changed-since-approval queue, the diff, the re-approval
   registerMcpDefinitionPinRoutes(app, db);
+  registerAgentRiskProofRoutes(app, db);
   // ADR-0246 addendum: offensive MCP servers as high-risk — the policy template and the authorised-targets list
   registerMcpHighRiskRoutes(app, db);
   registerMcpSapBusinessRoutes(app, db);
@@ -6301,6 +6333,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOrgSettingsRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0212 (P12 b/c): model rate limits, their org opt-in, and per-modality agent prices
   registerModelRateLimitRoutes(app, db);
+  // ADR-0251 (P-01): admin routes for the governed core's resource approval rules and rate limits
+  registerResourceRuleRoutes(app, db);
   // ADR-0241 (P21): admin usage mappings (versioned, sample-tested, step-up to activate; off by default)
   registerUsageExtractorRoutes(app, db);
   // ADR-0202 decision 4 — the demo beats' simulated fallback; admin-only (not in NON_ADMIN_ROUTES), audited
@@ -6395,6 +6429,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerCostOutcomeRoutes(app, db);
   // ADR-0312 (pilot addendum): a person's spend budget (admin; the self read is in NON_ADMIN_ROUTES)
   registerBudgetAlertRoutes(app, db);
+  // ADR-0313: paid-call prices and holds (admin-only through the default gate; deleting a price is a step-up)
+  registerPaidCallRoutes(app, db);
   // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
   // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
   // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
@@ -6412,11 +6448,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
   // production until slice 1b; both come only through the code-only test seam below
   registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
+  registerContainmentRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
+  registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
   // ADR-0342 (lane E23): process analytics over the workflow history (reads scoped by the ADR-0047 decision; refresh admin)
   registerProcessAnalyticsRoutes(app, db);
@@ -6424,6 +6464,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRobotRoutes(app, db, { dataKey: opts.dataKey, ...(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }) });
   // ADR-0232 (lane E49 slice 1): the step catalogue and governed pipeline runs over published template versions
   registerPipelineRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0358 (lane E39): AI adoption analytics, admin-only aggregates
+  registerAdoptionAnalyticsRoutes(app, db);
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file
@@ -6545,6 +6587,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAssuranceSettingsRoutes(app, db);
   // ADR-0363 slice 1: customer sensitivity labels (admin API; the UI is a #453 gap)
   registerSensitivityLabelRoutes(app, db);
+  // ADR-0363 slice 3: AI app risk attributes and the risk-ranked shadow-AI inventory (read-only; UI is a #453 gap)
+  registerAiAppRiskRoutes(app, db);
   // ADR-0211 (P17): the default-off switch for transferred and avoided risk treatments
   registerRiskTreatmentSettingsRoutes(app, db);
   registerConditionMetricRoutes(app, db);
