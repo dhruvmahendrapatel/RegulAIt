@@ -368,11 +368,40 @@ describe("applying an import", () => {
     expect(res.json().posture).toMatch(/never broken by guessing/);
   });
 
-  it("removing the alias puts the line back to unattributed — visible, not deleted", async () => {
+  it("CXR-CST-005: removing an alias WITHOUT a reason is a 400 that deletes nothing and audits nothing", async () => {
     const [alias] = await db.select().from(vendorAccountAliases);
-    const res = await del(`/v1/cost-imports/mappings/${alias!.id}`);
+    for (const payload of [{}, { reason: "" }, { reason: "x".repeat(501) }]) {
+      const res = await del(`/v1/cost-imports/mappings/${alias!.id}`, payload);
+      expect(res.statusCode).toBe(400);
+    }
+    const bare = await app.inject({ method: "DELETE", url: `/v1/cost-imports/mappings/${alias!.id}`, headers: ADMIN });
+    expect(bare.statusCode).toBe(400);
+    const [still] = await db.select().from(vendorAccountAliases).where(eq(vendorAccountAliases.id, alias!.id));
+    expect(still).toBeDefined();
+    const [ghost] = await db.select().from(importedCostLines).where(eq(importedCostLines.accountKey, GHOST));
+    expect(ghost!.resolvedUserId).toBe(bobId);
+    expect(await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.aliasDeleted))).toHaveLength(0);
+  });
+
+  it("a non-admin cannot remove an alias, even with a reason", async () => {
+    const [alias] = await db.select().from(vendorAccountAliases);
+    const res = await del(`/v1/cost-imports/mappings/${alias!.id}`, { reason: "not mine to remove" }, janeAuth);
+    expect(res.statusCode).toBe(403);
+    expect(await db.select().from(vendorAccountAliases).where(eq(vendorAccountAliases.id, alias!.id))).toHaveLength(1);
+  });
+
+  it("removing the alias puts the line back to unattributed — visible, not deleted — and audits the reason", async () => {
+    const [alias] = await db.select().from(vendorAccountAliases);
+    const res = await del(`/v1/cost-imports/mappings/${alias!.id}`, { reason: "IT retired the alternate address" });
     expect(res.statusCode).toBe(200);
     expect(res.json().reresolved.changed).toBe(1);
+    expect(res.json().reresolved.scanned).toBeGreaterThanOrEqual(1);
+    const audits = await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.aliasDeleted));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.objectId).toBe(alias!.id);
+    expect(audits[0]!.reason).toContain("IT retired the alternate address");
+    expect(audits[0]!.reason).toContain("1 stored line(s) re-attributed");
+    expect(audits[0]!.detail).toMatchObject({ changed: 1, scanned: res.json().reresolved.scanned });
     const [ghost] = await db.select().from(importedCostLines).where(eq(importedCostLines.accountKey, GHOST));
     expect(ghost!.resolvedUserId).toBeNull();
     expect(ghost!.resolutionMethod).toBe("unresolved");
@@ -412,9 +441,23 @@ describe("applying an import", () => {
     expect(line!.resolutionMethod).toBe("domain_rule");
     expect(line!.resolutionDomainRuleId).toBe(rule.json().domainRule.id);
 
-    // clean the rule back off so later assertions are not affected
-    const removed = await del(`/v1/cost-imports/domain-rules/${rule.json().domainRule.id}`);
+    // CXR-CST-005: a reasonless removal is a 400 and the rule (and the line it resolved) stay put
+    const refused = await del(`/v1/cost-imports/domain-rules/${rule.json().domainRule.id}`);
+    expect(refused.statusCode).toBe(400);
+    expect(await db.select().from(vendorDomainRules).where(eq(vendorDomainRules.id, rule.json().domainRule.id))).toHaveLength(1);
+    expect(await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.domainRuleDeleted))).toHaveLength(0);
+
+    // clean the rule back off so later assertions are not affected; the removal is audited with its reason and counts
+    const removed = await del(`/v1/cost-imports/domain-rules/${rule.json().domainRule.id}`, {
+      reason: "the legacy domain is decommissioned",
+    });
     expect(removed.statusCode).toBe(200);
+    expect(removed.json().reresolved.changed).toBe(1);
+    const ruleAudits = await db.select().from(auditLog).where(eq(auditLog.ruleId, COST_IMPORT_RULE_IDS.domainRuleDeleted));
+    expect(ruleAudits).toHaveLength(1);
+    expect(ruleAudits[0]!.reason).toContain("the legacy domain is decommissioned");
+    expect(ruleAudits[0]!.reason).toContain("1 stored line(s) re-attributed");
+    expect(ruleAudits[0]!.detail).toMatchObject({ changed: 1, scanned: removed.json().reresolved.scanned });
     await db.delete(importedCostLines).where(eq(importedCostLines.batchId, imported.json().importId));
     await db.delete(costImportBatches).where(eq(costImportBatches.id, imported.json().importId));
   });

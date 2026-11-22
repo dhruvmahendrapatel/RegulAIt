@@ -1448,6 +1448,16 @@ export const vendorAliasRequestSchema = z
   })
   .strict();
 
+/**
+ * CXR-CST-005 (owner, 2026-11-22): removing an alias or a domain rule re-attributes stored lines exactly as creating one
+ * does, so it carries the same audited reason, under the same bounds as the create schemas.
+ */
+export const costResolutionRuleRemovalSchema = z
+  .object({
+    reason: vendorAliasRequestSchema.shape.reason,
+  })
+  .strict();
+
 export const vendorDomainRuleRequestSchema = z
   .object({
     vendor: z.string().min(1).max(100).default(ANY_VENDOR),
