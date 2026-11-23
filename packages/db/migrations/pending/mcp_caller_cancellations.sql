@@ -6,7 +6,7 @@
 -- robot run's heartbeat also confirms the watch, and a run whose cancel state cannot be confirmed is stopped (fail
 -- closed).
 --
---  - request_key: sha256 (hex) of the caller's cancellation scope (user, server, credential) and the JSON-RPC request
+--  - request_key: a scrypt hash (32 bytes, hex) of the caller's cancellation scope (user, server, credential) and the JSON-RPC request
 --    id, so no raw credential id is stored and one caller can never name another's call.
 --  - user_id: the caller, the one the scope names.
 --  - reason: the client's own reason, bounded.

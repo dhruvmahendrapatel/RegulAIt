@@ -600,7 +600,7 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
     - The call's abort signal cancels the run (`caller_aborted`).
     - **Cancel on any replica (owner, D-2026-11-22-07).** A `notifications/cancelled` that lands on a replica not
       serving the call is written to `mcp_caller_cancellations` (pending migration `mcp_caller_cancellations`). The
-      row is keyed by a sha256 of the caller's scope and request id, so no credential id is stored and a caller can
+      row is keyed by a scrypt hash of the caller's scope and request id, so no credential id is stored and a caller can
       name only its own calls. Every replica with calls in flight reads the table each second and aborts a call whose
       key appears after the call started (`apps/gateway/src/caller-cancel.ts`).
     - **Fail closed.** Each heartbeat of a run with a caller confirms that shared state. It accepts a read from the

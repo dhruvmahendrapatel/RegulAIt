@@ -20864,7 +20864,7 @@ export type BehaviourAnomalyFindingRow = typeof behaviourAnomalyFindings.$inferS
 export const mcpCallerCancellations = pgTable(
   "mcp_caller_cancellations",
   {
-    /** sha256 hex of the caller's cancellation scope and the JSON-RPC request id */
+    /** scrypt hash (hex) of the caller's cancellation scope and the JSON-RPC request id (caller-cancel.ts) */
     requestKey: text("request_key").primaryKey(),
     userId: uuid("user_id")
       .notNull()

@@ -9,7 +9,7 @@
  *    (`trackCallerRequest`). A cancel the receiving process serves is aborted at once (`cancelCallerRequest`). A scope
  *    is never shared between credentials, so one caller can cancel only its own calls.
  *  - SHARED: a cancel the receiving process does not serve is written to `mcp_caller_cancellations`
- *    (`broadcastCallerCancel`, keyed by a sha256 of scope and id). Every process with calls in flight watches that
+ *    (`broadcastCallerCancel`, keyed by a scrypt hash of scope and id). Every process with calls in flight watches that
  *    table (one indexed read per second, only while it serves calls) and aborts a call whose key appears after the call
  *    started. The abort reaches the upstream and, for a robot tool, the run (`startRobotRun` cancels on it).
  *
@@ -17,7 +17,7 @@
  * table within the last few seconds (or reads it now, within a bound); a run whose cancel state cannot be confirmed is
  * stopped, because an uncertain state means stop.
  */
-import { createHash } from "node:crypto";
+import { scryptSync } from "node:crypto";
 import { inArray, lt, mcpCallerCancellations, runWithRlsSystem, sql, type Db } from "@regulait/db";
 
 /** how often the watch reads the shared table while calls are in flight */
@@ -42,9 +42,17 @@ interface Tracked {
 const inFlightCalls = new Map<string, Set<Tracked>>();
 const localKey = (scope: string, requestId: string | number) => `${scope}\u0000${typeof requestId}:${String(requestId)}`;
 
-/** the shared key of one caller request: no raw scope (it holds credential ids) is stored */
+/** the fixed, versioned domain of the shared key (never the token-hash salt: a key is never a token's lookup hash) */
+const REQUEST_KEY_SALT = "regulait.mcp-caller-cancel.v1";
+const REQUEST_KEY_PARAMS = { N: 1024, r: 8, p: 1 } as const;
+
+/**
+ * The shared key of one caller request: no raw scope (it holds credential ids) is stored. Deterministic, so every
+ * replica derives the same key. scrypt rather than a bare digest, as for every value derived from a credential
+ * (token-hash.ts; CodeQL js/insufficient-password-hash is fixed in code, never dismissed). About a millisecond.
+ */
 export function callerRequestKey(scope: string, requestId: string | number): string {
-  return createHash("sha256").update(localKey(scope, requestId), "utf8").digest("hex");
+  return scryptSync(localKey(scope, requestId), REQUEST_KEY_SALT, 32, REQUEST_KEY_PARAMS).toString("hex");
 }
 
 let store: Db | null = null;
