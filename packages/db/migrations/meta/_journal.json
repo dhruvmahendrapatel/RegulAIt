@@ -2311,6 +2311,13 @@
       "when": 1785345000000,
       "tag": "0410_workflow_template_version_origin_apply",
       "breakpoints": true
+    },
+    {
+      "idx": 411,
+      "version": "7",
+      "when": 1785346000000,
+      "tag": "0411_ai_saas_monitoring",
+      "breakpoints": true
     }
   ]
 }
