@@ -217,14 +217,16 @@ test("roles: create a role and inspect a seeded role's grants + holders", async 
   await nav("Roles", "Roles");
   await page.getByLabel("Role name").fill("e2e-role");
   await page.getByRole("button", { name: "Create role" }).click();
-  await expect(page.getByRole("cell", { name: "e2e-role", exact: true })).toBeVisible();
+  // UIS-04: a role row selects in place through a real button in its primary cell, named "Open grants for <name>"
+  await expect(page.getByRole("button", { name: "Open grants for e2e-role", exact: true })).toBeVisible();
 
   // open the seeded analyst role — holders and grants load
-  const analystRow = page.locator("tbody tr[role='link']").filter({ hasText: "data-analyst" }).first();
+  const openGrants = page.locator("tbody").getByRole("button", { name: /^Open grants for / });
+  const analystRow = openGrants.filter({ hasText: "data-analyst" }).first();
   if (await analystRow.count()) {
     await analystRow.click();
   } else {
-    await page.locator("tbody tr[role='link']").first().click();
+    await openGrants.first().click();
   }
   await expect(page.getByText("What this role provisions")).toBeVisible();
   await shot(page, "phase2-06-roles-grants");
@@ -507,7 +509,7 @@ test("connectors: create a snowflake connector + save its structured multi-field
 test("mcp servers: tool inventory + tool grant", async () => {
   await nav("MCP servers", "MCP servers");
   // open the seeded server's tools
-  await page.locator("tbody tr[role='link']").first().click();
+  await page.locator("tbody").getByRole("button", { name: /^Show tools on / }).first().click();
   await expect(page.getByText(/Tools on /)).toBeVisible();
 
   // register a tool on it
@@ -526,7 +528,7 @@ test("mcp servers: set a per-tool price override and see it persist (O10)", asyn
   // open it only if it is not already open, so this test is order-independent
   const openTools = async () => {
     if (!(await toolsCard.isVisible())) {
-      await page.locator("tbody tr[role='link']").first().click();
+      await page.locator("tbody").getByRole("button", { name: /^Show tools on / }).first().click();
     }
     await expect(toolsCard).toBeVisible();
   };
