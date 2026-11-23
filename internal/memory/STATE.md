@@ -116,6 +116,15 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-17 - E41 slice 1a: endpoint fleet operations ([ADR-0360](../decisions/0360-endpoint-fleet-operations-and-edr.md), lane E41, branch `builder/e41-fleet-ops`).**
+The per-device-group self-update setting (D-2026-11-22-04; off by default; on only with a `settings_relax` step-up recorded on the row),
+staged update rollouts over ADR-0350 device groups (lane E31's, reused; no second group table) with a declared lifecycle
+(ADR-0348 machines in `@regulait/shared`, `whereFrom`-guarded UPDATEs, one open rollout per source, a paged list, a halt threshold bounded 1 to 10 whose loosening is a step-up) and one-line enrolment tokens (one
+device, 15 minutes by default and at most 60, optional ADR-0350 group, secret only hashed). Migration
+`pending/endpoint_fleet_operations.sql`. Eight admin routes are API-only gaps on #453
+(`scripts/known-ui-gaps/adr-0360-e41-endpoint-fleet-operations.json`). The agent updater (slice 1b),
+the signed directive and update results (1c) and EDR (2) follow.
+
 **2026-11-17 - E42 slice 1: monitoring sanctioned AI SaaS through vendor compliance APIs ([ADR-0361](../decisions/0361-sanctioned-ai-saas-compliance-monitoring.md), migration `pending/ai_saas_monitoring.sql`, numbered at merge).**
 - Forcepoint gap 1. An admin registers a read-only connector to a Microsoft 365 Copilot tenant (Graph
   `getAllEnterpriseInteractions`, `AiEnterpriseInteraction.Read.All`); a run records each interaction as append-only
@@ -6833,6 +6842,14 @@ review S-08).**
   are refused at the same cost as a missing hash.
 - **S-10, same PR:** `runDueReportSchedules` takes an explicit `isAdmin` (no `?? true` default). The three `sql.raw`
   uuid arrays in compliance-packs, copilot and reporting are now bound parameters.
+
+**ADR-0360 (builder lane E41, 2026-11-17, Proposed): endpoint fleet operations and EDR.** Self-update is off by default
+and a per-device-group relaxation (step-up, audited; D-2026-11-22-04); a rollout's halt threshold is bounded 1 to 10, loosening a step-up; updates are verified against a pinned release keyring with the agent's existing Ed25519
+envelope (go-tuf v2 failed admission on unmaintained transitive modules; minio/selfupdate and fynelabs/selfupdate are
+unmaintained; creativeprojects/go-selfupdate is forge-bound), staged by device group,
+refuse a downgrade and roll back on a failed health check; the device acts only on a directive signed by the
+device-policy signer. One-line enrolment is a single-use, at-most-60-minute, source-scoped token read from standard
+input. EDR (Defender, Falcon, SentinelOne) is read-only by default; isolation is optional, approved and stepped up.
 
 <!-- fold:state-decisions -->
 

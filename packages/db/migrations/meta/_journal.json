@@ -2318,6 +2318,13 @@
       "when": 1785346000000,
       "tag": "0411_ai_saas_monitoring",
       "breakpoints": true
+    },
+    {
+      "idx": 412,
+      "version": "7",
+      "when": 1785347000000,
+      "tag": "0412_endpoint_fleet_operations",
+      "breakpoints": true
     }
   ]
 }
