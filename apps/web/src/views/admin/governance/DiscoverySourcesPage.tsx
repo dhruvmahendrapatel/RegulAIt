@@ -454,6 +454,8 @@ export default function DiscoverySourcesPage() {
                       }
                     />
                     {!s.enabled && !s.scannerBuilt ? <div className={v.faint}>Its scanner is not built yet, so it cannot be enabled.</div> : null}
+                    {s.kind === "entitlement_m365" || s.kind === "entitlement_salesforce" ? <Link to={`/admin/shadow-ai/discovery-sources/read-setup/${s.id}`}>Read setup</Link> : null}
+                    {s.kind.startsWith("entitlement_") ? <Link to={`/admin/shadow-ai/discovery-sources/apps/${s.id}`}>Apps and agents</Link> : null}
                     </>
                   ),
                 },

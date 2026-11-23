@@ -13,6 +13,7 @@ import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
 import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
+import { APPROVAL_SLA_MACHINE } from "./workbench.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -896,6 +897,27 @@ export const AUTONOMY_ENFORCEMENT_MACHINE = defineMachine({
 export type AutonomyEnforcementState = (typeof AUTONOMY_ENFORCEMENT_STATES)[number];
 export type AutonomyEnforcementEvent = keyof typeof AUTONOMY_ENFORCEMENT_MACHINE.def.transitions;
 
+/** `report_definitions.status` (ADR-0047 addendum 2026-11-22, CXR-REV-002). A definition is archived instead of
+ * deleted, so the runs it generated stay readable as evidence. Archiving disables its schedules in the same
+ * transaction and refuses new generations; there is no unarchive (create a new definition instead). */
+export const REPORT_DEFINITION_STATES = ["active", "archived"] as const;
+export type ReportDefinitionState = (typeof REPORT_DEFINITION_STATES)[number];
+export const REPORT_DEFINITION_MACHINE = defineMachine({
+  id: "report_definition",
+  stored: "report_definitions.status",
+  states: REPORT_DEFINITION_STATES,
+  initial: ["active"],
+  terminal: ["archived"],
+  transitions: {
+    archive: {
+      from: ["active"],
+      to: "archived",
+      by: ["admin"],
+      summary: "Archive the definition: its schedules are disabled and stop firing, no new report is generated from it, and every run it already generated is kept and stays readable.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 /** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
  * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
@@ -1088,6 +1110,10 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
   [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
   [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
+  // ADR-0047 addendum (CXR-REV-002): archive instead of delete
+  [REPORT_DEFINITION_MACHINE.def.id]: REPORT_DEFINITION_MACHINE,
   // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
+  // ADR-0342 slice 2: a human task's SLA clock in the approvals queue (ADR-0046 sweep; re-armed by a reschedule)
+  [APPROVAL_SLA_MACHINE.def.id]: APPROVAL_SLA_MACHINE,
 } as Record<string, StateMachine<string, string>>);

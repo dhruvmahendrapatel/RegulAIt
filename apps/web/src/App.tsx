@@ -116,6 +116,8 @@ const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "Con
 // ADR-0255: the governed connector catalogue is its own lazy chunk, loaded only when opened, so it adds nothing to the
 // entry bundle or to admin-integrations (ADR-0344 per-route budgets)
 const ConnectorCataloguePage = screen(() => import("./views/admin/integrations/ConnectorCataloguePage"), "default");
+const ReadSetupPage = screen(() => import("./views/admin/governance/ReadSetupPage"), "default");
+const EntitlementLinksPage = screen(() => import("./views/admin/governance/EntitlementLinksPage"), "default");
 const ProcessAnalyticsPage = screen(() => import("./views/admin/governance/ProcessAnalyticsPage"), "default");
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
@@ -341,6 +343,8 @@ function ApplicationRoutes() {
                 <Route path="shadow-ai" element={<ShadowAiPage />} />
                 {/* ADR-0195 SD0 */}
                 {/* P3 (#453): one lazy chunk owns the overview and its full lists (see DiscoveryListPages) */}
+                <Route path="shadow-ai/discovery-sources/read-setup/:sourceId" element={<ReadSetupPage />} />
+                <Route path="shadow-ai/discovery-sources/apps/:sourceId" element={<EntitlementLinksPage />} />
                 <Route path="shadow-ai/discovery-sources/*" element={<DiscoverySourcesArea />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
