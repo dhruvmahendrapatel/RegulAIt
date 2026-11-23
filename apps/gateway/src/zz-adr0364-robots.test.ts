@@ -208,7 +208,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S2 robots", () => {
     expect(pin!.approvedDigest).toBe(pin!.observedDigest);
     expect(pin!.approvedBy).toBe(approver.id);
 
-    // the in-process server lists it, and refuses to run it until the S3 runner exists
+    // the in-process server lists it; a connect with no governed call behind it never runs a robot (S3)
     const [server] = await kit.db.select().from(mcpServers).where(eq(mcpServers.url, ROBOTS_SERVER_URL));
     const client = (await connectFirstPartyServer(kit.db, server!, 5_000))!;
     try {
@@ -216,7 +216,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S2 robots", () => {
       expect(listed.tools.map((t) => t.name)).toContain(tool!.name);
       const called = await client.callTool({ name: tool!.name, arguments: { username: "a" } });
       expect(called.isError).toBe(true);
-      expect(called.structuredContent).toMatchObject({ error: "robot_runner_unavailable" });
+      expect(called.structuredContent).toMatchObject({ error: "robot-run-needs-project" });
     } finally {
       await client.close();
     }
@@ -265,19 +265,20 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S2 robots", () => {
     expect(strangerList.statusCode, strangerList.body).toBe(200);
     expect(strangerList.body).not.toContain(tool!.name);
     const strangerCall = await mcp(stranger, server!.id, "tools/call", { name: tool!.name, arguments: { username: "a" } });
-    expect(strangerCall.body).not.toContain("robot_runner_unavailable");
+    expect(strangerCall.body).not.toContain("robot-run-needs-project");
     const denied = await kit.db.execute(
       sql`SELECT effect FROM audit_log WHERE server_id = ${server!.id} AND tool_name = ${tool!.name} AND user_id = ${stranger.id} ORDER BY at DESC LIMIT 1`,
     );
     expect((denied as unknown as { rows: Array<{ effect: string }> }).rows[0]?.effect).toBe("deny");
     // the entitled owner (tool grant from the toolbox test) sees it in tools/list, and the governed call passes the
-    // decision path and reaches the server, which refuses because the S3 runner is not installed
+    // decision path and reaches the server and its run controller
     const ownerList = await mcp(owner, server!.id, "tools/list");
     expect(ownerList.body).toContain(tool!.name);
     const ownerCall = await mcp(owner, server!.id, "tools/call", { name: tool!.name, arguments: { username: "a" } });
     expect(ownerCall.statusCode, ownerCall.body).toBe(200);
-    // the governed decision allowed it, the proxy connected in-process, and the server refused: no runner in S2
-    expect(ownerCall.body).toContain("robot_runner_unavailable");
+    // the governed decision allowed it, the proxy connected in-process with the call's context, and the run controller
+    // refused before any sandbox: the owner's project has no budget (S3; the full run is the S3 e2e suite)
+    expect(ownerCall.body).toContain("robot-run-needs-project");
     const decided = await kit.db.execute(
       sql`SELECT count(*)::int AS n FROM audit_log WHERE server_id = ${server!.id} AND tool_name = ${tool!.name} AND user_id = ${owner.id}`,
     );
@@ -291,7 +292,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S2 robots", () => {
       .returning({ id: approvalRules.id });
     try {
       const held = await mcp(owner, server!.id, "tools/call", { name: tool!.name, arguments: { username: "held" } });
-      expect(held.body).not.toContain("robot_runner_unavailable");
+      expect(held.body).not.toContain("robot-run-needs-project");
       expect(held.body).toMatch(/approver/);
     } finally {
       await kit.db.delete(approvalRules).where(eq(approvalRules.id, rule!.id));
@@ -305,7 +306,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S2 robots", () => {
     try {
       await mcp(owner, server!.id, "tools/call", { name: tool!.name, arguments: { username: "one" } });
       const limited = await mcp(owner, server!.id, "tools/call", { name: tool!.name, arguments: { username: "two" } });
-      expect(limited.body).not.toContain("robot_runner_unavailable");
+      expect(limited.body).not.toContain("robot-run-needs-project");
       expect(limited.body.toLowerCase()).toContain("rate");
     } finally {
       await kit.db.delete(rateLimits).where(eq(rateLimits.id, limit!.id));

@@ -22,7 +22,10 @@ export function PatchFormModal(props: {
   intro?: ReactNode;
   saveLabel?: string;
 }) {
-  const [draft, setDraft] = useState<PatchDraft>(() => draftFromRecord(props.fields, props.record));
+  // the draft as opened, from the saved record: `dirty` is any difference from it
+  const [initial] = useState<PatchDraft>(() => draftFromRecord(props.fields, props.record));
+  const [draft, setDraft] = useState<PatchDraft>(initial);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const base = useId();
@@ -46,9 +49,9 @@ export function PatchFormModal(props: {
     <Modal
       open
       title={props.title}
-      onClose={() => {
-        if (!busy) props.onClose();
-      }}
+      onClose={props.onClose}
+      busy={busy}
+      dirty={dirty}
       actions={
         <>
           <Button disabled={busy} onClick={props.onClose}>

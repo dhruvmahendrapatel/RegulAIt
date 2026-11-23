@@ -13,7 +13,10 @@
  *  - the API-key exchange for key-first users.
  *
  * When the options cannot be read (an older gateway, a network blip), the page
- * falls back to the email form — the one path every deployment has.
+ * falls back to the email form — the one path every deployment has — and says
+ * so, with a Retry (CXR-ACC-005): single sign-on may be missing from the page,
+ * and a silent fallback would leave an SSO user stuck at a form they cannot use.
+ * The notice names no error detail: the page is unauthenticated.
  *
  * `?link=pending` is the ADR-0174 §5 account-link step: a federated identity
  * matched an existing account that has a local credential, so the person
@@ -143,6 +146,9 @@ export default function LoginPage() {
     retry: false,
   });
   const options = normalizeOptions(optionsQ.data);
+  // a failed read, or an answer that is not an object at all, is the degraded fallback
+  const optionsDegraded =
+    optionsQ.isError || (optionsQ.isSuccess && (optionsQ.data === null || typeof optionsQ.data !== "object"));
 
   // already signed in (e.g. back-button to /login) → straight through
   useEffect(() => {
@@ -363,6 +369,17 @@ export default function LoginPage() {
         </div>
         {error && <div className={s.error} role="alert">{error}</div>}
         <RefusalNotice guidance={guidance} />
+        {optionsDegraded && (
+          <div className={`${s.notice} ${s.degraded}`} role="status" data-testid="sign-in-options-degraded">
+            <span>
+              Couldn’t load every way to sign in. Email sign-in is shown below; if your organization uses single
+              sign-on, retry to load it.
+            </span>
+            <Button size="sm" disabled={optionsQ.isFetching} onClick={() => void optionsQ.refetch()}>
+              {optionsQ.isFetching ? "Retrying…" : "Retry"}
+            </Button>
+          </div>
+        )}
 
         {hasFederated && (
           <div className={s.providers}>

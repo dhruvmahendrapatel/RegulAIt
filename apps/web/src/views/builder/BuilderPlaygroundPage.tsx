@@ -22,7 +22,7 @@ import { ApiError } from "../../api/client";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { ModelPicker } from "../../ui/ModelPicker";
-import { Badge, Button, Field, Input, Modal, Select, Textarea } from "../../ui/kit";
+import { Badge, Button, ErrorState, Field, Input, Modal, Select, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { useMyModelTiles, useMyProjects } from "./builderApi";
 import { Icon, Segmented } from "./BuilderUi";
@@ -445,6 +445,14 @@ export default function BuilderPlaygroundPage() {
             <h2 className={p.paneTitle} id="pg-prompt">
               Prompt
             </h2>
+            {/* CXR-RUN-001: a failed read of the prompt being opened is said, with a retry, never an unexplained starter template */}
+            {source.isError && (
+              <ErrorState
+                title="Couldn't open this prompt"
+                message={errorText(source.error)}
+                onRetry={() => void source.refetch()}
+              />
+            )}
             <Field label="Template">
               <Textarea className={p.template} value={template} onChange={(e) => setTemplate(e.target.value)} spellCheck={false} maxLength={50000} />
             </Field>
@@ -576,6 +584,14 @@ export default function BuilderPlaygroundPage() {
                       ))}
                     </Select>
                   </Field>
+                )}
+                {/* CXR-RUN-001: "no datasets" and "couldn't load them" differ */}
+                {isAdmin && datasets.isError && (
+                  <ErrorState
+                    title="Couldn't load the evaluation datasets"
+                    message={errorText(datasets.error)}
+                    onRetry={() => void datasets.refetch()}
+                  />
                 )}
                 {datasetId ? (
                   <p className={s.small} style={{ margin: 0 }}>

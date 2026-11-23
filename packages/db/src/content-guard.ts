@@ -76,6 +76,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
   [s.initiatives, ["name"]],
+  // ADR-0357 §4 (lane E38): the business-unit level of the policy hierarchy
+  [s.businessUnits, ["name", "description"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
   // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
@@ -207,6 +209,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
   "mcp_bundle_version_items.tool_name": "tool_reference",
+  "paid_call_holds.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",

@@ -269,7 +269,8 @@ function AccessCard(props: { agent: A2aAgent }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!userId) return;
-          void act.run(() => api.post(url, { userId, ...(skillId ? { skillId } : {}) }), "Access given").then((ok) => {
+          // a grant is a grant_mint step-up on the server; withStepUp opens the proof and resends the same POST once
+          void act.run(() => withStepUp((h) => stepUpApi.post(url, { userId, ...(skillId ? { skillId } : {}) }, h)), "Access given").then((ok) => {
             if (ok) setUserId("");
           });
         }}

@@ -246,6 +246,8 @@ describe("what proves the runtime is runsc (decision 6 probe set, amendments A, 
 /** the docker seam: run the real sandbox init on this host in place of the container */
 function hostInit(calls: string[][]) {
   return (args: string[]): DockerChild => {
+    // the first preflight's reconciler listings (tested in robot-egress.test.ts): empty, and not recorded here
+    if (args[0] === "ps" || (args[0] === "network" && args[1] === "ls")) return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     calls.push(args);
     if (args[0] === "run") return spawn(process.execPath, [INIT, ...(args.at(-1) === "--canary" ? ["--canary"] : [])], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
     // kill / rm: nothing to do on the host; a short-lived no-op process
@@ -386,7 +388,7 @@ describe("the handshake with the real sandbox init (run on this host in place of
     const b = backend(calls);
     expect(b.describe()).toEqual({ backend: "gvisor", runtimeVersion: "release-20261012.0", classes: ["user_space_kernel"] });
     await expect(b.startCanary(restricted, "hardened_container")).rejects.toThrow(/user_space_kernel only/);
-    await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio and engine_worker/);
+    await expect(b.start({ ...offer, workloadKind: "code_exec" }, restricted, "user_space_kernel")).rejects.toThrow(/mcp_stdio, engine_worker and robot_browser/);
     // I5: an engine task needs its input; a profile that declares none cannot run one
     await expect(b.start({ ...offer, workloadKind: "engine_worker" }, restricted, "user_space_kernel")).rejects.toThrow(/declares no input/);
     await expect(b.start(offer, SHIPPED_EXECUTION_PROFILES["engine-worker"], "user_space_kernel")).rejects.toThrow(/nothing was started/);

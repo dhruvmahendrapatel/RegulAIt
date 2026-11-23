@@ -434,11 +434,11 @@ function assertUuid(v: string): string {
 }
 
 /** `audit_log` carries no project column; attribution rides `detail.projectId`,
- * the key every governed path writes. Built by interpolation, so every id is
- * re-validated as a uuid — a non-uuid here would be an injection primitive. */
+ * the key every governed path writes. Every id is a bound parameter (Codex
+ * review S-10) and is still validated as a uuid. */
 function auditScopePredicate(projectIds: string[]) {
-  const ids = safeIds(projectIds).map((p) => `'${assertUuid(p)}'`).join(",");
-  return sql`${auditLog.detail} ->> 'projectId' = ANY(${sql.raw(`ARRAY[${ids}]::text[]`)})`;
+  const ids = safeIds(projectIds).map((p) => sql`${assertUuid(p)}`);
+  return sql`${auditLog.detail} ->> 'projectId' = ANY(ARRAY[${sql.join(ids, sql`, `)}]::text[])`;
 }
 
 // ---------------------------------------------------------------------------
