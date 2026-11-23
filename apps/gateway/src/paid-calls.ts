@@ -10,7 +10,9 @@
  *   authorise   `reservePaidCall` reserves the price's `max_settle_usd` against the attributed project's effective
  *               budget and the orchestration run's cap, under each envelope's advisory lock, in one transaction:
  *               measured spend + open holds + this hold must fit. Over budget is a refusal (409), escalated into the
- *               ONE approvals queue (`__project_budget__` / `__budget__:paid_call`). No envelope at all is a refusal
+ *               ONE approvals queue (`__project_budget__` / `__budget__:paid_call`); an org whose budget enforcement is
+ *               `warn_only` lets an over-project-budget call through, warned and audited (D-2026-11-22-05; a run's cap
+ *               always refuses). No envelope at all is a refusal
  *               too (default-deny, ADR-0180): money does not leave without a budget it is counted against.
  *   settle      `settlePaidCall` with the call's usage row: the upstream-reported charge (an MCP result's
  *               `_meta["io.regulait/charge"].amountUsd`), never above the hold, else the quoted price
@@ -69,6 +71,7 @@ export const PAID_CALL_RULE_IDS = {
   reserved: "paid-call-reserved",
   noBudget: "paid-call-no-budget",
   overProjectBudget: "paid-call-over-project-budget",
+  overProjectBudgetWarnOnly: "paid-call-over-project-budget-warn-only",
   overRunBudget: "paid-call-over-run-budget",
   settled: "paid-call-settled",
   chargeCapped: "paid-call-charge-capped",
@@ -114,8 +117,26 @@ export function runIdOfCall(args: { contextId?: string | null | undefined; detai
 // reserve / settle / release
 // ---------------------------------------------------------------------------
 
+/** the result `_meta` key an over-budget paid call that warn-only let through carries its warning under */
+export const PAID_CALL_BUDGET_WARNING_META_KEY = "io.regulait/budget-warning";
+
+/**
+ * D-2026-11-22-05: an org whose `budgetEnforcement` is `warn_only` lets a paid call that does not fit its project budget
+ * through. The caller is told (this warning rides the response), the budget approver is told (the crossing is escalated
+ * into the approvals queue, as under `block`), and the pass is audited (`paid-call-over-project-budget-warn-only`).
+ */
+export interface PaidCallBudgetWarning {
+  code: "paid_call_over_budget_warn_only";
+  message: string;
+  projectId: string;
+  neededUsd: number;
+  limitUsd: number;
+  spentUsd: number;
+  openHoldsUsd: number;
+}
+
 export type PaidCallReservation =
-  | { ok: true; holdId: string; heldUsd: number; price: PaidCallPriceRow }
+  | { ok: true; holdId: string; heldUsd: number; price: PaidCallPriceRow; budgetWarning?: PaidCallBudgetWarning }
   | { ok: false; status: number; error: string; detail: string };
 
 export interface ReserveArgs {
@@ -186,11 +207,12 @@ export async function reservePaidCall(db: Db, a: ReserveArgs): Promise<PaidCallR
     if (a.projectId) await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${lockKey("project", a.projectId)}))`);
     if (a.runId) await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${lockKey("run", a.runId)}))`);
     let envelopes = 0;
+    let budgetWarning: PaidCallBudgetWarning | undefined;
 
     if (a.projectId) {
       const [project] = await tx.select().from(projects).where(eq(projects.id, a.projectId));
       if (project) {
-        const { effectiveBudgetUsd } = await effectiveProjectBudget(tx, project);
+        const { effectiveBudgetUsd, cascade } = await effectiveProjectBudget(tx, project);
         const now = new Date();
         if (effectiveBudgetUsd != null) {
           envelopes++;
@@ -202,6 +224,22 @@ export async function reservePaidCall(db: Db, a: ReserveArgs): Promise<PaidCallR
             const held = await openHoldsUsd(tx, eq(paidCallHolds.projectId, project.id), monthly ? periodStart(now) : null);
             if (spent + held + hold > blockAtUsd) {
               await escalateProjectBudget(tx, project, a.userId, spent + held);
+              // ADR-0021 / D-2026-11-22-05: the org's `warn_only` lets the call through (escalated above, audited and
+              // warned here); a compliance profile's `block` still wins over it (strictest wins, ADR-0027 O2). The
+              // hold is taken all the same, so the budget keeps counting what is in flight.
+              const enforcement = cascade.budgetEnforcement === "block" ? "block" : org.budgetEnforcement;
+              if (enforcement === "warn_only") {
+                const message =
+                  `paid call is over its project budget: it needs $${hold.toFixed(6)} and measured $${spent.toFixed(6)} + ` +
+                  `held $${held.toFixed(6)} leaves $${Math.max(0, blockAtUsd - spent - held).toFixed(6)} of the ` +
+                  `$${blockAtUsd.toFixed(6)} limit. It was let through because the org's budget enforcement is warn-only, ` +
+                  "and the overage is queued for the project's budget approver";
+                budgetWarning = { code: "paid_call_over_budget_warn_only", message, projectId: project.id, neededUsd: hold, limitUsd: blockAtUsd, spentUsd: spent, openHoldsUsd: held };
+                await auditPaid(tx, a.userId, PAID_CALL_RULE_IDS.overProjectBudgetWarnOnly, "allow", `paid call let through over budget (warn-only): ${message}`,
+                  { ...subjectDetail, projectId: project.id, heldUsd: hold, spentUsd: spent, openHoldsUsd: held, blockAtUsd, budgetEnforcement: "warn_only" });
+              }
+            }
+            if (spent + held + hold > blockAtUsd && !budgetWarning) {
               const detail =
                 `paid call needs $${hold.toFixed(6)}; measured $${spent.toFixed(6)} + held $${held.toFixed(6)} leaves ` +
                 `$${Math.max(0, blockAtUsd - spent - held).toFixed(6)} of the $${blockAtUsd.toFixed(6)} limit; the overage is queued for the project's budget approver`;
@@ -279,8 +317,8 @@ export async function reservePaidCall(db: Db, a: ReserveArgs): Promise<PaidCallR
       })
       .returning({ id: paidCallHolds.id });
     await auditPaid(tx, a.userId, PAID_CALL_RULE_IDS.reserved, "allow", `paid call reserved $${hold.toFixed(6)}`,
-      { ...subjectDetail, projectId: a.projectId, runId: a.runId, heldUsd: hold, holdId: row!.id }, row!.id);
-    return { ok: true, holdId: row!.id, heldUsd: hold, price: a.price };
+      { ...subjectDetail, projectId: a.projectId, runId: a.runId, heldUsd: hold, holdId: row!.id, ...(budgetWarning ? { overBudgetWarnOnly: true } : {}) }, row!.id);
+    return { ok: true, holdId: row!.id, heldUsd: hold, price: a.price, ...(budgetWarning ? { budgetWarning } : {}) };
   });
 }
 

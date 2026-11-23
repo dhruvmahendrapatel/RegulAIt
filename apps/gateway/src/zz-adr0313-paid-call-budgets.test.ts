@@ -29,13 +29,14 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { executeGovernedToolCall, withBudgetWarning } from "./mcp-proxy.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import {
+  PAID_CALL_BUDGET_WARNING_META_KEY,
   PAID_CALL_CHARGE_META_KEY,
   PAID_HOLD_STATES,
   PAID_HOLD_TRANSITIONS,
@@ -414,5 +415,134 @@ describe("ADR-0313 a hold lasts as long as its call can (R4 #1143)", () => {
     await settle();
     const audits = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "paid-call-settled"), eq(auditLog.objectId, holdId)));
     expect(audits).toHaveLength(1);
+  });
+});
+
+describe("D-2026-11-22-05 budgetEnforcement warn_only lets an over-budget paid call through, warned and audited", () => {
+  const PROFILE = `p313-block-${RUN}`;
+  const putEnforcement = (value: "block" | "warn_only", auth = AUTH) =>
+    app.inject({ method: "PUT", headers: auth, url: "/v1/org/settings", payload: { budgetEnforcement: value } });
+  // fileParallelism is off for this suite, so the org dial is flipped for one test and always put back (M-068)
+  async function withEnforcement<T>(value: "block" | "warn_only", fn: () => Promise<T>): Promise<T> {
+    const restore = ((await loadOrgSettings(db)).budgetEnforcement ?? "block") as "block" | "warn_only";
+    expect((await putEnforcement(value)).statusCode).toBe(200);
+    try {
+      return await fn();
+    } finally {
+      await putEnforcement(restore);
+    }
+  }
+  const audits = (ruleId: string, projectId: string) =>
+    db.select().from(auditLog).where(and(eq(auditLog.ruleId, ruleId), sql`${auditLog.detail}->>'projectId' = ${projectId}`));
+
+  it("enforcement is 'block' by default for a new org (ADR-0180)", async () => {
+    const [col] = await db.execute<{ d: string | null }>(
+      sql`select column_default as d from information_schema.columns where table_name = 'org_settings' and column_name = 'budget_enforcement'`,
+    ).then((r) => r.rows);
+    expect(col?.d).toMatch(/^'block'/);
+  });
+
+  it("block: an over-budget paid call is refused, never reaches the upstream, and holds nothing", async () => {
+    await withEnforcement("block", async () => {
+      const p = await mkProject(0.01);
+      const before = hits[FLAT]!;
+      expect(await call(FLAT, p)).toMatchObject({ kind: "budget_blocked", error: "paid_call_over_budget" });
+      expect(hits[FLAT]).toBe(before);
+      expect(await holdsFor(p)).toHaveLength(0);
+      expect(await audits("paid-call-over-project-budget", p)).toHaveLength(1);
+      expect(await audits("paid-call-over-project-budget-warn-only", p)).toHaveLength(0);
+    });
+  });
+
+  it("warn_only: the call runs, carries a warning to the caller, is escalated, audited, held and settled", async () => {
+    await withEnforcement("warn_only", async () => {
+      const p = await mkProject(0.01);
+      const before = hits[FLAT]!;
+      const out = await call(FLAT, p);
+      expect(out.kind).toBe("allowed");
+      expect(hits[FLAT]).toBe(before + 1);
+      const warning = (out as { budgetWarning?: Record<string, unknown> }).budgetWarning;
+      expect(warning).toMatchObject({ code: "paid_call_over_budget_warn_only", projectId: p, neededUsd: 0.25 });
+      expect(String(warning!.message)).toContain("warn-only");
+      // the agent sees it too: a text block and the structured warning in the MCP result's _meta
+      const shown = withBudgetWarning({ content: [{ type: "text", text: "ok" }] }, warning as never);
+      expect(JSON.stringify(shown.content)).toContain("[RegulAIt budget warning]");
+      expect((shown._meta as Record<string, unknown>)[PAID_CALL_BUDGET_WARNING_META_KEY]).toMatchObject({ code: "paid_call_over_budget_warn_only" });
+      // the audit trail: the pass itself (allow, warn-only), then the reservation flagged as over budget
+      const [passed] = await audits("paid-call-over-project-budget-warn-only", p);
+      expect(passed).toMatchObject({ effect: "allow", objectType: "paid_call" });
+      expect(passed!.detail).toMatchObject({ budgetEnforcement: "warn_only", heldUsd: 0.25 });
+      const [reserved] = await audits("paid-call-reserved", p);
+      expect(reserved!.detail).toMatchObject({ overBudgetWarnOnly: true });
+      expect(await audits("paid-call-over-project-budget", p)).toHaveLength(0);
+      // the budget approver is told: the crossing is queued exactly as under block
+      const queued = await db.select().from(approvals).where(and(eq(approvals.projectId, p), eq(approvals.stageId, "__project_budget__"), eq(approvals.status, "pending")));
+      expect(queued).toHaveLength(1);
+      // the money still counts: the hold was taken and settled
+      const [h] = await holdsFor(p);
+      expect(h).toMatchObject({ state: "settled", heldUsd: 0.25, settledUsd: 0.25 });
+    });
+  });
+
+  it("warn_only: a compliance profile's 'block' still refuses (strictest wins)", async () => {
+    const prof = await app.inject({ method: "POST", headers: AUTH, url: "/v1/compliance/profiles", payload: { tag: PROFILE, budgetEnforcement: "block", piiMode: "log" } });
+    expect(prof.statusCode, prof.body).toBe(201);
+    await withEnforcement("warn_only", async () => {
+      const r = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/projects",
+        payload: { name: `p313-cascade-${RUN}`, budgetUsd: 0.01, budgetApproverUserId: approverId, classifications: [PROFILE] },
+      });
+      expect(r.statusCode, r.body).toBe(201);
+      const p = r.json().id as string;
+      const before = hits[FLAT]!;
+      expect(await call(FLAT, p)).toMatchObject({ kind: "budget_blocked", error: "paid_call_over_budget" });
+      expect(hits[FLAT]).toBe(before);
+      expect(await audits("paid-call-over-project-budget-warn-only", p)).toHaveLength(0);
+    });
+  });
+
+  it("warn_only does not lift a run's cap", async () => {
+    await withEnforcement("warn_only", async () => {
+      const runId = randomUUID();
+      await db.insert(orchestrationRuns).values({
+        id: runId, name: `p313 warn ${RUN}`, initiatingUserId: userId,
+        graph: { nodes: [], escalationApproverUserId: approverId }, state: { status: "running" }, status: "running",
+        budget: { capUsd: 0.1, overageApproved: false },
+      });
+      expect(await call(FLAT, null, { contextId: `run:${runId}` })).toMatchObject({ kind: "budget_blocked", error: "paid_call_over_run_budget" });
+    });
+  });
+
+  it("warn_only: a paid connector over budget runs and returns the warning", async () => {
+    await withEnforcement("warn_only", async () => {
+      const p = await mkProject(0.01);
+      const before = receiverHits;
+      const ok = await app.inject({
+        method: "POST", headers: userAuth, url: `/v1/connectors/${connectorId}/invoke`,
+        payload: { operation: "write", object: "x", payload: { n: RUN }, projectId: p },
+      });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(receiverHits).toBe(before + 1);
+      expect(ok.json().budgetWarning).toMatchObject({ code: "paid_call_over_budget_warn_only", projectId: p, neededUsd: 0.5 });
+      expect(await audits("paid-call-over-project-budget-warn-only", p)).toHaveLength(1);
+    });
+  });
+
+  it("switching to warn_only is an admin action, audited as a relaxation from the strict default", async () => {
+    const denied = await putEnforcement("warn_only", userAuth);
+    expect(denied.statusCode).toBe(403);
+    const since = new Date(Date.now() - 1000).toISOString();
+    await withEnforcement("block", async () => {
+      expect((await putEnforcement("warn_only")).statusCode).toBe(200);
+      const rows = await db.select().from(auditLog).where(and(
+        eq(auditLog.ruleId, "org-settings-updated"),
+        sql`${auditLog.at} >= ${since}::timestamptz`,
+        sql`${auditLog.detail}->'changed' ? 'budgetEnforcement'`,
+      ));
+      const toWarn = rows.find((r) => (r.detail as { transitions?: Record<string, { to?: unknown }> }).transitions?.budgetEnforcement?.to === "warn_only");
+      expect(toWarn, JSON.stringify(rows.map((r) => r.detail))).toBeTruthy();
+      expect((toWarn!.detail as { relaxed?: string[] }).relaxed).toContain("budgetEnforcement");
+      expect(toWarn!.reason).toContain("RELAXED");
+    });
   });
 });
