@@ -27,6 +27,10 @@ import {
   connectors,
   eq,
   inArray,
+  mcpBundleGrants,
+  mcpBundleVersionItems,
+  mcpBundleVersions,
+  mcpBundles,
   mcpServers,
   projects,
   rateLimits,
@@ -38,6 +42,8 @@ import {
   roles,
   sql,
   teams,
+  workflowTemplateVersions,
+  workflowTemplates,
   type Db,
 } from "@regulait/db";
 import {
@@ -49,6 +55,8 @@ import {
   type GovernanceChange,
   type GovernancePlan,
   type NormalBudget,
+  type NormalMcpBundle,
+  type NormalWorkflowTemplate,
   type NormalRateLimit,
   type NormalRole,
 } from "@regulait/shared";
@@ -63,11 +71,14 @@ import {
   type LiveIndex,
   type PlanIssue,
 } from "./governance-config.js";
+import { bundleSodGate, MCP_BUNDLE_RULE_IDS, type Subject } from "./mcp-bundles.js";
 import { applyProjectPatch } from "./projects.js";
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { checkSodMint, type SodMint } from "./sod.js";
 import { requireStepUp } from "./step-up.js";
 import { lockRoleOrRefuse, RoleNotFoundError } from "./workload-identity-admin.js";
+import { BUILDER_RULE_IDS, builderDiff, ensureBaseline, validateBuilderDefinition } from "./workflow-builder.js";
+import { createWorkflowTemplateValidated, retireWorkflowTemplateLocked } from "./workflows.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 const APPLY_ROUTE = "POST /v1/governance-config/apply";
@@ -83,9 +94,6 @@ export class ApplyRefusal extends Error {
     super(detail);
   }
 }
-
-/** sections apply writes today; a plan with changes elsewhere is refused whole (ADR-0357 slicing) */
-export const APPLIABLE_SECTIONS = ["roles", "rateLimits", "budgets"] as const;
 
 /** the settings_relax step-up an apply is bound to: the plan and exactly the changes in it that widen */
 export function applyStepUpFacts(plan: GovernancePlan) {
@@ -124,8 +132,10 @@ export async function applyLocked(tx: Db, content: string, planHash: string, act
   const by = (s: GovernanceChange["section"]) => plan.changes.filter((c) => c.section === s);
   // roles first (a limit may name a role the same file creates); a role's deletion last (it cascades its limits)
   for (const c of by("roles").filter((c) => c.op !== "delete")) await writeRole(ctx, c);
+  for (const c of by("mcpBundles")) await writeBundle(ctx, c);
   for (const c of by("rateLimits")) await writeRateLimit(ctx, c);
   for (const c of by("budgets")) await writeBudget(ctx, c);
+  for (const c of by("workflowTemplates")) await writeTemplate(ctx, c);
   for (const c of by("roles").filter((c) => c.op === "delete")) await deleteRole(ctx, c);
 
   for (const c of plan.changes) {
@@ -355,6 +365,209 @@ async function writeBudget(ctx: Ctx, c: GovernanceChange) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// MCP bundles (ADR-0236): the bundle row, an append-only version per change of tools, role/team grants
+// ---------------------------------------------------------------------------------------------------------------
+
+const EMPTY_BUNDLE: NormalMcpBundle = { name: "", description: null, archived: false, approverUserId: null, items: [], grants: [] };
+const bundleAudit = (ctx: Ctx, bundleId: string, ruleId: string, reason: string, detail: Record<string, unknown>) =>
+  ctx.tx.insert(auditLog).values({
+    userId: ctx.actor ?? NIL_USER,
+    objectType: "mcp_bundle",
+    objectId: bundleId,
+    detail: { ...detail, via: APPLY_ROUTE, planHash: ctx.plan.planHash },
+    effect: "allow",
+    ruleId,
+    ruleChain: [],
+    reason,
+  });
+
+async function writeBundle(ctx: Ctx, c: GovernanceChange) {
+  const { tx } = ctx;
+  const before = (c.before as NormalMcpBundle | null) ?? EMPTY_BUNDLE;
+  const after = c.after as NormalMcpBundle | null;
+  let bundleId = ctx.index.bundleIds.get(c.key);
+  if (bundleId) {
+    const [locked] = await tx.select().from(mcpBundles).where(eq(mcpBundles.id, bundleId)).for("update");
+    if (!locked) throw new ApplyRefusal(409, "changed_concurrently", `bundle ${c.key} no longer exists; plan again`);
+  }
+  // missing from the file: archived (it grants nothing from now on; versions and grants stay as history)
+  if (after === null || (after.archived && !before.archived && c.op !== "create")) {
+    await tx.update(mcpBundles).set({ archivedAt: sql`now()`, updatedAt: sql`now()` }).where(eq(mcpBundles.id, bundleId!));
+    await bundleAudit(ctx, bundleId!, MCP_BUNDLE_RULE_IDS.archived, `MCP bundle '${c.key}' archived by a governance-config apply`, { phase: "archive" });
+    return;
+  }
+
+  const serverNames = [...new Set(after.items.map((i) => i.server))];
+  const serverIds = serverNames.length ? await idsByName(tx.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.name, serverNames))) : new Map<string, string>();
+  const teamNames = [...new Set(after.grants.flatMap((g) => (g.team !== null ? [g.team] : [])))];
+  const teamIds = teamNames.length ? await idsByName(tx.select({ id: teams.id, name: teams.name }).from(teams).where(inArray(teams.name, teamNames))) : new Map<string, string>();
+  const subjectOf = (g: NormalMcpBundle["grants"][number]): Subject => (g.role !== null ? { kind: "role", id: ctx.roleIds.get(g.role)! } : { kind: "team", id: teamIds.get(g.team!)! });
+  const itemsAfter = after.items.map((i) => ({ serverId: serverIds.get(i.server)!, toolName: i.tool }));
+  const tk = (i: { server: string; tool: string }) => `${i.server}\u0000${i.tool}`;
+  const gk = (g: { role: string | null; team: string | null }) => (g.role !== null ? `role:${g.role}` : `team:${g.team}`);
+  const beforeItems = new Set(before.items.map(tk));
+  const added = after.items.filter((i) => !beforeItems.has(tk(i))).map((i) => ({ serverId: serverIds.get(i.server)!, toolName: i.tool }));
+  const itemsChanged = c.op === "create" || added.length > 0 || before.items.length !== after.items.length;
+  const beforeGrants = new Map(before.grants.map((g) => [gk(g), g]));
+  const afterGrants = new Map(after.grants.map((g) => [gk(g), g]));
+  const newGrants = after.grants.filter((g) => !beforeGrants.has(gk(g)));
+
+  // ADR-0091: every holder after the change comes to hold the added tools; every new holder, all the tools
+  const sod = async (subjects: Subject[], items: { serverId: string; toolName: string }[]) => {
+    const gate = await bundleSodGate(tx, subjects, items, ctx.actor, bundleId ?? NIL_USER);
+    if (!gate.ok) throw new ApplyRefusal(gate.status, String(gate.body.error ?? "sod_conflict"), `bundle ${c.key}: ${String(gate.body.detail ?? "a separation-of-duties rule refuses this grant")}`);
+  };
+  const keptSubjects = after.grants.filter((g) => beforeGrants.has(gk(g))).map(subjectOf);
+  await sod(keptSubjects, added);
+  await sod(newGrants.map(subjectOf), itemsAfter);
+
+  let version = 1;
+  if (c.op === "create") {
+    const [row] = await tx
+      .insert(mcpBundles)
+      .values({ name: after.name, description: after.description, approverUserId: after.approverUserId, currentVersion: 1, createdBy: ctx.actor })
+      .returning({ id: mcpBundles.id });
+    bundleId = row!.id;
+    await bundleAudit(ctx, bundleId, MCP_BUNDLE_RULE_IDS.created, `MCP bundle '${after.name}' created at version 1 by a governance-config apply`, { phase: "create", items: itemsAfter });
+  } else {
+    const [cur] = await tx.select({ v: mcpBundles.currentVersion }).from(mcpBundles).where(eq(mcpBundles.id, bundleId!));
+    version = cur!.v;
+    if (before.description !== after.description || before.approverUserId !== after.approverUserId) {
+      await tx.update(mcpBundles).set({ description: after.description, approverUserId: after.approverUserId, updatedAt: sql`now()` }).where(eq(mcpBundles.id, bundleId!));
+      await bundleAudit(ctx, bundleId!, MCP_BUNDLE_RULE_IDS.updated, `MCP bundle '${c.key}' updated by a governance-config apply`, {
+        phase: "update",
+        approverBefore: before.approverUserId,
+        approverAfter: after.approverUserId,
+      });
+    }
+  }
+  const id = bundleId!;
+  if (itemsChanged) {
+    const next = c.op === "create" ? 1 : version + 1;
+    const [v] = await tx.insert(mcpBundleVersions).values({ bundleId: id, version: next, createdBy: ctx.actor }).returning({ id: mcpBundleVersions.id });
+    if (itemsAfter.length) await tx.insert(mcpBundleVersionItems).values(itemsAfter.map((i) => ({ versionId: v!.id, serverId: i.serverId, toolName: i.toolName })));
+    if (c.op !== "create") {
+      await tx.update(mcpBundles).set({ currentVersion: next, updatedAt: sql`now()` }).where(eq(mcpBundles.id, id));
+      await bundleAudit(ctx, id, MCP_BUNDLE_RULE_IDS.versioned, `MCP bundle '${c.key}' changed from version ${version} to ${next} by a governance-config apply`, {
+        phase: "version",
+        fromVersion: version,
+        version: next,
+        added,
+      });
+    }
+  }
+  for (const [k, g] of beforeGrants) {
+    if (afterGrants.has(k)) continue;
+    const s = subjectOfBefore(ctx, g, teamIds);
+    const removed = await tx
+      .delete(mcpBundleGrants)
+      .where(and(eq(mcpBundleGrants.bundleId, id), s.kind === "role" ? eq(mcpBundleGrants.roleId, s.id) : eq(mcpBundleGrants.teamId, s.id)))
+      .returning({ id: mcpBundleGrants.id });
+    for (const r of removed) await bundleAudit(ctx, id, MCP_BUNDLE_RULE_IDS.grantRemoved, `MCP bundle '${c.key}' revoked from ${k}`, { phase: "grant", grantId: r.id });
+  }
+  for (const [k, g] of afterGrants) {
+    const was = beforeGrants.get(k);
+    const s = subjectOf(g);
+    if (!was) {
+      const [created] = await tx
+        .insert(mcpBundleGrants)
+        .values({ bundleId: id, roleId: s.kind === "role" ? s.id : null, teamId: s.kind === "team" ? s.id : null, maxTier: g.maxTier, grantedBy: ctx.actor })
+        .returning({ id: mcpBundleGrants.id });
+      await bundleAudit(ctx, id, MCP_BUNDLE_RULE_IDS.granted, `MCP bundle '${c.key}' granted to ${k} up to the ${g.maxTier} tier`, { phase: "grant", grantId: created!.id, maxTier: g.maxTier });
+    } else if (was.maxTier !== g.maxTier) {
+      await tx
+        .update(mcpBundleGrants)
+        .set({ maxTier: g.maxTier })
+        .where(and(eq(mcpBundleGrants.bundleId, id), s.kind === "role" ? eq(mcpBundleGrants.roleId, s.id) : eq(mcpBundleGrants.teamId, s.id)));
+      await bundleAudit(ctx, id, MCP_BUNDLE_RULE_IDS.granted, `MCP bundle '${c.key}': ${k} moved from the ${was.maxTier} to the ${g.maxTier} tier`, {
+        phase: "grant-tier",
+        maxTierBefore: was.maxTier,
+        maxTier: g.maxTier,
+      });
+    }
+  }
+}
+
+/** a removed grant's subject: its role or team may be one the same apply does not name any more */
+function subjectOfBefore(ctx: Ctx, g: NormalMcpBundle["grants"][number], teamIds: Map<string, string>): Subject {
+  if (g.role !== null) {
+    const id = ctx.roleIds.get(g.role);
+    if (!id) throw new ApplyRefusal(409, "changed_concurrently", `role ${g.role} no longer exists; plan again`);
+    return { kind: "role", id };
+  }
+  const id = teamIds.get(g.team!);
+  if (id) return { kind: "team", id };
+  throw new ApplyRefusal(409, "changed_concurrently", `team ${g.team} is not resolvable; plan again`);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Workflow templates (ADR-0022 retire, ADR-0341 versions)
+// ---------------------------------------------------------------------------------------------------------------
+
+async function writeTemplate(ctx: Ctx, c: GovernanceChange) {
+  const { tx } = ctx;
+  const after = c.after as NormalWorkflowTemplate | null;
+  const reason = `retired by a governance-config apply (plan ${ctx.plan.planHash.slice(0, 12)})`;
+  if (c.op === "create") {
+    const created = await createWorkflowTemplateValidated(tx, { name: after!.name, definition: after!.definition }, ctx.actor);
+    if (!created.ok) throw new ApplyRefusal(created.status === 404 ? 404 : created.status === 409 ? 409 : 422, String(created.body.error ?? "invalid_template"), `template ${c.key}: ${String(created.body.detail ?? created.body.error)}`);
+    if (after!.retired) await retireOrRefuse(tx, created.row.id, reason, ctx.actor, c.key);
+    return;
+  }
+  const templateId = ctx.index.templateIds.get(c.key)!;
+  const [locked] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
+  if (!locked) throw new ApplyRefusal(409, "changed_concurrently", `template ${c.key} no longer exists; plan again`);
+  if (after === null || (after.retired && !locked.retiredAt)) {
+    // a definition change on a template the file also retires is still recorded first, then the retire
+    if (after !== null && canonicalJson(after.definition) !== canonicalJson(locked.definition)) await publishVersion(ctx, locked, after.definition, c.key);
+    await retireOrRefuse(tx, templateId, reason, ctx.actor, c.key);
+    return;
+  }
+  if (canonicalJson(after.definition) !== canonicalJson(locked.definition)) await publishVersion(ctx, locked, after.definition, c.key);
+}
+
+async function retireOrRefuse(tx: Db, templateId: string, reason: string, actor: string | null, key: string) {
+  const r = await retireWorkflowTemplateLocked(tx, templateId, reason, actor);
+  if (!r.ok) throw new ApplyRefusal(409, String(r.body.error), `template ${key}: ${String(r.body.error)}`);
+}
+
+/** a new version (origin governance_apply) over the baseline, as the builder's publish writes one */
+async function publishVersion(ctx: Ctx, locked: typeof workflowTemplates.$inferSelect, raw: Record<string, unknown>, key: string) {
+  const { tx } = ctx;
+  const v = await validateBuilderDefinition(tx, raw);
+  if (!v.valid) throw new ApplyRefusal(422, "invalid_workflow_definition", `template ${key}: ${v.issues.map((i) => i.message).join("; ").slice(0, 500)}`);
+  const latest = await ensureBaseline(tx, locked, ctx.actor);
+  const diff = builderDiff(locked.definition, v.definition);
+  const [version] = await tx
+    .insert(workflowTemplateVersions)
+    .values({ templateId: locked.id, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "governance_apply", publishedBy: ctx.actor })
+    .returning({ version: workflowTemplateVersions.version });
+  await tx.update(workflowTemplates).set({ definition: v.definition }).where(eq(workflowTemplates.id, locked.id));
+  await tx.insert(auditLog).values({
+    userId: ctx.actor ?? NIL_USER,
+    objectType: "workflow_template",
+    objectId: locked.id,
+    detail: {
+      phase: "published",
+      origin: "governance_apply",
+      name: locked.name,
+      version: version!.version,
+      fromVersion: latest.version,
+      contentHash: v.contentHash,
+      previousContentHash: latest.contentHash,
+      stages: diff.stages,
+      relaxations: diff.relaxations,
+      via: APPLY_ROUTE,
+      planHash: ctx.plan.planHash,
+    },
+    effect: "allow",
+    ruleId: BUILDER_RULE_IDS.published,
+    ruleChain: [],
+    reason: `workflow template '${locked.name}' version ${version!.version} published by a governance-config apply`,
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // The route
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -407,16 +620,6 @@ export function registerGovernanceConfigApplyRoute(app: FastifyInstance, db: Db)
         error: "plan_stale",
         detail: "the planHash sent is not this document's plan against the live configuration now; plan again and review the new diff",
         planHash: plan.planHash,
-      });
-    }
-    const notYet = plan.changes.filter((c) => !(APPLIABLE_SECTIONS as readonly string[]).includes(c.section));
-    if (notYet.length) {
-      const sections = [...new Set(notYet.map((c) => c.section))];
-      await deny(req, "section_not_appliable", `apply does not write ${sections.join(", ")} yet`, { sections });
-      return reply.status(422).send({
-        error: "section_not_appliable",
-        detail: `apply writes ${APPLIABLE_SECTIONS.join(", ")} today; this plan also changes ${sections.join(", ")} (change those through their own screens, or leave the section out of the file)`,
-        sections,
       });
     }
     if (plan.changes.length === 0) return reply.send({ applied: false, planHash: plan.planHash, summary: plan.summary, detail: "nothing to change" });

@@ -212,7 +212,7 @@ function editRefusal(t: Pick<TemplateRow, "name" | "retiredAt"> | undefined): Re
   return null;
 }
 
-async function latestVersion(db: Db, templateId: string): Promise<WorkflowTemplateVersionRow | undefined> {
+export async function latestVersion(db: Db, templateId: string): Promise<WorkflowTemplateVersionRow | undefined> {
   const [v] = await db
     .select()
     .from(workflowTemplateVersions)

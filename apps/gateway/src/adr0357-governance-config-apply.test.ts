@@ -7,7 +7,7 @@
  *  - with exactly its grant, every change lands through the UI's own stores (role grants, a versioned rate-limit
  *    edit, a project budget patch), with one audit row per change and one for the apply;
  *  - all or nothing: a writer refusing midway (an archived project) rolls back the changes before it;
- *  - a held role cannot be deleted by a file; sections not yet appliable are refused whole.
+ *  - a held role cannot be deleted by a file.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -168,21 +168,14 @@ describe("POST /v1/governance-config/apply: the gate", () => {
     expect(await grantSpent(db, g.grantId)).toBe(false);
   });
 
-  it("a plan with issues is 422, and a section apply does not write yet is refused whole", async () => {
+  it("a plan with issues is 422", async () => {
     const bad = doc({ rateLimits: [...(await liveDoc()).rateLimits, { scope: "role", subject: n("nobody"), maxCalls: 1, windowSeconds: 60 }] });
     const badPlan = await planOf(bad);
     const g = await grantStepUpForTest(db, adminId, factsOf(badPlan));
     const r = await apply({ document: bad, planHash: badPlan.plan.planHash }, stepUpRequest(g));
     expect(r.statusCode, r.body).toBe(422);
     expect(r.json().error).toBe("plan_has_issues");
-
-    const wf = doc({ workflowTemplates: [] });
-    const wfPlan = await planOf(wf);
-    if (wfPlan.plan.changes.length > 0) {
-      const w = await apply({ document: wf, planHash: wfPlan.plan.planHash }, stepUpRequest(await grantStepUpForTest(db, adminId, factsOf(wfPlan))));
-      expect(w.statusCode, w.body).toBe(422);
-      expect(w.json()).toMatchObject({ error: "section_not_appliable", sections: ["workflowTemplates"] });
-    }
+    expect(await grantSpent(db, g.grantId)).toBe(false);
   });
 
   it("a held role cannot be deleted by a file: the plan reports it", async () => {

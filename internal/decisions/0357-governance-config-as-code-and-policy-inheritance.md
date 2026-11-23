@@ -161,12 +161,18 @@ lowers a limit) or `neutral` (a description).
   append-only `mcp_bundle_versions`, `workflow_template_versions` with `origin`, the project budget columns). It
   does not add a parallel store.
 - **Slicing.** Slice 1a: this ADR, the document schema, export and plan. Slice 1b: apply for roles, rate limits and
-  budgets (no migration); a plan that also changes MCP bundles or workflow templates is refused whole
-  (`422 section_not_appliable`) until slice 1c writes them through their own versioned stores
-  (`mcp_bundle_versions`, `workflow_template_versions`).
+  budgets. Slice 1c: apply for MCP bundles (the bundle row, an append-only `mcp_bundle_versions` row per change of
+  tools, role and team grants, archive when missing from the file) and workflow templates (the create path's own
+  validation; a definition change records the baseline and a new `workflow_template_versions` row with the new origin
+  `governance_apply`, the pending `workflow_template_version_origin_apply` migration; retire when missing from the
+  file, through the retire route's own core). Slice 2: policy inheritance.
 - **What apply refuses that the UI decides.** A role deletion while the role is held (assignments are identity data,
   not in the file), and one that moves who approves calls (ADR-0229), are plan issues: the role's own screen asks for
   those decisions. A grant that breaks a separation-of-duties rule (ADR-0091) refuses the whole apply.
+  Likewise: any bundle change but an archive or a grant removed while MCP bundles are off (ADR-0236, off by default);
+  un-archiving a bundle or un-retiring a template (the UI has no such path either); any change to an intake template
+  (it goes through the decision-regression gate on its own screen, ADR-0182 A11); and a dangerous tier on a bundle
+  with no approver.
 - **Rate limits are read as enforced.** Export and plan read a versioned limit as its active `config_versions` body
   over the row, and apply edits it through `applyRuleEdit` (a new version) and deletes it through
   `deleteRuleArtifact`, as the rule CRUD routes do. Those writers keep their own loosening guard; apply hands it a
