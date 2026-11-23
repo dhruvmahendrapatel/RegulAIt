@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS "ai_saas_monitor_runs" (
     'token_failed', 'missing_permission', 'unauthorized', 'forbidden', 'rate_limited', 'http_error', 'bad_response',
     'response_too_large', 'network_error', 'page_limit', 'interaction_limit', 'in_progress', 'internal')),
   CONSTRAINT "ai_saas_monitor_runs_error_detail_check" CHECK ("error_detail" IS NULL OR char_length("error_detail") <= 500),
-  CONSTRAINT "ai_saas_monitor_runs_outcome_check" CHECK (("status" IN ('failed', 'refused')) = ("error_code" IS NOT NULL)),
+  CONSTRAINT "ai_saas_monitor_runs_outcome_check" CHECK (("status" = 'failed' OR "status" = 'refused') = ("error_code" IS NOT NULL)),
   CONSTRAINT "ai_saas_monitor_runs_finished_check" CHECK (("status" = 'running') = ("finished_at" IS NULL)),
   CONSTRAINT "ai_saas_monitor_runs_counts_check" CHECK (
     "users_read" >= 0 AND "pages" >= 0 AND "interactions_seen" >= 0 AND "interactions_new" >= 0 AND "findings_created" >= 0)

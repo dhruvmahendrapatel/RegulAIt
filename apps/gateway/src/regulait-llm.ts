@@ -115,6 +115,7 @@ import {
   type GuardrailMode,
   type GuardrailModes,
   type PiiHit,
+  type CompiledClassifier,
 } from "@regulait/shared";
 import {
   ArtifactModelProvider,
@@ -197,7 +198,12 @@ export function scanTrainingRows(
    * scanned to the SAME breadth as a prompt, or the corpus becomes the way a
    * jurisdiction's identifiers reach a provider unscanned. */
   piiInternational: readonly InternationalPiiCategory[],
+  /** ADR-0363 slice 2: the published customer classifiers (`policy.classifiers`). A corpus row carries prompt and
+   * completion alike, so each classifier scans it whatever its phases: an EDM-protected value must not reach a
+   * fine-tune corpus that a prompt carrying it would have been refused for. */
+  classifiers: readonly CompiledClassifier[] = [],
 ): { findings: ScanFindings; piiHits: PiiHit[]; hasPii: boolean; guardrailBlocked: boolean } {
+  const corpusClassifiers = classifiers.map((c) => ({ ...c, phases: ["input"] as const }));
   const piiCounts = new Map<string, number>();
   const guardrailCounts = new Map<string, { detector: string; category: string; count: number }>();
   const allHits: PiiHit[] = [];
@@ -221,6 +227,7 @@ export function scanTrainingRows(
       modes: guardrailModes,
       terms: {},
       exclude: ["pii"],
+      classifiers: corpusClassifiers,
     });
     if (evaluation.action === "block") guardrailBlocked = true;
     for (const finding of evaluation.findings) {
@@ -2176,7 +2183,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     const mode = effectiveIngestMode(requested, piiFloor);
     // The detectors run at their configured strength for content classes, and
     // PII runs at the composed ingest mode above.
-    const scan = scanTrainingRows(rows, policy.modes, await piiInternationalCategories(database));
+    const scan = scanTrainingRows(rows, policy.modes, await piiInternationalCategories(database), policy.classifiers);
     const findings = scan.findings;
     const anything = scan.hasPii || findings.guardrails.length > 0;
     if (!anything) {

@@ -232,7 +232,7 @@ async function* m365ListInteractions(ctx: ConnectorContext, auth: ConnectorAutho
     const seenLinks = new Set<string>();
     for (let page = 1; url; page++) {
       if (page > AI_SAAS_MONITOR_MAX_PAGES_PER_USER) {
-        throw new ConnectorError("page_limit", `one user had more than ${AI_SAAS_MONITOR_MAX_PAGES_PER_USER} pages in the window; nothing past them was read and the window was not advanced`);
+        throw new ConnectorError("page_limit", `one user had more than ${AI_SAAS_MONITOR_MAX_PAGES_PER_USER} pages in the window; nothing past them was read, the window was not advanced, and the next run asks for half as long`);
       }
       const body = await getJson(fetchImpl, url, auth.headers, ctx.signal, "a user's Copilot interactions");
       const parsed = graphAiInteractionPageSchema.safeParse(body);

@@ -6,14 +6,16 @@ import { describe, expect, it } from "vitest";
 import {
   adaptiveCardText,
   AI_SAAS_MONITOR_MAX_TEXT_CHARS,
-  AI_SAAS_MONITOR_RUN_TRANSITIONS,
-  aiSaasMonitorRunSources,
+  AI_SAAS_MONITOR_MAX_WINDOW_MS,
+  AI_SAAS_MONITOR_MIN_WINDOW_MS,
+  AI_SAAS_MONITOR_RUN_MACHINE,
+  STATE_MACHINES,
   htmlToScanText,
   normalizeGraphInteraction,
   type GraphAiInteraction,
 } from "@regulait/shared";
 import { ConnectorError, M365_COPILOT_CONNECTOR, m365InteractionsUrl, sameOriginNext, type ConnectorContext } from "./ai-saas-connectors.js";
-import { configWidens, monitorWindow } from "./ai-saas-monitor.js";
+import { cascadeLoosens, configWidens, m365SetupGuide, monitorWindow, windowSpanMs } from "./ai-saas-monitor.js";
 
 const TENANT = "11111111-2222-3333-4444-555555555555";
 const CLIENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -237,10 +239,81 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
     expect(live.end.toISOString()).toBe("2026-11-17T11:55:00.000Z");
   });
 
-  it("declares the run lifecycle: running closes once", () => {
-    expect(AI_SAAS_MONITOR_RUN_TRANSITIONS.running).toEqual(["succeeded", "failed", "refused"]);
-    expect(aiSaasMonitorRunSources("failed")).toEqual(["running"]);
-    expect(AI_SAAS_MONITOR_RUN_TRANSITIONS.succeeded).toEqual([]);
+  it("declares the run lifecycle on ADR-0348: running closes once, and an in-progress refusal is born refused", () => {
+    const m = AI_SAAS_MONITOR_RUN_MACHINE;
+    expect(STATE_MACHINES[m.def.id]).toBe(m);
+    expect(m.def.stored).toBe("ai_saas_monitor_runs.status");
+    expect([...m.def.initial]).toEqual(["running", "refused"]);
+    for (const e of ["succeed", "fail", "refuse"] as const) expect(m.sourcesOf(e)).toEqual(["running"]);
+    for (const t of ["succeeded", "failed", "refused"] as const) expect(m.isTerminal(t)).toBe(true);
+  });
+
+  it("halves the window after each bounded failure since the last success, down to the floor (review R7 [1])", () => {
+    expect(windowSpanMs(0)).toBe(AI_SAAS_MONITOR_MAX_WINDOW_MS);
+    expect(windowSpanMs(1)).toBe(AI_SAAS_MONITOR_MAX_WINDOW_MS / 2);
+    expect(windowSpanMs(3)).toBe(AI_SAAS_MONITOR_MAX_WINDOW_MS / 8);
+    expect(windowSpanMs(7)).toBe(AI_SAAS_MONITOR_MIN_WINDOW_MS);
+    expect(windowSpanMs(1000)).toBe(AI_SAAS_MONITOR_MIN_WINDOW_MS);
+    const now = new Date("2026-11-17T12:00:00Z");
+    const w = monitorWindow(new Date("2026-11-10T00:00:00Z"), 7, now, windowSpanMs(2));
+    expect(w.end.getTime() - w.start.getTime()).toBe(6 * 3600_000);
+  });
+
+  it("builds the guided M365 setup from what RegulAIt can see, never claiming a step it cannot check (D-2026-11-22-06)", () => {
+    const base = {
+      config: listed([USER_A]),
+      publicUrl: "https://regulait.example.com",
+      allowedHosts: new Set<string>(),
+      policyEnabled: false,
+      connectorEnabled: false,
+      credential: null,
+      lastRun: null,
+    };
+    const fresh = m365SetupGuide(base);
+    const state = (g: ReturnType<typeof m365SetupGuide>) => Object.fromEntries(g.steps.map((st) => [st.id, st.state]));
+    expect(state(fresh)).toEqual({
+      register_app: "done",
+      api_permissions: "unknown",
+      redirect_uri: "unknown",
+      admin_consent: "unknown",
+      client_secret: "to_do",
+      egress: "to_do",
+      turn_on: "to_do",
+      data_flowing: "unknown",
+    });
+    expect(fresh.next).toBe("api_permissions");
+    const url = new URL(fresh.adminConsentUrl!);
+    expect(url.origin + url.pathname).toBe(`https://login.microsoftonline.com/${TENANT}/v2.0/adminconsent`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({ client_id: CLIENT, scope: "https://graph.microsoft.com/.default", redirect_uri: "https://regulait.example.com" });
+    const live = m365SetupGuide({
+      ...base,
+      allowedHosts: new Set(["graph.microsoft.com", "login.microsoftonline.com"]),
+      policyEnabled: true,
+      connectorEnabled: true,
+      credential: { scopePosture: "read_only" },
+      lastRun: { status: "succeeded", errorCode: null },
+    });
+    expect(live.steps.every((st) => st.state === "done")).toBe(true);
+    expect(live.next).toBeNull();
+    // a write-capable credential, or a run that hit a missing permission, fails the permission steps
+    expect(state(m365SetupGuide({ ...base, credential: { scopePosture: "refused" } })).api_permissions).toBe("failed");
+    expect(state(m365SetupGuide({ ...base, credential: { scopePosture: "unverified" }, lastRun: { status: "failed", errorCode: "missing_permission" } })).admin_consent).toBe("failed");
+    // with no public URL there is no consent link to return to: the step names the portal button, and no redirect step
+    const noUrl = m365SetupGuide({ ...base, publicUrl: null });
+    expect(noUrl.adminConsentUrl).toBeNull();
+    expect(noUrl.steps.map((st) => st.id)).not.toContain("redirect_uri");
+    // every user in scope also needs User.Read.All
+    const all = m365SetupGuide({ ...base, config: { ...listed([USER_A]), users: { mode: "all" } } });
+    expect(all.steps.find((st) => st.id === "api_permissions")!.detail).toContain("User.Read.All");
+  });
+
+  it("knows when a tag change loosens the cascade (review R7 [3])", () => {
+    const c = (auditRetentionDays: number | null, piiMode: "block" | "warn" | "log" | "redact" | null) => ({ tags: [], auditRetentionDays, piiMode });
+    expect(cascadeLoosens(c(400, "warn"), c(null, "warn"))).toEqual(["retention"]); // the tag's days are gone: evidence goes at the org floor
+    expect(cascadeLoosens(c(null, "warn"), c(400, "warn"))).toBeNull(); // gaining tag days keeps evidence longer
+    expect(cascadeLoosens(c(400, "block"), c(30, "log"))).toEqual(["retention", "pii_mode"]);
+    expect(cascadeLoosens(c(30, "log"), c(400, "block"))).toBeNull();
+    expect(cascadeLoosens(c(400, "redact"), c(400, "warn"))).toEqual(["pii_mode"]);
   });
 
   it("knows when a configuration reads more than before", () => {

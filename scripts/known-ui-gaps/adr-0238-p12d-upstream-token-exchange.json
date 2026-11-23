@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0238",
+  "lane": "P12(d)",
+  "tracking": "ADR-0238 (P12(d)): the brief is API-only; the token-exchange form and scope map are posted on #453. Master decision 2026-11-08 (#712 unblock): keep as a known gap until that screen is built",
+  "gaps": {
+    "GET /v1/servers/:serverId/token-exchange": "reads an MCP server's upstream token-exchange configuration and per-action scope map (never the secret)",
+    "PUT /v1/servers/:serverId/token-exchange": "sets or changes an MCP server's upstream token exchange (settings_relax step-up, audited)",
+    "DELETE /v1/servers/:serverId/token-exchange": "removes an MCP server's upstream token exchange (settings_relax step-up, audited)",
+    "GET /v1/connectors/:connectorId/token-exchange": "reads a connector's upstream token-exchange configuration and per-action scope map (never the secret)",
+    "PUT /v1/connectors/:connectorId/token-exchange": "sets or changes a connector's upstream token exchange (settings_relax step-up, audited)",
+    "DELETE /v1/connectors/:connectorId/token-exchange": "removes a connector's upstream token exchange (settings_relax step-up, audited)"
+  }
+}

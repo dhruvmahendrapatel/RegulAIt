@@ -16,9 +16,10 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@aws-sdk/client-account` (github.com/aws/aws-sdk-js-v3) | `3.1160.0` | Apache-2.0 | `ListRegions`: the regions an AWS account has enabled. |
 | `@aws-sdk/client-bedrock` | `3.1160.0` | Apache-2.0 | Bedrock custom and imported models, provisioned throughput, guardrails, invocation-logging setting. |
 | `@aws-sdk/client-bedrock-agent` | `3.1160.0` | Apache-2.0 | Bedrock agents and knowledge bases. |
+| `@aws-sdk/client-bedrock-agentcore-control` | `3.1160.0` | Apache-2.0 | ADR-0314 (G6): `ListAgentRuntimes`, the AgentCore runtimes an agent registry source imports (read-only, SigV4 through the guarded handler). Added 2026-11-15; licence checked with `pnpm licenses list`; release 2026-11-13. |
 | `@aws-sdk/client-cloudtrail` | `3.1160.0` | Apache-2.0 | `LookupEvents` for Bedrock invocation events. |
 | `@aws-sdk/client-organizations` | `3.1160.0` | Apache-2.0 | `ListAccounts` (paginated, read-only) for an organisation-level AWS source, called from the management or delegated-admin account (SD2b). |
-| `@aws-sdk/client-s3` | `3.1160.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events. |
+| `@aws-sdk/client-s3` | `3.1160.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events; read-only list and get of an AWS Data Exports (CUR 2.0) export for Bedrock spend (ADR-0322 slice 4a, `aws-cur.ts`). |
 | `@aws-sdk/client-sagemaker` | `3.1160.0` | Apache-2.0 | SageMaker endpoints and models. |
 | `@aws-sdk/client-sts` | `3.1160.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
 | `@aws-sdk/credential-providers` | `3.1160.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |

@@ -78,17 +78,21 @@ import {
   DISCOVERY_SCHEDULE_MIN_SECONDS,
   DISCOVERY_SOURCE_KINDS,
   DISCOVERY_STEP_UP_KEYS,
+  SALESFORCE_ORG_TOKENS_TRADE_OFF,
   credentialTargetMatch,
   publicConfigProblem,
   defaultCredentialMode,
   scopeWidens,
   DISCOVERY_GATED_FAMILIES,
   familySwitchProblem,
+  discoveryWriteScopeFinal,
+  discoveryCredentialScope,
+  type DiscoveryCredentialScope,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { DISCOVERY_SCANNERS, type ScannerRegistry } from "./discovery-scanners.js";
-import { discoveryPosture, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, directoryTokensRequested, discoveryPosture, loadDiscoverySettings, salesforceOrgTokensProblem } from "./discovery-posture.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -150,11 +154,21 @@ const settingsSchema = z
     endpointRetentionDays: z.number().int().min(DISCOVERY_ENDPOINT_RETENTION_MIN_DAYS).max(DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS).optional(),
     // ADR-0235: the wider-source family switches; turning one on is a relaxation, turning one off is free
     families: z
-      .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional() })
+      .object({ saas: z.boolean().optional(), identity: z.boolean().optional(), ml_platform: z.boolean().optional(), agent_registry: z.boolean().optional() })
       .strict()
       .optional(),
     // ADR-0259: MCP client-config discovery through the endpoint agent; turning it on is a relaxation
     endpointMcpConfig: z.boolean().optional(),
+    // ADR-0337 §4: Google Workspace sources may use the Directory token listing; turning it on is a relaxation
+    googleDirectoryTokens: z.boolean().optional(),
+    // ADR-0337 §4a (owner, 2026-11-22): Salesforce sources may read org-wide OAuth tokens (Customize Application on the
+    // integration user); turning it on is a relaxation, audited with its trade-off
+    salesforceOrgTokens: z.boolean().optional(),
+    // ADR-0331: governed removal of flagged MCP servers from endpoints; turning it on is a relaxation
+    endpointAddonRemoval: z.boolean().optional(),
+    // ADR-0338: governed vendor agent control; turning it on is a relaxation, and so is a window longer than 24 hours
+    vendorAgentControl: z.boolean().optional(),
+    vendorAgentControlApprovalTtlHours: z.number().int().min(1).max(72).optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -206,6 +220,11 @@ export interface DiscoveryCredentialView {
   publicConfig: Record<string, string>;
   hasSecret: boolean;
   writeScope: DiscoveryCredentialRow["writeScope"];
+  /**
+   * ADR-0336 decision 5: `unverified` for a kind whose key scope no API can check (OpenAI, n8n). Storing and enabling
+   * such a credential is a relaxation, recorded with this same value in the step-up binding and the audit row.
+   */
+  credentialScope: DiscoveryCredentialScope;
   createdAt: string;
   ageDays: number;
   /** a static secret older than the warning age */
@@ -216,7 +235,7 @@ export interface DiscoveryCredentialView {
 const ageDaysSql = sql<number>`floor(extract(epoch from (now() - ${discoveryCredentials.createdAt})) / 86400)::int`;
 type CredentialWithAge = DiscoveryCredentialRow & { ageDays: number };
 
-function credentialView(c: CredentialWithAge, warningAgeDays: number): DiscoveryCredentialView {
+function credentialView(c: CredentialWithAge, warningAgeDays: number, kind: string): DiscoveryCredentialView {
   const ageDays = Math.max(0, Number(c.ageDays));
   return {
     id: c.id,
@@ -224,6 +243,7 @@ function credentialView(c: CredentialWithAge, warningAgeDays: number): Discovery
     publicConfig: { ...c.publicConfig },
     hasSecret: c.secretCiphertext !== null,
     writeScope: c.writeScope,
+    credentialScope: discoveryCredentialScope(kind),
     createdAt: c.createdAt.toISOString(),
     ageDays,
     ageWarning: c.credentialMode === "static" && ageDays >= warningAgeDays,
@@ -272,7 +292,9 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Cred
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
     scannerBuilt: registry.has(s.kind),
-    credential: cred ? credentialView(cred, warningAgeDays) : null,
+    /** ADR-0336 decision 5: whether this kind's credential scope can be checked at all (see DiscoveryCredentialView) */
+    credentialScope: discoveryCredentialScope(s.kind),
+    credential: cred ? credentialView(cred, warningAgeDays, s.kind) : null,
     lastRun: lastRun ? runView(lastRun) : null,
   };
 }
@@ -287,7 +309,15 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Cred
  * with (review of #403), so a credential swapped between the grant and its spend makes the grant fail.
  */
 export function enableStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, credentialId: string | null): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credentialId } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credentialId, ...unverifiedScope(kind) } } } };
+}
+/**
+ * ADR-0336 decision 5: a kind whose key scope cannot be checked names `credentialScope: "unverified"` in every
+ * step-up that stores or enables its credential, so the admin confirms that relaxation itself, not only the source.
+ * Kinds whose scope is checked add nothing, so their bindings are unchanged.
+ */
+function unverifiedScope(kind: string): { credentialScope?: "unverified" } {
+  return discoveryCredentialScope(kind) === "unverified" ? { credentialScope: "unverified" } : {};
 }
 
 /** per-kind target requirements the gateway can check (SD2 matches credentials against them) */
@@ -297,14 +327,14 @@ function targetProblem(kind: string, target: Record<string, string>): string | n
 }
 /** storing a credential on an ENABLED source whose account cannot be matched to the target: the enable step-up, with the config */
 export function credentialOnEnabledStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, mode: string, publicConfig: Record<string, string>): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credential: { mode, publicConfig } } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credential: { mode, publicConfig }, ...unverifiedScope(kind) } } } };
 }
 /** revealing the name behind one pseudonym: its own step-up kind (not a settings relaxation), bound to the pseudonym */
 export function pseudonymRevealStepUpArgs(pseudonym: string): StepUpCheckArgs {
   return { kind: "pseudonym_reveal", facts: { op: "pseudonym_reveal", pseudonym } };
 }
 export function staticCredentialStepUpArgs(sourceId: string, kind: string, replacesCredentialId: string | null): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.staticCredential]: { sourceId, kind, replacesCredentialId } } } };
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.staticCredential]: { sourceId, kind, replacesCredentialId, ...unverifiedScope(kind) } } } };
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +346,9 @@ interface Refusal {
   body: Record<string, unknown>;
 }
 const refusal = (status: number, error: string, detail: string, extra: Record<string, unknown> = {}): Refusal => ({ status, body: { error, detail, ...extra } });
+/** a target without one key, keys sorted, for comparing two targets on everything else */
+const withoutKey = (target: Readonly<Record<string, unknown>>, key: string) =>
+  Object.fromEntries(Object.entries(target).filter(([k]) => k !== key).sort(([a], [b]) => a.localeCompare(b)));
 const isRefusal = (x: unknown): x is Refusal => typeof x === "object" && x !== null && "status" in x && "body" in x;
 
 const isUniqueViolation = (e: unknown): boolean => {
@@ -433,8 +466,14 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
     // ADR-0235: a wider-source family is off until an admin turns it on
-    const createFamilyOff = familySwitchProblem(body.kind, (await loadDiscoverySettings(db)).families);
+    const createSettings = await loadDiscoverySettings(db);
+    const createFamilyOff = familySwitchProblem(body.kind, createSettings.families);
     if (createFamilyOff) return send(reply, refusal(409, "family_disabled", createFamilyOff));
+    // ADR-0337 §4: the Directory token listing needs its own org switch first
+    const createDirectory = directoryTokensProblem(body.kind, body.target, createSettings);
+    if (createDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", createDirectory));
+    const createOrgTokens = salesforceOrgTokensProblem(body.kind, body.target, createSettings);
+    if (createOrgTokens) return send(reply, refusal(409, "salesforce_org_tokens_not_allowed", createOrgTokens));
     // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
     const createProblem = registry.get(body.kind)!.validateTarget?.(body.target, body.scope) ?? null;
     if (createProblem) return send(reply, refusal(400, "target_invalid", createProblem));
@@ -494,7 +533,18 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         const tp = body.target ? targetProblem(s.kind, body.target) : null;
         if (tp) return refusal(400, "target_invalid", tp);
         const scope = body.scope ?? s.scope;
-        const targetChanged = body.target !== undefined && JSON.stringify(body.target) !== JSON.stringify(s.target);
+        // ADR-0337 §4: asking for the Directory token listing needs the org switch first
+        const patchDirectory = body.target ? directoryTokensProblem(s.kind, body.target, await loadDiscoverySettings(t)) : null;
+        if (patchDirectory) return refusal(409, "directory_tokens_not_allowed", patchDirectory);
+        const patchOrgTokens = body.target ? salesforceOrgTokensProblem(s.kind, body.target, await loadDiscoverySettings(t)) : null;
+        if (patchOrgTokens) return refusal(409, "salesforce_org_tokens_not_allowed", patchOrgTokens);
+        // turning the Directory token listing OFF (and changing nothing else) narrows the read: no step-up for it
+        const onlyNarrowsDirectory =
+          body.target !== undefined &&
+          directoryTokensRequested(s.kind, s.target) &&
+          !directoryTokensRequested(s.kind, body.target) &&
+          JSON.stringify(withoutKey(body.target, "directoryTokens")) === JSON.stringify(withoutKey(s.target, "directoryTokens"));
+        const targetChanged = body.target !== undefined && !onlyNarrowsDirectory && JSON.stringify(body.target) !== JSON.stringify(s.target);
         const widened = body.scope !== undefined && scopeWidens(s.scope, body.scope);
         // a duplicate name is refused BEFORE any grant is spent (review of #403)
         if (body.name !== undefined && body.name.toLowerCase() !== s.name.toLowerCase()) {
@@ -548,13 +598,18 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (s.enabled) return refusal(409, "already_enabled", "this source is already enabled");
       const scanner = registry.get(s.kind);
       if (!scanner) return refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[s.kind].slice})`);
-      const enableFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(t)).families);
+      const enableSettings = await loadDiscoverySettings(t);
+      const enableFamilyOff = familySwitchProblem(s.kind, enableSettings.families);
       if (enableFamilyOff) return refusal(409, "family_disabled", enableFamilyOff);
+      const enableDirectory = directoryTokensProblem(s.kind, s.target, enableSettings);
+      if (enableDirectory) return refusal(409, "directory_tokens_not_allowed", enableDirectory);
+      const enableOrgTokens = salesforceOrgTokensProblem(s.kind, s.target, enableSettings);
+      if (enableOrgTokens) return refusal(409, "salesforce_org_tokens_not_allowed", enableOrgTokens);
       const enableCred = await liveCredential(t, s.id);
       if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
       }
-      if (enableCred?.writeScope === "refused") {
+      if (enableCred && discoveryWriteScopeFinal(enableCred.writeScope)) {
         return refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it with a read-only credential first");
       }
       const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, s.target, s.scope, enableCred?.id ?? null), s.id);
@@ -566,8 +621,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         .where(eq(discoverySources.id, s.id))
         .returning();
       await audit(t, req, "discovery_source", s.id, "discovery-source-enabled", "allow",
-        `discovery source '${s.name}' (${s.kind}) ENABLED: RegulAIt will scan it read-only on its schedule`,
-        { kind: s.kind, target: s.target, scope: s.scope, scheduleIntervalSeconds: s.scheduleIntervalSeconds });
+        `discovery source '${s.name}' (${s.kind}) ENABLED: RegulAIt will scan it read-only on its schedule${discoveryCredentialScope(s.kind) === "unverified" ? "; its credential's scope cannot be checked (credentialScope: unverified, a relaxation confirmed with the step-up)" : ""}`,
+        { kind: s.kind, target: s.target, scope: s.scope, scheduleIntervalSeconds: s.scheduleIntervalSeconds, credentialScope: discoveryCredentialScope(s.kind) });
       return row!;
     });
     if (isRefusal(out)) return send(reply, out);
@@ -639,10 +694,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       const early = modeProblem(parsedBody.mode);
       if (early) return send(reply, early);
     }
+    let sourceKind = "";
     const out = await db.transaction(async (tx): Promise<Refusal | DiscoveryCredentialRow> => {
       const t = tx as unknown as Db;
       const s = await lockSource(t, p.data.sourceId);
       if (!s) return refusal(404, "not_found", "no such discovery source");
+      sourceKind = s.kind;
       // ADR-0195 A5 (secure by default): an omitted mode is federated wherever the provider supports it
       const body = { ...parsedBody, mode: parsedBody.mode ?? defaultCredentialMode(s.kind) };
       if (parsedBody.mode === undefined) {
@@ -700,13 +757,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         })
         .returning();
       await audit(t, req, "discovery_credential", row!.id, live ? "discovery-credential-replaced" : "discovery-credential-stored", "allow",
-        `${body.mode} credential ${live ? "replaced" : "stored"} for discovery source '${s.name}'${body.mode === "static" ? " (a stored static secret: a relaxation, confirmed with a step-up)" : ""}`,
-        { sourceId: s.id, kind: s.kind, mode: body.mode, publicConfigKeys: Object.keys(publicConfig).sort(), replacedCredentialId: live?.id ?? null });
+        `${body.mode} credential ${live ? "replaced" : "stored"} for discovery source '${s.name}'${body.mode === "static" ? " (a stored static secret: a relaxation, confirmed with a step-up)" : ""}${discoveryCredentialScope(s.kind) === "unverified" ? "; its scope cannot be checked (credentialScope: unverified)" : ""}`,
+        { sourceId: s.id, kind: s.kind, mode: body.mode, publicConfigKeys: Object.keys(publicConfig).sort(), replacedCredentialId: live?.id ?? null, credentialScope: discoveryCredentialScope(s.kind) });
       return row!;
     });
     if (isRefusal(out)) return send(reply, out);
     const settings = await loadDiscoverySettings(db);
-    return credentialView({ ...out, ageDays: 0 }, settings.credentialWarningAgeDays);
+    return credentialView({ ...out, ageDays: 0 }, settings.credentialWarningAgeDays, sourceKind);
   });
 
   app.delete("/v1/discovery/sources/:sourceId/credential", async (req, reply) => {
@@ -738,13 +795,18 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!s.enabled) return send(reply, refusal(409, "source_disabled", "enable this source before running it"));
     const scanner = registry.get(s.kind);
     if (!scanner) return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet`));
-    const runFamilyOff = familySwitchProblem(s.kind, (await loadDiscoverySettings(db)).families);
+    const runSettings = await loadDiscoverySettings(db);
+    const runFamilyOff = familySwitchProblem(s.kind, runSettings.families);
     if (runFamilyOff) return send(reply, refusal(409, "family_disabled", runFamilyOff));
+    const runDirectory = directoryTokensProblem(s.kind, s.target, runSettings);
+    if (runDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", runDirectory));
+    const runOrgTokens = salesforceOrgTokensProblem(s.kind, s.target, runSettings);
+    if (runOrgTokens) return send(reply, refusal(409, "salesforce_org_tokens_not_allowed", runOrgTokens));
     const runCred = await liveCredential(db, s.id);
     if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
     }
-    if (runCred?.writeScope === "refused") {
+    if (runCred && discoveryWriteScopeFinal(runCred.writeScope)) {
       return send(reply, refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it first"));
     }
     const [run] = await db
@@ -838,13 +900,31 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         relaxed[DISCOVERY_STEP_UP_KEYS.retention] = body.endpointRetentionDays;
       }
       // ADR-0235: turning a wider-source family ON is a relaxation, bound to exactly the families being turned on
-      const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled };
+      const beforeFamilies = { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled };
       const afterFamilies = { ...beforeFamilies, ...(body.families ?? {}) };
       const turnedOn = DISCOVERY_GATED_FAMILIES.filter((f) => afterFamilies[f] && !beforeFamilies[f]);
       if (turnedOn.length > 0) relaxed[DISCOVERY_STEP_UP_KEYS.families] = turnedOn;
       // ADR-0259: reading MCP host configs on employee machines is off until an admin turns it on (step-up); off is free
       const mcpAfter = body.endpointMcpConfig ?? row.endpointMcpConfigEnabled;
       if (mcpAfter && !row.endpointMcpConfigEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointMcpConfig] = true;
+      // ADR-0337 §4: the Directory token listing reads every user's OAuth grants with a scope that could revoke them;
+      // off until an admin turns it on with a step-up bound to exactly this switch; off is free
+      const gdtAfter = body.googleDirectoryTokens ?? row.googleDirectoryTokensEnabled;
+      if (gdtAfter && !row.googleDirectoryTokensEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.googleDirectoryTokens] = true;
+      // ADR-0337 §4a (owner, 2026-11-22): the Salesforce org-wide token read needs Customize Application, which can also
+      // change the org's setup; off until an admin turns it on with a step-up bound to exactly this switch; off is free
+      const sotAfter = body.salesforceOrgTokens ?? row.salesforceOrgTokensEnabled;
+      const sotTurnedOn = sotAfter && !row.salesforceOrgTokensEnabled;
+      if (sotTurnedOn) relaxed[DISCOVERY_STEP_UP_KEYS.salesforceOrgTokens] = true;
+      // ADR-0331: removing flagged MCP servers from employee machines is off until an admin turns it on (step-up); off is free
+      const removalAfter = body.endpointAddonRemoval ?? row.endpointAddonRemovalEnabled;
+      if (removalAfter && !row.endpointAddonRemovalEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointAddonRemoval] = true;
+      // ADR-0338: disabling, quarantining or restoring agents in vendor platforms is off until an admin turns it on
+      // (step-up); off is free. Its approval window may be shortened freely; lengthening it past 24 hours is a step-up
+      const vacAfter = body.vendorAgentControl ?? row.vendorAgentControlEnabled;
+      if (vacAfter && !row.vendorAgentControlEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControl] = true;
+      const ttlAfter = body.vendorAgentControlApprovalTtlHours ?? row.vendorAgentControlApprovalTtlHours;
+      if (ttlAfter > row.vendorAgentControlApprovalTtlHours && ttlAfter > 24) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlTtl] = ttlAfter;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -857,17 +937,24 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           saasSourcesEnabled: afterFamilies.saas,
           identitySourcesEnabled: afterFamilies.identity,
           mlPlatformSourcesEnabled: afterFamilies.ml_platform,
+          agentRegistrySourcesEnabled: afterFamilies.agent_registry,
           endpointMcpConfigEnabled: mcpAfter,
+          googleDirectoryTokensEnabled: gdtAfter,
+          salesforceOrgTokensEnabled: sotAfter,
+          endpointAddonRemovalEnabled: removalAfter,
+          vendorAgentControlEnabled: vacAfter,
+          vendorAgentControlApprovalTtlHours: ttlAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
         })
         .where(eq(discoverySettings.id, 1));
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
-        `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
+        `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}${sotTurnedOn ? `; Salesforce org-wide token read allowed, accepting: ${SALESFORCE_ORG_TOKENS_TRADE_OFF}` : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, salesforceOrgTokens: row.salesforceOrgTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, salesforceOrgTokens: sotAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter },
+          ...(sotTurnedOn ? { salesforceOrgTokensTradeOff: SALESFORCE_ORG_TOKENS_TRADE_OFF } : {}),
         });
       return true;
     });
