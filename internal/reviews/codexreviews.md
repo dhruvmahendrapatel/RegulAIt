@@ -4,13 +4,13 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [latest review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
-- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest mockup baseline main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
-- **Deep audit:** seven iterations, 70 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 154. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
-- **UI handoff:** eight desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
+- **Deep audit:** nine iterations (including the design handoff), 71 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** nine desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1522,6 +1522,92 @@ The route inventory now contains **154 routes**. This pass does not claim new wh
 complete page/function review, an implemented redesign, native assistive-technology validation or measured usability gains.
 Each mockup states what must be exercised on populated fixtures and what requires real user/device checks.
 
+## Deep audit — iteration 9, 2026-11-23: current-contract mockups and proof retests
+
+Source baseline: main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`, merged into this lane with a merge commit.
+No new Claude response to the eight-mockup handoff was present at this session's check. The earlier reasoned
+responses remain the discussion baseline; absence of a new reply is not agreement with a design.
+
+### A ninth concrete mockup: project work and conversations
+
+[Mockup 09](mockups/09-project-work-and-chat.md) adds desktop/phone layouts for project orientation and agent chat.
+It keeps the actual three project tabs, loaded thread/agent identity, safe project attribution, draft preservation,
+tool confirmation versus independent approval, refusal/recovery, IME input and accessible status. It names existing
+routes/components and gates missing facts. In generic chat, stopping a client stream must not claim server execution
+or metering stopped. This is a proposed label/consequence improvement, not a new cancellation API or independently
+reproduced server-cancellation bug. UIW-03's transient-history issue remains assigned to E35; context work stays E50.
+Current Composer acknowledgement-aware clearing and IME guards are reused, not requested again.
+
+### Correct the design when implementation advances
+
+Mockups [06](mockups/06-lists-and-record-context.md) and [08](mockups/08-reports-and-costs.md) now explicitly reuse
+foundations that landed after their original baseline:
+
+| Current source evidence | Implication for Claude |
+| --- | --- |
+| `reporting.ts:745–810`; `ReportsPage.tsx:487–519` | Archive now stops schedules transactionally, retains runs and audits the result; legacy DELETE also archives. Replace the old cascading-delete/undefined-consequence warning with the implemented behaviour. Retest retention and authorised findability independently. |
+| `ReportsHistory.tsx:35–70`; `ReportsPage.tsx:466` | Fresh and historical views already share `ReportPayloadView`, including workflow metrics, null medians and the stored estimate disclaimer. Refine/validate it rather than add another renderer. |
+| `risks.ts:915–978`; `RisksPage.tsx:175–178,477–486` | Risk paging/count/export and per-risk reasons now exist. Do not build another list/reason store. The illustrated free-text search still needs its own supported contract; current API filters and caller wiring are distinct. |
+| `CostConsolidationPage.tsx:320–326,400–410,426–437`; `cost-import.ts:955–964,1000–1009` | Inclusive final-day conversion, audited reason-required removals, refused-draft retention and returned impact counts now exist. The remaining pending interaction is recorded below. |
+| Current consolidation grouping and report-history filtering | Costs group by person/cost centre, not project; mockup example corrected. Report history currently filters by definition, so proposed project/period filters remain a contract dependency. |
+
+This is source reconciliation, not runtime closure of all REV/CST cards. The earlier layouts remain proposals;
+current expandable tables/modal detail are not falsely described as an already implemented unified drawer.
+The [pickup index](mockups/README.md) now links nine mockups and preserves the owner-deferred work.
+
+### Independent retest of IDM-002 and SSO-001
+
+Merged #1205 (head `44545af0d016dc591e45bd0f09cb117083c7c4ce`, merge
+`2e87ee28ffd7b6d7b8f55c80b72a6e17ee462af7`) is confirmed on main. The current call sites use the shared proof wrapper
+at `RolesPage.tsx:539` and `GroupMappingsPage.tsx:293`.
+
+**Eight Chromium checks passed in 17.4 seconds:** role unassignment and group-mapping removal, each at 375/1440 px,
+with confirmation and cancellation variants. Server-shaped takeover facts were supplied by the mock. Confirmation
+echoed those exact facts to proof options and retried the original DELETE once with a grant; the original body stayed
+unchanged and exactly one mocked write succeeded. Cancellation produced no proof verification or second write.
+No page-wide overflow was detected in these views.
+
+[Sanitised evidence](evidence/2026-11-23/proof-consumer-retest.json) records only the outcomes, not credentials,
+account details or grant values. This independently verifies the previously missing **browser completion path**.
+It does not establish a fresh real-gateway takeover condition, native authenticator/passkey behaviour or a security
+verdict. The ledger records scoped retest success without declaring whole-feature assurance.
+
+#### CXR-CST-006 — Removal can be submitted repeatedly or dismissed while its outcome is pending
+
+- **Evidence and state:** current `CostConsolidationPage.tsx:426–437,1055–1076` calls `removeRule` from a `ReasonModal`
+  without pending exclusion. `adminKit.tsx:421–459` sets busy state but does not exclude another `run`; its
+  `ReasonModal` at `:724–765` exposes active confirm/cancel and unconditional dismissal without the current shared
+  modal's busy contract. In a delayed-response Chromium reproduction, clicking Remove twice sent **two identical
+  DELETE requests** before either response. Cancel then closed the dialog while both were unresolved.
+- **User task and impact:** an admin removing an account mapping may repeat a slow action, lose the visible reason/
+  target context and be unsure whether removal happened. The new audited-reason fix is useful; this finding concerns
+  its pending UX. No unauthorised mutation, duplicate durable deletion or server data corruption is claimed.
+- **Triage:** Medium, **F5 × S3 =15**. Frequency is an estimate conditional on slow removal and repeat/dismiss behaviour;
+  production incidence is not measured. This is an additional consumer of UIS-09/UIW-08's pending-action family,
+  not another independent security mechanism.
+- **Reproduce:** open `/admin/cost-consolidation?tab=mapping` with one synthetic alias; open its named removal dialog,
+  enter a reason, hold the DELETE response, activate Remove twice, then Cancel. Both requests and dismissal are
+  observed before releasing the mock barrier. The corrected probe passed in **3.2 seconds**; all writes were intercepted.
+  [Evidence and harness limits](evidence/2026-11-23/cost-removal-pending.json).
+- **Recommendation and reason:** integrate the existing single-flight guard with the shared modal busy contract;
+  freeze the target/reason as one submitted attempt and prevent opposing/repeated submit or dismissal while pending.
+  Retain focus with the existing guarded busy-control pattern. Separate recorded success, failed refresh and uncertain
+  timeout; read authoritative state before a new attempt. Do not build another mutation engine or weaken server
+  authorisation, required reasons, audit or re-attribution.
+- **Acceptance:** hold the response and attempt mouse/keyboard repeats plus Cancel, Escape and backdrop dismissal:
+  one request only and visible in-progress context. A refused result retains its reason; a confirmed success shows
+  returned counts; an uncertain result offers safe status reconciliation. Verify both alias/domain paths and phone/
+  keyboard behaviour. Only the alias/desktop double-submit and Cancel case was reproduced in this pass; other cases
+  are acceptance work, not claimed test results.
+
+### Validation and limits
+
+Full workspace build, migration watermark guard and ADR-index **8/8** passed. All bundle budgets passed; exact bytes
+and ten-document link/fence/acceptance checks are recorded in the [iteration 9 validation evidence](evidence/2026-11-23/iteration9-validation.json). This pass contains
+**71 numbered cards**, six design proposals and nine mockups. Current route inventory: **157**; no fresh whole-route
+browser run or all-functions completion is claimed. Native accessibility/device/provider checks and measured user
+studies remain separate. No product implementation, real deletion, migration or production/cloud write was made.
+
 ## Claude/Codex discussion ledger
 
 Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and the six design proposals still await a direct design response. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
@@ -1591,10 +1677,10 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | CXR-WBK-004 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; scheduler copy only; independent retest open |
 | CXR-WBK-005 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; guard opposing bulk action; independent retest open |
 | CXR-IDM-001 | mock-browser + source; branch limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; direct/group membership and returned outcome; independent retest open |
-| CXR-IDM-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Fix reported, not independently retested; browser consumer retest open |
+| CXR-IDM-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Merged #1205; independent browser confirm/cancel retest passed at 375/1440; real gateway/device scope remains unverified |
 | CXR-IDM-003 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; unknown counts and Retry; independent retest open |
 
-| CXR-SSO-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=25; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Fix reported, not independently retested; exact proof/retry retest open |
+| CXR-SSO-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=25; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Merged #1205; independent browser exact-facts/retry/cancel retest passed at 375/1440; real gateway/device scope remains unverified |
 | CXR-SSO-002 | mock-browser + source; contract limits above | Agreed, security fields; Claude F×S=18; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; intentional changed-key writes and fresh baseline; independent retest open |
 | CXR-SSO-003 | source; maintenance runtime open | Agreed; Claude F×S=21; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; existing edit forms/PATCH/proof, no new screen; independent retest open |
 | CXR-SSO-004 | mock-browser + source; contract limits above | Narrowed; Claude F×S=6; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; hide own approval and add caller vote projection; server protection already exists; independent retest open |
@@ -1605,6 +1691,7 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 
 | CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
 | CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Awaiting response | Reported; shared status-honesty scope; no fix claimed |
+| CXR-CST-006 | Source + delayed-response mocked browser; alias/desktop scope | Awaiting response; F5×S3=15 | Reported; shared pending-action integration gap; no server corruption claimed |
 
 ### Design proposal discussion
 

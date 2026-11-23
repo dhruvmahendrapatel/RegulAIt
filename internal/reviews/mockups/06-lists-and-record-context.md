@@ -1,7 +1,7 @@
 # Mockup 06 — Lists that preserve place and record context
 
 Status: design proposal for Claude, not an implemented screen or completed usability test.
-Source snapshot: `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
+Source snapshot: `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`.
 Traceability: UXP-002/005/006, UIS-04/05/06/08, INT-005, REV-003/004, APR-003.
 
 ## User task and design intent
@@ -128,8 +128,11 @@ Clear secrets on identity changes; retain suitable non-secret drafts only under 
 | `DataList`, `listState`, current URL-backed place restoration | Do not rebuild the restoration already merged; verify caller filters and scroll continuity. |
 | `DetailDrawer`, `DrawerActions`, `RowActions` | Use existing focus/overlay rules; expose permitted action data only where genuinely available. |
 | `QueryGate`, `ErrorState`, `RecordError`, `RefusalNotice` | Distinguish failed count and failed row reads; no new global cache or status engine. |
-| Existing server list/page/count/export contracts | Risk register needs the bounded continuation/filter contract before all older risks become reachable. |
+| Existing server list/page/count/export contracts | Risk register now has bounded continuation/count/export (`risks.ts:915–978`, `RisksPage.tsx:477–486`). Reuse and validate it; caller search/filter integration remains separate. |
 | Existing per-record transition enforcement | Populate choices from the existing allowed-transition contract; a mockup does not grant authority. |
+
+Risk reasons are now keyed per record (`RisksPage.tsx:175–178`); verify refusal/cancel and place restoration rather than replacing that store.
+The API currently supports status/category/use-case filters; the illustrated free-text search needs an explicitly supported contract.
 
 Do not load every row into the browser to imitate pagination, estimate an exact total, or sort an unavailable page locally.
 Counts, detail, paging and export must use the same current authorisation/filter scope. A viewer gets evidence and navigation, not driving controls.

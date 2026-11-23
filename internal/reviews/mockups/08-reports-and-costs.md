@@ -1,8 +1,8 @@
 # Mockup 08 — Reports and costs with clear scope and retained evidence
 
 Status: design proposal for Claude, not an implemented screen, a real financial reconciliation or completed user test.
-Source snapshot: `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
-Traceability: REV-001..005, CST-001..005, UXP-002..006 and the recorded owner decisions on retention, date bounds and mapping reasons.
+Source snapshot: `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`.
+Traceability: REV-001..005, CST-001..006, UXP-002..006 and the recorded owner decisions on retention, date bounds and mapping reasons.
 
 ## User task and design intent
 
@@ -102,36 +102,41 @@ Configuration is not proof of health. Reuse the existing scheduler; never add a 
 
 ## Archive with evidence retained
 
-Owner direction: archiving hides the definition while retaining signed runs. Do not wire this mockup to the current cascading DELETE.
-Use the authorised archive contract once implemented; its lifecycle must reuse the existing server pattern.
+Owner direction is now implemented in the archive contract: `reporting.ts:745–810` archives under a row lock,
+stops schedules transactionally, retains runs and audits the change. Legacy DELETE also invokes archive.
+`ReportsPage.tsx:487–519` already confirms the named consequence. Reuse this implementation; independent runtime retest remains open.
 
 ```text
 Archive “Monthly review”?
 This definition leaves the active list. Its recorded runs and signed evidence remain available.
-Schedule consequence: [display the authoritative archive behaviour here]
+Schedules stop; recorded runs remain available.
 [Cancel]                                      [Archive definition]
 
 After confirmation:
 Definition archived. Recorded runs are kept. [View recorded runs]
 ```
 
-The schedule consequence must be defined by the server contract; do not silently promise that schedules stop or keep running.
-An `Archived definitions` filter and existing run history preserve discoverability without another whole screen.
+The implemented archive contract stops schedules; do not promise restoration or resumption without a supported transition.
+The current include-archived control and existing run history preserve discoverability without another whole screen.
 Authorised historical links continue to work. Retaining a payload never bypasses current read permission checks.
 
 ## Cost view — an explicit date and number contract
 
 ```text
 Cost consolidation
+Group by [Cost centre v]  (current choices: person / cost centre)
 From [1 Nov]  Through [22 Nov]  Timezone: UTC       [Apply period]
 Includes the whole final day: 1 Nov 00:00 to 23 Nov 00:00 UTC, end exclusive.
 
 Subject        Estimated usage cost       Imported reported cost      Action
-Project A      $42.10                    $38.00                      Open →
+Example centre $42.10                    $38.00                      Open →
 Unattributed   $3.20                     Not attributable            Review →
 
 Estimated usage and imported reported cost remain separate. They are not added together.
 ```
+
+Current consolidation groups by person or cost centre; project grouping is not part of that contract.
+Use the current inclusive-date conversion at `CostConsolidationPage.tsx:320–326,400–410`, not another date helper.
 
 `Through` implements the owner's inclusive calendar-day instruction; translate it once into the existing exclusive API boundary.
 Show the resolved server window and use the identical period/scope for export. Validate reversed dates before submission.
@@ -150,7 +155,12 @@ Mapping removed. Attribution changed for 8 of 24 evaluated lines. [Review result
 ```
 
 Changed/evaluated counts appear only from a confirmed response, not a client estimate. Never invent a preview API or substitute a zero count.
-The owner requires the reason on the server too. If that contract is not ready, do not ship a cosmetic required input as the safeguard.
+A current remaining gap is reproduced as CXR-CST-006: `ReasonModal` can submit Remove twice and dismiss while
+the responses are unresolved. Integrate the existing single-flight guard and shared busy modal contract; bind
+reason/target to the pending attempt, keep focus, and reconcile an uncertain outcome before permitting another write.
+
+The reason-required server contract now exists (`cost-import.ts:955–964,1000–1009`), as do returned impact counts
+and refused-removal draft retention. Reuse it; do not add another cosmetic required input or removal endpoint.
 Amounts/currencies and audit history are not rewritten to make reattribution look harmless. Read-only users receive an explanation, not removal controls.
 
 ## Failure, focus and accessibility
@@ -173,8 +183,11 @@ At 375/768/1440 px, retain period/scope/critical notes and ensure pinned actions
 ## Reuse, gaps and Claude acceptance
 
 Reuse `ReportsPage`, `ReportsHistory`, `CostConsolidationPage`, `DataList`, existing report exports, `QueryGate`, `RefusalNotice`, `ConfirmModal`/`ReasonModal` and `useApiAction`.
-Contract work includes archive/retention and its schedule semantics, reason-required mapping DELETE, and any missing scoped continuation/health data.
-Share one defensive stored-payload renderer for immediate and historical results; no parallel report aggregation or state helper.
+Archive/retention, schedule cessation, required audited removal reasons, inclusive final dates and a shared stored-payload renderer
+are now present. `ReportPayloadView` serves immediate and historical results (`ReportsPage.tsx:466`, `ReportsHistory.tsx:35–70`);
+validate/refine it instead of building another renderer. History currently filters by definition; the project/period controls
+illustrated above require an explicit scoped filter/count/export contract. Any additional scheduler-health data remains a gate.
+No parallel report aggregation or state helper is proposed.
 Existing APIs: `/v1/reports/overview`, `/v1/reports/runs`, `/v1/reports/runs/:id` and its export, definition generation/schedules, `/v1/cost-consolidated`, and cost-import mapping/domain-rule routes.
 Use run-scoped exports for recorded evidence; cost CSV reuses the resolved consolidation query. Do not substitute an overview export for the selected run.
 Source components live under `apps/web/src/views/admin/cost/`; shared mutation guards come from `views/admin/adminKit.tsx`.

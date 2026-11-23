@@ -1,7 +1,8 @@
 # UI mockups for Claude
 
-**Pickup pack, 2026-11-22.** Eight Markdown wireframes for making regulAIt easier to use.
-Baseline: main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
+**Pickup pack, 2026-11-22.** Nine Markdown wireframes for making regulAIt easier to use.
+Original eight-document baseline: main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
+2026-11-23: mockups 06/08 refined and 09 added against main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`; each document names its own baseline.
 These are proposed layouts and interaction contracts, not shipped screens or completed usability tests.
 All records and figures in examples are synthetic.
 
@@ -20,11 +21,12 @@ The [design guidelines](../../DESIGN_GUIDELINES.md) and current server contracts
 | [05 — Connections and credentials](05-connections-and-credentials.md) | Configure a service and replace its credential without moving the wrong connection or claiming untested health. | INT-002..005; CON-001..004; SSO-003 | Alongside assigned connection fixes |
 | [06 — Lists and record context](06-lists-and-record-context.md) | Reach older work, inspect it, and return to the same place without mixing subjects. | UIS-04/05/06/08; REV-003/004; APR-003; UXP-005 | Reuse shared list work before caller changes |
 | [07 — Sign-in and account linking](07-sign-in-and-account-linking.md) | Choose an available method, finish required setup/proof and complete linking without repeated dead ends. | ACC-001/004/005; SSO-003/004; UXP-002/003/006 | Verify merged proof fixes before new changes |
-| [08 — Reports and costs](08-reports-and-costs.md) | Understand recorded figures and date scope; retain evidence when archiving definitions. | REV-001..005; CST-001..005; UXP-002..006 | After archive/reason/date contracts are settled |
+| [08 — Reports and costs](08-reports-and-costs.md) | Understand recorded figures and date scope; retain evidence when archiving definitions. | REV-001..005; CST-001..006; UXP-002..006 | Reuse merged archive/reason/date/renderer work; verify pending actions |
+| [09 — Project work and chat](09-project-work-and-chat.md) | Keep project/thread context, drafts and tool-decision outcomes clear. | UIW-01..05; UXP-001/002/003/005/006 | Reuse Composer fixes; coordinate history/context work with E35/E50 |
 
 IDs above use the `CXR-` prefix in the review. This is a task-first implementation order, subject to the master's
-assigned slices and security prerequisites. It is not permission to open eight parallel implementation PRs.
-These eight journeys do not exhaust the current 154-route inventory or every page's functions and states.
+assigned slices and security prerequisites. It is not permission to open nine parallel implementation PRs.
+These nine journeys do not exhaust the current 157-route inventory or every page's functions and states.
 
 ## What the user should gain
 
@@ -84,8 +86,9 @@ In particular:
   reversion. The existing red-team assurance window cannot stand in for that contract.
 - Caller eligibility, current attempt, authoritative schedule/health and exact scoped counts need actual safe facts.
   Do not promise an unsupported deep link, priority/widget endpoint or automatic retry mechanism.
-- Report archive must retain and expose authorised recorded runs; do not invoke the cascading delete route.
-  Mapping removal needs the owner's server-required audited reason. Cost date selection includes the whole final day.
+- Report archive now stops schedules and retains runs; mapping removal requires an audited reason; cost dates
+  include the whole final day. Mockup 08 identifies their current implementations and remaining UX checks.
+  Risk paging and a shared report renderer also exist: do not rebuild them from the original design gates.
 - Claude's [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347)
   accepts 20 cards for implementation, reports IDM-002/SSO-001 fixed in #1205, and defers CON-004 to
   [#1212](https://github.com/dhruvmahendrapatel/RegulAIt/issues/1212). Independent retest remains required.
