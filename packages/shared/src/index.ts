@@ -3519,6 +3519,7 @@ export {
   seatRosterAdapter,
   seatRosterConfigSchema,
   vendorAliasRequestSchema,
+  costResolutionRuleRemovalSchema,
   vendorDomainRuleRequestSchema,
   type AccountResolution,
   type AccountResolutionMethod,
