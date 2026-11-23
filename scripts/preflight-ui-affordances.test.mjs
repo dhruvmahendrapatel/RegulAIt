@@ -103,7 +103,8 @@ describe("affordance census: a notBuilt route counts only when the file defines 
     // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
     // three ADR-0350 (lane E31) device-group removals until the device-group screen on #453, and the ADR-0365 (lane
     // E46) context graph source unbind until the bindings screen on #453, and the two ADR-0251 (lane L1) resource-rule
-    // removals until the screen on #453
+    // removals until the screen on #453, and the ADR-0357 §4 (lane E38) policy-layer removal until the
+    // policy hierarchy screen on #453
     // ADR-0311 (lane E1): the MCP endpoint's session-end DELETE, a 405 protocol answer that deletes nothing
     // CXR-REV-002 (ADR-0047 addendum): the report-definition DELETE, which archives and deletes nothing
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
@@ -114,6 +115,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/endpoint-device-groups/:x",
       "/v1/endpoint-device-groups/:x/members/:x",
       "/v1/endpoint-device-groups/:x/rules/:x",
+      "/v1/governance-policy/layer",
       "/v1/discovery/agent-identifiers/:x",
       "/v1/discovery/entitlements/apps/:x/agent-link",
       "/v1/servers/:x/system-class",

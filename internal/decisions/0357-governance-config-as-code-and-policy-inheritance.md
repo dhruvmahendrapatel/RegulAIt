@@ -144,7 +144,7 @@ lowers a limit) or `neutral` (a description).
 | ceiling | `maxBudgetUsd`, `maxCallsPerHour` | minimum | inherit |
 | floor | `auditRetentionDays`, `minApprovers` | maximum | inherit |
 | required flag | `requireHumanSignoff`, `requirePlanGate` | OR | inherit |
-| ordered level, strictest wins | `maxDataSensitivity` (lower is stricter), `piiMode` (higher is stricter) | the stricter value | inherit |
+| ordered level, strictest wins | `maxDataSensitivity` (public < internal < confidential < regulated, lower is stricter), `piiMode` (log < warn < block, higher is stricter) | the stricter value | inherit |
 
 - **The effective-policy view.** `GET /v1/governance-policy/effective?level=…&id=…` returns each rule's effective
   value and the level that set it (`setBy`), in a stable JSON shape agents can read as well as people.

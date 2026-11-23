@@ -76,6 +76,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
   [s.initiatives, ["name"]],
+  // ADR-0357 §4 (lane E38): the business-unit level of the policy hierarchy
+  [s.businessUnits, ["name", "description"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
   // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
