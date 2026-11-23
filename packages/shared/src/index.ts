@@ -5227,3 +5227,5 @@ export * from "./agent-credential.js";
 export * from "./content-inspection.js";
 // ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
 export * from "./ai-app-risk.js";
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";

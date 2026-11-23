@@ -127,6 +127,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.customClassifiers, ["name"]],
   // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
   [s.vendorUsageConnectors, ["name"]],
+  // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
+  [s.aiSaasMonitorConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
