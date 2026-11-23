@@ -504,16 +504,24 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
   - Per-run flags: `--egress-acl-file`, `--listen-ip` and `--listen-port 4750`.
 - **Ports: an ADR-0176 exception, a first-party hook on Smokescreen** (review round, 2026-11-20). Smokescreen v0.1.0
   has no port setting: its ACL matches host names only, and an allowed host was dialled on another port. The §7 CONNECT
-  filter is therefore built **inside** Smokescreen, not in front of it. `engines/robot-egress/portfilter` is
+  filter is therefore built **inside** Smokescreen (and, since D-2026-11-22-07, also in front of it: below). `engines/robot-egress/portfilter` is
   Smokescreen's own `main` with one `Config.PostDecisionRequestHandler`. That handler parses with Smokescreen's own
   `hostport.New` and refuses any request that is not a CONNECT, or whose `host:port` is not in the run's targets file
   (`ports.txt`). The executor writes that file next to the ACL from the offer's targets, with the same 0600 mode, mount
   and cleanup, and the proxy exits before it listens if the file is missing or invalid. Smokescreen is used unmodified,
   as a library. The unmet requirement is a per-host port limit. Re-check this exception when Smokescreen adds a port
   option.
-- **Open (owner): MPL-2.0 in the egress image.** `hashicorp/golang-lru` v1.0.2 is linked into Smokescreen through
-  `stripe/goproxy`. It is recorded as "owner to confirm" under the ADR-0187 decision 194 precedent (MPL-2.0 allowed
-  while unmodified). The image is built and tested but is not admissible until the owner decides.
+- **MPL-2.0 in the egress image: an ADR-0176 exception (owner, D-2026-11-22-07).** `hashicorp/golang-lru` v1.0.2 is
+  linked into Smokescreen through `stripe/goproxy`. It is admitted pinned and unmodified (the ADR-0187 decision 194
+  condition). The unmet requirement is that no permissive replacement can be linked without forking goproxy or
+  Smokescreen. Re-check it when either drops the module. Recorded in `engines/robot-egress/THIRD_PARTY.md`.
+- **Front CONNECT filter (owner, D-2026-11-22-07: defence in depth).** The sandbox no longer reaches Smokescreen.
+  `portfilter/front.go` listens on the flags' address (`--listen-ip`, `--listen-port 4750`, unchanged for the
+  executor). It admits only a CONNECT whose authority is exactly one run target, parsed with its own strict parser,
+  and re-writes the request before handing it to Smokescreen on a loopback listener in the same process. Its refusals
+  answer 403 with `X-Regulait-Egress-Front` (Smokescreen's answer 407). The in-Smokescreen hook above stays as the
+  second layer. It is built on the Go standard library; the comparison (goproxy, tinyproxy, Envoy) is in
+  `engines/robot-egress/README.md`.
 - **No runner credential.** The gateway holds the run's stdio session (the ADR-0190 I4 pattern). The runner's four
   requests (plan, heartbeat, evidence, result) are `http` frames the gateway answers in-process (`RobotRunController`).
   The session, behind the executor's MACed window, is the authority, and no frame carries a key.
@@ -590,6 +598,14 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
     - Each run writes a `robot_run` usage row with a NULL cost. A robot run has no price yet, and no figure is invented.
     - A robot tools/call gets a deadline that covers placement, the run and its margin, with one attempt and no retry.
     - The call's abort signal cancels the run (`caller_aborted`).
+    - **Cancel on any replica (owner, D-2026-11-22-07).** A `notifications/cancelled` that lands on a replica not
+      serving the call is written to `mcp_caller_cancellations` (pending migration `mcp_caller_cancellations`). The
+      row is keyed by a scrypt hash of the caller's scope and request id, so no credential id is stored and a caller can
+      name only its own calls. Every replica with calls in flight reads the table each second and aborts a call whose
+      key appears after the call started (`apps/gateway/src/caller-cancel.ts`).
+    - **Fail closed.** Each heartbeat of a run with a caller confirms that shared state. It accepts a read from the
+      last 3 s, or makes a fresh read bounded at 2 s. When it cannot confirm, the heartbeat answers `{cancel:true}`
+      and the run ends `cancelled` / `cancel_unconfirmed`. A test run has no caller and does not depend on the table.
 
 ## Addendum: free-form browsing limits (owner decision, 2026-11-19)
 

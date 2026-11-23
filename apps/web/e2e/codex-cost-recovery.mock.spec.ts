@@ -72,7 +72,7 @@ async function mock(page: Page, opts: Opts = {}): Promise<Capture> {
 
 const openRollup = async (page: Page) => {
   await page.goto("/ui/admin/cost");
-  await page.getByRole("link", { name: `Open cost rollup for ${PROJECT_NAME}` }).click();
+  await page.getByRole("button", { name: `Open cost rollup for ${PROJECT_NAME}` }).click();
 };
 
 test.describe("CXR-CST-001: a failed project cost rollup read", () => {

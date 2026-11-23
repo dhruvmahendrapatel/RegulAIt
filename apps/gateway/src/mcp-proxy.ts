@@ -3120,7 +3120,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     proxy.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       // ADR-0364 S3 (review B): the call ends when the caller cancels it (by id, from any later request of the same
       // caller), times out on its side, or closes its connection; the abort reaches the upstream (a robot run cancels)
-      const tracked = trackCallerRequest(cancelScope, extra.requestId, extra.signal);
+      const tracked = trackCallerRequest(cancelScope, extra.requestId, extra.signal, db);
       try {
         return await callToolForCaller(caller, request.params.name, request.params.arguments, tracked.signal);
       } finally {

@@ -153,12 +153,14 @@ function McpServersTab() {
                 key: "name",
                 header: "Name",
                 sort: (s) => s.name,
-                render: (s) => (
-                  <span className={v.row} style={{ gap: "var(--s1)" }}>
-                    {s.name}
-                    <DisabledBadge row={s} noun="MCP server" />
-                  </span>
-                ),
+                render: (s) => s.name,
+                // beside the row's button, not inside it: the badge's (i) is a button of its own (UIS-04)
+                after: (s) =>
+                  s.enabled === false ? (
+                    <span className={v.row} style={{ display: "inline-flex", gap: "var(--s1)", marginLeft: "var(--s1)", verticalAlign: "middle" }}>
+                      <DisabledBadge row={s} noun="MCP server" />
+                    </span>
+                  ) : null,
               },
               // G4: the table is wide, so the row's actions sit next to the name rather than off-screen at the end
               { key: "actions", header: "Actions", render: (s) => life.actions(s, editButton(s)) },
