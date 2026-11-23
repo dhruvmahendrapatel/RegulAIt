@@ -211,6 +211,18 @@ describe("the PR scope's trim rules", () => {
     expect(scopeOf(["apps/web/src/a.tsx"]).base).toBe(true);
   });
 
+  it("rule 8 (ADR-0262 addendum, #1227): the real-gateway journeys run on a PR that changes the web app, its e2e specs, the shared packages or the gateway's sources", () => {
+    for (const f of ["apps/web/src/views/admin/governance/ChatOpsPage.tsx", "apps/web/e2e/phase1.spec.ts", "apps/web/e2e/global-setup.ts",
+      "packages/shared/src/a.ts", "packages/ui/src/Button.tsx", "apps/gateway/src/route-classes.ts", "apps/gateway/src/routes/admin.ts"]) {
+      expect(scopeOf([f]), f).toMatchObject({ full: false, journeys: true });
+    }
+    // documentation, unit tests (not built into the gateway or the SPA), other packages and scripts wait for main
+    for (const f of ["docs/guide.md", "internal/memory/STATE.md", "apps/web/README.md", "apps/gateway/src/a.test.ts", "apps/web/src/a.test.tsx",
+      "packages/policy-kernel/src/a.ts", "scripts/x.mjs", "infra/x.tf", "engines/garak/requirements.txt"]) {
+      expect(scopeOf([f]).journeys, f).toBe(false);
+    }
+  });
+
   it("rule 5: a change to the scope rules themselves is a full run", () => {
     for (const f of ["scripts/ci-scope.mjs", "scripts/ci-scope.test.mjs", "scripts/ci-plan.mjs", ".github/actions/ci-scope/action.yml"]) {
       expect(scopeOf(["docs/a.md", f]), f).toMatchObject({ full: true, code: true, image: true, engines: true });
@@ -355,7 +367,8 @@ describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
     const ran = ranJobs(plan);
     expect(ran).toEqual(expect.arrayContaining([...REQUIRED, "ci:build-and-test-base", "ci:gateway-tests", "ci:spa-mock",
       "ui-enterprise:static", "ui-enterprise:browsers", "security:sast", "security:image"]));
-    for (const j of ["ci:gateway-coverage", "ci:spa-journeys", "ci:docker-build", "ui-enterprise:screenshots", "security:engine-image",
+    expect(ran).toContain("ci:spa-journeys"); // #1227: a web change runs the real-gateway journeys on the PR
+    for (const j of ["ci:gateway-coverage", "ci:docker-build", "ui-enterprise:screenshots", "security:engine-image",
       "import-cycles:gateway-import-cycles", "integrations:kong-adapter", "client-compat:client-compat"]) {
       expect(ran, j).not.toContain(j);
     }
@@ -376,7 +389,15 @@ describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
     expect(ran).toEqual(expect.arrayContaining([...REQUIRED, "ci:gateway-tests", "ci:gateway-coverage", "import-cycles:gateway-import-cycles"]));
     expect(ran).not.toContain("ci:spa-mock");
     expect(ran).not.toContain("ui-enterprise:browsers");
+    expect(ran, "the journeys boot the real gateway").toContain("ci:spa-journeys");
     expect(plan.workflows.find((w) => w.file === "ci.yml").jobs["gateway-tests"].runners).toBe(6);
+  });
+
+  it("the real-gateway journeys (#1227): on an e2e-spec PR, not on a docs-only or a gateway-unit-test-only PR", () => {
+    expect(ranJobs(planFor(["apps/web/e2e/phase2.spec.ts"]))).toContain("ci:spa-journeys");
+    expect(ranJobs(planFor(["docs/guide.md"]))).not.toContain("ci:spa-journeys");
+    expect(ranJobs(planFor(["apps/gateway/src/a.test.ts"]))).not.toContain("ci:spa-journeys");
+    expect(workflow("ci.yml").jobs["spa-journeys"].if).toBe("needs.scope.outputs.full == 'true' || needs.scope.outputs.journeys == 'true'");
   });
 
   it("a lockfile PR runs everything a PR can start: the full suite", () => {
