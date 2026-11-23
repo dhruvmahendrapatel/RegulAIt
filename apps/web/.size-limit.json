@@ -175,6 +175,12 @@
     "limit": "4.6 kB"
   },
   {
+    "name": "chunk: EntitlementLinksPage",
+    "path": "dist/assets/EntitlementLinksPage-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
     "name": "chunk: ExecutorDetail",
     "path": "dist/assets/ExecutorDetail-????????.js",
     "gzip": true,
