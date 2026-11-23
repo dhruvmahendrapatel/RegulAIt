@@ -14,7 +14,7 @@
 #
 # How the executor runs it, and the flags it adds per run: engines/robot-egress/README.md.
 
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 
 # ---- stage 1: build the binary from the published smokescreen module and portfilter/ ------------------------------
 FROM --platform=linux/amd64 golang:1.27-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
