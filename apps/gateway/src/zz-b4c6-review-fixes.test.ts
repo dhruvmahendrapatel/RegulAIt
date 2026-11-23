@@ -338,7 +338,7 @@ describe("F32: adding an authenticator app is admitted by the passkey rule", () 
 
   it("sweep: an SSO identity is linked by proof only to an account without a passkey", async () => {
     const link = async (u: User) => {
-      await db.update(usersTable).set({ passwordHash: hashPassword("b4c6-pw-correct"), mustChangePassword: false }).where(eq(usersTable.id, u.id));
+      await db.update(usersTable).set({ passwordHash: await hashPassword("b4c6-pw-correct"), mustChangePassword: false }).where(eq(usersTable.id, u.id));
       const [row] = await db.select({ email: usersTable.email }).from(usersTable).where(eq(usersTable.id, u.id));
       const anchor = {
         ref: { kind: "saml" as const, id: samlProviderId, name: `b4c6-saml-${RUN}` },

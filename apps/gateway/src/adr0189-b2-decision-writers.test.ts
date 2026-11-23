@@ -28,6 +28,7 @@ const DECISION_WRITERS = [
   "agents-connectors.ts", // agent dispatch: lifecycle, PII, egress and fallback refusals
   "app.ts", // advisory evaluate callouts and builder approval resumes
   "approval-signatures.ts", // approval decisions (objectType approval)
+  "autonomy.ts", // ADR-0180 addendum (E51): a builder agent's run refused (or let through relaxed) by the oversight gate (insert(auditLog) on the chained handle)
   "builder-runtime.ts", // builder turns
   "compaction.ts",
   "compat-core.ts", // the compat model surfaces
@@ -53,6 +54,7 @@ const DECISION_WRITERS = [
   "model-call-consent.ts", // ADR-0251: a model call held for approval (insert(auditLog) on the chained handle)
   "model-rate-limits.ts", // ADR-0212: a dispatch refused by a per-model rate limit (insert(auditLog) on the chained handle)
   "outbound-audience.ts",
+  "paid-calls.ts", // ADR-0313: a paid call refused or queued for want of budget (insert(auditLog) on the chained handle)
   "playground.ts",
   "privacy-ops.ts", // ADR-0224: the processing limit's dispatch refusal
   "redteam.ts",

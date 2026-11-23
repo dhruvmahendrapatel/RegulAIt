@@ -140,6 +140,16 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why: "POST /v1/rules/rate-limits — CREATE ONLY, identical reasoning to the approvals insert above.",
   },
   {
+    file: "governance-config-apply.ts",
+    method: "insert",
+    expr: "rateLimits",
+    why:
+      "ADR-0357 apply — CREATE ONLY, for a rate limit the plan lists as `create`. A plain insert with a " +
+      "defaultRandom id, so the row is brand new and has no config_versions rows: nothing is discarded at " +
+      "dispatch. Apply's EDITS go through `applyRuleEdit` and its deletions through `deleteRuleArtifact`, " +
+      "in the same transaction and under the same advisory lock as this insert.",
+  },
+  {
     file: "rule-creates.ts",
     method: "insert",
     expr: "rateLimits",
