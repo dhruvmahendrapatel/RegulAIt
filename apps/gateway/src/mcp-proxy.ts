@@ -156,7 +156,17 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
-import { paidPriceForMcpTool, releasePaidCall, reportedChargeOf, reservePaidCall, runIdOfCall, settlementAmount, settlePaidCall } from "./paid-calls.js";
+import {
+  PAID_CALL_BUDGET_WARNING_META_KEY,
+  type PaidCallBudgetWarning,
+  paidPriceForMcpTool,
+  releasePaidCall,
+  reportedChargeOf,
+  reservePaidCall,
+  runIdOfCall,
+  settlementAmount,
+  settlePaidCall,
+} from "./paid-calls.js";
 import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
 import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
@@ -439,6 +449,8 @@ export type GovernedToolCallOutcome =
       costUsd?: number | null;
       /** ADR-0354 — an `advise` policy allowed this call and returns static guidance to the agent */
       advice?: ReturnType<typeof agentResponseBody>;
+      /** D-2026-11-22-05 — a paid call over its project budget that the org's warn-only enforcement let through */
+      budgetWarning?: PaidCallBudgetWarning;
     }
   | { kind: "unknown_tool" }
   /**
@@ -1001,7 +1013,7 @@ async function executeGovernedToolCallInner(
     return { kind: "denied", decision };
   };
   // ADR-0313: this call's paid-call hold, once reserved (settled with the usage row, else released in `finally`)
-  let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow } | null = null;
+  let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow; budgetWarning?: PaidCallBudgetWarning } | null = null;
 
   try {
     if (kind) {
@@ -1964,6 +1976,7 @@ async function executeGovernedToolCallInner(
       // reported back — attributed or not. O10: tool-first resolution. ADR-0313: a paid call's settlement.
       costUsd: chargedUsd,
       ...(decision.response?.kind === "advise" ? { advice: agentResponseBody(decision.response) } : {}),
+      ...(paidHold?.budgetWarning ? { budgetWarning: paidHold.budgetWarning } : {}),
     };
   } finally {
     // ADR-0313: a hold neither settled nor released above (an exit that billed nothing) is released here; if even that
@@ -2694,7 +2707,7 @@ export async function callToolForCaller(
     case "unknown_tool":
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
     case "allowed":
-      return withPolicyAdvice(outcome.content as Record<string, unknown>, outcome.advice);
+      return withBudgetWarning(withPolicyAdvice(outcome.content as Record<string, unknown>, outcome.advice), outcome.budgetWarning);
     default:
       throw mcpErrorForGovernanceOutcome(outcome);
   }
@@ -3159,6 +3172,24 @@ export function withPolicyAdvice(
     ...result,
     content: [...content, { type: "text", text: `[RegulAIt policy advice] ${advice.message}` }],
     _meta: { ...meta, [AGENT_RESPONSE_META_KEY]: advice },
+  };
+}
+
+/**
+ * D-2026-11-22-05: a paid call that warn-only let through over its project budget says so to the agent, the same way
+ * policy advice does: a text block it reads and the structured warning under `_meta["io.regulait/budget-warning"]`.
+ */
+export function withBudgetWarning(
+  result: Record<string, unknown>,
+  warning: PaidCallBudgetWarning | undefined,
+): Record<string, unknown> {
+  if (!warning) return result;
+  const meta = (result._meta && typeof result._meta === "object" ? result._meta : {}) as Record<string, unknown>;
+  const content = Array.isArray(result.content) ? result.content : [];
+  return {
+    ...result,
+    content: [...content, { type: "text", text: `[RegulAIt budget warning] ${warning.message}` }],
+    _meta: { ...meta, [PAID_CALL_BUDGET_WARNING_META_KEY]: warning },
   };
 }
 
