@@ -191,6 +191,9 @@ import {
   BEHAVIOUR_MODES,
   BEHAVIOUR_SIGNAL_NAMES,
   BEHAVIOUR_SUBJECT_KINDS,
+  // ADR-0360 (migration endpoint_fleet_operations): the rollout and stage lifecycles, ADR-0348 machines
+  ENDPOINT_ROLLOUT_STATES,
+  ENDPOINT_ROLLOUT_STAGE_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -8620,8 +8623,20 @@ export const endpointEnrolmentTokens = pgTable(
     expiryRelaxationStepUp: text("expiry_relaxation_step_up"),
     /** the `endpoint-enrolment-token-expiry-relaxed` audit row the issue wrote (no foreign key: retention may prune it) */
     expiryRelaxationAuditId: uuid("expiry_relaxation_audit_id"),
+    /** ADR-0360 §5: a one-line enrolment token: device cap 1 and at most 60 minutes (CHECKs below) */
+    singleUse: boolean("single_use").notNull().default(false),
+    /**
+     * ADR-0360 §5: the ADR-0350 device group a redeemed device joins. A group only narrows a device's policy, so joining
+     * one at enrolment is never a relaxation. ON DELETE SET NULL: deleting the group (a step-up) leaves the token usable
+     * without it.
+     */
+    deviceGroupId: uuid("device_group_id").references(() => endpointDeviceGroups.id, { onDelete: "set null" }),
   },
   (t) => [
+    check(
+      "endpoint_enrolment_tokens_single_use_check",
+      sql`NOT ${t.singleUse} OR (${t.deviceCap} = 1 AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes')`,
+    ),
     unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
     check("endpoint_enrolment_tokens_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
@@ -20725,6 +20740,105 @@ export const paidCallHolds = pgTable(
 );
 export type PaidCallHoldRow = typeof paidCallHolds.$inferSelect;
 // ===== end ADR-0313 =================================================================================================
+
+// ===== ADR-0360 (lane E41): endpoint agent fleet operations =====
+// The per-device-group self-update setting (owner decision D-2026-11-22-04; off unless relaxed with a recorded step-up)
+// and staged update rollouts whose
+// stages are ADR-0350 device groups (lane E31's table, reused: no second group concept). A device may be in several
+// groups; it is offered an update by the first stage, in ordinal order, whose group holds it. The lifecycles are
+// ENDPOINT_ROLLOUT_MACHINE and ENDPOINT_ROLLOUT_STAGE_MACHINE (@regulait/shared, ADR-0348, in STATE_MACHINES);
+// every state write is a guarded UPDATE over the event's source states (`whereFrom`).
+
+/** one ADR-0350 device group's fleet settings; absent row = every setting at its strict default (self-update off) */
+export const endpointDeviceGroupFleetSettings = pgTable(
+  "endpoint_device_group_fleet_settings",
+  {
+    groupId: uuid("group_id")
+      .primaryKey()
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
+    selfUpdate: boolean("self_update").notNull().default(false),
+    /** the admin who relaxed self-update on, the step-up method, and the audit row the relaxation wrote */
+    selfUpdateRelaxedBy: uuid("self_update_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    selfUpdateStepUp: text("self_update_step_up"),
+    selfUpdateAuditId: uuid("self_update_audit_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "endpoint_device_group_fleet_settings_self_update_check",
+      sql`NOT ${t.selfUpdate} OR (${t.selfUpdateStepUp} IS NOT NULL AND ${t.selfUpdateAuditId} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointDeviceGroupFleetSettingsRow = typeof endpointDeviceGroupFleetSettings.$inferSelect;
+
+export const endpointUpdateRollouts = pgTable(
+  "endpoint_update_rollouts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    targetVersion: text("target_version").notNull(),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STATES }).notNull().default("draft"),
+    /**
+     * failed installs or rollbacks that halt the rollout (D-2026-11-22-04): strict default 1, bounded 1 to 10. Raising
+     * it is a relaxation, recorded with its step-up method and audit row (the CHECK below); lowering it is free.
+     */
+    haltThreshold: integer("halt_threshold").notNull().default(1),
+    haltThresholdStepUp: text("halt_threshold_step_up"),
+    haltThresholdAuditId: uuid("halt_threshold_audit_id"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
+    check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')`),
+    check("endpoint_update_rollouts_halt_threshold_check", sql`${t.haltThreshold} BETWEEN 1 AND 10`),
+    check(
+      "endpoint_update_rollouts_halt_relaxed_check",
+      sql`${t.haltThreshold} = 1 OR (${t.haltThresholdStepUp} IS NOT NULL AND ${t.haltThresholdAuditId} IS NOT NULL)`,
+    ),
+    // at most one open rollout per source
+    uniqueIndex("endpoint_update_rollouts_open_uq").on(t.sourceId).where(sql`${t.state} NOT IN ('completed', 'aborted')`),
+    index("endpoint_update_rollouts_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type EndpointUpdateRolloutRow = typeof endpointUpdateRollouts.$inferSelect;
+
+export const endpointUpdateRolloutStages = pgTable(
+  "endpoint_update_rollout_stages",
+  {
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    /**
+     * the ADR-0350 device group this stage offers the update to. ON DELETE SET NULL: deleting a group (an ADR-0350
+     * step-up) is never blocked by a rollout; the stage then offers the update to no device.
+     */
+    groupId: uuid("group_id").references(() => endpointDeviceGroups.id, { onDelete: "set null" }),
+    /** point-in-time snapshot (ADR-0200 exception): the group's name when the stage was created, kept as evidence after a delete */
+    groupName: text("group_name").notNull(),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STAGE_STATES }).notNull().default("pending"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_update_rollout_stages_pk", columns: [t.rolloutId, t.ordinal] }),
+    unique("endpoint_update_rollout_stages_group_uq").on(t.rolloutId, t.groupId),
+    index("endpoint_update_rollout_stages_group_idx").on(t.groupId),
+    check("endpoint_update_rollout_stages_ordinal_check", sql`${t.ordinal} BETWEEN 1 AND 20`),
+    check("endpoint_update_rollout_stages_state_check", sql`${t.state} IN ('pending', 'active', 'done')`),
+    check(
+      "endpoint_update_rollout_stages_times_check",
+      sql`(${t.state} = 'pending') = (${t.startedAt} IS NULL) AND (${t.state} = 'done') = (${t.completedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointUpdateRolloutStageRow = typeof endpointUpdateRolloutStages.$inferSelect;
+// ===== end ADR-0360 =====
 
 // ===== ADR-0358 (lane E39): AI adoption analytics =====
 /**

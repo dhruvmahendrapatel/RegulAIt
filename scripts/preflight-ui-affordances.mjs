@@ -96,6 +96,7 @@ export const DELIBERATELY_API_ONLY = new Map([
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
+  ["/v1/discovery/sources/:x/update-rollouts", "ADR-0360: a rollout is evidence of what was offered to which devices; it is retired by POST /v1/discovery/update-rollouts/:id/abort (or completes), never deleted"],
   ["/v1/ai-saas-monitoring/connectors/:x/runs", "ADR-0361: an AI SaaS monitor run is the ledger the append-only interaction evidence points at (FK RESTRICT); it is never removed"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],

@@ -222,6 +222,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "billing_statements.rate_card_name": "platform_copy",
   "builder_agent_skills.snapshot_name": "platform_copy",
   "engine_runs.workflow_check_name": "platform_copy",
+  "endpoint_update_rollout_stages.group_name": "platform_copy",
   "eval_runs.agent_name": "platform_copy",
   "eval_runs.workflow_check_name": "platform_copy",
   "mcp_servers.registry_entry_name": "platform_copy",

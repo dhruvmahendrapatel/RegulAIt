@@ -678,6 +678,7 @@ import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
   applyEndpointAddonRemovalDecision,
@@ -6489,6 +6490,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
   // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
   registerContainmentRoutes(app, db);
+  // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
+  // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
+  registerEndpointFleetRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
