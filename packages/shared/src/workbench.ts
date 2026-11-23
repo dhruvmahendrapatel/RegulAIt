@@ -19,6 +19,7 @@
  *     principle forbids it. The type is the enforcement, alongside the DB CHECK.
  */
 import { z } from "zod";
+import { defineMachine } from "./state-machine.js";
 
 export const APPROVAL_ASSIGNEE_KINDS = ["user", "role", "team"] as const;
 export type ApprovalAssigneeKind = (typeof APPROVAL_ASSIGNEE_KINDS)[number];
@@ -308,3 +309,99 @@ export const createApprovalSavedViewSchema = z.object({
   /** admin-only: publish for everyone instead of owning it privately */
   shared: z.boolean().default(false),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0342 slice 2 — a human task's priority and explicit due date
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_TASK_PRIORITY_ORDER = ["low", "normal", "high", "urgent"] as const;
+export type TaskPriority = (typeof APPROVAL_TASK_PRIORITY_ORDER)[number];
+
+export interface TaskSchedule {
+  priority: TaskPriority;
+  warnAt: Date | null;
+  dueAt: Date | null;
+  slaPolicyId: string | null;
+}
+
+/**
+ * Does moving a task from `current` to `next` LOOSEN it (ADR-0180)? A later or removed due or warn time, a lower
+ * priority, or a different escalation policy (it changes who the task escalates to) is a relaxation and needs an
+ * admin's `settings_relax` step-up; a stage timer may never make one. An earlier due time or a higher priority is a
+ * tightening, and so is a policy set where there was none, UNLESS that policy changes who decides the task (its breach
+ * reassigns or adds an assignee): changing who an approval goes to is a `settings_relax` (B4S-02), so attaching such a
+ * policy is the relaxation `escalation_policy_attached`. The caller says which with `nextPolicyChangesApprover`.
+ */
+export function taskScheduleRelaxations(
+  current: TaskSchedule,
+  next: TaskSchedule,
+  opts: { nextPolicyChangesApprover?: boolean } = {},
+): string[] {
+  const out: string[] = [];
+  const later = (a: Date | null, b: Date | null) => (a !== null && b === null) || (a !== null && b !== null && b.getTime() > a.getTime());
+  if (later(current.dueAt, next.dueAt)) out.push(next.dueAt ? "due_later" : "due_removed");
+  if (later(current.warnAt, next.warnAt)) out.push(next.warnAt ? "warn_later" : "warn_removed");
+  const rank = (p: TaskPriority) => APPROVAL_TASK_PRIORITY_ORDER.indexOf(p);
+  if (rank(next.priority) < rank(current.priority)) out.push("priority_lowered");
+  if (current.slaPolicyId !== null && next.slaPolicyId !== current.slaPolicyId) out.push("escalation_policy_changed");
+  if (current.slaPolicyId === null && next.slaPolicyId !== null && opts.nextPolicyChangesApprover) out.push("escalation_policy_attached");
+  return out;
+}
+
+/** the SLA state a schedule implies at `now`, from scratch (a moved due time re-arms the clock) */
+export function slaStateAt(schedule: { warnAt: Date | null; dueAt: Date | null }, now: Date): "ok" | "warning" | "breached" {
+  if (schedule.dueAt && now.getTime() >= schedule.dueAt.getTime()) return "breached";
+  if (schedule.warnAt && now.getTime() >= schedule.warnAt.getTime()) return "warning";
+  return "ok";
+}
+
+/**
+ * ADR-0342 slice 2 (rule 12, ADR-0348): the declared lifecycle of `approval_assignments.sla_state`, through the one
+ * shared `defineMachine` table, registered in `STATE_MACHINES` (so its states are held equal to the column's CHECK).
+ *  - the clock (`warn`, `breach`): the ADR-0046 evaluation (`evaluateSla`) only ever moves a task forward;
+ *  - a reschedule (`rearm_ok`, `rearm_warning`): a due or warn time moved later (`scheduleApprovalTask`) may re-arm it
+ *    backward. Moving a time EARLIER is left to the clock, so a warning or breach is audited and escalated once, the
+ *    usual way. A stage timer can never move a time later (it cannot relax), so a re-arm is an admin's.
+ * Staying in the same state is always allowed and is not an event.
+ */
+export const APPROVAL_SLA_MACHINE = defineMachine({
+  id: "approval_sla",
+  stored: "approval_assignments.sla_state",
+  states: APPROVAL_SLA_STATES,
+  initial: ["ok"],
+  terminal: [],
+  transitions: {
+    warn: { from: ["ok"], to: "warning", by: ["system"], summary: "The warn time passed; the SLA sweep warns the assignees." },
+    breach: {
+      from: ["ok", "warning"],
+      to: "breached",
+      by: ["system"],
+      summary: "The due time passed; the SLA sweep escalates the task by its policy (notify, reassign or add an assignee).",
+    },
+    rearm_ok: {
+      from: ["warning", "breached"],
+      to: "ok",
+      by: ["admin"],
+      summary: "An admin moved the due and warn times later (a settings_relax step-up); the clock re-arms.",
+    },
+    rearm_warning: {
+      from: ["breached"],
+      to: "warning",
+      by: ["admin"],
+      summary: "An admin moved the due time later but the warn time has passed; the task is back to a warning.",
+    },
+  },
+});
+
+/** which events each cause may take: the clock moves forward, a reschedule only re-arms */
+const SLA_EVENTS_BY_CAUSE = {
+  clock: ["warn", "breach"],
+  reschedule: ["rearm_ok", "rearm_warning"],
+} as const satisfies Record<string, readonly (typeof APPROVAL_SLA_MACHINE.events)[number][]>;
+
+/** may `cause` move a task's SLA state from `from` to `to` (a change of state; staying put is always allowed)? */
+export function slaTransitionAllowed(cause: keyof typeof SLA_EVENTS_BY_CAUSE, from: string, to: string): boolean {
+  const m = APPROVAL_SLA_MACHINE;
+  if (!m.isState(from) || !m.isState(to)) return false;
+  return SLA_EVENTS_BY_CAUSE[cause].some((e) => m.can(from, e) && m.def.transitions[e].to === to);
+}

@@ -46,6 +46,8 @@ export const ISOLATION_STRICT_DEFAULTS = Object.freeze({
   isolationFloorRegulated: "microvm" as RequirableIsolationClass,
   isolationFloorMcpStdio: "user_space_kernel" as RequirableIsolationClass,
   isolationFloorEngineWorker: "user_space_kernel" as RequirableIsolationClass,
+  /** ADR-0364 S3: a robot run's own floor (L2); lower (never below L1) relaxes it */
+  isolationFloorRobotBrowser: "user_space_kernel" as RequirableIsolationClass,
   executorAttestationMaxAgeMinutes: 120 as number,
 });
 export type IsolationSettings = {
@@ -62,6 +64,7 @@ export const ISOLATION_FLOOR_KEYS = [
   "isolationFloorRegulated",
   "isolationFloorMcpStdio",
   "isolationFloorEngineWorker",
+  "isolationFloorRobotBrowser",
 ] as const satisfies readonly IsolationSettingKey[];
 type FloorKey = (typeof ISOLATION_FLOOR_KEYS)[number];
 const isFloorKey = (k: IsolationSettingKey): k is FloorKey => (ISOLATION_FLOOR_KEYS as readonly string[]).includes(k);
@@ -83,6 +86,8 @@ export const ISOLATION_SETTING_COLUMNS: Readonly<Record<IsolationSettingKey, str
   isolationFloorRegulated: "isolation_floor_regulated",
   isolationFloorMcpStdio: "isolation_floor_mcp_stdio",
   isolationFloorEngineWorker: "isolation_floor_engine_worker",
+  // ADR-0364 S3 (pending migration robot_browser_isolation)
+  isolationFloorRobotBrowser: "isolation_floor_robot_browser",
   executorAttestationMaxAgeMinutes: "executor_attestation_max_age_minutes",
 };
 
@@ -112,6 +117,7 @@ export const ISOLATION_SETTING_COPY: Readonly<Record<IsolationSettingKey, { labe
   isolationFloorRegulated: floorCopy("regulated projects", "A microVM sandbox with its own guest kernel (L3)."),
   isolationFloorMcpStdio: floorCopy("local (stdio) MCP servers", "A user-space kernel sandbox (L2)."),
   isolationFloorEngineWorker: floorCopy("engine workers", "A user-space kernel sandbox (L2)."),
+  isolationFloorRobotBrowser: floorCopy("robot runs (browser)", "A user-space kernel sandbox (L2)."),
   executorAttestationMaxAgeMinutes: {
     label: "Executor attestation lifetime (minutes)",
     strict: "120 minutes: an executor whose last passing self-test is older than two hours places nothing.",
@@ -163,6 +169,8 @@ export const isolationOrgSettingsFields = {
   isolationFloorMcpStdio: floor,
   /** strict L2 (OWNER DECISION 4); L1 relaxes it */
   isolationFloorEngineWorker: floor,
+  /** ADR-0364 S3: strict L2; L1 relaxes it (a `settings_relax` step-up, audited; the schema has no L0) */
+  isolationFloorRobotBrowser: floor,
   /** strict 120; longer, up to 1440, relaxes it */
   executorAttestationMaxAgeMinutes: z
     .number()

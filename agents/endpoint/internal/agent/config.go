@@ -25,7 +25,7 @@ import (
 // server-side, audited step-ups that later slices deliver through the gateway, never through this file.
 //
 // Self-update in particular (ADR-0360 §2, §4): this file has no member that turns it on. The admin relaxes it per
-// source on the gateway (a settings_relax step-up, audited), and the device acts only on a directive the device-policy
+// ADR-0350 device group on the gateway (a settings_relax step-up, audited), and the device acts only on a directive the device-policy
 // signer signed for it, for a release the release keys signed. Pinning those keys here says whose signatures count; it
 // turns nothing on.
 type LocalConfig struct {

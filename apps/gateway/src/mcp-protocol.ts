@@ -60,6 +60,7 @@ import {
   ListResourcesResultSchema,
   ListResourceTemplatesRequestSchema,
   ListResourceTemplatesResultSchema,
+  CancelledNotificationSchema,
   LoggingMessageNotificationSchema,
   McpError,
   ProgressNotificationSchema,
@@ -71,6 +72,7 @@ import {
   type ServerNotification,
 } from "@modelcontextprotocol/sdk/types.js";
 import { auditLog, eq, mcpServers, type Db } from "@regulait/db";
+import { broadcastCallerCancel, cancelCallerRequest, trackCallerRequest } from "./caller-cancel.js";
 import type { Decision } from "@regulait/policy-kernel";
 import {
   approvalArgumentsPreview,
@@ -244,6 +246,11 @@ export interface GovernedProtocolCallArgs {
   relay?: ((n: ServerNotification) => Promise<void>) | undefined;
   /** the caller's own progress token, when it asked for progress */
   progressToken?: string | number | undefined;
+  /**
+   * the caller's abort (its cancellation, its own timeout, or its connection closing): passed to the upstream request,
+   * so the upstream is told to stop (`notifications/cancelled`) instead of working on for a caller that has gone
+   */
+  signal?: AbortSignal | undefined;
   /**
    * ADR-0188 S4 — the delegation grant of a WORKLOAD caller (a delegated token, S5): the method is then
    * decided for the sponsor AND the stored chain, read fresh (decision 17). A grant that cannot be read
@@ -738,6 +745,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
         ({ deadlineMs }) =>
           upstream!.request({ method, params: decided } as never, spec.result, {
             timeout: deadlineMs,
+            ...(args.signal ? { signal: args.signal } : {}),
             ...(relaying && downstreamToken !== undefined
               ? {
                   onprogress: (p: { progress: number; total?: number; message?: string }) => {
@@ -763,7 +771,8 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
         },
       )) as Record<string, unknown>;
     } catch (err) {
-      if (classifyUpstreamError(err).why !== "our_own_refusal") {
+      // a caller that gave up is not the upstream failing: nothing is charged to its breaker
+      if (!args.signal?.aborted && classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, errMessage(err));
       }
       throw err;
@@ -1003,6 +1012,13 @@ export function protocolOutcomeResult(
   }
 }
 
+// ---------------------------------------------------------------------------
+// the caller's cancellation, across stateless requests
+// ---------------------------------------------------------------------------
+
+// the registry and the cross-replica broadcast live in caller-cancel.ts (D-2026-11-22-07); re-exported for callers
+export { cancelCallerRequest, trackCallerRequest, trackedCallerRequestsForTest } from "./caller-cancel.js";
+
 /**
  * Wire the protocol surface into one proxy `Server` (one per HTTP request,
  * stateless). Every non-tool request reaches the fallback handler, so a
@@ -1019,22 +1035,38 @@ export function installProtocolSurface(
     call: (
       method: string,
       params: Record<string, unknown> | undefined,
-      extra: { relay: (n: ServerNotification) => Promise<void>; progressToken?: string | number },
+      extra: { relay: (n: ServerNotification) => Promise<void>; progressToken?: string | number; signal: AbortSignal },
     ) => Promise<Record<string, unknown>>;
     userId: string;
     serverId: string;
     projectId: string | null;
+    /** the caller's cancellation scope (`trackCallerRequest`): its user, server and credential */
+    cancelScope: string;
   },
 ): { flush: () => Promise<void> } {
   proxy.removeRequestHandler("logging/setLevel");
   proxy.fallbackRequestHandler = async (request: JSONRPCRequest, extra) => {
     const params = request.params as (Record<string, unknown> & { _meta?: { progressToken?: string | number } }) | undefined;
     const progressToken = params?._meta?.progressToken;
-    return ctx.call(request.method, params, {
-      relay: (n) => extra.sendNotification(n as never),
-      ...(progressToken !== undefined ? { progressToken } : {}),
-    }) as never;
+    const tracked = trackCallerRequest(ctx.cancelScope, extra.requestId, extra.signal, ctx.db);
+    try {
+      return (await ctx.call(request.method, params, {
+        relay: (n) => extra.sendNotification(n as never),
+        ...(progressToken !== undefined ? { progressToken } : {}),
+        signal: tracked.signal,
+      })) as never;
+    } finally {
+      tracked.done();
+    }
   };
+  // a client's cancellation names a request it sent, usually on an earlier HTTP request (stateless): it is looked up
+  // across this process's in-flight calls for the same caller, and when this process does not serve it, written for
+  // every replica to see (caller-cancel.ts). Never answered and never relayed as such.
+  proxy.setNotificationHandler(CancelledNotificationSchema, async (n) => {
+    const requestId = n.params.requestId;
+    if (cancelCallerRequest(ctx.cancelScope, requestId, n.params.reason) || requestId === undefined) return;
+    await broadcastCallerCancel(ctx.db, ctx.cancelScope, ctx.userId, requestId);
+  });
   const dropped: string[] = [];
   // the Protocol's own progress handler serves requests WE send; the proxy
   // sends none, so a client progress notification is just another drop

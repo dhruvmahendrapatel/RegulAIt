@@ -54,6 +54,7 @@
  * And nothing auto-discovers use cases: every row here was proposed by a
  * person.
  */
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { recordRiskAcceptance } from "./risk-tolerance.js";
 import { writeUseCaseDecisionRecord } from "./decision-regression.js";
 import { assertAiBomSignoffPossible, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -140,6 +141,7 @@ import {
   unsureAnswerViolations,
   unsureViolationDetail,
   isTreatedRiskStatus,
+  USE_CASE_MACHINE,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
@@ -551,6 +553,8 @@ export async function syncUseCaseForInstance(
   // questionnaire stage (blocked_on_artifact) and the use case STAYS
   // needs_info until a new version re-requests the sign-off (→ under_review).
   if (useCase.status === "needs_info" && next === "proposed") return null;
+  // ADR-0348: every move the sync makes is a declared one (the two checks above are the table's own rules)
+  if (!USE_CASE_MACHINE.canMove(useCase.status, next)) return null;
 
   const decided = next === "approved" || next === "rejected";
   // ADR-0168 — an approval has a lifetime, from the tier as it stands at the
@@ -1013,12 +1017,14 @@ export async function markUseCaseReturned(
   actorUserId: string,
 ): Promise<void> {
   const [uc] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
-  if (!uc || uc.status === "approved" || uc.status === "rejected" || uc.status === "retired") return;
-  if (uc.status === "needs_info") return;
-  await db
+  if (!uc || !USE_CASE_MACHINE.can(uc.status, "return_for_info")) return;
+  // ADR-0348: guarded on the state it leaves, so a retire or a decision that commits meanwhile is not overwritten
+  const moved = await db
     .update(aiUseCases)
     .set({ status: "needs_info", updatedAt: new Date() })
-    .where(eq(aiUseCases.id, uc.id));
+    .where(and(eq(aiUseCases.id, uc.id), eq(aiUseCases.status, uc.status)))
+    .returning({ id: aiUseCases.id });
+  if (moved.length === 0) return;
   await db.insert(auditLog).values({
     userId: actorUserId,
     objectType: "ai_use_case",
@@ -2090,6 +2096,7 @@ export function registerUseCaseRoutes(
         } else {
           // ADR-0188 S4: one intake-assist narrative the person asked for: a direct call, no agent principal acts — decided as the person (no delegation grant).
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,
@@ -3351,7 +3358,7 @@ export function registerUseCaseRoutes(
     const body = retireUseCaseSchema.parse(req.body);
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!row) return reply.status(404).send({ error: "not_found" });
-    if (row.status === "retired") return reply.status(409).send({ error: "already_retired" });
+    if (!USE_CASE_MACHINE.can(row.status, "retire")) return reply.status(409).send({ error: "already_retired" });
     const [updated] = await db
       .update(aiUseCases)
       .set({
@@ -3360,8 +3367,10 @@ export function registerUseCaseRoutes(
         retiredAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(aiUseCases.id, useCaseId))
+      // ADR-0348: from the status read above, so the audited "from" is what was really replaced
+      .where(and(eq(aiUseCases.id, useCaseId), eq(aiUseCases.status, row.status)))
       .returning();
+    if (!updated) return reply.status(409).send({ error: "use_case_changed", detail: "the use case changed state while it was being retired; reload it" });
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "ai_use_case",

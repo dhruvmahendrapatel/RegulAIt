@@ -17,6 +17,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { downloadCsv } from "../views/admin/adminKit";
 import { Button, Modal, Select, Table, type Column, type TableProps, type TableSort } from "./kit";
@@ -34,10 +35,12 @@ import {
   pageUrl,
   prefsOf,
   rangeText,
+  readPlace,
   resolveColumns,
   saveColumnPrefs,
   savePageSize,
   toggleColumn,
+  writePlace,
   type ColumnLayout,
   type Filters,
   type ListPageBody,
@@ -78,6 +81,8 @@ export interface DataListProps<T> {
   /** `estimate` where an exact count is costly: past the cap it reads "of 1,000+" */
   count?: "exact" | "estimate";
   rowKey: (row: T) => string;
+  /** a row that opens another page (a real link in its primary cell); `onRowClick` selects in place (a button) */
+  rowHref?: (row: T) => string;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
   empty?: ReactNode;
@@ -90,6 +95,19 @@ export interface DataListProps<T> {
 }
 
 const SERVER_SORT = () => 0;
+
+/**
+ * The page's fixed sentence in place of the server's wording, keeping the HTTP status and error code (UIS-08), so the
+ * table still tells an access refusal (403) from a failure worth retrying.
+ */
+function withMessage(error: unknown, message: string): Error {
+  const e = (error ?? {}) as { status?: unknown; code?: unknown; payload?: { error?: unknown } };
+  const code = typeof e.code === "string" ? e.code : typeof e.payload?.error === "string" ? e.payload.error : undefined;
+  return Object.assign(new Error(message), {
+    ...(typeof e.status === "number" ? { status: e.status } : {}),
+    ...(code ? { code } : {}),
+  });
+}
 const nameOf = <T,>(c: DataColumn<T>) => (typeof c.header === "string" && c.header ? c.header : c.srHeader ?? c.key);
 
 /** an icon-only button whose name is also a visible tip on hover and on keyboard focus, dismissed by Escape */
@@ -235,13 +253,31 @@ export function DataList<T>(props: DataListProps<T>) {
   const filters = useMemo(() => props.filters ?? {}, [props.filters]);
   const filterKey = JSON.stringify(Object.entries(filters).filter(([, v]) => v !== undefined && v !== null && v !== false && v !== ""));
 
-  const [size, setSizeState] = useState<PageSize>(() => loadPageSize(listId));
-  const [sort, setSort] = useState<ListSort>(props.defaultSort);
+  // UIS-06: the sort and the page come back from the address (Back from a row's detail lands where the reader was)
+  const [params] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [restored] = useState(() => {
+    const size = loadPageSize(listId);
+    const sortable = new Set(props.columns.filter((c) => c.sortable).map((c) => c.key));
+    const place = readPlace(params, listId, sortable, props.defaultSort);
+    const lim = size === "all" ? 0 : Number(size);
+    // an offset that is not on a page boundary of this browser's page size is not a page this list showed
+    const at = lim && place.offset % lim === 0 ? place.offset / lim : 0;
+    const start = at > 0 ? (place.cursor ? { cursor: place.cursor } : { offset: place.offset }) : null;
+    return { size, sort: place.sort, page: at, start };
+  });
+  const [size, setSizeState] = useState<PageSize>(restored.size);
+  const [sort, setSort] = useState<ListSort>(restored.sort);
   const [layout, setLayout] = useState<ColumnLayout>(() => resolveColumns(props.columns, loadColumnPrefs(listId)));
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [page, setPage] = useState(0);
+  const [page, setPage] = useState(restored.page);
   /** the cursor or offset that reads page i, learnt from page i-1 */
-  const [starts, setStarts] = useState<Record<number, { cursor?: string; offset?: number }>>({});
+  const [starts, setStarts] = useState<Record<number, { cursor?: string; offset?: number }>>(() =>
+    restored.start ? { [restored.page]: restored.start } : {},
+  );
+  /** a page restored from the address has not answered yet: a stale cursor or an emptied page falls back to the first */
+  const [checking, setChecking] = useState(restored.page > 0);
   const [exporting, setExporting] = useState(false);
   const [capNote, setCapNote] = useState<string | null>(null);
   const all = size === "all";
@@ -284,6 +320,29 @@ export function DataList<T>(props: DataListProps<T>) {
       [page + 1]: pagedData.nextCursor ? { cursor: pagedData.nextCursor } : pagedData.nextOffset !== null ? { offset: pagedData.nextOffset } : {},
     }));
   }, [all, pagedData, page, paged.isPlaceholderData]);
+
+  // re-validate a page restored from the address: a cursor the server refuses, or a page that is now empty, is stale
+  const { isError: pagedFailed, isSuccess: pagedOk, isPlaceholderData: pagedPlaceholder } = paged;
+  useEffect(() => {
+    if (!checking) return;
+    if (all || page !== restored.page) return setChecking(false);
+    if (pagedPlaceholder) return;
+    if (pagedFailed || (pagedOk && pagedData && pagedData.items.length === 0)) {
+      setChecking(false);
+      setPage(0);
+      setStarts({});
+    } else if (pagedOk) setChecking(false);
+  }, [checking, all, page, restored.page, pagedFailed, pagedOk, pagedPlaceholder, pagedData]);
+
+  // keep the place in the address, beside the page's own parameters; replace, so Back still leaves the page
+  const placeCursor = starts[page]?.cursor ?? null;
+  const placeOffset = all ? 0 : page * limit;
+  const { key: defaultKey, dir: defaultDir } = props.defaultSort;
+  useEffect(() => {
+    const next = writePlace(params, listId, { sort, offset: placeOffset, cursor: placeCursor }, { key: defaultKey, dir: defaultDir });
+    // the page's own #hash (an anchor, an open panel) and history state survive the write
+    if (next) navigate({ search: `?${next.toString()}`, hash: location.hash }, { replace: true, preventScrollReset: true, state: location.state });
+  }, [params, listId, sort, placeOffset, placeCursor, defaultKey, defaultDir, navigate, location.hash, location.state]);
 
   const rows: T[] | undefined = all ? infinite.data?.pages.flatMap((p) => p.items) : pagedData?.items;
   const lastBody = all ? infinite.data?.pages.at(-1) : pagedData;
@@ -366,9 +425,13 @@ export function DataList<T>(props: DataListProps<T>) {
   };
 
   const shownCount = rows?.length ?? 0;
+  // UIS-05: while a new sort, filter or page is read, the rows on screen are the previous answer, and say so
+  const updating = !all && paged.isPlaceholderData;
   const status = !rows
     ? ""
-    : all
+    : updating
+      ? "Updating… showing previous results"
+      : all
       ? loadedText(shownCount, total, estimate)
       : rangeText(page * limit, shownCount, total, estimate, more);
   const Tbl = props.table ?? Table;
@@ -379,7 +442,7 @@ export function DataList<T>(props: DataListProps<T>) {
   );
 
   return (
-    <div className={d.list} data-list={listId}>
+    <div className={`${d.list} ${updating ? d.updating : ""}`} data-list={listId} aria-busy={updating || undefined}>
       {/* data-list-view: the page size and the column picker change only how the list shows, so a folding card keeps its fold */}
       <div className={d.toolbar} data-list-view="">
         <label className={d.sizeLabel}>
@@ -414,8 +477,9 @@ export function DataList<T>(props: DataListProps<T>) {
         rows={rows}
         rowKey={props.rowKey}
         loading={q.isLoading}
-        error={q.error && props.errorMessage ? new Error(props.errorMessage) : q.error}
+        error={q.error && props.errorMessage ? withMessage(q.error, props.errorMessage) : q.error}
         onRetry={refresh}
+        rowHref={props.rowHref}
         onRowClick={props.onRowClick}
         rowLabel={props.rowLabel}
         empty={props.empty}

@@ -53,8 +53,8 @@ device ticket still lives 7 days; a one-line-enrolled device needs a new token (
    current and next). One key per purpose: the same key in both lists makes the config invalid.
 2. The spool (`/var/lib/regulait-agent/update`, `1770 root:regulait-agent`) holds an update directive signed by the
    device-policy signer for **this** device (the ticket file's device id), valid now and for at most 24 hours. The
-   gateway signs one only while the admin has turned self-update on for the source (a step-up, audited) and the
-   device's group has an active rollout stage.
+   gateway signs one only while the device's group has an active rollout stage and the admin has turned self-update on
+   for that group (a step-up, audited).
 3. The spool holds a release manifest (`regulait.endpoint-release/1`) signed by a release key for exactly the
    directive's version, listing this OS and architecture with the binary's SHA-256 and length.
 4. That version is **newer** than the running binary (`golang.org/x/mod/semver`); a downgrade or a development build is

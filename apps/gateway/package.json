@@ -48,6 +48,7 @@
     "@google-cloud/os-config": "^5.2.0",
     "@kubernetes/client-node": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/server": "2.4.0",
     "@node-saml/node-saml": "5.2.0",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-prometheus": "0.223.0",
@@ -91,6 +92,7 @@
     "openai": "6.49.0",
     "openid-client": "^6.8.4",
     "otpauth": "9.5.2",
+    "p-limit": "7.3.3",
     "pg-boss": "12.38.2",
     "pino": "10.4.0",
     "pkijs": "3.4.1",
@@ -101,6 +103,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@regulait/engine-garak": "workspace:*",
     "@regulait/engine-modelscan": "workspace:*",
     "@regulait/engine-promptfoo": "workspace:*",

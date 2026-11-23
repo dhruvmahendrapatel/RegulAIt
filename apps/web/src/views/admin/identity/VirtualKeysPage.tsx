@@ -76,6 +76,9 @@ interface VirtualKey {
   upstreamCredentialId: string | null;
   expiresAt: string | null;
   revokedAt: string | null;
+  /** ADR-0366: set while a containment holds the key; released only by an approved release */
+  haltedAt?: string | null;
+  haltedReason?: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   active: boolean;
@@ -119,6 +122,7 @@ type IssuedKey = VirtualKey & { token: string };
 
 function keyState(k: VirtualKey): { tone: "ok" | "danger" | "warn"; word: string } {
   if (k.revokedAt) return { tone: "danger", word: "revoked" };
+  if (k.haltedAt) return { tone: "danger", word: "halted" };
   if (!k.active) return { tone: "warn", word: "expired" };
   return { tone: "ok", word: "active" };
 }

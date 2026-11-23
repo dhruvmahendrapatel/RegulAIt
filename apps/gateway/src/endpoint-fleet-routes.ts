@@ -1,15 +1,20 @@
 /**
  * ADR-0360 slice 1a — ENDPOINT AGENT FLEET OPERATIONS, the admin routes (admin-only: none is in NON_ADMIN_ROUTES; every
- * write audited under the source).
+ * write audited under the source, or under the device group for its fleet settings).
  *
  *   (device groups     ADR-0350's org-wide groups, lane E31's table and routes, reused as the rollout stages; this file
  *                      adds no group concept of its own)
- *   fleet settings     self-update, OFF by default: turning it on is a `settings_relax` step-up bound to the source,
- *                      recorded on the row (a CHECK holds "on" to a recorded relaxation); turning it off is free
+ *   fleet settings     self-update per ADR-0350 device group (owner decision D-2026-11-22-04), OFF by default:
+ *                      turning it on is a `settings_relax` step-up bound to the group, recorded on the row (a CHECK
+ *                      holds "on" to a recorded relaxation); turning it off is free. A rollout starts or resumes only
+ *                      when every stage's group has it on
+ *   halt threshold     the failed installs or rollbacks that halt a rollout (D-2026-11-22-04): strict default 1,
+ *                      bounded 1 to 10; lowering it is free, raising it is a `settings_relax` step-up; both audited
  *   update rollouts    one target version over ordered stages (one ADR-0350 group each; a device in several groups is
- *                      offered the update by the first stage that holds it); the lifecycle is the declared table in
- *                      `endpoint-fleet-lifecycle.ts`, and every state write is a guarded UPDATE over its source states,
- *                      so a stale or concurrent write matches no row and is refused (409), never overwriting
+ *                      offered the update by the first stage that holds it); the lifecycles are ADR-0348 machines
+ *                      (ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE in @regulait/shared, registered in
+ *                      STATE_MACHINES), and every state write is guarded with `whereFrom`, so a stale or concurrent
+ *                      write matches no row and is refused (409), never overwriting
  *   one-line enrolment a single-use (device cap 1), short-lived (15 minutes by default, at most 60), source-scoped
  *                      enrolment token, optionally placing the device in one ADR-0350 group (a group only narrows a
  *                      device's policy, so joining one is never a relaxation). Only its SHA-256 is kept; no audit
@@ -26,8 +31,8 @@ import {
   desc,
   discoverySources,
   endpointDeviceGroups,
+  endpointDeviceGroupFleetSettings,
   endpointEnrolmentTokens,
-  endpointFleetSettings,
   endpointUpdateRollouts,
   endpointUpdateRolloutStages,
   eq,
@@ -35,11 +40,21 @@ import {
   sql,
   type Db,
   type DiscoverySourceRow,
+  type EndpointDeviceGroupRow,
   type EndpointUpdateRolloutRow,
   type EndpointUpdateRolloutStageRow,
 } from "@regulait/db";
 import { ENDPOINT_BULK_TOKEN_PREFIX, ENDPOINT_ENROL_FILE_SCHEMA } from "./endpoint-agent.js";
-import { ROLLOUT_MACHINE, ROLLOUT_STAGE_MACHINE, describe, sourcesOf, type RolloutEvent, type RolloutState } from "./endpoint-fleet-lifecycle.js";
+import {
+  ENDPOINT_ROLLOUT_HALT_THRESHOLD as HALT_THRESHOLD,
+  ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE,
+  ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE,
+  type EndpointRolloutEvent as RolloutEvent,
+  type EndpointRolloutState as RolloutState,
+} from "@regulait/shared";
+import type { ListSpec } from "./list-contract.js";
+import { answerListPage, type ContractList } from "./list-contract-route.js";
+import { whereFrom } from "./state-transition.js";
 import { identityIssuer } from "./oauth/common.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
@@ -48,19 +63,38 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** bounds (secure by default, ADR-0180: each is the strict value, none is a setting) */
 export const ROLLOUT_MAX_STAGES = 20;
-export const ROLLOUTS_LISTED = 100;
 export const ONE_LINE_TOKEN_DEFAULT_MINUTES = 15;
 export const ONE_LINE_TOKEN_MAX_MINUTES = 60;
 
-/** ADR-0360 §2: self-update's strict default, and the step-up that relaxes it for one source */
+/** ADR-0360 §2: self-update's strict default, and the step-up that relaxes it for one device group */
 export const FLEET_SETTINGS_STRICT = Object.freeze({ selfUpdate: false });
-export const selfUpdateRelaxStepUp = (sourceId: string): StepUpCheckArgs => ({
+export const selfUpdateRelaxStepUp = (groupId: string): StepUpCheckArgs => ({
   kind: "settings_relax",
-  facts: { op: "endpoint_fleet_self_update", sourceId, selfUpdate: true },
+  facts: { op: "endpoint_fleet_self_update", groupId, selfUpdate: true },
 });
+/** ADR-0360 §3: raising one rollout's halt threshold is a relaxation, bound to the rollout and the new value */
+export const haltThresholdRelaxStepUp = (rolloutId: string, haltThreshold: number): StepUpCheckArgs => ({
+  kind: "settings_relax",
+  facts: { op: "endpoint_rollout_halt_threshold", rolloutId, haltThreshold },
+});
+
+/** ADR-0226: a source's rollouts, newest first (the keyset cursor on created_at) */
+const ROLLOUTS_LIST: ListSpec<{ id: string; targetVersion: string; state: string; createdAt: string }> = {
+  id: "endpoint-update-rollouts",
+  sorts: { created: { expr: endpointUpdateRollouts.createdAt, keysetAt: endpointUpdateRollouts.createdAt } },
+  columns: {
+    targetVersion: { label: "Target version", value: (r) => r.targetVersion },
+    state: { label: "State", value: (r) => r.state },
+    created: { label: "Created", value: (r) => r.createdAt },
+  },
+  filters: [],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: endpointUpdateRollouts.id,
+};
 
 const uuid = z.string().uuid();
 const settingsSchema = z.object({ selfUpdate: z.boolean() }).strict();
+const haltThresholdSchema = z.object({ haltThreshold: z.number().int().min(HALT_THRESHOLD.min).max(HALT_THRESHOLD.max) }).strict();
 const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$/;
 const rolloutSchema = z
   .object({
@@ -90,12 +124,14 @@ class Refusal extends Error {
   }
 }
 
-async function audit(db: Db, actor: string, sourceId: string, ruleId: string, reason: string, detail: Record<string, unknown>, effect: "allow" | "deny" = "allow", id?: string) {
+type AuditObject = { type: "discovery_source" | "endpoint_device_group"; id: string };
+
+async function audit(db: Db, actor: string, object: AuditObject, ruleId: string, reason: string, detail: Record<string, unknown>, effect: "allow" | "deny" = "allow", id?: string) {
   await db.insert(auditLog).values({
     ...(id ? { id } : {}),
     userId: actor,
-    objectType: "discovery_source",
-    objectId: sourceId,
+    objectType: object.type,
+    objectId: object.id,
     detail: { subsystem: "endpoint-fleet", adr: "0360", ...detail },
     effect,
     ruleId,
@@ -104,30 +140,38 @@ async function audit(db: Db, actor: string, sourceId: string, ruleId: string, re
   });
 }
 
-/** the source's self-update setting: an absent row is the strict default (off) */
-async function selfUpdateOn(db: Db, sourceId: string): Promise<boolean> {
-  const [row] = await db.select({ on: endpointFleetSettings.selfUpdate }).from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, sourceId));
-  return row?.on ?? FLEET_SETTINGS_STRICT.selfUpdate;
+/** the group ids among `groupIds` whose self-update is on (an absent row is the strict default, off) */
+async function selfUpdateOnGroups(db: Db, groupIds: readonly (string | null)[]): Promise<Set<string>> {
+  const ids = [...new Set(groupIds.filter((g): g is string => g !== null))];
+  if (ids.length === 0) return new Set();
+  const rows = await db
+    .select({ id: endpointDeviceGroupFleetSettings.groupId })
+    .from(endpointDeviceGroupFleetSettings)
+    .where(and(inArray(endpointDeviceGroupFleetSettings.groupId, ids), eq(endpointDeviceGroupFleetSettings.selfUpdate, true)));
+  return new Set(rows.map((x) => x.id));
 }
 
-function rolloutView(r: EndpointUpdateRolloutRow, stages: EndpointUpdateRolloutStageRow[], selfUpdate: boolean) {
+function rolloutView(r: EndpointUpdateRolloutRow, stages: EndpointUpdateRolloutStageRow[], onGroups: Set<string>) {
   const sorted = [...stages].sort((a, b) => a.ordinal - b.ordinal);
   const active = sorted.find((s) => s.state === "active");
   const last = sorted[sorted.length - 1];
   const blocked: Partial<Record<RolloutEvent, string>> = {};
-  if (!selfUpdate) {
-    blocked.start = "self-update is off for this source; turn it on first (that asks you to confirm it's you, and is audited)";
+  // a stage whose group was deleted offers the update to no device, so only live groups must have self-update on
+  const off = sorted.filter((s) => s.groupId !== null && !onGroups.has(s.groupId)).map((s) => `'${s.groupName}'`);
+  if (off.length > 0) {
+    blocked.start = `self-update is off for device group${off.length > 1 ? "s" : ""} ${off.join(", ")}; turn it on for each first (that asks you to confirm it's you, and is audited)`;
     blocked.resume = blocked.start;
   }
   if (active && last && active.ordinal === last.ordinal) blocked.advance = "the active stage is the last one; complete the rollout instead";
   else blocked.complete = "stages remain; advance to the next stage first";
-  // `halt` is the system's (a device's failed install); an admin pauses instead
-  blocked.halt = "only a device's failed install or rollback halts a rollout; pause it instead";
+  // `halt` is the system's (failed installs reaching the halt threshold); an admin pauses instead
+  blocked.halt = "only failed installs or rollbacks reaching the halt threshold halt a rollout; pause it instead";
   return {
     id: r.id,
     sourceId: r.sourceId,
     targetVersion: r.targetVersion,
     state: r.state,
+    haltThreshold: { value: r.haltThreshold, ...HALT_THRESHOLD },
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
     stages: sorted.map((s) => ({
@@ -139,7 +183,7 @@ function rolloutView(r: EndpointUpdateRolloutRow, stages: EndpointUpdateRolloutS
       startedAt: s.startedAt?.toISOString() ?? null,
       completedAt: s.completedAt?.toISOString() ?? null,
     })),
-    lifecycle: describe(ROLLOUT_MACHINE, r.state as RolloutState, blocked),
+    lifecycle: ROLLOUT_MACHINE.describe(r.state as RolloutState, blocked),
   };
 }
 
@@ -168,48 +212,62 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     return source;
   };
 
-  // ---- fleet settings (self-update) -----------------------------------------------------------------------------
-  const settingsView = async (sourceId: string) => {
-    const [row] = await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, sourceId));
-    return { sourceId, selfUpdate: row?.selfUpdate ?? FLEET_SETTINGS_STRICT.selfUpdate, strict: FLEET_SETTINGS_STRICT, updatedAt: row?.updatedAt.toISOString() ?? null };
+  // ---- fleet settings (self-update, per ADR-0350 device group) ---------------------------------------------------
+  /** the device group the route names, or the refusal already sent */
+  const deviceGroup = async (reply: FastifyReply, groupId: string | null): Promise<EndpointDeviceGroupRow | null> => {
+    if (!groupId) {
+      await reply.status(400).send({ error: "invalid_request", detail: "groupId must be a uuid" });
+      return null;
+    }
+    const [group] = await db.select().from(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, groupId));
+    if (!group) {
+      await reply.status(404).send({ error: "not_found", detail: "no such device group" });
+      return null;
+    }
+    return group;
+  };
+  const settingsView = async (group: EndpointDeviceGroupRow) => {
+    const [row] = await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, group.id));
+    return { groupId: group.id, groupName: group.name, selfUpdate: row?.selfUpdate ?? FLEET_SETTINGS_STRICT.selfUpdate, strict: FLEET_SETTINGS_STRICT, updatedAt: row?.updatedAt.toISOString() ?? null };
   };
 
-  app.get("/v1/discovery/sources/:sourceId/fleet-settings", async (req, reply) => {
-    const source = await agentSource(reply, param(req, "sourceId"));
-    if (!source) return reply;
-    return reply.send(await settingsView(source.id));
+  app.get("/v1/endpoint-device-groups/:groupId/fleet-settings", async (req, reply) => {
+    const group = await deviceGroup(reply, param(req, "groupId"));
+    if (!group) return reply;
+    return reply.send(await settingsView(group));
   });
 
-  app.put("/v1/discovery/sources/:sourceId/fleet-settings", async (req, reply) => {
-    const source = await agentSource(reply, param(req, "sourceId"));
-    if (!source) return reply;
+  app.put("/v1/endpoint-device-groups/:groupId/fleet-settings", async (req, reply) => {
+    const group = await deviceGroup(reply, param(req, "groupId"));
+    if (!group) return reply;
     const b = settingsSchema.safeParse(req.body ?? {});
     if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: "send {selfUpdate: boolean}" });
-    const current = await selfUpdateOn(db, source.id);
-    if (current === b.data.selfUpdate) return reply.send(await settingsView(source.id));
+    const current = (await selfUpdateOnGroups(db, [group.id])).has(group.id);
+    if (current === b.data.selfUpdate) return reply.send(await settingsView(group));
+    const object: AuditObject = { type: "endpoint_device_group", id: group.id };
     if (b.data.selfUpdate) {
-      // ADR-0360 §2: turning self-update on relaxes the strict default: a fresh step-up bound to this source
-      const su = await requireStepUp(db, req, reply, selfUpdateRelaxStepUp(source.id));
+      // ADR-0360 §2: turning self-update on relaxes the strict default: a fresh step-up bound to this group
+      const su = await requireStepUp(db, req, reply, selfUpdateRelaxStepUp(group.id));
       if (!su.ok) return reply;
       await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         const auditId = randomUUID();
-        await audit(tx, actor(req), source.id, "endpoint-fleet-self-update-relaxed", `self-update turned on for endpoint agent source '${source.id}' (step-up ${su.method}) (ADR-0360)`, { selfUpdate: true, strict: false, relaxation: true, stepUp: su.method }, "allow", auditId);
+        await audit(tx, actor(req), object, "endpoint-fleet-self-update-relaxed", `self-update turned on for endpoint device group '${group.name}' (step-up ${su.method}) (ADR-0360)`, { groupId: group.id, selfUpdate: true, strict: false, relaxation: true, stepUp: su.method }, "allow", auditId);
         const values = { selfUpdate: true, selfUpdateRelaxedBy: req.authCtx.userId ?? null, selfUpdateStepUp: su.method, selfUpdateAuditId: auditId, updatedAt: sql`now()` };
-        await tx.insert(endpointFleetSettings).values({ sourceId: source.id, ...values }).onConflictDoUpdate({ target: endpointFleetSettings.sourceId, set: values });
+        await tx.insert(endpointDeviceGroupFleetSettings).values({ groupId: group.id, ...values }).onConflictDoUpdate({ target: endpointDeviceGroupFleetSettings.groupId, set: values });
       });
     } else {
       // tightening back to the strict default needs no step-up; directives stop at once (slice 1c reads this row)
       await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         await tx
-          .update(endpointFleetSettings)
+          .update(endpointDeviceGroupFleetSettings)
           .set({ selfUpdate: false, selfUpdateRelaxedBy: null, selfUpdateStepUp: null, selfUpdateAuditId: null, updatedAt: sql`now()` })
-          .where(eq(endpointFleetSettings.sourceId, source.id));
-        await audit(tx, actor(req), source.id, "endpoint-fleet-self-update-off", `self-update turned off for endpoint agent source '${source.id}' (ADR-0360)`, { selfUpdate: false });
+          .where(eq(endpointDeviceGroupFleetSettings.groupId, group.id));
+        await audit(tx, actor(req), object, "endpoint-fleet-self-update-off", `self-update turned off for endpoint device group '${group.name}' (ADR-0360)`, { groupId: group.id, selfUpdate: false });
       });
     }
-    return reply.send(await settingsView(source.id));
+    return reply.send(await settingsView(group));
   });
 
   // ---- update rollouts ------------------------------------------------------------------------------------------
@@ -220,13 +278,29 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     return { r, stages };
   };
 
+  // ADR-0226: the rollouts are evidence, so the list pages (keyset on created_at) rather than stopping at a fixed count
+  const rolloutsList: ContractList<ReturnType<typeof rolloutView> & { _cursorAt?: unknown }, Record<string, never>> = {
+    spec: ROLLOUTS_LIST,
+    filters: z.object({}).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db.select({ r: endpointUpdateRollouts, _cursorAt: q.cursorAt }).from(endpointUpdateRollouts).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+        if (rows.length === 0) return [];
+        const ids = rows.map((x) => x.r.id);
+        const stages = await db.select().from(endpointUpdateRolloutStages).where(inArray(endpointUpdateRolloutStages.rolloutId, ids));
+        const on = await selfUpdateOnGroups(db, stages.map((st) => st.groupId));
+        return rows.map((x) => ({ ...rolloutView(x.r, stages.filter((st) => st.rolloutId === x.r.id), on), _cursorAt: x._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(endpointUpdateRollouts).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req) => eq(endpointUpdateRollouts.sourceId, (req.params as { sourceId: string }).sourceId),
+  };
+
   app.get("/v1/discovery/sources/:sourceId/update-rollouts", async (req, reply) => {
     const source = await agentSource(reply, param(req, "sourceId"));
     if (!source) return reply;
-    const rows = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.sourceId, source.id)).orderBy(desc(endpointUpdateRollouts.createdAt), desc(endpointUpdateRollouts.id)).limit(ROLLOUTS_LISTED);
-    const stages = rows.length ? await db.select().from(endpointUpdateRolloutStages).where(inArray(endpointUpdateRolloutStages.rolloutId, rows.map((r) => r.id))) : [];
-    const on = await selfUpdateOn(db, source.id);
-    return reply.send({ rollouts: rows.map((r) => rolloutView(r, stages.filter((s) => s.rolloutId === r.id), on)), limit: ROLLOUTS_LISTED });
+    return answerListPage(db, req, reply, rolloutsList);
   });
 
   app.post("/v1/discovery/sources/:sourceId/update-rollouts", async (req, reply) => {
@@ -255,10 +329,10 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
           .insert(endpointUpdateRolloutStages)
           .values(b.data.stages.map((groupId, i) => ({ rolloutId: r.id, ordinal: i + 1, groupId, groupName: nameOf.get(groupId)! })))
           .returning();
-        await audit(tx, actor(req), source.id, "endpoint-update-rollout-created", `update rollout to ${r.targetVersion} created over ${stages.length} stage(s) (ADR-0360)`, { rolloutId: r.id, targetVersion: r.targetVersion, stages: b.data.stages });
+        await audit(tx, actor(req), { type: "discovery_source", id: source.id }, "endpoint-update-rollout-created", `update rollout to ${r.targetVersion} created over ${stages.length} stage(s) (ADR-0360)`, { rolloutId: r.id, targetVersion: r.targetVersion, stages: b.data.stages });
         return { r, stages };
       });
-      return reply.status(201).send({ rollout: rolloutView(created.r, created.stages, await selfUpdateOn(db, source.id)) });
+      return reply.status(201).send({ rollout: rolloutView(created.r, created.stages, await selfUpdateOnGroups(db, created.stages.map((st) => st.groupId))) });
     } catch (e) {
       if (e instanceof Refusal) return send(reply, e);
       throw e;
@@ -270,7 +344,7 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     if (!id) return reply.status(400).send({ error: "invalid_request", detail: "rolloutId must be a uuid" });
     const found = await loadRollout(id);
     if (!found) return reply.status(404).send({ error: "not_found", detail: "no such rollout" });
-    return reply.send({ rollout: rolloutView(found.r, found.stages, await selfUpdateOn(db, found.r.sourceId)) });
+    return reply.send({ rollout: rolloutView(found.r, found.stages, await selfUpdateOnGroups(db, found.stages.map((st) => st.groupId))) });
   });
 
   app.post("/v1/discovery/update-rollouts/:rolloutId/:action", async (req, reply) => {
@@ -280,27 +354,34 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
       return reply.status(400).send({ error: "invalid_request", detail: `rolloutId must be a uuid and the action one of ${ROLLOUT_ACTIONS.join(", ")}` });
     }
     try {
-      const done = await db.transaction(async (rawTx) => {
+      await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
         const [r] = await tx.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id)).for("update");
         if (!r) throw new Refusal(404, "not_found", "no such rollout");
         const stages = (await tx.select().from(endpointUpdateRolloutStages).where(eq(endpointUpdateRolloutStages.rolloutId, id)).for("update")).sort((a, b) => a.ordinal - b.ordinal);
-        const on = await selfUpdateOn(tx, r.sourceId);
+        // start and resume need every live stage group's self-update on; slice 1c also reads the group's setting each time
+        // it offers the update, so a group turned off afterwards stops being offered it at once
+        const on = await selfUpdateOnGroups(tx, stages.map((st) => st.groupId));
         const view = rolloutView(r, stages, on).lifecycle.transitions.find((t) => t.event === action)!;
-        if (!view.allowed) throw new Refusal(409, ROLLOUT_MACHINE.transitions[action].from.includes(r.state as RolloutState) ? "transition_blocked" : "illegal_transition", view.reason ?? "not allowed now");
-        const to = ROLLOUT_MACHINE.transitions[action].to;
+        if (!view.allowed) throw new Refusal(409, ROLLOUT_MACHINE.can(r.state as RolloutState, action) ? "transition_blocked" : "illegal_transition", view.reason ?? "not allowed now");
+        const to = ROLLOUT_MACHINE.next(r.state as RolloutState, action);
         // the guarded write: only from the declared source states (a concurrent write matches no row)
         const moved = await tx
           .update(endpointUpdateRollouts)
           .set({ state: to, updatedAt: sql`now()` })
-          .where(and(eq(endpointUpdateRollouts.id, id), inArray(endpointUpdateRollouts.state, sourcesOf(ROLLOUT_MACHINE, action))))
+          .where(and(eq(endpointUpdateRollouts.id, id), whereFrom(endpointUpdateRollouts.state, ROLLOUT_MACHINE, action)))
           .returning();
         if (moved.length === 0) throw new Refusal(409, "changed_concurrently", "the rollout changed while this was decided; read it again");
-        const stageMove = async (ordinal: number, event: "activate" | "finish") =>
-          tx
+        const stageMove = async (ordinal: number, event: "activate" | "finish") => {
+          const to = ROLLOUT_STAGE_MACHINE.def.transitions[event].to;
+          const rows = await tx
             .update(endpointUpdateRolloutStages)
-            .set(event === "activate" ? { state: "active", startedAt: sql`now()` } : { state: "done", completedAt: sql`now()` })
-            .where(and(eq(endpointUpdateRolloutStages.rolloutId, id), eq(endpointUpdateRolloutStages.ordinal, ordinal), inArray(endpointUpdateRolloutStages.state, sourcesOf(ROLLOUT_STAGE_MACHINE, event))));
+            .set(to === "active" ? { state: to, startedAt: sql`now()` } : { state: to, completedAt: sql`now()` })
+            .where(and(eq(endpointUpdateRolloutStages.rolloutId, id), eq(endpointUpdateRolloutStages.ordinal, ordinal), whereFrom(endpointUpdateRolloutStages.state, ROLLOUT_STAGE_MACHINE, event)))
+            .returning({ ordinal: endpointUpdateRolloutStages.ordinal });
+          // the stage rows are locked FOR UPDATE above, so a miss is a broken invariant: roll the whole move back
+          if (rows.length === 0) throw new Refusal(409, "changed_concurrently", "a stage changed while this was decided; read the rollout again");
+        };
         const active = stages.find((s) => s.state === "active");
         if (action === "start") await stageMove(stages[0]!.ordinal, "activate");
         if (action === "advance" && active) {
@@ -308,15 +389,74 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
           await stageMove(stages.find((s) => s.ordinal > active.ordinal)!.ordinal, "activate");
         }
         if (action === "complete" && active) await stageMove(active.ordinal, "finish");
-        await audit(tx, actor(req), r.sourceId, `endpoint-update-rollout-${action}`, `update rollout to ${r.targetVersion}: ${action} (${r.state} → ${to}) (ADR-0360)`, { rolloutId: id, event: action, from: r.state, to, activeStage: active?.ordinal ?? null });
-        return r.sourceId;
+        await audit(tx, actor(req), { type: "discovery_source", id: r.sourceId }, `endpoint-update-rollout-${action}`, `update rollout to ${r.targetVersion}: ${action} (${r.state} → ${to}) (ADR-0360)`, { rolloutId: id, event: action, from: r.state, to, activeStage: active?.ordinal ?? null });
       });
       const found = await loadRollout(id);
-      return reply.send({ rollout: rolloutView(found!.r, found!.stages, await selfUpdateOn(db, done)) });
+      return reply.send({ rollout: rolloutView(found!.r, found!.stages, await selfUpdateOnGroups(db, found!.stages.map((st) => st.groupId))) });
     } catch (e) {
       if (e instanceof Refusal) return send(reply, e);
       throw e;
     }
+  });
+
+  // ---- halt threshold (D-2026-11-22-04: configurable but bounded) ----------------------------------------------
+  app.put("/v1/discovery/update-rollouts/:rolloutId/halt-threshold", async (req, reply) => {
+    const id = param(req, "rolloutId");
+    if (!id) return reply.status(400).send({ error: "invalid_request", detail: "rolloutId must be a uuid" });
+    const b = haltThresholdSchema.safeParse(req.body ?? {});
+    if (!b.success) {
+      return reply.status(400).send({ error: "invalid_request", detail: `send {haltThreshold}: a whole number from ${HALT_THRESHOLD.min} to ${HALT_THRESHOLD.max} (strict default ${HALT_THRESHOLD.strict})` });
+    }
+    const want = b.data.haltThreshold;
+    const [current] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    if (!current) return reply.status(404).send({ error: "not_found", detail: "no such rollout" });
+    const terminal = ROLLOUT_MACHINE.def.terminal as readonly string[];
+    if (terminal.includes(current.state)) return reply.status(409).send({ error: "rollout_closed", detail: `the rollout is ${current.state}; its halt threshold no longer applies` });
+    // raising the threshold lets more devices fail before the update stops: a relaxation, so a fresh step-up bound to
+    // this rollout and the new value; lowering it is a tightening and needs none
+    const loosening = want > current.haltThreshold;
+    let stepUp: string | null = null;
+    if (loosening) {
+      const su = await requireStepUp(db, req, reply, haltThresholdRelaxStepUp(id, want));
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    try {
+      await db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        const [r] = await tx.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id)).for("update");
+        if (!r) throw new Refusal(404, "not_found", "no such rollout");
+        if (terminal.includes(r.state)) throw new Refusal(409, "rollout_closed", `the rollout is ${r.state}; its halt threshold no longer applies`);
+        // the step-up was bound to the value read before the lock: a concurrent change makes it a different decision
+        if (r.haltThreshold !== current.haltThreshold) throw new Refusal(409, "changed_concurrently", "the halt threshold changed while this was decided; read the rollout again");
+        if (r.haltThreshold === want) return;
+        const auditId = randomUUID();
+        await audit(
+          tx,
+          actor(req),
+          { type: "discovery_source", id: r.sourceId },
+          loosening ? "endpoint-update-rollout-halt-threshold-relaxed" : "endpoint-update-rollout-halt-threshold-tightened",
+          `update rollout to ${r.targetVersion}: halt threshold ${r.haltThreshold} → ${want}${loosening ? ` (step-up ${stepUp})` : ""} (ADR-0360)`,
+          { rolloutId: id, from: r.haltThreshold, to: want, strict: HALT_THRESHOLD.strict, max: HALT_THRESHOLD.max, relaxation: loosening, ...(stepUp ? { stepUp } : {}) },
+          "allow",
+          auditId,
+        );
+        // back at the strict default the relaxation evidence is cleared; a tightening that stays above it keeps the
+        // evidence of the loosening it narrows
+        const evidence =
+          want === HALT_THRESHOLD.strict
+            ? { haltThresholdStepUp: null, haltThresholdAuditId: null }
+            : loosening
+              ? { haltThresholdStepUp: stepUp, haltThresholdAuditId: auditId }
+              : {};
+        await tx.update(endpointUpdateRollouts).set({ haltThreshold: want, ...evidence, updatedAt: sql`now()` }).where(eq(endpointUpdateRollouts.id, id));
+      });
+    } catch (e) {
+      if (e instanceof Refusal) return send(reply, e);
+      throw e;
+    }
+    const found = await loadRollout(id);
+    return reply.send({ rollout: rolloutView(found!.r, found!.stages, await selfUpdateOnGroups(db, found!.stages.map((st) => st.groupId))) });
   });
 
   // ---- one-line enrolment ---------------------------------------------------------------------------------------
@@ -351,7 +491,7 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
         })
         .returning();
       // the token id only: the secret is in no audit row, log line or later read
-      await audit(tx, actor(req), source.id, "endpoint-one-line-enrolment-issued", `one-line enrolment token '${inserted!.label}' issued for one device until ${inserted!.expiresAt.toISOString()} (ADR-0360)`, {
+      await audit(tx, actor(req), { type: "discovery_source", id: source.id }, "endpoint-one-line-enrolment-issued", `one-line enrolment token '${inserted!.label}' issued for one device until ${inserted!.expiresAt.toISOString()} (ADR-0360)`, {
         tokenId: inserted!.id,
         deviceGroupId: inserted!.deviceGroupId,
         expiresAt: inserted!.expiresAt.toISOString(),

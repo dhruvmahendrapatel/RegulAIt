@@ -547,7 +547,12 @@ export interface ProjectCosts {
   budget?: {
     spentUsd?: number;
     budgetUsd?: number | null;
+    /** the raw latch: an admin approved an overage at some point (CXR-CST-002: never shown as "approved now") */
     overageApproved?: boolean;
+    /** the period (YYYY-MM) a monthly budget's approval was granted for */
+    overageApprovedPeriod?: string | null;
+    /** whether the approval is suppressing enforcement NOW, as the gateway decides it */
+    overageActive?: boolean;
     period?: string;
     periodKey?: string;
     alertThresholdPct?: number;

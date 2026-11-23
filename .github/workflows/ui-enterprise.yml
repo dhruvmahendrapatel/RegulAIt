@@ -39,6 +39,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
+
 jobs:
   # ADR-0262: what this run must cover (.github/actions/ci-scope)
   scope:
@@ -101,7 +105,9 @@ jobs:
 
       - name: Build the web app
         if: success() || failure()
-        run: pnpm --filter @regulait/web build
+        # --manifest writes dist/.vite/manifest.json, which ui-chunk-budgets.mjs reads for the first-load and first-paint
+        # totals (ADR-0344 addendum); only the bundle checks in this job read it.
+        run: pnpm --filter @regulait/web build --manifest
 
       - name: Bundle-size ceilings (size-limit)
         if: success() || failure()

@@ -21,6 +21,9 @@ import { resolveToolbox } from "./builder-tools.js";
 import { drainBackgroundWork } from "./background-work.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+import { meetDelegatedAutonomyFloorsForTest, type AutonomyFloorsFixture } from "./testing/autonomy-floors.js";
+
+let autonomyFloors: AutonomyFloorsFixture | undefined;
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -63,6 +66,8 @@ beforeAll(async () => {
   stranger = await k.person("stranger");
   approver = await k.person("approver");
   model = await k.model("conn", { price: 1 });
+  // ADR-0180 addendum (E51): its agents are delegated by setup, so the delegated autonomy floors are put in place
+  autonomyFloors = await meetDelegatedAutonomyFloorsForTest(k.db, [model]);
   await k.grantModel(owner.id, model);
 
   receiver = http.createServer((req, res) => {
@@ -105,6 +110,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await autonomyFloors?.cleanup();
   // M-068: through the shared helper, by the id the POST returned, while the app is still up
   const loopback = await removeEgressAllowEntry(k.app, k.BOOT, { id: allowHostId });
   try {

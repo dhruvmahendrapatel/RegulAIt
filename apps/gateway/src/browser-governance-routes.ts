@@ -182,6 +182,23 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
 
     const deny = (objectId: string | null, code: BrowserRefusalCode, route: string) =>
       audit(db, NIL_UUID, objectId, "browser-extension-refused", "deny", `a browser extension request was refused: ${code} (ADR-0334)`, { code, route });
+    /**
+     * #1030: a registration refused before any enrolment token is known (no token, an unknown one, a malformed body)
+     * comes from an unauthenticated caller, so it must not cost one audit row each. The first refusal of each code in a
+     * minute is written; the rest of that minute are counted and written as one summary row when it ends.
+     */
+    const unauthenticatedRefusals = new RefusalCoalescer((code, route, suppressed, windowStartedAt) =>
+      audit(db, NIL_UUID, null, "browser-extension-refused", "deny", `${suppressed} further unauthenticated browser extension request(s) were refused: ${code}, counted rather than written one by one (ADR-0334, #1030)`, {
+        code,
+        route,
+        coalesced: true,
+        suppressed,
+        windowStartedAt: new Date(windowStartedAt).toISOString(),
+      }).catch(() => undefined),
+    );
+    const denyUnauthenticated = async (code: BrowserRefusalCode, route: string) => {
+      if (unauthenticatedRefusals.admit(code, route, Date.now())) await deny(null, code, route);
+    };
 
     // -- registration (once per install) ------------------------------------------------------------------------
     // The key becomes a workload identity of kind `browser_extension` through S6's binding path (one key, one identity,
@@ -191,24 +208,24 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
       const route = "register";
       const token = bearerToken(req);
       if (!token) {
-        await deny(null, "invalid_token", route);
+        await denyUnauthenticated("invalid_token", route);
         return refuse(reply, 401, "invalid_token");
       }
       const settings = await asEnrolment(() => loadSettings(db));
       if (!settings.enabled) {
-        await deny(null, "browser_governance_disabled", route);
+        await denyUnauthenticated("browser_governance_disabled", route);
         return refuse(reply, 403, "browser_governance_disabled");
       }
       if (!identityIssuer()) return refuse(reply, 503, "issuer_not_configured");
       const body = browserRegisterRequestSchema.safeParse(jsonOf(req.body));
       if (!body.success) {
-        await deny(null, "invalid_body", route);
+        await denyUnauthenticated("invalid_body", route);
         return refuse(reply, 400, "invalid_body");
       }
       const now = await databaseNow(db);
       const prepared = await prepareRunnerKey(body.data.publicJwk as WorkloadPublicJwk, now);
       if (prepared instanceof IdentityAdminError) {
-        await deny(null, "invalid_body", route);
+        await denyUnauthenticated("invalid_body", route);
         return refuse(reply, 400, "invalid_body");
       }
       const jkt = await runnerKeyThumbprint(prepared);
@@ -269,7 +286,8 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
           throw e;
         }));
       if (!outcome.ok) {
-        await deny(outcome.tokenId, outcome.code, route);
+        if (outcome.tokenId) await deny(outcome.tokenId, outcome.code, route);
+        else await denyUnauthenticated(outcome.code, route);
         return refuse(reply, outcome.status, outcome.code);
       }
       return reply.status(outcome.created ? 201 : 200).send({ deviceId: outcome.deviceId, identityId: outcome.identityId, clientId });
@@ -330,7 +348,7 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
           .for("update");
         if (!cur) return "gone" as const;
         if (cur.boundSubject === null) {
-          // an unbound device with no account signed in is attributed to no one (owner decision B1's org-wide rules)
+          // an unbound device with no account signed in is attributed to no one (and its policy denies every site, #1028)
           if (!subject) return "ok" as const;
           const user = await userForEmail(t, email);
           await t
@@ -401,12 +419,13 @@ export function registerBrowserGovernanceRoutes(app: FastifyInstance, db: Db, op
         rules,
         nowSeconds: Math.floor((await databaseNow(db)).getTime() / 1000),
       });
-      // owner decision B1: an account that matches no RegulAIt user gets the org-wide rules, and that is audited
-      if (email && !user) {
-        await audit(db, NIL_UUID, authed.device.id, "browser-policy-unmatched-account", "allow", "a browser policy was issued with the org-wide site rules for a profile account that matches no RegulAIt user (ADR-0334 B1)", {
+      // #1028 (owner decision 2026-11-21, reversing B1): an account that matches no active RegulAIt user, or no account,
+      // gets a policy that denies every site (`account_not_recognised`); that is audited, pseudonym only
+      if (!user) {
+        await audit(db, NIL_UUID, authed.device.id, "browser-policy-unrecognised-account", "deny", "a browser policy denying every site was issued for a profile account that matches no RegulAIt user, or for a signed-out profile (ADR-0334 §14, #1028)", {
           deviceId: authed.device.id,
-          subject,
-          allowedSites: policy.sites.filter((s) => s.decision === "allow").map((s) => s.siteId),
+          subject: subject || null,
+          signedIn: Boolean(email),
         });
       }
       return reply.status(200).send({ policy: signDevicePolicy(policy, key.signer) });
@@ -840,6 +859,48 @@ function trimTrailingSlashes(u: string): string {
 
 /** the HTTP status of each non-active token state's refusal at register (unchanged by rule 12) */
 const TOKEN_REFUSAL_STATUS = { exhausted: 409, expired: 410, revoked: 403 } as const;
+
+export const REFUSAL_COALESCE_WINDOW_MS = 60_000;
+
+/**
+ * #1030: per process, per refusal code and route, the first refusal of a window is written and the rest are counted;
+ * the count is written as one summary row when the window ends (an unref'd timer, so it never holds the process
+ * open). A count still open when the process exits is lost, which the ADR records: it bounds audit volume from
+ * unauthenticated callers and is not itself evidence of any one request.
+ */
+export class RefusalCoalescer {
+  private readonly windows = new Map<string, { code: BrowserRefusalCode; route: string; startedAt: number; suppressed: number; timer: ReturnType<typeof setTimeout> | null }>();
+
+  constructor(
+    private readonly flush: (code: BrowserRefusalCode, route: string, suppressed: number, windowStartedAt: number) => Promise<unknown>,
+    private readonly windowMs: number = REFUSAL_COALESCE_WINDOW_MS,
+  ) {}
+
+  /** true when this refusal should be written now (the first of its window) */
+  admit(code: BrowserRefusalCode, route: string, nowMs: number): boolean {
+    const key = `${route}:${code}`;
+    const w = this.windows.get(key);
+    if (!w || nowMs - w.startedAt >= this.windowMs) {
+      if (w) this.close(key);
+      this.windows.set(key, { code, route, startedAt: nowMs, suppressed: 0, timer: null });
+      return true;
+    }
+    w.suppressed += 1;
+    if (!w.timer) {
+      w.timer = setTimeout(() => this.close(key), Math.max(0, w.startedAt + this.windowMs - nowMs));
+      w.timer.unref?.();
+    }
+    return false;
+  }
+
+  private close(key: string): void {
+    const w = this.windows.get(key);
+    if (!w) return;
+    this.windows.delete(key);
+    if (w.timer) clearTimeout(w.timer);
+    if (w.suppressed > 0) void this.flush(w.code, w.route, w.suppressed, w.startedAt);
+  }
+}
 
 /** a step-up refused while claimed inside the settings write's transaction: rolls the write back */
 class StepUpRefusedInTx extends Error {

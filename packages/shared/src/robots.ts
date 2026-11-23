@@ -117,7 +117,22 @@ export const robotVersionDraftSchema = z
   .strict();
 export type RobotVersionDraft = z.infer<typeof robotVersionDraftSchema>;
 
-export const setRobotSecretSchema = z.object({ value: z.string().min(1).max(8192) }).strict();
+/**
+ * The shortest robot secret value: the evidence and output canary (`canaryPatterns`, gateway) cannot tell a shorter
+ * value apart from ordinary page bytes, so such a value could leave in a screenshot or an output unseen. One constant
+ * for both, so the store refuses exactly what the canary would not match.
+ */
+export const ROBOT_SECRET_MIN_CHARS = 4;
+export const setRobotSecretSchema = z
+  .object({
+    value: z
+      .string()
+      .min(ROBOT_SECRET_MIN_CHARS, {
+        message: `a robot secret is at least ${ROBOT_SECRET_MIN_CHARS} characters (a shorter value cannot be detected if a page echoes it back)`,
+      })
+      .max(8192),
+  })
+  .strict();
 
 export const submitRobotVersionSchema = z
   .object({

@@ -241,7 +241,7 @@ test.describe("ADR-0186 A: passkeys and step-up", () => {
     await fakeWebAuthn(page);
     const cap = await mockApi(page, { admin: true, methods: ["passkey"] });
     await page.goto("/ui/admin/users");
-    await page.getByRole("link", { name: "Manage Ana Analyst" }).click();
+    await page.getByRole("button", { name: "Manage Ana Analyst" }).click();
     await page.getByRole("tab", { name: "Passkeys" }).click();
     await page.getByRole("button", { name: `Revoke Ana Analyst's passkey "Ana's phone"` }).click();
     await page.getByRole("dialog", { name: /Remove Ana Analyst's passkey/ }).getByRole("button", { name: "Revoke" }).click();
