@@ -1,14 +1,8 @@
 {
   "adr": "ADR-0337",
   "lane": "E18",
-  "tracking": "ADR-0337 §5 and §6 (lane E18): the findings report (slice 3) and the owner decision 2026-11-17 (vendor-app auto-link to agents, admin link and unlink) are API-only in the lane brief; the graph, findings and link screen is requested on #453. raised under the lane brief (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0337); the read-setup screen (owner decisions 2026-11-22: the Microsoft 365 activity-log checklist and the Salesforce read-scope view) is built",
+  "tracking": "ADR-0337 §5 and §6 (lane E18): the findings report (slice 3) is API-only in the lane brief; the owner decision 2026-11-17 (vendor-app auto-link to agents, admin link and unlink) has its Apps and agents screen; the graph, findings and link screen is requested on #453. raised under the lane brief (new routes go to the census with a KNOWN_UI_GAPS entry on #453; recorded in ADR-0337); the read-setup screen (owner decisions 2026-11-22: the Microsoft 365 activity-log checklist and the Salesforce read-scope view) is built",
   "gaps": {
-    "GET /v1/discovery/entitlements/apps": "lists the apps one SaaS entitlement source holds, each with its agent link state and the link transitions allowed next",
-    "PUT /v1/discovery/entitlements/apps/:appId/agent-link": "links a vendor app to an agent by hand (a partial or fuzzy match), audited",
-    "DELETE /v1/discovery/entitlements/apps/:appId/agent-link": "unlinks a vendor app from its agent (auto or manual), audited; it is not auto-linked again",
-    "GET /v1/discovery/agent-identifiers": "lists the vendor app identifiers declared for agents",
-    "POST /v1/discovery/agent-identifiers": "declares an agent's app id on one platform; apps with exactly that id are auto-linked, each audited",
-    "DELETE /v1/discovery/agent-identifiers/:identifierId": "removes a declared identifier (audited); existing links stay until an admin unlinks them",
     "GET /v1/discovery/entitlements/findings": "the SaaS entitlement findings (unused grant, excessive scope, oversharing, publicly exposed agent), computed at read time with their evidence and what is not assessable (ADR-0337 §5)",
     "POST /v1/discovery/entitlements/findings/reviews": "raises a SaaS entitlement finding the report flags now into the approvals queue for a second administrator's decision (remove the grant, or accept the risk); nothing executes",
     "GET /v1/discovery/entitlements/findings/reviews": "lists raised finding reviews with their state and the transitions allowed next",
