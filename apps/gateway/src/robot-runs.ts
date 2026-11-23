@@ -23,6 +23,9 @@
  *   session closing). Before placement it withdraws the offer and ends the run `cancelled`; during the run every
  *   heartbeat answers {cancel}, and a runner that does not report within a grace is ended `cancelled` anyway. Either
  *   way the session and its sandbox are released. A tools/call is never retried (ADR-0128), so no second run starts.
+ *   The cancel reaches the run from ANY gateway replica (D-2026-11-22-07, caller-cancel.ts): a cancel received
+ *   elsewhere is shared through the database and aborts the call here. Fail closed: each heartbeat of such a run
+ *   confirms that shared state (`confirmCallerCancels`), and a run whose cancel state cannot be confirmed is stopped.
  *
  *   THE SESSION. The gateway holds the run's stdio session (the I4 pattern) and answers the runner's gateway-channel
  *   requests (`http` frames, `robots-run.ts`) in-process: the plan (once), heartbeats (`{cancel}` when the kill
@@ -98,6 +101,7 @@ import {
 import { loadExecutionMode } from "./execution-posture.js";
 import { decidePlacement, PlacementEgressError, type PlacementRequest } from "./execution-placement.js";
 import { awaitPlacement, cancelOffer } from "./executor-channel.js";
+import { confirmCallerCancels } from "./caller-cancel.js";
 import { endStdioSession, holdStdioSession, StdioSession, useRelayDb, watchHeldStdioSession } from "./executor-stdio.js";
 import { artifactStorageKey, type ArtifactStore } from "./model-artifacts.js";
 import { validateOutputAgainstSchema } from "./playground.js";
@@ -492,6 +496,8 @@ export async function startRobotRun(db: Db, req: RobotRunRequest, deps: RobotRun
   };
   const controller = new RobotRunController(db, deps, runId, plan, [runKey, ...opened.map((s) => s.value)], req.requestedBy, {
     downloads: piiBlock ? "digest_only" : "store",
+    // a run with a caller can be cancelled from any replica: each heartbeat confirms that shared state (fail closed)
+    ...(req.signal ? { confirmCancel: confirmCallerCancels, cancelGraceMs: deps.abortGraceMs ?? ABORT_GRACE_MS } : {}),
   });
   try {
     const session = new StdioSession(decision.offerId, decision.executorId, { command: ROBOT_RUNNER_WORKLOAD.command, args: [...ROBOT_RUNNER_WORKLOAD.args] });
@@ -562,6 +568,8 @@ export interface RunEndFacts {
   readonly forcedFailure: "evidence_too_large" | null;
   /** the caller aborted the run */
   readonly cancelRequested: boolean;
+  /** the cancel came from an unconfirmed cross-replica state, not the caller (D-2026-11-22-07) */
+  readonly cancelUnconfirmed?: boolean;
 }
 
 /** the outputs carry a secret value in any canary form, whole or in one field */
@@ -584,7 +592,7 @@ export async function finishRun(
 ): Promise<RobotRunOutcome> {
   let status: "succeeded" | "failed" | "timed_out" | "cancelled" = r?.status ?? (facts.cancelRequested ? "cancelled" : "timed_out");
   let failureCode: string | null = r ? (r.failureCode ?? null) : facts.cancelRequested ? "caller_aborted" : "timed_out";
-  if (facts.cancelRequested && status === "cancelled") failureCode = "caller_aborted";
+  if (facts.cancelRequested && status === "cancelled") failureCode = facts.cancelUnconfirmed ? "cancel_unconfirmed" : "caller_aborted";
   let outputs: Record<string, unknown> | null = null;
   let outputLeak = false;
   if (facts.forcedFailure) {
@@ -825,6 +833,9 @@ export class RobotRunController implements RunEndFacts {
   private cancelled = false;
   private forced: "evidence_too_large" | null = null;
   private readonly downloads: "store" | "digest_only";
+  private readonly confirmCancel: (() => Promise<boolean>) | null;
+  private readonly cancelGraceMs: number;
+  private unconfirmed = false;
 
   constructor(
     private readonly db: Db,
@@ -833,9 +844,11 @@ export class RobotRunController implements RunEndFacts {
     private readonly plan: RobotRunPlan,
     forbidden: readonly string[],
     private readonly requestedBy: string,
-    opts: { downloads?: "store" | "digest_only" } = {},
+    opts: { downloads?: "store" | "digest_only"; confirmCancel?: () => Promise<boolean>; cancelGraceMs?: number } = {},
   ) {
     this.forbidden = canaryPatterns(forbidden);
+    this.confirmCancel = opts.confirmCancel ?? null;
+    this.cancelGraceMs = opts.cancelGraceMs ?? ABORT_GRACE_MS;
     // strict by default: a controller told nothing keeps a download by its digest only
     this.downloads = opts.downloads ?? "digest_only";
   }
@@ -855,6 +868,11 @@ export class RobotRunController implements RunEndFacts {
 
   get cancelRequested(): boolean {
     return this.cancelled;
+  }
+
+  /** true when a heartbeat stopped the run because its cross-replica cancel state could not be confirmed */
+  get cancelUnconfirmed(): boolean {
+    return this.unconfirmed;
   }
 
   /** the caller aborted: every heartbeat answers {cancel}; a runner that has not reported within `graceMs` is ended */
@@ -965,6 +983,12 @@ export class RobotRunController implements RunEndFacts {
     }
     if (route === "heartbeat" && frame.method === "POST") {
       if (!robotHeartbeatSchema.safeParse(body).success) return [400, { error: "invalid_body" }];
+      // fail closed (D-2026-11-22-07): a cancel sent to another replica must reach this run; when that cannot be
+      // confirmed, the run stops as cancelled
+      if (this.confirmCancel && !this.cancelled && !this.done && !(await this.confirmCancel().catch(() => false))) {
+        this.unconfirmed = true;
+        this.requestCancel(this.cancelGraceMs);
+      }
       const mode = await loadExecutionMode(this.db);
       const overTime = Date.now() - this.startedAt > this.plan.limits.wallClockMs;
       return [200, { cancel: mode === "halted" || mode === "read_only" || overTime || this.done || this.cancelled || this.forced !== null }];

@@ -60,7 +60,15 @@ import {
   type Db,
   type PaidCallPriceRow,
 } from "@regulait/db";
-import { paidPriceForConnector, releasePaidCall, reservePaidCall, runIdOfCall, settlementAmount, settlePaidCall } from "./paid-calls.js";
+import {
+  type PaidCallBudgetWarning,
+  paidPriceForConnector,
+  releasePaidCall,
+  reservePaidCall,
+  runIdOfCall,
+  settlementAmount,
+  settlePaidCall,
+} from "./paid-calls.js";
 import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
 import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
@@ -1281,7 +1289,7 @@ export async function executeGovernedConnectorCall(
     // anything is sent (and before a held approval is spent); over budget, or no budget at all, is a refusal routed to
     // the approvals queue. A hold this path does not settle or release is released by the sweeper at its TTL.
     const paidPrice = await paidPriceForConnector(db, connectorId);
-    let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow } | null = null;
+    let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow; budgetWarning?: PaidCallBudgetWarning } | null = null;
     if (paidPrice) {
       const reserved = await reservePaidCall(db, {
         price: paidPrice,
@@ -1553,6 +1561,8 @@ export async function executeGovernedConnectorCall(
         decision,
         result: { status: result.status, body: respBody },
         costUsd,
+        // D-2026-11-22-05: an over-budget paid call that the org's warn-only enforcement let through says so
+        ...(paidHold?.budgetWarning ? { budgetWarning: paidHold.budgetWarning } : {}),
         ...(pii ? { pii } : {}),
         ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
       });

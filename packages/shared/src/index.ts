@@ -244,6 +244,13 @@ export {
   selectAssignmentRule,
   slaDeadlines,
   evaluateSla,
+  APPROVAL_TASK_PRIORITY_ORDER,
+  taskScheduleRelaxations,
+  slaStateAt,
+  APPROVAL_SLA_MACHINE,
+  slaTransitionAllowed,
+  type TaskPriority,
+  type TaskSchedule,
   bulkCapRefusal,
   bulkSensitivityFenced,
   createApprovalSlaPolicySchema,
@@ -3512,6 +3519,7 @@ export {
   seatRosterAdapter,
   seatRosterConfigSchema,
   vendorAliasRequestSchema,
+  costResolutionRuleRemovalSchema,
   vendorDomainRuleRequestSchema,
   type AccountResolution,
   type AccountResolutionMethod,
@@ -5114,6 +5122,7 @@ export * from "./repo-analysis.js";
 export * from "./discovery/index.js";
 // ADR-0337 (lane E18): the SaaS entitlement graph vocabulary (batch shape and checks, the frozen scope classifier)
 export * from "./saas-entitlements.js";
+export * from "./saas-entitlement-findings.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
 // ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
@@ -5179,7 +5188,32 @@ export * from "./adoption-analytics.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+// ADR-0357: governance configuration as code (the document schema and the dry-run plan)
+export * from "./governance-config.js";
+// ADR-0357 §4: tighten-only policy inheritance (the declared merge table)
+export * from "./governance-policy.js";
 
+// ADR-0359 (lane E40): behaviour baselines' pure statistics (robust z-score and share of history)
+export {
+  BEHAVIOUR_BASELINE,
+  BEHAVIOUR_CATEGORY_SIGNALS,
+  BEHAVIOUR_FINDING_STATUSES,
+  BEHAVIOUR_METHODS,
+  BEHAVIOUR_MODES,
+  BEHAVIOUR_SIGNAL_NAMES,
+  BEHAVIOUR_SIGNALS,
+  BEHAVIOUR_SUBJECT_KINDS,
+  BEHAVIOUR_VOLUME_SIGNALS,
+  evaluateCategory,
+  evaluateVolume,
+  volumeBaselineStats,
+  type BehaviourFindingStatus,
+  type BehaviourMethod,
+  type BehaviourMode,
+  type BehaviourSignal,
+  type BehaviourSubjectKind,
+  type BehaviourVerdict,
+} from "./behaviour-baseline.js";
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
 

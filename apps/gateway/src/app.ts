@@ -451,6 +451,9 @@ import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration
 import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
+import { registerGovernanceConfigRoutes } from "./governance-config.js";
+import { registerGovernancePolicyRoutes } from "./governance-policy.js";
+import { registerGovernanceConfigApplyRoute } from "./governance-config-apply.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -648,6 +651,12 @@ import { registerPmImportRoutes } from "./pm-import.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
+import {
+  applySaasFindingReviewDecision,
+  precheckSaasFindingReviewDecision,
+  registerSaasFindingReviewRoutes,
+  saasFindingReviewApprovalLabels,
+} from "./saas-finding-reviews.js";
 import { registerContextGraphRoutes } from "./context-graph-routes.js";
 import { registerAgentRegistryRoutes } from "./agent-registry-routes.js";
 import { registerContentTrustRoutes } from "./content-trust-routes.js";
@@ -658,6 +667,7 @@ import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerThirdPartyIngestRoutes } from "./third-party-ingest-routes.js";
 import { registerBrowserGovernanceRoutes } from "./browser-governance-routes.js";
 import { registerSiemDeliveryRoutes } from "./siem-delivery.js";
+import { registerBehaviourRoutes } from "./behaviour/routes.js";
 import { registerDetectionRoutes } from "./detection/routes.js";
 import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
@@ -4703,6 +4713,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       rows.filter((r) => r.objectType === "endpoint_addon_removal").map((r) => r.stageId),
     );
     // ADR-0338: what a vendor agent control action asks the approver to approve
+    // ADR-0337 §5 slice 3b: what a SaaS entitlement finding review asks the approver to decide
+    const saasFindingReviewLabel = await saasFindingReviewApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "saas_finding_review").map((r) => r.stageId),
+    );
     const vendorAgentControlLabel = await vendorAgentControlApprovalLabels(
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
@@ -4794,6 +4809,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "saas_finding_review" && r.stageId ? (saasFindingReviewLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
         null,
@@ -5303,6 +5319,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0337 §5 slice 3b — a SaaS entitlement finding review: never its requester, only an admin in the pool (no
+    // override), and the approval must still bind the review as raised. Nothing executes on either decision.
+    if (row.objectType === "saas_finding_review") {
+      const refusal = await precheckSaasFindingReviewDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0366 — a rogue-agent containment or its release: only an active administrator decides, never the agent's
     // steward nor the release's requester, with an MFA `approval_decide` step-up (owner decision 2026-11-21)
     if (row.objectType === "agent_containment") {
@@ -5714,6 +5736,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approver's step-up is spent here, with the move.
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0337 §5 slice 3b: approved = remediate in the vendor's console, denied = risk accepted; nothing is sent
+      if (updated.objectType === "saas_finding_review") {
+        await applySaasFindingReviewDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0366: a proposal approved = the agent is halted (ADR-0124's halt), denied = it keeps running; a release
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
@@ -6297,6 +6323,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
   // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
   registerMcpBundleRoutes(app, db);
+  // ADR-0357 (lane E38): governance configuration as code (schema, export, dry-run plan)
+  registerGovernanceConfigRoutes(app, db);
+  // ADR-0357 §4: business units, tighten-only policy layers and the effective-policy view
+  registerGovernancePolicyRoutes(app, db);
+  registerGovernanceConfigApplyRoute(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
@@ -6394,6 +6425,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0337 §6 — the entitlement graph's apps and their agent links (auto on an exact identifier match, audited;
   // an admin links a partial match or unlinks). Admin-only by default (none is in NON_ADMIN_ROUTES); no vendor call.
   registerSaasEntitlementRoutes(app, db);
+  registerSaasFindingReviewRoutes(app, db);
   registerContextGraphRoutes(app, db);
   // ADR-0314 (G6) — agents staged from vendor agent registries (Entra Agent ID / Agent 365, Gemini Enterprise,
   // Bedrock AgentCore) and their step-up import into the inventory (disabled, proposed, no grants). Admin-only.
@@ -6424,6 +6456,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerBrowserGovernanceRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0303: SIEM delivery of the audit chain (admin-only through the default gate)
   registerSiemDeliveryRoutes(app, db, { dataKey: opts.dataKey });
+  registerBehaviourRoutes(app, db); // ADR-0359 (E40): behaviour baselines, shadow mode (admin-only through the default gate)
   registerDetectionRoutes(app, db); // ADR-0333 (E15): agent behaviour detection
   // ADR-0312: cost per outcome (the list is self-scoped and in NON_ADMIN_ROUTES; the roll-up and refresh are admin-only)
   registerCostOutcomeRoutes(app, db);

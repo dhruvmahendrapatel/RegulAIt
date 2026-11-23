@@ -174,7 +174,7 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   const row = await registered.json(); serverId = row.id;
   expect(row.stdio).toEqual({ image: IMAGE, command: "/srv/mcp/server.js", args: ["--root", "/srv/data with spaces"] });
   expect(row.stdioCommandDigest).toBe(IMAGE);
-  await expect(page.getByRole("link", { name: `Show tools on ${SERVER}`, exact: true })).toContainText(IMAGE);
+  await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: `Show tools on ${SERVER}`, exact: true }) })).toContainText(IMAGE);
   await page.getByLabel("Server to assign").selectOption(serverId!);
   await page.getByLabel(`Owner for ${SERVER}`).selectOption(ownerId);
   await page.getByRole("button", { name: "Save owner", exact: true }).click();
