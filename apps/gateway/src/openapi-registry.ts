@@ -271,6 +271,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
   "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "internal", // ADR-0361
   "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "internal", // ADR-0361 (D-2026-11-22-06 guided setup)
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "internal",
@@ -1972,6 +1973,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
   "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "shadow-ai", // ADR-0361
   "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "shadow-ai", // ADR-0361 (D-2026-11-22-06 guided setup)
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
   "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "cost-imports",

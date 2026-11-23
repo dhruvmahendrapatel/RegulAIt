@@ -435,6 +435,18 @@ describe("ADR-0361 review fixes", () => {
     }
   });
 
+  it("serves the guided M365 setup checklist to an admin, and no secret (D-2026-11-22-06)", async () => {
+    const res = await app.inject({ method: "GET", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/setup`, headers: KEY });
+    expect(res.statusCode, res.body).toBe(200);
+    const setup = res.json().setup;
+    expect(setup.vendor).toBe("m365_copilot");
+    const ids = setup.steps.map((st: { id: string }) => st.id);
+    expect(ids).toEqual(expect.arrayContaining(["register_app", "api_permissions", "admin_consent", "client_secret", "egress", "turn_on", "data_flowing"]));
+    // this file allowed both hosts
+    expect(setup.steps.find((st: { id: string }) => st.id === "egress").state).toBe("done");
+    expect(res.body).not.toContain(SECRET);
+  });
+
   it("manual runs are rate limited per admin (security S2)", async () => {
     const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0361-limit-${RUN}@example.com`, displayName: "limit admin", isAdmin: true } });
     const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "limit" } });

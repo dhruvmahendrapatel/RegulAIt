@@ -232,6 +232,14 @@ posture read instead of pretending.
 - **Reads of captured text** are audited: one row per page that returned any redacted text (who, which connector,
   which interaction ids, never the text). Manual runs are limited to six a minute per admin (`SharedRateLimitStore`,
   503 when the limit cannot be checked).
+- **Guided setup** (owner decision D-2026-11-22-06, in the orchestration DecisionLog): `GET …/connectors/:id/setup`
+  returns the Microsoft 365 Copilot checklist as data for the UI. It covers the app registration, read-only Graph
+  permissions, the redirect URI, tenant-wide admin consent (the Microsoft identity platform v2.0 `adminconsent` link
+  with the Graph `.default` scope, returning to the deployment's public URL), the client secret, the two egress hosts,
+  the two switches, and whether interactions arrive. Each step's state is read from what RegulAIt sees: the token's
+  roles on the last run, the stored credential, the allow-list and the last finished run. Nothing is fetched from the
+  vendor for it, and a step RegulAIt cannot check is `unknown`, never `done`. The checklist screen is a KNOWN_UI_GAPS
+  entry for #453.
 - **Not built in slice 1:** the ADR-0220 trained detectors on monitored text; a federated (client-assertion) Entra
   credential (the secret path only, the same `azureCredential` supports both); ChatGPT Enterprise and Claude Enterprise
   (slice 2); remediation (slice 3).

@@ -12,6 +12,7 @@
     "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "enables (step-up, needs a live read-only credential) or disables a connector",
     "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "runs one compliance-export read now for a connector",
     "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "lists a connector's runs, 50 at a time",
-    "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "lists a connector's recorded interactions and their counts-only findings, 100 at a time"
+    "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "lists a connector's recorded interactions and their counts-only findings, 100 at a time",
+    "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "the Microsoft 365 Copilot guided setup checklist: each admin step, its state read from what RegulAIt sees, and the admin consent link (owner decision D-2026-11-22-06; the checklist screen is posted on #453)"
   }
 }

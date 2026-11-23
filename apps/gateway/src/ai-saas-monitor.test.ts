@@ -15,7 +15,7 @@ import {
   type GraphAiInteraction,
 } from "@regulait/shared";
 import { ConnectorError, M365_COPILOT_CONNECTOR, m365InteractionsUrl, sameOriginNext, type ConnectorContext } from "./ai-saas-connectors.js";
-import { cascadeLoosens, configWidens, monitorWindow, windowSpanMs } from "./ai-saas-monitor.js";
+import { cascadeLoosens, configWidens, m365SetupGuide, monitorWindow, windowSpanMs } from "./ai-saas-monitor.js";
 
 const TENANT = "11111111-2222-3333-4444-555555555555";
 const CLIENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -257,6 +257,54 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
     const now = new Date("2026-11-17T12:00:00Z");
     const w = monitorWindow(new Date("2026-11-10T00:00:00Z"), 7, now, windowSpanMs(2));
     expect(w.end.getTime() - w.start.getTime()).toBe(6 * 3600_000);
+  });
+
+  it("builds the guided M365 setup from what RegulAIt can see, never claiming a step it cannot check (D-2026-11-22-06)", () => {
+    const base = {
+      config: listed([USER_A]),
+      publicUrl: "https://regulait.example.com",
+      allowedHosts: new Set<string>(),
+      policyEnabled: false,
+      connectorEnabled: false,
+      credential: null,
+      lastRun: null,
+    };
+    const fresh = m365SetupGuide(base);
+    const state = (g: ReturnType<typeof m365SetupGuide>) => Object.fromEntries(g.steps.map((st) => [st.id, st.state]));
+    expect(state(fresh)).toEqual({
+      register_app: "done",
+      api_permissions: "unknown",
+      redirect_uri: "unknown",
+      admin_consent: "unknown",
+      client_secret: "to_do",
+      egress: "to_do",
+      turn_on: "to_do",
+      data_flowing: "unknown",
+    });
+    expect(fresh.next).toBe("api_permissions");
+    const url = new URL(fresh.adminConsentUrl!);
+    expect(url.origin + url.pathname).toBe(`https://login.microsoftonline.com/${TENANT}/v2.0/adminconsent`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({ client_id: CLIENT, scope: "https://graph.microsoft.com/.default", redirect_uri: "https://regulait.example.com" });
+    const live = m365SetupGuide({
+      ...base,
+      allowedHosts: new Set(["graph.microsoft.com", "login.microsoftonline.com"]),
+      policyEnabled: true,
+      connectorEnabled: true,
+      credential: { scopePosture: "read_only" },
+      lastRun: { status: "succeeded", errorCode: null },
+    });
+    expect(live.steps.every((st) => st.state === "done")).toBe(true);
+    expect(live.next).toBeNull();
+    // a write-capable credential, or a run that hit a missing permission, fails the permission steps
+    expect(state(m365SetupGuide({ ...base, credential: { scopePosture: "refused" } })).api_permissions).toBe("failed");
+    expect(state(m365SetupGuide({ ...base, credential: { scopePosture: "unverified" }, lastRun: { status: "failed", errorCode: "missing_permission" } })).admin_consent).toBe("failed");
+    // with no public URL there is no consent link to return to: the step names the portal button, and no redirect step
+    const noUrl = m365SetupGuide({ ...base, publicUrl: null });
+    expect(noUrl.adminConsentUrl).toBeNull();
+    expect(noUrl.steps.map((st) => st.id)).not.toContain("redirect_uri");
+    // every user in scope also needs User.Read.All
+    const all = m365SetupGuide({ ...base, config: { ...listed([USER_A]), users: { mode: "all" } } });
+    expect(all.steps.find((st) => st.id === "api_permissions")!.detail).toContain("User.Read.All");
   });
 
   it("knows when a tag change loosens the cascade (review R7 [3])", () => {

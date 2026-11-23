@@ -58,6 +58,7 @@ import {
   AI_SAAS_MONITOR_STATEMENT,
   AI_SAAS_MONITOR_VENDORS,
   aiSaasMonitorConfigSchemas,
+  m365CopilotConfigSchema,
   configuredBackfillDays,
   detectPII,
   redactPII,
@@ -79,6 +80,7 @@ import { loadOrgSettings, orgDefaultPiiMode, piiInternationalCategories, retenti
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { resolvePublicUrl } from "./public-url.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { requireStepUp } from "./step-up.js";
 
@@ -863,6 +865,33 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     return reply.status(status).send({ run: runView(run), statement: AI_SAAS_MONITOR_STATEMENT });
   });
 
+  app.get("/v1/ai-saas-monitoring/connectors/:connectorId/setup", async (req, reply) => {
+    const p = idParam.safeParse(req.params);
+    if (!p.success) return reply.status(404).send({ error: "not_found" });
+    const connector = await loadConnector(p.data.connectorId);
+    if (!connector) return reply.status(404).send({ error: "not_found" });
+    if (connector.vendor !== "m365_copilot") {
+      return reply.status(409).send({ error: "no_guided_setup", detail: `there is no guided setup for ${connector.vendor} yet; the catalogue entry lists its permissions and hosts` });
+    }
+    const [lastRun] = await db
+      .select({ status: aiSaasMonitorRuns.status, errorCode: aiSaasMonitorRuns.errorCode })
+      .from(aiSaasMonitorRuns)
+      .where(and(eq(aiSaasMonitorRuns.connectorId, connector.id), inArray(aiSaasMonitorRuns.status, ["succeeded", "failed"])))
+      .orderBy(desc(aiSaasMonitorRuns.startedAt), desc(aiSaasMonitorRuns.id))
+      .limit(1);
+    const cred = await liveCredential(db, connector.id);
+    const guide = m365SetupGuide({
+      config: connector.publicConfig,
+      publicUrl: resolvePublicUrl(),
+      allowedHosts: new Set((await loadEgressAllowList(db)).map((e) => e.host)),
+      policyEnabled: (await loadAiSaasPolicy(db)).enabled,
+      connectorEnabled: connector.enabled,
+      credential: cred?.secretCiphertext ? { scopePosture: cred.scopePosture } : null,
+      lastRun: lastRun ?? null,
+    });
+    return reply.send({ setup: guide });
+  });
+
   app.get("/v1/ai-saas-monitoring/connectors/:connectorId/runs", async (req, reply) => {
     const p = idParam.safeParse(req.params);
     if (!p.success) return reply.status(404).send({ error: "not_found" });
@@ -958,6 +987,124 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
       nextBefore: rows.length === INTERACTIONS_PAGE ? rows[rows.length - 1]!.id : null,
     });
   });
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Guided setup (owner decision D-2026-11-22-06): the admin steps and the consent link are data for the UI, and every
+// step's state is read from what RegulAIt can see itself. Nothing here calls the vendor; a step RegulAIt cannot check is
+// `unknown`, never `done`.
+// --------------------------------------------------------------------------------------------------------------------
+
+export type SetupStepState = "done" | "to_do" | "failed" | "unknown";
+export interface SetupStep {
+  id: string;
+  title: string;
+  detail: string;
+  state: SetupStepState;
+  link?: string | undefined;
+}
+export interface SetupGuide {
+  vendor: AiSaasMonitorVendor;
+  /** the tenant-wide admin consent link (Microsoft identity platform v2.0), or null when the gateway has no public URL
+   * to return to; the step then names the Entra admin center's "Grant admin consent" button instead */
+  adminConsentUrl: string | null;
+  steps: SetupStep[];
+  /** the first step that is not done, for the screen to open on */
+  next: string | null;
+}
+
+const ENTRA_APP_REGISTRATIONS = "https://go.microsoft.com/fwlink/?linkid=2083908";
+const GRAPH_EXPORT_ROLE = "AiEnterpriseInteraction.Read.All";
+
+/** the Microsoft 365 Copilot setup checklist, from the connector's own state (pure; the route gathers the inputs) */
+export function m365SetupGuide(input: {
+  config: unknown;
+  publicUrl: string | null;
+  allowedHosts: ReadonlySet<string>;
+  policyEnabled: boolean;
+  connectorEnabled: boolean;
+  credential: { scopePosture: string } | null;
+  lastRun: { status: string; errorCode: string | null } | null;
+}): SetupGuide {
+  const cfg = m365CopilotConfigSchema.safeParse(input.config);
+  const tenantId = cfg.success ? cfg.data.tenantId : null;
+  const clientId = cfg.success ? cfg.data.clientId : null;
+  const everyone = cfg.success && cfg.data.users.mode === "all";
+  const roles = everyone ? `${GRAPH_EXPORT_ROLE} and User.Read.All` : GRAPH_EXPORT_ROLE;
+  const posture = input.credential?.scopePosture ?? null;
+  const code = input.lastRun?.status === "failed" ? input.lastRun.errorCode : null;
+  // the token's roles are read on every run: a read-only verdict means the permissions were added and consented
+  const consented: SetupStepState =
+    posture === "read_only" ? "done" : posture === "refused" || code === "missing_permission" || code === "forbidden" ? "failed" : "unknown";
+  const adminConsentUrl =
+    tenantId && clientId && input.publicUrl
+      ? `https://login.microsoftonline.com/${tenantId}/v2.0/adminconsent?${new URLSearchParams({ client_id: clientId, scope: "https://graph.microsoft.com/.default", redirect_uri: input.publicUrl }).toString()}`
+      : null;
+  const hosts = AI_SAAS_MONITOR_CATALOGUE.m365_copilot.hosts;
+  const steps: SetupStep[] = [
+    {
+      id: "register_app",
+      title: "Register an application in your Entra tenant",
+      detail: "Create a single-tenant app registration and enter its Directory (tenant) ID and Application (client) ID in this connector.",
+      state: cfg.success ? "done" : "to_do",
+      link: ENTRA_APP_REGISTRATIONS,
+    },
+    {
+      id: "api_permissions",
+      title: "Add read-only Microsoft Graph application permissions",
+      detail: `Under API permissions add the application permission ${roles}, and nothing else. A credential whose token holds any write permission is refused and the connector turned off.`,
+      state: posture === "refused" ? "failed" : consented,
+      link: ENTRA_APP_REGISTRATIONS,
+    },
+    ...(input.publicUrl
+      ? [
+          {
+            id: "redirect_uri",
+            title: "Let the consent link return to RegulAIt",
+            detail: `Under Authentication add the Web redirect URI ${input.publicUrl}. Entra only returns from the consent link to an address the app lists. RegulAIt cannot read your app registration, so it cannot check this step.`,
+            state: consented === "done" ? ("done" as const) : ("unknown" as const),
+          },
+        ]
+      : []),
+    {
+      id: "admin_consent",
+      title: "Grant tenant-wide admin consent",
+      detail: adminConsentUrl
+        ? "A Global Administrator or Privileged Role Administrator opens the consent link and accepts. RegulAIt sees the result the next time a run reads the token's roles."
+        : "A Global Administrator or Privileged Role Administrator selects \"Grant admin consent\" on the app's API permissions page. RegulAIt sees the result the next time a run reads the token's roles.",
+      state: consented,
+      link: adminConsentUrl ?? ENTRA_APP_REGISTRATIONS,
+    },
+    {
+      id: "client_secret",
+      title: "Create a client secret and store it here",
+      detail: "Under Certificates & secrets create a client secret, then store it on this connector (a step-up). RegulAIt encrypts it and never shows it again.",
+      state: posture === null ? "to_do" : posture === "refused" ? "failed" : "done",
+    },
+    {
+      id: "egress",
+      title: "Allow the two Microsoft hosts",
+      detail: `Add ${hosts.join(" and ")} to the egress allow-list. Every vendor request goes through the guarded fetch, which refuses any other host.`,
+      state: hosts.every((h) => input.allowedHosts.has(h)) ? "done" : "to_do",
+    },
+    {
+      id: "turn_on",
+      title: "Turn on monitoring and this connector",
+      detail: "Both are off by default, and turning each on is a step-up.",
+      state: input.policyEnabled && input.connectorEnabled ? "done" : "to_do",
+    },
+    {
+      id: "data_flowing",
+      title: "Interactions arrive",
+      detail: !input.lastRun
+        ? "No run has finished yet. Start one, or wait for the hourly sweep."
+        : input.lastRun.status === "succeeded"
+          ? "The last run read the export."
+          : `The last run ended ${input.lastRun.status}${input.lastRun.errorCode ? ` (${input.lastRun.errorCode})` : ""}; its detail says what to fix.`,
+      state: !input.lastRun ? "unknown" : input.lastRun.status === "succeeded" ? "done" : "failed",
+    },
+  ];
+  return { vendor: "m365_copilot", adminConsentUrl, steps, next: steps.find((st) => st.state !== "done")?.id ?? null };
 }
 
 const PII_STRICTNESS: Record<string, number> = { block: 4, redact: 3, warn: 2, log: 1 };
