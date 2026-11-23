@@ -48,7 +48,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
-  ["/v1/mcp/authorised-targets/:x", "ADR-0246 (P27): API-only brief; the authorised-targets screen is posted on #453 (route census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete this entry when the screen lands"],
+  // CXR-REV-002 (ADR-0047 addendum 2026-11-22): this DELETE archives (it deletes nothing); the screen calls POST .../archive
+  ["/v1/reports/definitions/:x", "a report definition is archived, never deleted (ADR-0047 addendum): DELETE is kept only so an older client archives too, and the Reports screen's Archive action calls POST /v1/reports/definitions/:id/archive"],
   // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
@@ -58,6 +59,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   ["/v1/endpoint-device-groups/:x", "deleting an endpoint device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
   ["/v1/endpoint-device-groups/:x/members/:x", "removing a device from a device group (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
   ["/v1/endpoint-device-groups/:x/rules/:x", "removing a device group's narrowing rule (settings_relax step-up). ADR-0350 (lane E31): master brief rule 3, API-only; the device-group screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
+  // ADR-0357 §4 (lane E38): master brief 2026-11-17 rule 3, API-only; delete this entry when the policy screen lands
+  ["/v1/governance-policy/layer", "removing one level's policy layer (a settings_relax step-up for every rule it set, audited). ADR-0357 §4 (lane E38): master brief rule 3, API-only; the policy hierarchy screen is requested on #453 (route census known gap adr-0357-e38-policy-inheritance.json)"],
   // ADR-0337 §6 (lane E18, owner decision 2026-11-17): API-only until the entitlement graph screen on #453; delete these
   // entries when the screen lands
   ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
@@ -66,6 +69,9 @@ export const DELIBERATELY_API_ONLY = new Map([
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
   ["/v1/users/:x/spend-budget", "removing a person's spend budget (settings_relax step-up, audited): API-only until the spend-budget screen on #453 (ADR-0312 pilot addendum)"],
+  // ADR-0313 (lane E2, G9): removing a paid-call price is a relaxation (settings_relax step-up, audited) and is API-only
+  // until the paid-call screens on #453 land (the route census gap file holds the same route); delete this entry then.
+  ["/v1/paid-call-prices/:x", "removing a paid-call price (settings_relax step-up, audited): API-only until the paid-call screens on #453 (ADR-0313, lane E2)"],
   // ADR-0322 (lane E7): the vendor usage pull brief is API-only; the connector screen is posted on #453 (route census
   // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
   ["/v1/vendor-usage/connectors/:x/credential", "revoking a vendor usage connector credential: API-only until the vendor usage screen on #453 (ADR-0322, lane E7)"],
@@ -121,6 +127,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
  */
 export const KNOWN_REMOVE_GAPS = new Map([
   ["/v1/llm/datasets", "not yet proposed: fine-tuning datasets have no retire; raise on #453"],
+  ["/v1/business-units", "not yet proposed (ADR-0357 §4, lane E38): removing a business unit moves its projects back under the org and drops its layer, which can loosen their effective policy, so it needs a settings_relax step-up bound to those relaxations; raise on #453 with the policy screen"],
 ]);
 
 export const walk = (dir, out = []) => {

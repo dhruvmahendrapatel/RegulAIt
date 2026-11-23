@@ -59,7 +59,17 @@ import {
   governancePolicyEpoch,
   usageEvents,
   type Db,
+  type PaidCallPriceRow,
 } from "@regulait/db";
+import {
+  type PaidCallBudgetWarning,
+  paidPriceForConnector,
+  releasePaidCall,
+  reservePaidCall,
+  runIdOfCall,
+  settlementAmount,
+  settlePaidCall,
+} from "./paid-calls.js";
 import { evaluateConnector, governedCoreErrorDecision, matchingResourceApprovalRulesWith, type GovernedResource } from "@regulait/policy-kernel";
 import { governedEvaluateResource, governedProcessingLimit, loadResourceRestrictions, type ResourceRestrictions } from "./governed-core.js";
 import { CONNECTOR_PIECE_GATE_RULE_ID, refusePieceConnector } from "./connector-catalogue.js";
@@ -1284,8 +1294,27 @@ export async function executeGovernedConnectorCall(
 
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
     // surfaces as 502 — the same discipline as a failed model dispatch.
+    // ADR-0313: a PAID connector reserves its worst-case charge against the call's project budget and run cap before
+    // anything is sent (and before a held approval is spent); over budget, or no budget at all, is a refusal routed to
+    // the approvals queue. A hold this path does not settle or release is released by the sweeper at its TTL.
+    const paidPrice = await paidPriceForConnector(db, connectorId);
+    let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow; budgetWarning?: PaidCallBudgetWarning } | null = null;
+    if (paidPrice) {
+      const reserved = await reservePaidCall(db, {
+        price: paidPrice,
+        userId,
+        projectId: projectId ?? null,
+        runId: runIdOfCall(args),
+        subject: { kind: "connector", connectorId },
+      });
+      if (!reserved.ok) return out.status(reserved.status).send({ decision, error: reserved.error, detail: reserved.detail });
+      paidHold = reserved;
+    }
     const spent = await consumeHeld();
-    if (spent) return spent;
+    if (spent) {
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "not_executed");
+      return spent;
+    }
     let result;
     try {
       if (!await generationCurrent()) throw new ConnectorPolicyChangedError();
@@ -1299,6 +1328,8 @@ export async function executeGovernedConnectorCall(
       );
       result = await provider.invoke(effectiveInvocation);
     } catch (err) {
+      // ADR-0313: a failed call bills nothing, so its hold is released
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed");
       if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
         policyChanged = true;
         await auditPolicyChangedAfterDecision(db, "execution");
@@ -1419,7 +1450,9 @@ export async function executeGovernedConnectorCall(
 
       // pillar 5 actuals: an allowed, executed call bills the connector's flat
       // list price. Unpriced → null, never an invented figure (agents' rule).
-      const costUsd = connector.pricePerCallUsd ?? null;
+      // ADR-0313: a paid connector bills its quoted price (never above its hold) instead of the flat list price
+      const paidSettlement = paidHold ? settlementAmount(paidHold.price, paidHold.heldUsd, undefined) : null;
+      const costUsd = paidSettlement ? paidSettlement.amountUsd : (connector.pricePerCallUsd ?? null);
       const [connectorUsageRow] = await evidenceDb.insert(usageEvents).values({
         // ADR-0188 S4: the acting agent, when one acts (decision 9)
         ...actorColumns(),
@@ -1431,6 +1464,8 @@ export async function executeGovernedConnectorCall(
         projectId,
         detail: {
           status: result.status,
+          // ADR-0313 / ADR-0312: the run this call was made in, so the run's cap and cost per outcome see the spend
+          ...(runIdOfCall(args) ? { runId: runIdOfCall(args) } : {}),
           ...(!policyChanged && body.object ? { object: body.object } : {}),
           providerKind: connector.providerKind,
           ...(policyChanged ? { withheld: true, reason: "policy_changed" } : {}),
@@ -1454,6 +1489,10 @@ export async function executeGovernedConnectorCall(
       // in the same call that inserted it. Never a recomputed price.
       sink.usageEventId = connectorUsageRow?.id ?? null;
       sink.costUsd = costUsd;
+      if (paidHold && paidSettlement) {
+        await settlePaidCall(evidenceDb as unknown as Db, { holdId: paidHold.holdId, userId, amountUsd: paidSettlement.amountUsd,
+          usageEventId: connectorUsageRow?.id ?? null, capped: false, reported: false });
+      }
       // ADR-0188 S4 (decision 22): settled along the chain in the usage row's transaction
       if (args.delegationGrantId && connectorUsageRow) {
         await settleDelegationCharge(evidenceDb, { usageEventId: connectorUsageRow.id, leafGrantId: args.delegationGrantId, amountMicros: usdToMicros(costUsd) });
@@ -1531,6 +1570,8 @@ export async function executeGovernedConnectorCall(
         decision,
         result: { status: result.status, body: respBody },
         costUsd,
+        // D-2026-11-22-05: an over-budget paid call that the org's warn-only enforcement let through says so
+        ...(paidHold?.budgetWarning ? { budgetWarning: paidHold.budgetWarning } : {}),
         ...(pii ? { pii } : {}),
         ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
       });

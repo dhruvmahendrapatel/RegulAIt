@@ -1142,7 +1142,9 @@
                 "rule_step_switch",
                 "robot_version",
                 "endpoint_addon_removal",
-                "vendor_agent_control"
+                "vendor_agent_control",
+                "saas_finding_review",
+                "agent_containment"
               ]
             }
           },

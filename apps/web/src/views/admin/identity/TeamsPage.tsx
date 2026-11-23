@@ -7,7 +7,7 @@
  */
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../../../api/client";
-import { withStepUp } from "../../../stepup/stepUp";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
 import { ago } from "../../../api/format";
@@ -30,24 +30,6 @@ import v from "../../views.module.css";
 // G10 (ADR-0206): the rename dialog is its own chunk, loaded when an admin opens it
 const RenameModal = lazy(() => import("./RenameModal").then((m) => ({ default: m.RenameModal })));
 
-async function deleteWithBody(path: string, body: unknown): Promise<void> {
-  const res = await fetch(path, {
-    method: "DELETE",
-    credentials: "include",
-    headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      payload = { raw: text };
-    }
-    throw new ApiError(res.status, payload);
-  }
-}
 
 export default function TeamsPage() {
   const teams = useTeams();
@@ -80,7 +62,8 @@ export default function TeamsPage() {
 
   const deleteTeam = async (team: Team) => {
     try {
-      await api.del(`/v1/teams/${team.id}`);
+      // settings_relax when the change hands calls to a rule with a wider approver pool (step-up.ts); withStepUp resends once
+      await withStepUp((h) => stepUpApi.del(`/v1/teams/${team.id}`, undefined, h));
       await act.run(async () => {}, "Team deleted");
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.payload.error === "team_owns_shared_context") {
@@ -286,7 +269,7 @@ export default function TeamsPage() {
           setRemoveMember(null);
           if (r)
             void act.run(
-              () => api.del(`/v1/teams/${r.team.id}/members/${r.userId}`),
+              () => withStepUp((h) => stepUpApi.del(`/v1/teams/${r.team.id}/members/${r.userId}`, undefined, h)),
               "Member removed from the team",
             );
         }}
@@ -322,7 +305,7 @@ export default function TeamsPage() {
           setForceDelete(null);
           if (t)
             void act.run(
-              () => deleteWithBody(`/v1/teams/${t.id}`, { force: true, reason }),
+              () => withStepUp((h) => stepUpApi.del(`/v1/teams/${t.id}`, { force: true, reason }, h)),
               "Team force-deleted — reason audited; context provenance retained",
             );
         }}
