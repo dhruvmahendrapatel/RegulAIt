@@ -29,10 +29,12 @@ import {
   governancePolicyLayers,
   gt,
   projects,
+  runWithRlsSystem,
   sql,
   type Db,
   type GovernancePolicyLayerRow,
 } from "@regulait/db";
+import type { InheritedPolicy } from "@regulait/policy-kernel";
 import {
   POLICY_LEVELS,
   effectivePolicy,
@@ -110,21 +112,59 @@ async function layersFor(db: Db, chain: readonly ChainLink[]): Promise<PolicyLay
 }
 
 /**
- * Whether stored policy is applied to calls yet. ADR-0357 §4 slice 2 stores and resolves layers, but no call path
- * reads them yet: wiring the decision core belongs to the ADR-0251 lane (fragment
- * `2026-11-17-e38-policy-enforcement-pending.md`). Every layer and effective-policy response carries this, so an admin
- * (or an agent) is never told a stored rule is in force when it is not (ADR-0180). The enforcement slice flips it.
+ * Whether stored policy is applied to calls, rule by rule (ADR-0180: an admin, or an agent, is never told a stored
+ * rule is in force when it is not). Since the enforcement slice (D-2026-11-23-02, lane L1) the governed decision core
+ * applies the allow-lists and the deny-list on every model, connector and MCP call (`resolveInheritedPolicy`). The other
+ * rules govern project budgets, approvals, workflows and data handling, which are not wired to the inherited policy yet
+ * (fragment `2026-11-17-e38-policy-enforcement-pending.md`), so they stay `not_enforced`.
  */
+const ENFORCED_AT_CALL_TIME = ["allowedAgents", "allowedConnectors", "allowedMcpServers", "deniedTools"] as const;
 export const POLICY_ENFORCEMENT = Object.freeze({
-  enforced: false,
-  status: "not_enforced",
-  reason: "stored and resolved, not yet applied at call time: the decision core does not read the effective policy yet",
+  enforced: "partial",
+  status: "partially_enforced",
+  rules: Object.freeze(
+    Object.fromEntries(
+      (Object.keys(governancePolicySchema.shape) as (keyof typeof governancePolicySchema.shape)[]).map((r) => [
+        r,
+        (ENFORCED_AT_CALL_TIME as readonly string[]).includes(r) ? "enforced" : "not_enforced",
+      ]),
+    ) as Record<keyof typeof governancePolicySchema.shape, "enforced" | "not_enforced">,
+  ),
+  reason:
+    "allowedAgents, allowedConnectors, allowedMcpServers and deniedTools are applied to every governed call; the other rules are stored and resolved, not yet applied",
 } as const);
 
+/** ADR-0357 §4 enforcement: the effective inherited policy could not be read on a call path (the call is refused) */
+export class InheritedPolicyUnavailable extends Error {
+  override name = "InheritedPolicyUnavailable";
+}
+
 /**
- * The effective policy at a level: the chain and each rule's merged value. No call path reads this yet
- * (see POLICY_ENFORCEMENT); it is exported for the enforcement slice, which must fail closed when the read is empty.
+ * ADR-0357 §4 enforcement (D-2026-11-23-02) — THE EFFECTIVE INHERITED POLICY FOR ONE GOVERNED CALL, for the decision
+ * core. A call is placed by its attribution: a project (and the business unit it belongs to) or, unattributed, the org.
+ *
+ * FAIL CLOSED. The policy tables are admin-only under RLS and most callers are not admins, so the read runs in a
+ * transaction of its own under the `governance_policy_read` reason (SELECT on those two tables only), and the first
+ * statement checks that the reason took effect. If it did not (the handle was already inside another transaction, or
+ * the reason is unknown to the database) the read could see no rows and look like "no policy", so this throws
+ * instead, and every caller turns a throw into a refusal (`governed-core-error`). An unknown project throws too.
  */
+export async function resolveInheritedPolicy(db: Db, at: { projectId: string | null }): Promise<InheritedPolicy> {
+  return runWithRlsSystem("governance_policy_read", "governed-core.inherited-policy", () =>
+    db.transaction(async (tx) => {
+      const check = await tx.execute<{ ok: boolean }>(sql`select (select regulait_rls_system_reason()) is not distinct from 'governance_policy_read' as ok`);
+      if (check.rows[0]?.ok !== true) {
+        throw new InheritedPolicyUnavailable("the inherited policy could not be read under its read reason; the call is refused");
+      }
+      const scoped = tx as unknown as Db;
+      const { chain, rules } = await effectivePolicyAt(scoped, at.projectId ? "project" : "org", at.projectId);
+      return { chain, rules: rules.map((r) => ({ rule: r.rule, value: r.value, setBy: r.setBy })) };
+    }),
+  );
+}
+
+/** The effective policy at a level: the chain and each rule's merged value (the call path reads it through
+ * `resolveInheritedPolicy`, which fails closed). */
 export async function effectivePolicyAt(db: Db, level: PolicyLevel, id: string | null) {
   const chain = await policyChain(db, level, id);
   return { chain, rules: effectivePolicy(await layersFor(db, chain)) };

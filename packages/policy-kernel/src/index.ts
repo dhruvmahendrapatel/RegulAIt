@@ -2,6 +2,8 @@
 export * from "./actor.js";
 // ADR-0251 — the restriction layer of the one governed decision core (model, connector, A2A)
 export * from "./resource.js";
+export * from "./inherited-policy.js";
+import { inheritedPolicyVerdict, type InheritedPolicy } from "./inherited-policy.js";
 // ADR-0354 — the graduated, agent-steering response vocabulary (one declared table)
 export * from "./agent-response.js";
 import type { AgentResponse, PolicyResponseSource } from "./agent-response.js";
@@ -679,6 +681,14 @@ export interface EvaluationInput {
    * S3/S4 from the stored grant path, never from anything a caller asserts.
    */
   actor: GovernedActor | null;
+  /**
+   * ADR-0357 §4 enforcement (D-2026-11-23-02) — the effective inherited policy for this call (org → business unit →
+   * project → use case). The gateway's enforcement path always resolves and passes it, and a resolution that fails
+   * refuses the call before the kernel runs. Applied after the decision: an allow or a hold outside it is refused
+   * (deny wins), and every rule it applied is traced with the level that supplied it. Absent = this caller applies
+   * no inherited term (a unit test or a probe that is not an enforcement path).
+   */
+  inheritedPolicy?: InheritedPolicy;
   /** optional display names for reason prose; ids stay authoritative */
   userName?: string | null;
   serverName?: string | null;
@@ -782,6 +792,8 @@ export interface RuleTrace {
 }
 
 export type RuleName =
+  /** ADR-0357 §4 enforcement: the effective inherited policy (an allow-list or the deny-list) */
+  | "inherited-policy"
   /** ADR-0124 — the kill switch and safe modes, consulted before every other
    * rule. Four distinct names so an operator can alert on each reason
    * separately: a deployment-wide stop is a different event from one tool
@@ -1088,10 +1100,24 @@ export function executionApprovalHold(
  * signed off) and approval rules before the final allow.
  */
 export function evaluate(input: EvaluationInput): Decision {
-  const decision = input.actor === null ? evaluateTool(input) : evaluateToolForActor(input, input.actor);
+  const decided = input.actor === null ? evaluateTool(input) : evaluateToolForActor(input, input.actor);
+  const decision = input.inheritedPolicy ? withInheritedPolicy(decided, input.inheritedPolicy, input.serverName ?? null, input.tool.name) : decided;
   // ADR-0182 A14 — `warn` or a break-glass exemption: decided exactly as without the gate, traced first
   const t = literacyTrace(input.execution);
   return t ? { ...decision, ruleChain: [t, ...decision.ruleChain] } : decision;
+}
+
+/**
+ * ADR-0357 §4 enforcement — the inherited policy on an MCP tool call. A deny stays the deny it was (its reason is the
+ * more specific one); an allow or a hold outside the inherited policy is refused, because an inherited rule never
+ * grants and a refusal beats a hold. Every applied rule is traced with the level that supplied it.
+ */
+function withInheritedPolicy(decision: Decision, policy: InheritedPolicy, serverName: string | null, toolName: string): Decision {
+  if (decision.effect === "deny") return decision;
+  const v = inheritedPolicyVerdict(policy, { type: "mcp_tool", serverName, toolName });
+  const ruleChain = [...decision.ruleChain, ...(v.trace as RuleTrace[])];
+  if (v.effect === "deny") return { effect: "deny", ruleId: v.ruleId, ruleChain, reason: v.reason };
+  return { ...decision, ruleChain };
 }
 
 function evaluateTool(input: EvaluationInput): Decision {

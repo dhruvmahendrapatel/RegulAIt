@@ -13,6 +13,7 @@
  * A call over its limit is refused before it is queued for anyone's sign-off, and an approval only ever turns an
  * allow into a hold: it is consulted strictly after an entitlement allow (AER-017's order on the MCP path).
  */
+import { inheritedPolicyVerdict, type InheritedPolicy } from "./inherited-policy.js";
 import type { AbacDecision, ExecutionPosture, RuleScope } from "./index.js";
 import { executionGate } from "./index.js";
 
@@ -176,6 +177,12 @@ export interface ComposeResourceInput {
   approvedApprovalId?: string | null;
   /** can this path queue a per-call approval? false = a required approval refuses (fail closed) */
   canQueue: boolean;
+  /**
+   * ADR-0357 §4 enforcement (D-2026-11-23-02) — REQUIRED, so the compiler finds every caller: the effective inherited
+   * policy for this call. The gateway resolves it with the restrictions and a resolution that fails is a deny
+   * (`governed-core-error`). An install with no layers passes rules whose values are all null.
+   */
+  inheritedPolicy: InheritedPolicy;
 }
 
 /**
@@ -194,6 +201,11 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
   if (base.effect === "deny") {
     return out({ effect: "deny", ruleId: base.ruleId, reason: base.reason });
   }
+
+  // 0. the inherited policy (ADR-0357 §4): deny wins over every grant, rule and consent; nothing here widens
+  const inherited = inheritedPolicyVerdict(input.inheritedPolicy, { type: resource.type, name: resource.name ?? null });
+  chain.push(...inherited.trace);
+  if (inherited.effect === "deny") return out({ effect: "deny", ruleId: inherited.ruleId, reason: `${subject}: ${inherited.reason}` });
 
   // 1. attribution mandate (pillar 5)
   if (input.attributionRequired && !input.projectId) {

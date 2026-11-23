@@ -149,6 +149,61 @@ lowers a limit) or `neutral` (a description).
 - **The effective-policy view.** `GET /v1/governance-policy/effective?level=…&id=…` returns each rule's effective
   value and the level that set it (`setBy`), in a stable JSON shape agents can read as well as people.
 
+#### Enforcement at call time (2026-11-23, lane L1, owner decision D-2026-11-23-02)
+
+The ADR-0251 governed decision core now applies the effective policy on every governed call. Before this, an admin
+could set a rule that the gateway stored but did not enforce, a security-checklist gap.
+
+- **Where.**
+  - `resolveInheritedPolicy` (`apps/gateway/src/governance-policy.ts`) resolves the policy at the call's attribution:
+    its project (with the project's business unit) or, for an unattributed call, the org. Call paths carry no use case
+    yet.
+  - The core loads it with the other restrictions (`loadResourceRestrictions`), so model, connector and A2A calls share
+    one read.
+  - The MCP path loads it at the top of `governedEvaluate`.
+  - The decision is pure, in the kernel (`inheritedPolicyVerdict`, `packages/policy-kernel/src/inherited-policy.ts`).
+    `composeResourceDecision` applies it first, right after the entitlement deny; `evaluate` applies it after the MCP
+    decision.
+- **Which rules.** The rest of §4's rules govern writes, workflows and data handling. They report `not_enforced` in
+  `POLICY_ENFORCEMENT` (now per rule) until they are wired. The call-time rules:
+
+  | Rule | Applies to |
+  |---|---|
+  | `allowedAgents` | a model dispatch, by the agent's name |
+  | `allowedConnectors` | a connector call, by name |
+  | `allowedMcpServers` | an MCP tool call, by server name |
+  | `deniedTools` | an MCP tool call, as `server/tool` |
+
+  An A2A call has no inherited rule yet, because none of the lists names remote agents. It is still resolved, so an
+  unresolvable policy refuses it.
+- **Precedence: deny wins.** An inherited rule never grants. A call outside an allow-list, or on the deny-list, is
+  refused whatever grant, approval rule, ABAC hold or consent covers it. Inside the policy the call is decided as
+  before. Tighten-only merging means a child's narrower list governs inside it.
+- **Fail closed.**
+  - The layer tables are admin-only under FORCE RLS and most callers are not admins. So the read runs in its own
+    transaction under the new `governance_policy_read` reason (SELECT on `business_units` and
+    `governance_policy_layers` only; pending migration `system_reason_governance_policy_read`).
+  - Its first statement checks that the reason took effect. Otherwise the read could see no rows and look like
+    "no policy". On a failed check, an unknown project, or any read error, it throws.
+  - The core answers a throw with `governed-core-error`; the MCP path's evaluation throws, which refuses the call.
+- **Audit.** Every applied rule is a rule-chain entry `{rule: "inherited-policy", outcome, grantId:
+  "<rule>@<level>[:<subjectId>]"}` on the decision's audit row, on a refusal and on an allow. A refusal's reason names
+  the level (the org, business unit '…', project '…').
+- **Tests.**
+  - Kernel `inherited-policy.test.ts`: each call type, unset rules, deny precedence over an entitlement and a hold,
+    and the MCP kernel.
+  - `zz-adr0357-inherited-enforcement.test.ts` (gateway, own scratch database):
+    - a non-admin's model dispatch through the real route, audited with its level;
+    - a connector governed by its business unit;
+    - A2A resolved;
+    - MCP allow-list and deny-list;
+    - the project narrowing the org;
+    - the deny-list beating a hold;
+    - an unknown project refusing every call type;
+    - a read whose reason cannot take effect throwing.
+- **Still open** (PENDING fragment): `maxCallsPerHour`, `maxDataSensitivity` and `piiMode` at call time, and the
+  write-side rules.
+
 ## Consequences
 
 - An org can keep its governance in Git, review a change as a diff, and promote it between deployments. The plan is

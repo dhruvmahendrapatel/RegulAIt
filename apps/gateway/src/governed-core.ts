@@ -40,6 +40,7 @@ import {
   type EntitlementDecision,
   type GovernedActor,
   type GovernedResource,
+  type InheritedPolicy,
   type GovernedResourceDecision,
   type ResourceApprovalRule,
   type ResourceApprovalRuleEvaluator,
@@ -49,6 +50,7 @@ import { perCallResourceApprovalRuleEvaluator } from "@regulait/policy-kernel/re
 import { NOT_ADVISORY_SQL } from "@regulait/shared";
 import type { AbacPrincipalContext } from "./abac-principal.js";
 import { actorForGrant } from "./in-process-delegation.js";
+import { resolveInheritedPolicy } from "./governance-policy.js";
 import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
   modelConsentState,
@@ -71,6 +73,9 @@ export interface ResourceRestrictions {
    * of `approvalRules`: the consent binding here and the kernel's composition). Required, so no path can fall back to
    * the hand-written predicate by omission. */
   approvalRuleEvaluator: ResourceApprovalRuleEvaluator;
+  /** ADR-0357 §4 enforcement: the effective inherited policy at the call's attribution. Required; a read that fails
+   * throws, and every caller turns that into a refusal (`governed-core-error`). */
+  inheritedPolicy: InheritedPolicy;
 }
 
 
@@ -217,6 +222,10 @@ export async function loadResourceRestrictions(
   void abacVerdict.catch(() => undefined);
   const idCol =
     resource.type === "connector" ? resourceApprovalRules.connectorId : resource.type === "a2a" ? resourceApprovalRules.a2aAgentId : resourceApprovalRules.agentId;
+  // ADR-0357 §4 enforcement: the effective inherited policy, read beside the rules (fail closed: a throw rejects the
+  // whole load, and the caller refuses the call)
+  const inheritedPolicy = resolveInheritedPolicy(db, { projectId: args.projectId ?? null });
+  void inheritedPolicy.catch(() => undefined);
   const [ruleRows, limitRows, [org]] = await Promise.all([
     db
       .select({ rule: resourceApprovalRules, approverName: users.displayName })
@@ -272,7 +281,14 @@ export async function loadResourceRestrictions(
   }));
   // no org row reads as the strict default (ADR-0180), never as a relaxation
   const attributionRequired = resource.type === "connector" ? org?.connector !== false : resource.type === "a2a" ? org?.a2a !== false : false;
-  return { approvalRules, rateLimits, attributionRequired, abacDecision: await abacVerdict, approvalRuleEvaluator: perCallResourceApprovalRuleEvaluator() };
+  return {
+    approvalRules,
+    rateLimits,
+    attributionRequired,
+    abacDecision: await abacVerdict,
+    approvalRuleEvaluator: perCallResourceApprovalRuleEvaluator(),
+    inheritedPolicy: await inheritedPolicy,
+  };
 }
 
 export interface GovernedResourceInput {
@@ -317,6 +333,7 @@ export async function governedEvaluateResource(db: Db, input: GovernedResourceIn
         abacDecision: r.abacDecision,
         approvedApprovalId: input.approvedApprovalId ?? null,
         canQueue: input.canQueue,
+        inheritedPolicy: r.inheritedPolicy,
       });
     const counted = async () => {
       const counts = await countWindows(db, input.userId, input.resource, r.rateLimits);

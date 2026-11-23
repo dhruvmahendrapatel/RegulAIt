@@ -25,6 +25,7 @@ import {
   type SQL,
   sql,
 } from "@regulait/db";
+import { resolveInheritedPolicy } from "./governance-policy.js";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
 import { evaluate, matchingApprovalRulesWith, withAgentResponse, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 // ADR-0239 slice 2: approval rules are matched on Cedar, here and in the kernel call below, so the gateway's reads of
@@ -467,6 +468,9 @@ export async function governedEvaluate(
   const [policyGeneration] = await db.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch);
   if (!policyGeneration) throw new Error("governance policy epoch is unavailable");
   const policyEpoch = policyGeneration.epoch;
+  // ADR-0357 §4 enforcement (D-2026-11-23-02): the effective inherited policy at the call's attribution, applied by
+  // the kernel (deny wins). A read that fails throws here, which refuses the call (fail closed).
+  const inheritedPolicy = await resolveInheritedPolicy(db, { projectId: projectId ?? null });
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
   // scope this user matches. The kernel receives a pre-filtered set and stays
@@ -899,6 +903,7 @@ export async function governedEvaluate(
       deployContext,
       abacDecision,
       actor,
+      inheritedPolicy,
     });
     const original = evaluateArguments(args);
     if (!preparedPii) return original;

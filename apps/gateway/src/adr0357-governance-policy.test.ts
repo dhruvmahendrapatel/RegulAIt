@@ -101,7 +101,12 @@ const effective = async (level: string, id?: string) => {
   return r.json() as { chain: Array<{ level: string; name: string | null }>; rules: Array<{ rule: string; value: unknown; setBy: { level: string; name: string | null } | null }> };
 };
 const rule = (e: Awaited<ReturnType<typeof effective>>, name: string) => e.rules.find((r) => r.rule === name)!;
-const NOT_ENFORCED = { enforced: false, status: "not_enforced" };
+// D-2026-11-23-02 (lane L1): the call-time rules are enforced; every other rule still says it is not (ADR-0180)
+const NOT_ENFORCED = {
+  enforced: "partial",
+  status: "partially_enforced",
+  rules: { allowedAgents: "enforced", allowedConnectors: "enforced", allowedMcpServers: "enforced", deniedTools: "enforced", maxBudgetUsd: "not_enforced", maxCallsPerHour: "not_enforced", piiMode: "not_enforced" },
+};
 const relaxGrant = (facts: Record<string, unknown>) => grantStepUpForTest(db, adminId, { kind: "settings_relax", facts });
 
 describe("layers and the effective view", () => {
@@ -124,7 +129,7 @@ describe("layers and the effective view", () => {
     expect(rule(await effective("project", projectId), "allowedAgents")).toMatchObject({ value: ["a", "b"], setBy: { level: "business_unit", name: n("bu") } });
   });
 
-  it("says on the layer and effective reads that stored policy is not yet enforced at call time (ADR-0180)", async () => {
+  it("says on the layer and effective reads which stored rules are enforced at call time and which are not (ADR-0180)", async () => {
     const layer = await app.inject({ method: "GET", url: "/v1/governance-policy/layer?level=org", headers: AUTH });
     expect(layer.statusCode, layer.body).toBe(200);
     expect(layer.json()).toMatchObject({ layer: { version: 1 }, enforcement: NOT_ENFORCED });

@@ -75,6 +75,9 @@ const arbLimit = (resource: GovernedResource): fc.Arbitrary<ResourceRateLimit> =
     currentCount: fc.integer({ min: 0, max: 4 }),
   }) as fc.Arbitrary<ResourceRateLimit>;
 
+/** ADR-0357 §4: no inherited layers (every rule unset) */
+const NO_INHERITED = { chain: [{ level: "org" as const, subjectId: null, name: null }], rules: [] };
+
 const arbCompose: fc.Arbitrary<ComposeResourceInput> = arbResource.chain((resource) =>
   fc.record({
     resource: fc.constant(resource),
@@ -86,6 +89,7 @@ const arbCompose: fc.Arbitrary<ComposeResourceInput> = arbResource.chain((resour
     abacDecision: arbAbac,
     approvedApprovalId: fc.option(fc.constant("appr-1"), { nil: null }),
     canQueue: fc.boolean(),
+    inheritedPolicy: fc.constant(NO_INHERITED),
   }),
 );
 
@@ -156,7 +160,7 @@ describe("ADR-0239 slice 2b — one batched Cedar request per governed call", ()
     const before = resourceApprovalRuleCedarCallCount();
     const first = matchingResourceApprovalRulesWith(ev, resource, rules);
     const base: EntitlementDecision = { effect: "allow", ruleId: "g-1", reason: "granted", ruleChain: [] };
-    const input: ComposeResourceInput = { resource, base, projectId: "p-1", attributionRequired: true, approvalRules: rules, approvalRuleEvaluator: ev, canQueue: true };
+    const input: ComposeResourceInput = { resource, base, projectId: "p-1", attributionRequired: true, approvalRules: rules, approvalRuleEvaluator: ev, canQueue: true, inheritedPolicy: NO_INHERITED };
     const d1 = composeResourceDecision(input);
     const d2 = composeResourceDecision({ ...input, rateLimits: [] });
     expect(resourceApprovalRuleCedarCallCount() - before).toBe(1);
@@ -194,6 +198,7 @@ describe("ADR-0239 slice 2b — fail closed", () => {
     approvalRuleEvaluator,
     approvedApprovalId: "appr-1",
     canQueue: true,
+    inheritedPolicy: NO_INHERITED,
   });
 
   it("an evaluator error refuses the call, even with a consent in hand (never reads as 'no rule binds')", () => {

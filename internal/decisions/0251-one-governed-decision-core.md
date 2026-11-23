@@ -420,6 +420,12 @@ facts and defaults as a tool call:
   - an `Agent`-scoped forbid refusing a chain that contains the matching actor;
   - an unreadable identity and an unreadable grant each refusing.
 
+#### Inherited policy (2026-11-23, ADR-0357 §4 enforcement)
+
+The core's restrictions now include the effective inherited policy (org → business unit → project). The policy is
+applied first, right after the entitlement deny: an allow-list miss or a deny-list hit refuses the call (deny wins),
+and an unresolvable policy is `governed-core-error`. See ADR-0357 "Enforcement at call time".
+
 #### Review #836 (2026-11-14)
 
 1. **A v5 forbid that validates can no longer silently never fire (blocking, ADR-0180).** The governed core decides

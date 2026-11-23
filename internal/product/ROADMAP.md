@@ -800,7 +800,7 @@ Demo-critical items for 2026-10-05 are tracked in `AgentCoordination.md`
 |---|---|---|
 | Agentic risk assessment library with mapped controls | exists | scenario library with suggested controls, rating-free (`GET /v1/risks/scenarios`) [G2, X8]; bias/safety categories (ADR-0147) |
 | Inherent → residual risk with control linkage | exists | ADR-0147: residual likelihood/impact and pack-control links per risk [C4] |
-| Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level, no policy inheritance yet |
+| Policy inheritance and aggregate risk scoring | partial | risk now propagates across connected entities (max, ADR-0156); packs remain org-level; policy inheritance org → business unit → project → use case (ADR-0357), its allow-lists and deny-list enforced on every governed call |
 | Automated red-teaming and drift detection | partial | `redteam.ts`, `evals.ts`; drift baselines not continuous |
 | Regulatory & policy intelligence (obligations → our controls and use cases) | exists | `regulatory-intel.ts` (ADR-0158); curated, source-dated feed [G4]; page [X9] |
 | Pre-built policy packs: EU AI Act, NIST AI RMF, ISO 42001, SOC 2 (+ ISO 27001 partial, HIPAA, PCI-DSS, FINRA) | exists | `compliance-packs.ts`; per-use-case framework mapping on the use-case 360 Frameworks tab [X2] |

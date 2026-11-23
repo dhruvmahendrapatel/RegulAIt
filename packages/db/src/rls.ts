@@ -110,6 +110,13 @@ export const RLS_SYSTEM_REASONS = [
    * filtered by the principal's own readable predicate, which the reason does not widen; nothing is written under it.
    */
   "context_graph_read",
+  /**
+   * ADR-0357 §4 enforcement (lane L1, D-2026-11-23-02): the governed decision core's read of the effective inherited
+   * policy on a call path, whoever the caller is: business_units and governance_policy_layers (read only, every row;
+   * the policy is org-wide configuration, not anyone's data). Entered as a scope of its own around that one read
+   * (`resolveInheritedPolicy`), which checks in the same transaction that the reason took effect; nothing is written.
+   */
+  "governance_policy_read",
 ] as const;
 export type RlsSystemReason = (typeof RLS_SYSTEM_REASONS)[number];
 
