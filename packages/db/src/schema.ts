@@ -20869,14 +20869,12 @@ export const mcpCallerCancellations = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    reason: text("reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("mcp_caller_cancellations_created_idx").on(t.createdAt),
     index("mcp_caller_cancellations_user_idx").on(t.userId),
     check("mcp_caller_cancellations_key_check", sql`${t.requestKey} ~ '^[0-9a-f]{64}$'`),
-    check("mcp_caller_cancellations_reason_check", sql`${t.reason} IS NULL OR char_length(${t.reason}) <= 200`),
   ],
 );
 export type McpCallerCancellationRow = typeof mcpCallerCancellations.$inferSelect;

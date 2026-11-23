@@ -31,7 +31,6 @@ const SKEW_MS = 2000;
 /** rows older than this are deleted by the watch */
 const ROW_TTL_MS = 60 * 60 * 1000;
 const PRUNE_EVERY_MS = 60 * 1000;
-const REASON_MAX = 200;
 
 interface Tracked {
   readonly ctrl: AbortController;
@@ -171,13 +170,13 @@ export function cancelCallerRequest(scope: string, requestId: string | number | 
  * so it applies to the call in flight now. Returns false when the write failed (the caller is not told: a notification
  * has no answer; the call still ends at its deadline).
  */
-export async function broadcastCallerCancel(db: Db, scope: string, userId: string, requestId: string | number, reason?: string): Promise<boolean> {
+export async function broadcastCallerCancel(db: Db, scope: string, userId: string, requestId: string | number): Promise<boolean> {
   try {
     await runWithRlsSystem("system_task", "mcp.caller-cancel.broadcast", () =>
       db
         .insert(mcpCallerCancellations)
-        .values({ requestKey: callerRequestKey(scope, requestId), userId, reason: reason ? reason.slice(0, REASON_MAX) : null })
-        .onConflictDoUpdate({ target: mcpCallerCancellations.requestKey, set: { createdAt: sql`now()`, reason: reason ? reason.slice(0, REASON_MAX) : null } }),
+        .values({ requestKey: callerRequestKey(scope, requestId), userId })
+        .onConflictDoUpdate({ target: mcpCallerCancellations.requestKey, set: { createdAt: sql`now()` } }),
     );
     return true;
   } catch {

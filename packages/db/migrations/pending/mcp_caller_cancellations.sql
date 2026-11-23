@@ -9,7 +9,7 @@
 --  - request_key: a scrypt hash (32 bytes, hex) of the caller's cancellation scope (user, server, credential) and the JSON-RPC request
 --    id, so no raw credential id is stored and one caller can never name another's call.
 --  - user_id: the caller, the one the scope names.
---  - reason: the client's own reason, bounded.
+--  - No client-supplied text is stored (the client's free-text reason is not kept: nothing reads it).
 --  - Rows are short-lived: a cancel applies to calls that started before it, and the watcher deletes rows older than
 --    an hour.
 -- Only the gateway's system task reads or writes the table.
@@ -17,10 +17,8 @@
 CREATE TABLE IF NOT EXISTS "mcp_caller_cancellations" (
   "request_key" text PRIMARY KEY NOT NULL,
   "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-  "reason" text,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "mcp_caller_cancellations_key_check" CHECK ("request_key" ~ '^[0-9a-f]{64}$'),
-  CONSTRAINT "mcp_caller_cancellations_reason_check" CHECK ("reason" IS NULL OR char_length("reason") <= 200)
+  CONSTRAINT "mcp_caller_cancellations_key_check" CHECK ("request_key" ~ '^[0-9a-f]{64}$')
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "mcp_caller_cancellations_created_idx" ON "mcp_caller_cancellations" ("created_at");

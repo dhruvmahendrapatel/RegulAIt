@@ -103,7 +103,7 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs: cross-replic
     try {
       // A serves nothing: its local lookup misses, so it writes the cancel for every replica
       expect(replicaA.cancelCallerRequest(scope, 7, "user pressed stop")).toBe(false);
-      expect(await replicaA.broadcastCallerCancel(kit.db, scope, owner.id, 7, "user pressed stop")).toBe(true);
+      expect(await replicaA.broadcastCallerCancel(kit.db, scope, owner.id, 7)).toBe(true);
       // the row holds a hash, never the raw scope (it names credential ids)
       const rows = await kit.db.select().from(mcpCallerCancellations).where(eq(mcpCallerCancellations.requestKey, replicaB.callerRequestKey(scope, 7)));
       expect(rows).toHaveLength(1);
@@ -133,7 +133,8 @@ describe.skipIf(!process.env.DATABASE_URL)("ADR-0364 S3 robot runs: cross-replic
     await onCancel({ method: "notifications/cancelled", params: { requestId: 55, reason: "r".repeat(500) } });
     const [row] = await rowsFor(55);
     expect(row).toMatchObject({ userId: owner.id });
-    expect(row!.reason).toHaveLength(200);
+    // the client's free-text reason is never stored
+    expect(Object.keys(row!).sort()).toEqual(["createdAt", "requestKey", "userId"]);
     // served here: aborted at once, nothing written
     const served = replicaB.trackCallerRequest(scope, 56, new AbortController().signal, kit.db);
     try {

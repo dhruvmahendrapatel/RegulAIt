@@ -1065,7 +1065,7 @@ export function installProtocolSurface(
   proxy.setNotificationHandler(CancelledNotificationSchema, async (n) => {
     const requestId = n.params.requestId;
     if (cancelCallerRequest(ctx.cancelScope, requestId, n.params.reason) || requestId === undefined) return;
-    await broadcastCallerCancel(ctx.db, ctx.cancelScope, ctx.userId, requestId, n.params.reason);
+    await broadcastCallerCancel(ctx.db, ctx.cancelScope, ctx.userId, requestId);
   });
   const dropped: string[] = [];
   // the Protocol's own progress handler serves requests WE send; the proxy
