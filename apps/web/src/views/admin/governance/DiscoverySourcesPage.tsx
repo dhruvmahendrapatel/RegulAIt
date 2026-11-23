@@ -240,6 +240,7 @@ export default function DiscoverySourcesPage() {
     <>
       <PageHeader
         title="Discovery sources"
+        actions={<Link to="/admin/shadow-ai/entitlement-findings">SaaS entitlement findings</Link>}
         info={
           <>
             Discovery sources are the places regulAIt reads, read-only, to find AI use nobody registered, such as cloud

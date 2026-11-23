@@ -122,7 +122,7 @@ lowers a limit) or `neutral` (a description).
 | Section | Widens | Narrows |
 |---|---|---|
 | roles | a new tool, server, agent or connector grant on a role; server `readOnlyAll` false → true (false confers nothing, and the plan refuses it as an inert grant); connector `read` → `readwrite`; agent modes or connector objects gained or set to unrestricted | a grant removed; a role removed; modes or objects reduced |
-| rateLimits | a limit removed; `maxCalls` raised; `windowSeconds` shortened; `writeOnly` false → true | a limit added; `maxCalls` lowered; window lengthened |
+| rateLimits | a limit removed (changing its subject, server, tool, deploy mode or `writeOnly`, which select the calls it counts, is a removal plus a new limit); `maxCalls` raised; `windowSeconds` shortened | a limit added; `maxCalls` lowered; window lengthened |
 | mcpBundles | an item added; a grant added; a grant's `maxTier` raised; a bundle un-archived | an item or grant removed; tier lowered; bundle archived |
 | workflowTemplates | any definition change, a new template, a template un-retired (a stage removed can skip a sign-off; the plan cannot prove a definition change is stricter) | a template retired |
 | budgets | a budget removed or raised; `alertThresholdPct` raised; period `none` → `monthly` (a monthly cap resets, so it allows more spend over time); the approver changed | a budget added or lowered; threshold lowered |
@@ -160,6 +160,17 @@ lowers a limit) or `neutral` (a description).
 - Each section's writer in apply reuses the stores the UI writes (the role-grant tables, `rate_limits`, the
   append-only `mcp_bundle_versions`, `workflow_template_versions` with `origin`, the project budget columns). It
   does not add a parallel store.
-- **Slicing.** Slice 1a: this ADR, the document schema, export and plan. Slice 1b: apply (no migration). Slice 2: business units, policy layers, the merge table and the effective view.
+- **Slicing.** Slice 1a: this ADR, the document schema, export and plan. Slice 1b: apply for roles, rate limits and
+  budgets (no migration); a plan that also changes MCP bundles or workflow templates is refused whole
+  (`422 section_not_appliable`) until slice 1c writes them through their own versioned stores
+  (`mcp_bundle_versions`, `workflow_template_versions`).
+- **What apply refuses that the UI decides.** A role deletion while the role is held (assignments are identity data,
+  not in the file), and one that moves who approves calls (ADR-0229), are plan issues: the role's own screen asks for
+  those decisions. A grant that breaks a separation-of-duties rule (ADR-0091) refuses the whole apply.
+- **Rate limits are read as enforced.** Export and plan read a versioned limit as its active `config_versions` body
+  over the row, and apply edits it through `applyRuleEdit` (a new version) and deletes it through
+  `deleteRuleArtifact`, as the rule CRUD routes do. Those writers keep their own loosening guard; apply hands it a
+  callback that accepts a loosening only where the plan marked that change as widening, so any gap between the two
+  classifications refuses the apply instead of bypassing the step-up. Slice 2: business units, policy layers, the merge table and the effective view.
 - **Follow-ups:** user-scoped and model rate limits, ABAC policies, approval rules and compliance profiles as further
   sections; a signed export (ADR-0310 bundles) for air-gapped promotion; the UI for plan review (#453).

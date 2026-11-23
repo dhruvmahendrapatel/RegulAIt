@@ -16,6 +16,7 @@ import {
   agents,
   and,
   auditLog,
+  configVersions,
   connectors,
   eq,
   inArray,
@@ -29,6 +30,7 @@ import {
   projects,
   rateLimits,
   roleAgentGrants,
+  roleAssignments,
   roleConnectorGrants,
   roleServerGrants,
   roleToolGrants,
@@ -41,6 +43,8 @@ import {
 import {
   GOVERNANCE_CONFIG_LIMITS,
   duplicateKeys,
+  effectiveRuleBody,
+  normalizeRateLimit,
   governanceConfigJsonSchema,
   governanceConfigSchema,
   normalizeSpec,
@@ -50,35 +54,72 @@ import {
   type GovernanceChange,
   type GovernancePlan,
   type NormalMcpBundle,
+  type NormalRateLimit,
   type NormalRole,
   type NormalSpec,
 } from "@regulait/shared";
+import { approverPoolShiftFacts } from "./approval-pool.js";
 import { validateBuilderDefinition } from "./workflow-builder.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Runs queries one after another. These readers also run inside apply's transaction, whose single connection must
+ * not be handed concurrent queries (node-postgres deprecates it, and pg 9 refuses it), so no Promise.all here.
+ */
+export async function inSequence<T extends readonly unknown[]>(thunks: { [K in keyof T]: () => PromiseLike<T[K]> }): Promise<T> {
+  const out: unknown[] = [];
+  for (const t of thunks as readonly (() => unknown)[]) out.push(await t());
+  return out as unknown as T;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Reading the live configuration, by name
 // ---------------------------------------------------------------------------------------------------------------
 
+/** The row ids behind the live configuration, by natural key: what apply writes to. */
+export interface LiveIndex {
+  roleIds: Map<string, string>;
+  /** a rate limit has no unique key, so one key may name several rows (the plan deletes the extras); apply matches
+   * each change's `before` to a row by its exact enforced values */
+  rateLimitRows: { id: string; limit: NormalRateLimit }[];
+  bundleIds: Map<string, string>;
+  templateIds: Map<string, string>;
+  projectIds: Map<string, string>;
+}
+
 /** The whole live configuration in normal form. Reads no credential table. */
 export async function readLiveGovernanceConfig(db: Db): Promise<Required<NormalSpec>> {
+  return (await readLive(db)).spec;
+}
+
+/**
+ * The live configuration and the ids behind it. A rate limit is read as it is ENFORCED: the active
+ * `config_versions` body over the row (`effectiveRuleBody`, ADR-0074), never the row alone, which may be a stale
+ * read model.
+ */
+export async function readLive(db: Db): Promise<{ spec: Required<NormalSpec>; index: LiveIndex }> {
   const [roleRows, toolRows, serverRows, agentRows, connectorRows, limitRows, bundleRows, itemRows, bundleGrantRows, templateRows, budgetRows] =
-    await Promise.all([
-      db.select({ id: roles.id, name: roles.name, description: roles.description }).from(roles),
-      db
+    await inSequence([
+      () =>
+        db.select({ id: roles.id, name: roles.name, description: roles.description }).from(roles),
+      () =>
+        db
         .select({ roleId: roleToolGrants.roleId, server: mcpServers.name, tool: roleToolGrants.toolName })
         .from(roleToolGrants)
         .innerJoin(mcpServers, eq(mcpServers.id, roleToolGrants.serverId)),
-      db
+      () =>
+        db
         .select({ roleId: roleServerGrants.roleId, server: mcpServers.name, readOnlyAll: roleServerGrants.readOnlyAll })
         .from(roleServerGrants)
         .innerJoin(mcpServers, eq(mcpServers.id, roleServerGrants.serverId)),
-      db
+      () =>
+        db
         .select({ roleId: roleAgentGrants.roleId, agent: agents.name, allowedModes: roleAgentGrants.allowedModes })
         .from(roleAgentGrants)
         .innerJoin(agents, eq(agents.id, roleAgentGrants.agentId)),
-      db
+      () =>
+        db
         .select({
           roleId: roleConnectorGrants.roleId,
           connector: connectors.name,
@@ -87,25 +128,20 @@ export async function readLiveGovernanceConfig(db: Db): Promise<Required<NormalS
         })
         .from(roleConnectorGrants)
         .innerJoin(connectors, eq(connectors.id, roleConnectorGrants.connectorId)),
-      db
-        .select({
-          scope: rateLimits.scope,
-          serverScope: rateLimits.serverScope,
-          role: roles.name,
-          team: teams.name,
-          server: mcpServers.name,
-          tool: rateLimits.toolName,
-          deployMode: rateLimits.deployMode,
-          maxCalls: rateLimits.maxCalls,
-          windowSeconds: rateLimits.windowSeconds,
-          writeOnly: rateLimits.writeOnly,
-        })
+      () =>
+        db
+        .select({ row: rateLimits, role: roles.name, team: teams.name, server: mcpServers.name, active: configVersions.body })
         .from(rateLimits)
+        .leftJoin(
+          configVersions,
+          and(eq(configVersions.artifactType, "rate_limit"), eq(configVersions.artifactId, rateLimits.id), eq(configVersions.status, "active")),
+        )
         .leftJoin(roles, eq(roles.id, rateLimits.roleId))
         .leftJoin(teams, eq(teams.id, rateLimits.teamId))
         .leftJoin(mcpServers, eq(mcpServers.id, rateLimits.serverId))
         .where(inArray(rateLimits.scope, ["role", "team", "fleet"])),
-      db
+      () =>
+        db
         .select({
           id: mcpBundles.id,
           name: mcpBundles.name,
@@ -115,21 +151,26 @@ export async function readLiveGovernanceConfig(db: Db): Promise<Required<NormalS
         })
         .from(mcpBundles),
       // the CURRENT version's items; an item whose server was removed (server_id SET NULL) matches no call and is not exported
-      db
+      () =>
+        db
         .select({ bundleId: mcpBundleVersions.bundleId, server: mcpServers.name, tool: mcpBundleVersionItems.toolName })
         .from(mcpBundleVersionItems)
         .innerJoin(mcpBundleVersions, eq(mcpBundleVersions.id, mcpBundleVersionItems.versionId))
         .innerJoin(mcpBundles, and(eq(mcpBundles.id, mcpBundleVersions.bundleId), eq(mcpBundles.currentVersion, mcpBundleVersions.version)))
         .innerJoin(mcpServers, eq(mcpServers.id, mcpBundleVersionItems.serverId)),
       // role and team grants only: a user grant is a per-user override (ADR-0357 §1)
-      db
+      () =>
+        db
         .select({ bundleId: mcpBundleGrants.bundleId, role: roles.name, team: teams.name, maxTier: mcpBundleGrants.maxTier })
         .from(mcpBundleGrants)
         .leftJoin(roles, eq(roles.id, mcpBundleGrants.roleId))
         .leftJoin(teams, eq(teams.id, mcpBundleGrants.teamId)),
-      db.select({ name: workflowTemplates.name, definition: workflowTemplates.definition, retiredAt: workflowTemplates.retiredAt }).from(workflowTemplates),
-      db
+      () =>
+        db.select({ id: workflowTemplates.id, name: workflowTemplates.name, definition: workflowTemplates.definition, retiredAt: workflowTemplates.retiredAt }).from(workflowTemplates),
+      () =>
+        db
         .select({
+          id: projects.id,
           project: projects.name,
           budgetUsd: projects.budgetUsd,
           period: projects.budgetPeriod,
@@ -169,23 +210,37 @@ export async function readLiveGovernanceConfig(db: Db): Promise<Required<NormalS
       .map((g) => ({ role: g.role, team: g.role === null ? g.team : null, maxTier: g.maxTier })),
   }));
 
+  // a role/team limit whose subject row is gone matches nothing; a `server` scope whose server is gone likewise
+  const limits = limitRows
+    .filter((r) => (r.row.scope === "role" ? r.role !== null : r.row.scope === "team" ? r.team !== null : true))
+    .filter((r) => r.row.serverScope === "all" || r.server !== null)
+    .map((r) => {
+      const eff = effectiveRuleBody("rate_limit", r.row as unknown as Record<string, unknown>, (r.active ?? {}) as Record<string, unknown>) as {
+        toolName?: string | null;
+        maxCalls: number;
+        windowSeconds: number;
+        deployMode?: "hosted" | "byoc" | "air_gapped" | null;
+      };
+      const scope = r.row.scope as "role" | "team" | "fleet";
+      return {
+        id: r.row.id,
+        limit: {
+          scope,
+          ...(scope === "role" ? { subject: r.role! } : scope === "team" ? { subject: r.team! } : {}),
+          ...(r.row.serverScope === "server" ? { server: r.server! } : {}),
+          ...(eff.toolName != null ? { tool: eff.toolName } : {}),
+          ...(eff.deployMode != null ? { deployMode: eff.deployMode } : {}),
+          maxCalls: eff.maxCalls,
+          windowSeconds: eff.windowSeconds,
+          writeOnly: r.row.writeOnly,
+        },
+      };
+    });
+
   // normalizeSpec sorts and dedupes; feed it the shared schema's input shape
   const spec = normalizeSpec({
     roles: roleList.map((r) => ({ ...r })),
-    rateLimits: limitRows
-      // a role/team limit whose subject row is gone matches nothing; a `server` scope whose server is gone likewise
-      .filter((r) => (r.scope === "role" ? r.role !== null : r.scope === "team" ? r.team !== null : true))
-      .filter((r) => r.serverScope === "all" || r.server !== null)
-      .map((r) => ({
-        scope: r.scope as "role" | "team" | "fleet",
-        ...(r.scope === "role" ? { subject: r.role! } : r.scope === "team" ? { subject: r.team! } : {}),
-        ...(r.serverScope === "server" ? { server: r.server! } : {}),
-        ...(r.tool !== null ? { tool: r.tool } : {}),
-        ...(r.deployMode !== null ? { deployMode: r.deployMode } : {}),
-        maxCalls: r.maxCalls,
-        windowSeconds: r.windowSeconds,
-        writeOnly: r.writeOnly,
-      })),
+    rateLimits: limits.map((l) => l.limit),
     mcpBundles: bundles.map((b) => ({
       name: b.name,
       description: b.description,
@@ -208,11 +263,20 @@ export async function readLiveGovernanceConfig(db: Db): Promise<Required<NormalS
     })),
   });
   return {
-    roles: spec.roles ?? [],
-    rateLimits: spec.rateLimits ?? [],
-    mcpBundles: spec.mcpBundles ?? [],
-    workflowTemplates: spec.workflowTemplates ?? [],
-    budgets: spec.budgets ?? [],
+    spec: {
+      roles: spec.roles ?? [],
+      rateLimits: spec.rateLimits ?? [],
+      mcpBundles: spec.mcpBundles ?? [],
+      workflowTemplates: spec.workflowTemplates ?? [],
+      budgets: spec.budgets ?? [],
+    },
+    index: {
+      roleIds: new Map(roleRows.map((r) => [r.name, r.id])),
+      rateLimitRows: limits.map((l) => ({ id: l.id, limit: normalizeRateLimit(l.limit) })),
+      bundleIds: new Map(bundleRows.map((b) => [b.name, b.id])),
+      templateIds: new Map(templateRows.map((t) => [t.name, t.id])),
+      projectIds: new Map(budgetRows.map((b) => [b.project, b.id])),
+    },
   };
 }
 
@@ -289,6 +353,8 @@ export interface PlanIssue {
     | "unknown_user"
     | "budget_approver_required"
     | "inert_server_grant"
+    | "role_held"
+    | "role_delete_shifts_approvers"
     | "invalid_workflow_definition";
   detail: string;
 }
@@ -321,13 +387,13 @@ export async function referenceIssues(db: Db, plan: GovernancePlan, desired: Nor
   }
   const names = async <T extends { name: string }>(set: Set<string>, q: (xs: string[]) => Promise<T[]>) =>
     set.size ? new Set((await q([...set])).map((r) => r.name)) : new Set<string>();
-  const [hasServer, hasAgent, hasConnector, hasRole, hasTeam, hasProject] = await Promise.all([
-    names(want.servers, (xs) => db.select({ name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.name, xs))),
-    names(want.agents, (xs) => db.select({ name: agents.name }).from(agents).where(inArray(agents.name, xs))),
-    names(want.connectors, (xs) => db.select({ name: connectors.name }).from(connectors).where(inArray(connectors.name, xs))),
-    names(want.roles, (xs) => db.select({ name: roles.name }).from(roles).where(inArray(roles.name, xs))),
-    names(want.teams, (xs) => db.select({ name: teams.name }).from(teams).where(inArray(teams.name, xs))),
-    names(want.projects, (xs) => db.select({ name: projects.name }).from(projects).where(inArray(projects.name, xs))),
+  const [hasServer, hasAgent, hasConnector, hasRole, hasTeam, hasProject] = await inSequence([
+    () => names(want.servers, (xs) => db.select({ name: mcpServers.name }).from(mcpServers).where(inArray(mcpServers.name, xs))),
+    () => names(want.agents, (xs) => db.select({ name: agents.name }).from(agents).where(inArray(agents.name, xs))),
+    () => names(want.connectors, (xs) => db.select({ name: connectors.name }).from(connectors).where(inArray(connectors.name, xs))),
+    () => names(want.roles, (xs) => db.select({ name: roles.name }).from(roles).where(inArray(roles.name, xs))),
+    () => names(want.teams, (xs) => db.select({ name: teams.name }).from(teams).where(inArray(teams.name, xs))),
+    () => names(want.projects, (xs) => db.select({ name: projects.name }).from(projects).where(inArray(projects.name, xs))),
   ]);
   const toolRows = want.tools.size
     ? await db
@@ -384,6 +450,17 @@ export async function referenceIssues(db: Db, plan: GovernancePlan, desired: Nor
     } else if (c.section === "workflowTemplates") {
       const v = await validateBuilderDefinition(db, a.definition);
       if (!v.valid) for (const i of v.issues.slice(0, 20)) miss(c, "invalid_workflow_definition", `${i.code}: ${i.message}`);
+    }
+  }
+  // a role deletion is refused while the role is held (assignments are identity data, not in the file) or while
+  // deleting it would move who approves calls (ADR-0229): both are decisions for the role's own screen
+  for (const c of plan.changes.filter((x) => x.section === "roles" && x.op === "delete")) {
+    const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.name, c.key));
+    if (!role) continue;
+    const held = await db.select({ userId: roleAssignments.userId }).from(roleAssignments).where(eq(roleAssignments.roleId, role.id)).limit(1);
+    if (held.length) miss(c, "role_held", `role ${c.key} is held; unassign its holders before the file removes it`);
+    if (await approverPoolShiftFacts(db, { change: "delete", objectType: "role", objectId: role.id })) {
+      miss(c, "role_delete_shifts_approvers", `deleting role ${c.key} moves who approves calls; delete it from the role screen, which asks for that step-up`);
     }
   }
   return out;
