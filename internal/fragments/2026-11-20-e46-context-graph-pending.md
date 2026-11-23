@@ -1,2 +1,0 @@
-<!-- fold: pending -->
-- **P2 context graph follow-ups (ADR-0365, lane E46):** a scheduled sync (incremental hourly, full daily); a git source (repositories and pull requests, with per-repository scope rows); identity and connector sources; edges from work items to RegulAIt runs (`pm_links`); a live title read-through via the PM adapters; the admin bindings screen and the member graph view (#453); provenance and retention by the compliance cascade.
