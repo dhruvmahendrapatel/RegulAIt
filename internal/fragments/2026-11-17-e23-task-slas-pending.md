@@ -1,0 +1,2 @@
+<!-- fold: pending -->
+| **E23 slice 2** | **Human-task priority and due dates (ADR-0342 §8).** Built: priority and due source on the approval assignment, one setter for admins and stage timers, relaxations behind a step-up, the declared SLA transition table. | Remaining: lane E21 reworks its stage-timer slice to call `scheduleStageApprovals`; the queue's priority and due-date controls (#453, closes one KNOWN_UI_GAPS entry); slice 3 (value view joined to #848). |

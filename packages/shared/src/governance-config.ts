@@ -22,6 +22,8 @@ export const GOVERNANCE_CONFIG_KIND = "GovernanceConfig";
 export const GOVERNANCE_CONFIG_LIMITS = {
   /** objects per section */
   sectionItems: 2000,
+  /** workflow templates per document: each changed one is validated against the database by plan and apply */
+  workflowTemplates: 200,
   /** grants / items inside one object */
   innerItems: 2000,
   name: 200,
@@ -129,7 +131,8 @@ export const governanceConfigSpecSchema = z
     roles: section(governanceRoleSchema),
     rateLimits: section(governanceRateLimitSchema),
     mcpBundles: section(governanceMcpBundleSchema),
-    workflowTemplates: section(governanceWorkflowTemplateSchema),
+    // tighter than the other sections: each created or changed template runs the builder's validator (DB reads)
+    workflowTemplates: z.array(governanceWorkflowTemplateSchema).max(L.workflowTemplates).optional(),
     budgets: section(governanceBudgetSchema),
   })
   .strict();
@@ -156,6 +159,17 @@ export type GovernanceWorkflowTemplate = z.infer<typeof governanceWorkflowTempla
 export type GovernanceBudget = z.infer<typeof governanceBudgetSchema>;
 export type GovernanceConfigSpec = z.infer<typeof governanceConfigSpecSchema>;
 export type GovernanceConfig = z.infer<typeof governanceConfigSchema>;
+
+/**
+ * Orders rate limits on one key strictest first (fewest calls, then the longest window), so when live holds
+ * duplicates the one that pairs with the file, and survives, is the strictest. Numbers are zero-padded so the
+ * comparison is numeric, not lexical ("20" before "100").
+ */
+const pad = (n: number, width: number) => String(n).padStart(width, "0");
+function strictnessKey(r: { maxCalls: number; windowSeconds: number; writeOnly?: boolean }): string {
+  const maxWindow = 366 * 24 * 3600;
+  return `${pad(r.maxCalls, 10)}|${pad(maxWindow - r.windowSeconds, 8)}|${r.writeOnly ? 1 : 0}`;
+}
 
 export const GOVERNANCE_CONFIG_SECTIONS = ["roles", "rateLimits", "mcpBundles", "workflowTemplates", "budgets"] as const;
 export type GovernanceConfigSection = (typeof GOVERNANCE_CONFIG_SECTIONS)[number];
@@ -218,9 +232,10 @@ export interface NormalSpec {
   budgets?: NormalBudget[];
 }
 
-/** the identity of a rate limit: everything except its values */
-export function rateLimitKey(r: Pick<NormalRateLimit, "scope" | "subject" | "server" | "tool" | "deployMode">): string {
-  return [r.scope, r.subject ?? "*", r.server ?? "*", r.tool ?? "*", r.deployMode ?? "*"].join("|");
+/** The identity of a rate limit: what selects the calls it counts. Only `maxCalls` and `windowSeconds` are values;
+ * `writeOnly` decides which calls match and is not editable on a live rule, so changing it is a new rule. */
+export function rateLimitKey(r: Pick<NormalRateLimit, "scope" | "subject" | "server" | "tool" | "deployMode" | "writeOnly">): string {
+  return [r.scope, r.subject ?? "*", r.server ?? "*", r.tool ?? "*", r.deployMode ?? "*", r.writeOnly ? "write" : "all"].join("|");
 }
 const toolKey = (g: { server: string; tool: string }) => `${g.server}\u0000${g.tool}`;
 const grantSubjectKey = (g: { role: string | null; team: string | null }) => (g.role !== null ? `role:${g.role}` : `team:${g.team}`);
@@ -304,7 +319,7 @@ export function duplicateKeys(spec: GovernanceConfigSpec): { section: Governance
 export function normalizeSpec(spec: GovernanceConfigSpec): NormalSpec {
   const out: NormalSpec = {};
   if (spec.roles) out.roles = spec.roles.map(normalizeRole).sort(byKey((r) => r.name));
-  if (spec.rateLimits) out.rateLimits = spec.rateLimits.map(normalizeRateLimit).sort(byKey((r) => `${rateLimitKey(r)}|${r.maxCalls}|${r.windowSeconds}|${r.writeOnly}`));
+  if (spec.rateLimits) out.rateLimits = spec.rateLimits.map(normalizeRateLimit).sort(byKey((r) => `${rateLimitKey(r)}|${strictnessKey(r)}`));
   if (spec.mcpBundles) out.mcpBundles = spec.mcpBundles.map(normalizeMcpBundle).sort(byKey((b) => b.name));
   if (spec.workflowTemplates) out.workflowTemplates = spec.workflowTemplates.map(normalizeWorkflowTemplate).sort(byKey((t) => t.name));
   if (spec.budgets) out.budgets = spec.budgets.map(normalizeBudget).sort(byKey((b) => b.project));
@@ -501,8 +516,6 @@ function rateLimitFindings(before: NormalRateLimit | null, after: NormalRateLimi
   if (after.maxCalls < before.maxCalls) out.push(N("max_calls_lowered", `maxCalls ${before.maxCalls} → ${after.maxCalls}`));
   if (after.windowSeconds < before.windowSeconds) out.push(W("window_shortened", `window ${before.windowSeconds}s → ${after.windowSeconds}s`));
   if (after.windowSeconds > before.windowSeconds) out.push(N("window_lengthened", `window ${before.windowSeconds}s → ${after.windowSeconds}s`));
-  if (after.writeOnly !== before.writeOnly)
-    out.push(after.writeOnly ? W("write_only_set", "now counts write tools only") : N("write_only_cleared", "now counts every call"));
   return out;
 }
 
@@ -591,10 +604,14 @@ function sectionChanges<T>(
   const am = new Map(after.map((v) => [key(v), v]));
   const keys = [...new Set([...bm.keys(), ...am.keys()])].sort();
   for (const k of keys) {
-    const [b = null, ...extra] = bm.get(k) ?? [];
+    const live = bm.get(k) ?? [];
     const a = am.get(k) ?? null;
-    // live duplicates (possible for rate limits, which have no unique key): the first pairs, the rest are deleted
-    for (const x of extra) push(k, x, null);
+    // live duplicates (possible for rate limits, which have no unique key): the one identical to the file pairs
+    // when there is one, else the first in normal order (the strictest); the rest are deleted
+    const same = a === null ? -1 : live.findIndex((v) => canonicalJson(v) === canonicalJson(a));
+    const pick = same >= 0 ? same : 0;
+    const b = live[pick] ?? null;
+    for (const [i, x] of live.entries()) if (i !== pick) push(k, x, null);
     push(k, b, a);
   }
   return out;

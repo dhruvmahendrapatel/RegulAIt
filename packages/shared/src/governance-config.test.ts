@@ -149,7 +149,11 @@ describe("the classification table (ADR-0357 §3)", () => {
     expect(codes(rl({}), rl({ maxCalls: 9 }))).toEqual(["narrows:max_calls_lowered"]);
     expect(codes(rl({}), rl({ windowSeconds: 30 }))).toEqual(["widens:window_shortened"]);
     expect(codes(rl({}), rl({ windowSeconds: 120 }))).toEqual(["narrows:window_lengthened"]);
-    expect(codes(rl({}), rl({ writeOnly: true }))).toEqual(["widens:write_only_set"]);
+    // writeOnly selects which calls count, so flipping it is a new rule: the old one's removal widens
+    expect(plan(rl({}), rl({ writeOnly: true })).changes.map((c) => [c.op, c.effect])).toEqual([
+      ["delete", "widens"],
+      ["create", "narrows"],
+    ]);
     // a mixed edit is a widening: the reviewer must approve the part that loosens
     expect(plan(rl({}), rl({ maxCalls: 20, windowSeconds: 120 })).changes[0]!.effect).toBe("widens");
   });
@@ -158,6 +162,14 @@ describe("the classification table (ADR-0357 §3)", () => {
     const one = { scope: "fleet" as const, maxCalls: 10, windowSeconds: 60 };
     const p = planGovernanceConfig({ ...EMPTY, rateLimits: normalizeSpec({ rateLimits: [one, { ...one, maxCalls: 5 }] }).rateLimits! }, normalizeSpec({ rateLimits: [one] }));
     expect(p.changes.map((c) => [c.op, c.effect])).toEqual([["delete", "widens"]]);
+  });
+
+  it("rate limits: the strictest live duplicate is the one kept, compared numerically", () => {
+    const loose = { scope: "fleet" as const, maxCalls: 100, windowSeconds: 60 };
+    const strict = { ...loose, maxCalls: 20 }; // lexically "100" < "20"; numerically 20 is the stricter
+    const p = planGovernanceConfig({ ...EMPTY, rateLimits: normalizeSpec({ rateLimits: [loose, strict] }).rateLimits! }, normalizeSpec({ rateLimits: [strict] }));
+    expect(p.changes.map((c) => [c.op, (c.before as { maxCalls: number }).maxCalls])).toEqual([["delete", 100]]);
+    expect(normalizeSpec({ rateLimits: [loose, strict] }).rateLimits!.map((r) => r.maxCalls)).toEqual([20, 100]);
   });
 
   it("MCP bundles", () => {

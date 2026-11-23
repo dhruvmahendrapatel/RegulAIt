@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0327",
+  "lane": "E12",
+  "tracking": "ADR-0327 addendum (lane E12, owner approval 2026-11-17, competitor gap audit Camunda row 6): API and backend only; the decision-table editor (rows, review, history) is for UI-D (#453)",
+  "gaps": {
+    "GET /v1/decision-tables": "lists decision tables (business-authored conditions and outcomes per AI step) with their published and in-review versions, under the ADR-0226 list contract",
+    "POST /v1/decision-tables": "creates a decision table bound to one AI step (agent and step name), audited",
+    "GET /v1/decision-tables/:id": "reads a decision table: the published and in-review versions with their readable rows and test cases, and recent history",
+    "POST /v1/decision-tables/:id/versions": "proposes a new decision-table version (schema-validated, compiled to the exact-match rule engine) for review by a named administrator in the approvals queue, audited; published only on approval",
+    "POST /v1/decision-tables/:id/switch": "asks for an AI step to be answered by its table's published version, for review by a named administrator in the approvals queue (step-up), audited; nothing changes until approved",
+    "POST /v1/decision-tables/:id/revert": "reverts a step switched to its decision table back to the AI in one action, audited"
+  }
+}

@@ -213,7 +213,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   // pillar-6 routing would move calls between the three identically priced agents; this suite
   // needs each call served by the agent it names (a model limit binds the agent that serves)

@@ -317,7 +317,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 640 }], ["1440 px"
       drawer.getByRole("button", { name: "Deny" }),
       drawer.getByRole("button", { name: "Approve" }),
       drawer.getByText("Deciding this approves your own request, so a reason is required."),
-      drawer.getByText("Approve unlocks once a reason is entered"),
+      drawer.getByText("Approve and Deny unlock once a reason is entered"),
     ]) expect(await pinnedAfterScroll(drawer, control)).toBe("pinned");
     // the gate is unchanged: Approve waits for the required reason
     await expect(drawer.getByRole("button", { name: "Approve" })).toBeDisabled();

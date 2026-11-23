@@ -140,6 +140,16 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why: "POST /v1/rules/rate-limits — CREATE ONLY, identical reasoning to the approvals insert above.",
   },
   {
+    file: "governance-config-apply.ts",
+    method: "insert",
+    expr: "rateLimits",
+    why:
+      "ADR-0357 apply — CREATE ONLY, for a rate limit the plan lists as `create`. A plain insert with a " +
+      "defaultRandom id, so the row is brand new and has no config_versions rows: nothing is discarded at " +
+      "dispatch. Apply's EDITS go through `applyRuleEdit` and its deletions through `deleteRuleArtifact`, " +
+      "in the same transaction and under the same advisory lock as this insert.",
+  },
+  {
     file: "rule-creates.ts",
     method: "insert",
     expr: "rateLimits",
@@ -257,6 +267,15 @@ const AUDITED_WRITERS: AuditedWriter[] = [
     why:
       "the RegulAIt-LLM bootstrap registration — CREATE ONLY, same shape as POST /v1/agents: a fresh row with " +
       "a random id and no ON CONFLICT, which cannot yet have versions.",
+  },
+  {
+    file: "agent-registry-routes.ts",
+    method: "insert",
+    expr: "agents",
+    why:
+      "ADR-0314 POST /v1/agent-registry/records/:recordId/import — CREATE ONLY: a fresh row with a random id, " +
+      "disabled and `proposed`, no grant rows. Its ON CONFLICT (name) DO NOTHING writes nothing on a clash (the " +
+      "route answers 409), so it never touches an existing agent and a new row cannot yet have versions.",
   },
   {
     file: "org-settings.ts",
