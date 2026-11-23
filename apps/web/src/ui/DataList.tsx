@@ -81,6 +81,8 @@ export interface DataListProps<T> {
   /** `estimate` where an exact count is costly: past the cap it reads "of 1,000+" */
   count?: "exact" | "estimate";
   rowKey: (row: T) => string;
+  /** a row that opens another page (a real link in its primary cell); `onRowClick` selects in place (a button) */
+  rowHref?: (row: T) => string;
   onRowClick?: (row: T) => void;
   rowLabel?: (row: T) => string;
   empty?: ReactNode;
@@ -477,6 +479,7 @@ export function DataList<T>(props: DataListProps<T>) {
         loading={q.isLoading}
         error={q.error && props.errorMessage ? withMessage(q.error, props.errorMessage) : q.error}
         onRetry={refresh}
+        rowHref={props.rowHref}
         onRowClick={props.onRowClick}
         rowLabel={props.rowLabel}
         empty={props.empty}
