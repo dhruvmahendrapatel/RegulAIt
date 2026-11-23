@@ -175,6 +175,12 @@
     "limit": "4.6 kB"
   },
   {
+    "name": "chunk: EntitlementFindingsPage",
+    "path": "dist/assets/EntitlementFindingsPage-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
     "name": "chunk: EntitlementLinksPage",
     "path": "dist/assets/EntitlementLinksPage-????????.js",
     "gzip": true,
