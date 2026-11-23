@@ -146,6 +146,7 @@ import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
 import { databaseNow } from "./db-clock.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
@@ -1172,6 +1173,16 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         limit: BUILDER_LIMITS.memoryPerAgent,
       });
     }
+    // ADR-0193 addendum (E50, ASI06): a memory drawn from a causal context is held to the content-trust floor. The
+    // context must be the caller's own run or thread (checked, never asserted); the floor is categorical, so it runs
+    // before the ADR-0347 scan below.
+    const trust = await memoryTrustFloor(db, {
+      userId: viewer.userId,
+      isAdmin: viewer.isAdmin,
+      contextId: body.contextId ?? null,
+      target: { kind: "agent_memory", agentId: agent.id, projectId: agent.projectId ?? null },
+    });
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
     // ADR-0347: the memory scan and the mandatory expiry, before anything is stored
     const memoryGate = await governMemoryWrite(db, {
       store: "builder_agent_memory",
