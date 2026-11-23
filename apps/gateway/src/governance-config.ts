@@ -43,6 +43,7 @@ import {
 import {
   GOVERNANCE_CONFIG_LIMITS,
   duplicateKeys,
+  isIntakeTemplateName,
   effectiveRuleBody,
   normalizeRateLimit,
   governanceConfigJsonSchema,
@@ -59,6 +60,9 @@ import {
   type NormalSpec,
 } from "@regulait/shared";
 import { approverPoolShiftFacts } from "./approval-pool.js";
+import { MCP_BUNDLE_MAX_ITEMS } from "./mcp-bundles.js";
+import { isReservedToolName } from "./mcp-protocol.js";
+import { loadOrgSettings } from "./org-settings.js";
 import { validateBuilderDefinition } from "./workflow-builder.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -353,6 +357,14 @@ export interface PlanIssue {
     | "unknown_user"
     | "budget_approver_required"
     | "inert_server_grant"
+    | "mcp_bundles_disabled"
+    | "invalid_bundle_name"
+    | "too_many_items"
+    | "approver_required"
+    | "bundle_unarchive_unsupported"
+    | "intake_template_not_editable"
+    | "template_unretire_unsupported"
+    | "template_retired"
     | "role_held"
     | "role_delete_shifts_approvers"
     | "invalid_workflow_definition";
@@ -452,6 +464,36 @@ export async function referenceIssues(db: Db, plan: GovernancePlan, desired: Nor
       if (!v.valid) for (const i of v.issues.slice(0, 20)) miss(c, "invalid_workflow_definition", `${i.code}: ${i.message}`);
     }
   }
+  // MCP bundles (ADR-0236): off by default; only taking access away (archive, a grant removed) is allowed while off
+  const bundleChanges = plan.changes.filter((x) => x.section === "mcpBundles");
+  if (bundleChanges.length && !(await loadOrgSettings(db)).mcpBundlesEnabled) {
+    for (const c of bundleChanges) {
+      if (c.findings.some((f) => f.code !== "bundle_archived" && f.code !== "bundle_grant_removed")) {
+        miss(c, "mcp_bundles_disabled", "MCP bundles are turned off for this organization (org settings); only archiving a bundle or removing a grant is allowed");
+      }
+    }
+  }
+  for (const c of bundleChanges) {
+    const b = c.after as NormalMcpBundle | null;
+    if (c.findings.some((f) => f.code === "bundle_unarchived")) miss(c, "bundle_unarchive_unsupported", "an archived bundle stays archived; create a bundle with a new name");
+    if (!b) continue;
+    if (c.op === "create" && !/^[a-z0-9][a-z0-9-]{0,62}$/.test(b.name)) miss(c, "invalid_bundle_name", "a bundle name is lower-case letters, digits and hyphens (at most 63)");
+    if (b.items.length > MCP_BUNDLE_MAX_ITEMS) miss(c, "too_many_items", `a bundle holds at most ${MCP_BUNDLE_MAX_ITEMS} tools`);
+    for (const i of b.items) if (isReservedToolName(i.tool)) miss(c, "unknown_tool", `${i.tool} is a protocol-reserved name, not a tool`);
+    if (!b.archived && b.grants.some((g) => g.maxTier === "dangerous") && !b.approverUserId) {
+      miss(c, "approver_required", "a grant that reaches dangerous tools needs the bundle to name an approver");
+    }
+  }
+
+  // workflow templates: an intake template decides who signs off every use case and goes through the
+  // decision-regression gate on its own screen (ADR-0182 A11); a retired template is not edited or revived
+  for (const c of plan.changes.filter((x) => x.section === "workflowTemplates")) {
+    if (isIntakeTemplateName(c.key)) miss(c, "intake_template_not_editable", "an intake template changes through the decision-regression gate on its own screen, not a file");
+    if (c.findings.some((f) => f.code === "template_unretired")) miss(c, "template_unretire_unsupported", "a retired template stays retired; create one with a new name");
+    const b = c.before as { retired: boolean } | null;
+    if (b?.retired && c.findings.some((f) => f.code === "definition_changed")) miss(c, "template_retired", "a retired template is not edited");
+  }
+
   // a role deletion is refused while the role is held (assignments are identity data, not in the file) or while
   // deleting it would move who approves calls (ADR-0229): both are decisions for the role's own screen
   for (const c of plan.changes.filter((x) => x.section === "roles" && x.op === "delete")) {

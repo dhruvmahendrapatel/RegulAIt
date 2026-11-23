@@ -95,5 +95,31 @@ built in our own ledger. No new dependency.
   escalation helpers. Behaviour is unchanged.
 - Follow-ups: an x402 wire adapter (parse a `402` quote and a payment-response header on HTTP connectors) behind the
   same reservation; a connector-reported charge; holds for A2A calls; the price and hold screens (#453).
-- Owner question open: should the org's `budgetEnforcement: warn_only` let paid calls through over budget? Today it
-  does not: a paid call is always refused over budget, and the approvals queue is the way to relax it.
+- The owner's answer to whether `budgetEnforcement: warn_only` lets paid calls through over budget is yes
+  (D-2026-11-22-05). See the addendum below.
+
+## Addendum (2026-11-23): `warn_only` lets an over-budget paid call through (D-2026-11-22-05)
+
+- **Default unchanged.** `org_settings.budget_enforcement` defaults to `block` (ADR-0180), so a new org refuses an
+  over-budget paid call exactly as above.
+- **Switching is an admin action, and it is audited.** `PUT /v1/org/settings` is admin-only. The switch writes an
+  `org-settings-updated` row recording the `block → warn_only` transition, and names `budgetEnforcement` as relaxed
+  from its strict default (ADR-0021 strictness table).
+- **Under `warn_only`, a paid call that does not fit its project budget goes through.** Everything else still happens:
+  - The crossing is escalated into the approvals queue (`__project_budget__`), as under `block`.
+  - The pass is audited as `paid-call-over-project-budget-warn-only` (effect `allow`, with the amounts), and the
+    reservation's `paid-call-reserved` row carries `overBudgetWarnOnly: true`.
+  - The hold is still taken and settled, so in-flight money keeps counting against the budget.
+  - The caller is told. An MCP result gains a `[RegulAIt budget warning]` text block, plus the structured warning under
+    `_meta["io.regulait/budget-warning"]`. A connector invoke response gains `budgetWarning`.
+- **Strictest still wins.** A compliance profile whose `budgetEnforcement` is `block` refuses even when the org is set
+  to `warn_only` (ADR-0027 O2).
+- **Run caps are not covered.** `budgetEnforcement` governs project budgets only, so an orchestration run's cap still
+  refuses an over-cap paid call. The run's escalation approver is the way to lift it.
+- **Tests:** `zz-adr0313-paid-call-budgets.test.ts`, under "D-2026-11-22-05". They cover:
+  - the `block` default;
+  - both modes on an MCP tool;
+  - a paid connector under `warn_only`;
+  - the compliance override;
+  - the run cap;
+  - the audited admin switch.
