@@ -6,9 +6,17 @@
 # the pending migrations (journal entry, idx, `when`, rename), adds the missing ADR index rows and folds the
 # fragments, and pushes the result to one branch, `assign-at-merge/<main sha>`.
 #
-# Push-only, like engine-images.yml's lock-pr job (owner decision, 2026-10-21): it opens no PR, and never merges,
-# approves or enables auto-merge. The master opens the PR from the branch and enqueues it, so the change goes
-# through the merge queue and its full CI like any other (a PR opened with GITHUB_TOKEN would start no CI).
+# Two modes, chosen by the optional repo secret ASSIGN_AT_MERGE_TOKEN (owner decision, 2026-11-23):
+# - Secret set: the job pushes the branch with GITHUB_TOKEN, then opens the PR against main with the secret, so the
+#   PR's CI runs (a PR opened with GITHUB_TOKEN would start no CI). The token is used for nothing else.
+# - Secret empty: push-only, like engine-images.yml's lock-pr job (owner decision, 2026-10-21). The master opens the
+#   PR from the branch.
+# In both modes the job never merges, approves or enables auto-merge: the master enqueues the PR, so the change goes
+# through the merge queue and its full CI like any other.
+#
+# ASSIGN_AT_MERGE_TOKEN must be a fine-grained personal access token scoped to this repository only, with
+# Contents: read and write and Pull requests: read and write (nothing else), or a GitHub App installation token with
+# the same rights on this repository only.
 #
 # One assignment in flight: while an assign-at-merge PR is open, or an `assign-at-merge/*` branch has commits main
 # does not, a run pushes nothing. When that PR merges, its own
@@ -87,11 +95,14 @@ jobs:
           fi
           git status --short
 
-      - name: Push the assignment branch (the master opens the PR and enqueues it)
+      - name: Push the assignment branch (the next step or the master opens the PR)
+        id: push
         if: steps.plan.outputs.changed == 'true'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # only whether the secret is set, never its value
+          HAS_PR_TOKEN: ${{ secrets.ASSIGN_AT_MERGE_TOKEN != '' }}
         run: |
           set -euo pipefail
           open="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("assign-at-merge/"))] | length')"
@@ -126,14 +137,49 @@ jobs:
           auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           # no force: an existing branch for this main commit is refused, never overwritten
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" push origin "HEAD:refs/heads/${branch}"
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
           {
             echo "### Assignment branch pushed: \`${branch}\`"
             echo ""
-            echo "The master opens a PR against \`main\` from it (title: \`chore: assign migration numbers and fold docs at merge (ADR-0252)\`) and enqueues it with \`gh pr merge --merge --auto\`. This job opens, merges and approves nothing."
+            if [ "$HAS_PR_TOKEN" = "true" ]; then
+              echo "The next step opens a PR against \`main\` from it with \`ASSIGN_AT_MERGE_TOKEN\`, so its CI runs. The master enqueues it with \`gh pr merge --merge --auto\`. This job merges and approves nothing."
+            else
+              echo "The master opens a PR against \`main\` from it (title: \`chore: assign migration numbers and fold docs at merge (ADR-0252)\`) and enqueues it with \`gh pr merge --merge --auto\`. This job opens, merges and approves nothing."
+            fi
             echo ""
             echo "- Compare URL: https://github.com/${GITHUB_REPOSITORY}/compare/main...${branch}?expand=1"
             echo ""
             echo '```'
             cat "$RUNNER_TEMP/plan.txt"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$HAS_PR_TOKEN" = "true" ]; then
+            {
+              echo "Written by \`scripts/assign-at-merge.mjs\` from main at \`${main:0:12}\`, run ${GITHUB_RUN_ID}. The master enqueues this PR; the job merges and approves nothing."
+              echo ""
+              echo '```'
+              head -c 60000 "$RUNNER_TEMP/plan.txt"
+              echo '```'
+            } > "$RUNNER_TEMP/pr-body.md"
+            echo "open_pr=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only when ASSIGN_AT_MERGE_TOKEN is set (see the header for its required scope). The push above already
+      # checked that no assign-at-merge PR is open and no earlier branch is unmerged. The token reaches this step
+      # alone, through env, and is used only to open the PR: no push, merge, approval or auto-merge.
+      - name: Open the assignment PR with ASSIGN_AT_MERGE_TOKEN
+        if: steps.push.outputs.open_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ASSIGN_AT_MERGE_TOKEN }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+        run: |
+          set -euo pipefail
+          url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "chore: assign migration numbers and fold docs at merge (ADR-0252)" \
+            --body-file "$RUNNER_TEMP/pr-body.md")"
+          {
+            echo ""
+            echo "### Assignment PR opened: ${url}"
+            echo ""
+            echo "The master enqueues it with \`gh pr merge --merge --auto\`."
           } >> "$GITHUB_STEP_SUMMARY"

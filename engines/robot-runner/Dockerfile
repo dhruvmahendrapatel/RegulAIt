@@ -21,7 +21,7 @@
 # headless shell build is linux64).
 
 # ---- stage 1: the runner, built and deployed with production dependencies ---------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -38,7 +38,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
  && node -e "const v=require('/out/node_modules/playwright-core/package.json').version; if (v !== '1.65.1') { console.error('expected playwright-core 1.65.1, got ' + v); process.exit(1); }"
 
 # ---- stage 2: the browser, from Playwright's own installer at build time ---------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS browser
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS browser
 COPY --from=shim /out/node_modules/playwright-core /pw/playwright-core
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN node /pw/playwright-core/cli.js install --only-shell chromium \
@@ -47,7 +47,7 @@ RUN node /pw/playwright-core/cli.js install --only-shell chromium \
  && ls /ms-playwright
 
 # ---- stage 3: runtime -------------------------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS runtime
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-robot-runner" \
       org.regulait.engine="robot-runner" \
       org.regulait.engine-version="playwright-core-1.65.1"
