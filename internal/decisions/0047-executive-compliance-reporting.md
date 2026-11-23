@@ -313,3 +313,33 @@ Three things about that are worth stating here rather than only in ADR-0064:
 3. **Timeliness is bounded by the box being up.** [ADR-0032](0032-scheduled-power-off-dev-infra.md)
    powers this deployment's infrastructure off nightly; a sweep due inside the off-window does not
    run, is not queued, and is picked up once — late — on the first tick after power-on.
+
+---
+
+## Addendum — 2026-11-22: archive a report definition instead of deleting it (owner decision, CXR-REV-002)
+
+**Owner decision (2026-11-22): archive instead of delete.** Until now `DELETE /v1/reports/definitions/:id` deleted
+the definition, and the `report_schedules` and `report_runs` foreign keys cascaded its schedules and its generated runs
+away with it. This ADR calls a run "one immutable row per generation", and a run is the evidence a board or an auditor
+was given, so a definition is now archived and never deleted.
+
+1. **Lifecycle.** `report_definitions.status` is `active` or `archived`, declared as `REPORT_DEFINITION_MACHINE`
+   (`packages/shared/src/state-machines.ts`, ADR-0348) with one event, `archive` (active to archived, admin). Archived
+   is final: there is no unarchive, so a retired report cannot quietly start producing again. To report again, create
+   a new definition. `archived_at` and `archived_by_user_id` record when and by whom; a CHECK keeps `archived_at` set
+   exactly when the status is `archived` (migration `report_definition_archive`).
+2. **The act.** `POST /v1/reports/definitions/:id/archive` (admin-only through the default gate, as delete was) moves
+   the row with the `whereFrom` guard under a row lock, disables every schedule of the definition in the same
+   transaction, and writes one `report-definition-archived` audit row naming the schedules disabled and the runs kept.
+   A second archive is a 409. `DELETE` on the same path is kept as the same act, so an older client cannot delete.
+3. **Schedules are disabled and also skipped.** Archiving sets `enabled = false` on the definition's schedules, so the
+   schedule list shows them as off. The sweep (`runDueReportSchedules`) also reads only schedules of active
+   definitions, so a schedule re-enabled underneath the API still never fires; re-enabling one through the API, adding
+   a schedule to an archived definition, and generating from one are each refused with `report_definition_archived`.
+4. **Runs are kept.** Every run stays in `report_runs`, readable and exportable under its frozen entitlement scope, and
+   listed in the run history under the definition's name.
+5. **Visibility.** The definitions list and the overview hide archived definitions by default; `?include=archived`
+   shows them (both routes are admin-only).
+6. **The cascade stays.** The foreign keys keep `ON DELETE CASCADE`: no route deletes a definition any more, and
+   changing the keys would only break the test suites' own cleanup. Retention for `report_runs.payload` remains the
+   open follow-up named above; when it lands it will decide when evidence may go, not a definition delete.

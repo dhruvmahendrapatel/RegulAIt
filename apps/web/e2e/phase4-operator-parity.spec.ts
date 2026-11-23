@@ -196,7 +196,7 @@ test.describe("admin console parity", () => {
     await page.getByLabel("Filter navigation").fill("Users");
     await page.getByRole("link", { name: "Users", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Users", exact: true })).toBeVisible();
-    await page.locator("tbody tr[role='link']").first().click();
+    await page.locator("tbody tr [data-row-control]").first().click();
     await page.getByRole("tab", { name: "Overrides" }).click();
     await expect(page.getByText("MCP revocations", { exact: true })).toBeVisible();
     // the O9 disclosure: creation is always full, narrowing is a second act
