@@ -392,6 +392,11 @@ export interface BuildAppOptions {
   /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
   vendorUsageFetch?: typeof fetch;
   vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
+  /** ADR-0361 test seams: the transport the AI SaaS monitor's guarded fetch sends through, its pinned DNS, and the
+   * connector registry (production: `AI_SAAS_CONNECTORS`) */
+  aiSaasMonitorFetch?: typeof fetch;
+  aiSaasMonitorResolve?: import("./egress-guard.js").EgressResolver;
+  aiSaasMonitorConnectors?: import("./ai-saas-monitor.js").AiSaasMonitorDeps["connectors"];
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -673,6 +678,7 @@ import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
   applyEndpointAddonRemovalDecision,
@@ -705,6 +711,7 @@ import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
+import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -6483,6 +6490,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
   // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
   registerContainmentRoutes(app, db);
+  // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
+  // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
+  registerEndpointFleetRoutes(app, db);
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
@@ -6516,6 +6526,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     deps: {
       ...(opts.vendorUsageFetch ? { fetchImpl: opts.vendorUsageFetch } : {}),
       ...(opts.vendorUsageResolve ? { resolve: opts.vendorUsageResolve } : {}),
+    },
+  });
+  // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
+  // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
+  registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
     },
   });
   // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the

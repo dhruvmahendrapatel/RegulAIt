@@ -46,6 +46,9 @@ export const DELIBERATELY_API_ONLY = new Map([
   // ADR-0311 (lane E1, G10): MCP Streamable HTTP plumbing, not a governed object. It always answers 405 Allow: POST,
   // because the stateless proxy issues no session for a client to end, and it deletes nothing.
   ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
+  // ADR-0361 (lane E42): the AI SaaS monitoring brief is API-only; the connector screen is posted on #453 (route census
+  // KNOWN_UI_GAPS holds the same route). RAISED for the master's review on the PR: delete this entry when the screen lands.
+  ["/v1/ai-saas-monitoring/connectors/:x/credential", "revoking an AI SaaS monitor connector credential: API-only until the AI SaaS monitoring screen on #453 (ADR-0361, lane E42)"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
   // CXR-REV-002 (ADR-0047 addendum 2026-11-22): this DELETE archives (it deletes nothing); the screen calls POST .../archive
@@ -93,6 +96,8 @@ export const DELIBERATELY_API_ONLY = new Map([
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
+  ["/v1/discovery/sources/:x/update-rollouts", "ADR-0360: a rollout is evidence of what was offered to which devices; it is retired by POST /v1/discovery/update-rollouts/:id/abort (or completes), never deleted"],
+  ["/v1/ai-saas-monitoring/connectors/:x/runs", "ADR-0361: an AI SaaS monitor run is the ledger the append-only interaction evidence points at (FK RESTRICT); it is never removed"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],

@@ -5181,6 +5181,7 @@ export * from "./agent-identity.js";
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-fleet.js";
 export * from "./endpoint-actions.js";
 
 // ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
@@ -5227,3 +5228,5 @@ export * from "./agent-credential.js";
 export * from "./content-inspection.js";
 // ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
 export * from "./ai-app-risk.js";
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";
