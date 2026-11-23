@@ -153,8 +153,12 @@ name: CI
 #                  job is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #                  A dependency, workflow, schema/migration or security-config change is a full run (ADR-0323).
 #                  Dry run: `node scripts/ci-plan.mjs <changed paths>` or `--base origin/main`.
+#                  #1227 (ADR-0262 addendum, 2026-11-23): the real-gateway SPA journeys also run on a PR that
+#                  changes their inputs (`journeys`: apps/web/**, packages/shared|ui/**, apps/gateway/src/** less
+#                  unit tests). This repository has no merge queue, so a journeys gate on `full` alone never ran
+#                  before a merge: #1227 passed every PR check and turned main red on spa-journeys.
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
-#   push to main   the docker build. The merge queue is where the full suite gates a merge.
+#   push to main   the docker build. The merge queue is where the full suite gates a merge (when one is enabled).
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
 # No workflow-level path filter: `build-and-test` must report on every PR and every merge group.
 on:
@@ -202,6 +206,7 @@ jobs:
       base: ${{ steps.scope.outputs.base }}
       web: ${{ steps.scope.outputs.web }}
       gateway: ${{ steps.scope.outputs.gateway }}
+      journeys: ${{ steps.scope.outputs.journeys }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -750,9 +755,10 @@ jobs:
   # (install + build dominate), on the same `pull_request` paths-ignore as the
   # rest of this workflow.
   spa-journeys:
-    # ADR-0262: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0262: the full suite (merge group, push to main, nightly, manual), and since #1227 (ADR-0262 addendum) also a
+    # PR that changes the journeys' inputs (`journeys`). Not a required check, so gating it directly is safe.
     needs: scope
-    if: needs.scope.outputs.full == 'true'
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.journeys == 'true'
     runs-on: ubuntu-24.04
     # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
     # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
