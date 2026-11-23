@@ -3,7 +3,7 @@
 - **Status**: Proposed (builder lane E41, 2026-11-17; owner decision 2026-11-17, competitor gap audit DarkControl row 21
   and Manifold row 14)
 - **Date**: 2026-11-17
-- **Index**: Endpoint fleet ops: device groups, off-by-default signed staged self-update, one-line enrolment, EDR adapters
+- **Index**: Endpoint fleet ops: staged rollouts over ADR-0350 groups, off-by-default signed staged self-update, one-line enrolment, EDR adapters
 - **Builds on**: ADR-0195 (SD4 endpoint agent), ADR-0197 (Q13 token expiry relaxation), ADR-0259 (endpoint MCP config
   discovery), ADR-0298 (on-device enforcement), ADR-0330 (hook adapters; B4 device-policy signer), and the open
   proposals of lane E16 (the device-policy signer as built, PR #867), lane E15 (the detection engine, PR #865) and lane
@@ -74,27 +74,39 @@ timing-safe compare and a replay window, the shape the PM webhooks already use.
 
 ## Decision
 
-### 1. Device groups (staging rings)
+### 1. Device groups: ADR-0350's, reused
 
-A device group belongs to one endpoint-agent discovery source. A device is in at most one group (the join table's
-primary key is the device), so a rollout stage selects a disjoint set of devices. Groups and memberships are
-admin-only, audited, and in third normal form (`endpoint_device_groups`, `endpoint_device_group_members`).
+The rollout stages are lane E31's device groups ([ADR-0350](0350-endpoint-command-file-package-rules.md):
+`endpoint_device_groups`, `endpoint_device_group_members` and the `/v1/endpoint-device-groups` routes). This lane
+adds no group concept of its own (first drafted as per-source rings; replaced on 2026-11-21 when ADR-0350 merged first).
+
+- ADR-0350 groups are org-wide and a device may be in several. A stage offers the update to the members of its group
+  that are devices of the rollout's source; a device in several staged groups is offered it by the first stage, in
+  ordinal order, that holds it.
+- An ADR-0350 group only narrows a device's policy (its rules are ask or deny), so placing a device in one, as the
+  one-line enrolment does, is never a relaxation. Leaving or deleting a group stays ADR-0350's step-up.
+- A rollout never blocks ADR-0350's group delete: the stage's and the token's foreign keys are `ON DELETE SET NULL`.
+  The stage keeps the group's name as evidence (a point-in-time snapshot) and then offers the update to no device.
 
 ### 2. Self-update: off by default, a relaxation
 
-- The per-source setting `selfUpdate` is `false` by default (`endpoint_fleet_settings`, absent row = off). Turning it on
-  is a `settings_relax` step-up bound to the source (`requireRelaxStepUp`), audited, and the step-up method and audit
+- The setting `selfUpdate` is per ADR-0350 device group (owner decision D-2026-11-22-04; first built per source) and
+  `false` by default (`endpoint_device_group_fleet_settings`, absent row = off; deleting the group deletes its row).
+  Turning it on is a `settings_relax` step-up whose facts bind it to the group (`requireStepUp` with `{op, groupId,
+  selfUpdate}`, so a grant for another group or setting does not count), audited under the group, and the step-up method and audit
   row are recorded on the settings row (a CHECK holds "on" to a recorded relaxation, as migration 0208 does for long
   token expiry). Turning it off needs no step-up and is audited.
+- A rollout starts or resumes only when every stage whose group still exists has self-update on; the refusal names the
+  groups that do not. A device is offered an update only while the group of the stage that offers it has it on.
 - The agent's local config cannot turn it on: `config.go` names self-update a server-side relaxation, and the config
   file has no member for it. The device only acts on a signed directive (below).
 
 ### 3. Staged rollouts: a declared lifecycle
 
-A rollout names one target version and an ordered list of stages, each one device group. At most one rollout per
+A rollout names one target version and an ordered list of stages, each one ADR-0350 device group. At most one rollout per
 source is open (not `completed` or `aborted`; a partial unique index).
 
-Rollout lifecycle (`endpoint_update_rollouts.state`, declared once in `endpoint-fleet-lifecycle.ts`):
+Rollout lifecycle (`endpoint_update_rollouts.state`, declared once as `ENDPOINT_ROLLOUT_MACHINE` in `@regulait/shared`):
 
 | Event | From | To | By |
 |---|---|---|---|
@@ -103,7 +115,7 @@ Rollout lifecycle (`endpoint_update_rollouts.state`, declared once in `endpoint-
 | `complete` | `running` (last stage active) | `completed` | admin |
 | `pause` | `running` | `paused` | admin |
 | `resume` | `paused`, `halted` | `running` | admin; refused while self-update is off |
-| `halt` | `running` | `halted` | system: a device reported a failed install or a rollback (strict default: the first failure halts) |
+| `halt` | `running` | `halted` | system: failed installs or rollbacks reached the rollout's halt threshold (strict default 1: the first failure halts) |
 | `abort` | `draft`, `running`, `paused`, `halted` | `aborted` | admin |
 
 `completed` and `aborted` are terminal. Stage lifecycle (`endpoint_update_rollout_stages.state`): `pending → active →
@@ -111,8 +123,18 @@ done`, `done` terminal. Every write is a guarded `UPDATE … WHERE state IN (sou
 stale write matches no row and is refused (409), never overwriting a newer state. Turning self-update off does not
 change a rollout's state; it stops every directive at once (the device route answers "no update" while it is off).
 
-The tables are declared in lane E29's `MachineDef` shape (PR #920) (states, initial, terminal, transitions with from, to, by
-and summary) so they move onto `defineMachine` when lane E29's PR merges, without a behaviour change.
+**The halt threshold** (owner decision D-2026-11-22-04: configurable but bounded). `endpoint_update_rollouts.halt_threshold`
+counts the failed installs or rollbacks that halt the rollout. Its strict default is 1 and its bounds are 1 to 10
+(`ENDPOINT_ROLLOUT_HALT_THRESHOLD`, held by a CHECK). `PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold`
+changes it on an open rollout. Lowering it is a tightening and needs no step-up. Raising it is a relaxation: a
+`settings_relax` step-up bound to `{op, rolloutId, haltThreshold}`, never past 10. The step-up method and audit row are
+recorded on the rollout (a CHECK holds any value above 1 to a recorded relaxation) and cleared when the value returns to
+1. Every change is audited. The count is a number of devices, not a percentage, so the cap means the same thing in a
+small fleet as in a large one.
+
+Both tables are ADR-0348 machines declared with `defineMachine` (`packages/shared/src/endpoint-fleet.ts`) and
+registered in `STATE_MACHINES`, so `GET /v1/state-machines` lists them and the CHECK-equality test covers both columns.
+Every state write is guarded with `whereFrom(column, machine, event)`, and the API returns `machine.describe(state)`.
 
 ### 4. The device side (slice 1b and 1c)
 
@@ -124,8 +146,8 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
 - **Directive.** The gateway answers the per-user agent's existing config request with an update directive signed by
   the device-policy signer (ADR-0330 B4 as lane E16 builds it, PR #867; the same envelope `{keyId, payload, signature}`
   and pinned keyring as the enforcement policy). Payload: `{schema, deviceId, rolloutId, targetVersion, issuedAt,
-  notAfter}` (at most 24 hours). Only while self-update is on, the rollout is running and the device's group has an
-  active stage.
+  notAfter}` (at most 24 hours). Only while the rollout is running and the device's group has an active stage whose
+  group has self-update on.
 - **Transport is untrusted, verification is not.** The per-user agent (which holds the self token) downloads the
   directive, the release manifest and the binary into a spool directory (`/var/lib/regulait-agent/update`). The root
   updater (`regulait-agent update`, a system timer the package installs) trusts none of it: it verifies the directive
@@ -139,6 +161,16 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
   again; a failure restores the previous binary. Every outcome (`installed`, `rolled_back`, `refused`, `failed`) is
   written with a fixed code to a result file the per-user agent reports, and a `rolled_back` or `failed` result halts
   the rollout.
+- **Hardening the updater must meet (review of #962, checked against the slice 1b/1c code):**
+  - the spool is read with `O_NOFOLLOW` (`openat` under the spool directory), bounded by the manifest's `length`, and
+    copied into a root-only staging file before it is hashed, so the bytes hashed are the bytes run;
+  - versions are compared with `golang.org/x/mod/semver` on a valid `v`-prefixed form only (an invalid version is
+    refused, never treated as equal), and an install needs `semver.Compare(target, running) > 0`.
+- **What self-update does not protect against (stated, not hidden).** There is no device-side off switch once the
+  admin pins a release key and turns self-update on: a compromised gateway can direct a device to any *newer* release
+  that the offline release key signed. It cannot supply an unsigned or older binary, a key, or a release the release
+  key never signed. The mitigations are the offline release key, the per-group switch (off by default, a step-up to
+  turn on), staged rollouts, and the halt threshold (the first failed install by default, at most 10).
 
 ### 5. One-line enrolment
 
@@ -147,8 +179,7 @@ and summary) so they move onto `defineMachine` when lane E29's PR merges, withou
 - **short-lived**: 15 minutes by default, at most 60 (a CHECK);
 - **single-use**: device cap 1 (a CHECK), consumed by the first redemption;
 - **scope-limited**: it redeems a device ticket for its own source only, and optionally places the device in one
-  device group of that source (a composite foreign key, so the group cannot belong to another source). It reaches no
-  other route;
+  ADR-0350 device group (which only narrows the device's policy). It reaches no other route;
 - **never logged**: only its SHA-256 is stored; the gateway logger redacts the Authorization header; the audit rows
   name the token id, never the secret. On the device, `regulait-agent enrol` reads the token from standard input, never
   from an argument (an argument is visible to every user in the process list), and never writes it to disk or a log.
@@ -191,7 +222,7 @@ process list). The token is consumed on use, so a copy left in shell history is 
   `approval_decide` step-up bound to the request and the decision, before anything is sent to the vendor. Releasing
   widens access back, so it is the same with a `settings_relax` step-up bound to the request. One open request per
   device.
-- **Isolation lifecycle** (`edr/lifecycle.ts`, declared in the same `MachineDef` shape): `requested →(approve)
+- **Isolation lifecycle** (`EDR_ISOLATION_MACHINE` in `@regulait/shared`'s `edr.ts`, an ADR-0348 `defineMachine` registered in `STATE_MACHINES`): `requested →(approve)
   submitting →(confirm) isolated →(request_release) release_requested →(approve_release) releasing →(confirm_release)
   released`; `requested →(reject) rejected`; `submitting →(fail) failed`; `release_requested →(reject_release)
   isolated`; `releasing →(fail_release) isolated`. `rejected`, `failed` and `released` are terminal. The system events
@@ -217,7 +248,7 @@ Queue screen is a UI follow-up on #453.
 
 ## Slices
 
-1. **1a (gateway):** this ADR, device groups, the self-update setting, rollouts and their lifecycle, one-line
+1. **1a (gateway):** this ADR, the self-update setting, rollouts over ADR-0350 device groups and their lifecycle, one-line
    enrolment tokens.
 2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the root updater: directive and manifest
    verification, the downgrade refusal, staging, health check and rollback.
@@ -225,8 +256,7 @@ Queue screen is a UI follow-up on #453.
    route, the per-user agent's spool writer, and the device's update-result route (which halts a rollout).
 4. **2 (gateway):** EDR adapters, signal ingest, verified webhooks and governed isolation.
 
-## Owner questions (built with the secure default)
+## Owner questions (answered 2026-11-22, DecisionLog D-2026-11-22-04)
 
-- Should a halted rollout's failure threshold be configurable (for example 2 % of a stage)? Built: the first failure
-  halts; an admin resumes after looking.
-- Should the self-update setting be per source (built) or per device group?
+- The halt threshold is configurable but bounded: tightening is free, loosening is capped and audited (§3).
+- The self-update setting is per device group, default off (§2).

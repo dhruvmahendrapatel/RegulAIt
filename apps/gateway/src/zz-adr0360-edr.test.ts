@@ -35,7 +35,6 @@ import { buildApp } from "./app.js";
 import { edrIsolationDecideStepUp, edrIsolationEnableStepUp, edrReleaseStepUp } from "./edr/routes.js";
 import { pollEdrIsolations } from "./edr/service.js";
 import { ISOLATION_MACHINE } from "./edr/lifecycle.js";
-import { sourcesOf } from "./endpoint-fleet-lifecycle.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -167,9 +166,9 @@ afterAll(async () => {
 
 describe("ADR-0360 EDR: the declared isolation lifecycle", () => {
   it("has no event out of a terminal state and two-step release", () => {
-    for (const t of Object.values(ISOLATION_MACHINE.transitions)) for (const s of ISOLATION_MACHINE.terminal) expect(t.from).not.toContain(s);
-    expect(sourcesOf(ISOLATION_MACHINE, "approve_release")).toEqual(["release_requested"]);
-    expect(ISOLATION_MACHINE.transitions.fail_release.to).toBe("isolated");
+    for (const t of Object.values(ISOLATION_MACHINE.def.transitions)) for (const s of ISOLATION_MACHINE.def.terminal) expect(t.from).not.toContain(s);
+    expect(ISOLATION_MACHINE.sourcesOf("approve_release")).toEqual(["release_requested"]);
+    expect(ISOLATION_MACHINE.def.transitions.fail_release.to).toBe("isolated");
   });
 });
 

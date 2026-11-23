@@ -49,8 +49,8 @@ export const AI_BOM_SCAN_VERDICTS = ["clean", "no_known_unsafe", "unsafe", "unkn
 export const AI_BOM_EVIDENCE_KINDS = ["eval_run", "external", "engine_scan"] as const;
 /** `BUILDER_SKILL_ADMISSION_STATES` */
 export const AI_BOM_SKILL_ADMISSION_STATES = ["unscanned", "clean", "held", "refused", "admitted"] as const;
-/** `MCP_UPSTREAM_TRANSPORTS` */
-export const AI_BOM_MCP_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const;
+/** `MCP_SERVER_TRANSPORTS` (the upstream transports plus ADR-0364's in-process `first_party`) */
+export const AI_BOM_MCP_TRANSPORTS = ["streamable_http", "sse", "stdio", "first_party"] as const;
 /** `ADR-0045` bias/fairness slot statuses (`BIAS_FAIRNESS_STATUSES`) */
 export const AI_BOM_BIAS_STATUSES = ["not_assessed", "in_progress", "assessed", "waived"] as const;
 /** the config artifact types whose active and canary versions are agent components (round 8, 4237322637) */
@@ -1007,8 +1007,9 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         id: uuid(`${at}.id`, r.id) as string,
         name: free(`${at}.name`, r.name, AI_BOM_NAME_MAX_CHARS),
         transport,
-        // a stdio server's url is the `stdio:<name>` sentinel, not an endpoint (R12 section 12)
-        url: transport === "stdio" ? null : sanitiseAiBomEndpoint(url, `${at}.url`),
+        // a stdio server's url is the `stdio:<name>` sentinel, and a first-party server's the fixed `regulait:<name>`
+        // key (ADR-0364), not an endpoint (R12 section 12)
+        url: transport === "stdio" || transport === "first_party" ? null : sanitiseAiBomEndpoint(url, `${at}.url`),
         releaseDigest: r.releaseDigest === null ? null : digest(`${at}.releaseDigest`, String(r.releaseDigest).replace(/^sha256:/, "")),
         admissionState: ident(`${at}.admissionState`, r.admissionState),
         admissionManifestDigest: r.admissionManifestDigest === null ? null : digest(`${at}.admissionManifestDigest`, String(r.admissionManifestDigest).replace(/^sha256:/, "")),

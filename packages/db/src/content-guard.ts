@@ -60,18 +60,28 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0315 (G7): an agent credential audience's admin-typed name
+  [s.agentCredentialAudiences, ["name"]],
   // ADR-0236 (P11): governed MCP bundles
   [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
   [s.builderAgentSubagents, ["name", "description"]],
   [s.builderAgentSchedules, ["name"]],
   [s.builderSkills, ["name", "description", "body"]],
+  // ADR-0364 (lane E45 S2): robots, and the names a robot's secrets are bound and stored under
+  [s.robots, ["name", "description"]],
+  [s.robotSecrets, ["name"]],
+  [s.robotVersionSecrets, ["name"]],
   [s.orchestrationRuns, ["name"]],
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
   [s.initiatives, ["name"]],
+  // ADR-0357 §4 (lane E38): the business-unit level of the policy hierarchy
+  [s.businessUnits, ["name", "description"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
+  // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
+  [s.jurisdictions, ["name"]],
   [s.aiVendors, ["name", "description"]],
   [s.aiRisks, ["title", "description"]],
   [s.kris, ["name", "scoreName"]],
@@ -107,14 +117,20 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
-  // ADR-0360 (lane E41): a device group (staging ring) an admin names
-  [s.endpointDeviceGroups, ["name"]],
   // ADR-0360 slice 2 (lane E41): an EDR connection an admin names
   [s.edrConnections, ["name"]],
   // ADR-0261 (P37): a third-party ingest source an admin names
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
   [s.siemDestinations, ["name"]],
+  // ADR-0350 (lane E31): an endpoint device group an admin names and describes
+  [s.endpointDeviceGroups, ["name", "description"]],
+  // ADR-0363 slice 2: a customer classifier an admin names
+  [s.customClassifiers, ["name"]],
+  // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
+  [s.vendorUsageConnectors, ["name"]],
+  // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
+  [s.aiSaasMonitorConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -125,12 +141,20 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.redteamLibraries, ["name"]],
   [s.trainingDatasets, ["name"]],
   [s.fairnessDatasets, ["name", "description"]],
+  // ADR-0346: an evaluation's name, and a model-input dataset's input column names (CSV headers an admin typed)
+  [s.fairnessEvaluations, ["name"]],
+  [s.fairnessDatasetInputColumns, ["columnName"]],
   [s.modelDriftMonitors, ["name"]],
   [s.trainingJobs, ["name"]],
   [s.monitoringDashboards, ["name"]],
   [s.automationRules, ["name"]],
   [s.policySimulations, ["policyName"]],
   [s.rateCards, ["name", "description"]],
+  // ADR-0327 addendum: a decision table's name is typed by an administrator
+  [s.decisionTables, ["name"]],
+  // ADR-0331: the server name an admin types to narrow a removal; refused when credential-shaped (such a name is
+  // stored as "(unnamed)" in the evidence and could never match anyway)
+  [s.endpointAddonRemovals, ["serverName"]],
 ];
 
 export type ContentGuardExclusion =
@@ -161,13 +185,25 @@ export const CONTENT_GUARD_EXCLUSION_REASONS: Readonly<Record<ContentGuardExclus
 
 /** DELIBERATELY NOT GUARDED — named, with a category, so the inventory test can tell a decision from an oversight. */
 export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclusion>> = {
+  // ADR-0314: a vendor agent registry's own name and description for an agent, read-only and bounded at staging
+  "agent_registry_records.description": "ingested",
+  "agent_registry_records.display_name": "ingested",
+  // ADR-0336: a staged agent's component name (a knowledge source, a skill, a connector) as the vendor reports it
+  "agent_registry_record_components.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
+  // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
+  "saas_entitlement_apps.display_name": "ingested",
+  "saas_entitlement_scopes.name": "ingested",
+  // ADR-0363 slice 1: a label's display name as Microsoft Graph returns it (the customer's Purview tenant)
+  "sensitivity_label_definitions.name": "ingested",
   "ai_incident_actions.title": "prose_owned_by_adr0102",
   "ai_incidents.summary": "prose_owned_by_adr0102",
   "ai_incidents.title": "prose_owned_by_adr0102",
   "ai_policy_documents.title": "prose_owned_by_adr0102",
   "audit_log.tool_name": "audit_owned_by_adr0099",
+  // ADR-0315 (G7): a scope map row names the governed tool it maps
+  "agent_credential_audience_scopes.tool_name": "tool_reference",
   "approval_rules.tool_name": "tool_reference",
   "approvals.tool_name": "tool_reference",
   "config_canary_observations.tool_name": "tool_reference",
@@ -175,6 +211,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
   "mcp_bundle_version_items.tool_name": "tool_reference",
+  "paid_call_holds.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",
@@ -187,6 +224,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "billing_statements.rate_card_name": "platform_copy",
   "builder_agent_skills.snapshot_name": "platform_copy",
   "engine_runs.workflow_check_name": "platform_copy",
+  "endpoint_update_rollout_stages.group_name": "platform_copy",
   "eval_runs.agent_name": "platform_copy",
   "eval_runs.workflow_check_name": "platform_copy",
   "mcp_servers.registry_entry_name": "platform_copy",
@@ -195,10 +233,15 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "redteam_runs.agent_name": "platform_copy",
   "redteam_runs.library_name": "platform_copy",
   "rule_step_suggestions.step_name": "platform_copy",
+  // ADR-0327 addendum: names an existing trace span (`trace_spans.name`, machine) and must equal it exactly to bind the
+  // table to that step; refusing it would make the step unbindable, not stop a paste
+  "decision_tables.step_name": "platform_copy",
   "scheduler_runs.job_name": "platform_copy",
   "use_case_decision_records.intake_template_name": "platform_copy",
   "cert_inventory.common_name": "ingested",
   "endpoint_mcp_servers.server_name": "ingested",
+  // ADR-0331: the target's point-in-time copy of endpoint_mcp_servers.server_name (ingested above)
+  "endpoint_addon_removal_targets.server_name": "platform_copy",
   "imported_cost_lines.description": "ingested",
   "infra_resources.name": "ingested",
   "mcp_registry_entries.description": "ingested",
@@ -231,6 +274,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "conversations.title": "conversation",
   "ai_bom_snapshots.body": "signed_evidence",
   "decision_boms.body": "signed_evidence",
+  // ADR-0346: the canonical bytes of a signed fairness run (aggregates the gateway computed; refusing would break the signature)
+  "fairness_run_evidence.body": "signed_evidence",
   // ADR-0310: a compiled managed-settings file (vendor JSON/TOML of gateway URLs and tool names); its sha256 is in the
   // signed bundle manifest, so refusing it after compilation would break the signature, not stop a paste
   "managed_settings_bundle_files.body": "signed_evidence",

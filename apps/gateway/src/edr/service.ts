@@ -15,7 +15,7 @@ import { and, auditLog, edrConnections, edrDeviceSignals, edrIsolationRequests, 
 import { ConnectionEgressBlockedError, guardConnectionCall, type ConnectionEgressDeps } from "../connection-egress.js";
 import { derivePseudonym } from "../discovery-worker.js";
 import { decryptSecret } from "../secrets.js";
-import { sourcesOf } from "../endpoint-fleet-lifecycle.js";
+import { whereFrom } from "../state-transition.js";
 import { EDR_ADAPTERS, EDR_RISK_LEVELS, EdrError, deviceRisk, type EdrCredential, type EdrRisk, type EdrSeverity, type EdrWebhookEvent } from "./adapters.js";
 import { ISOLATION_MACHINE, type IsolationEvent } from "./lifecycle.js";
 
@@ -149,8 +149,8 @@ export async function ingestEdrWebhook(db: Db, conn: EdrConnectionRow, ev: EdrWe
 export async function moveIsolation(db: Db, id: string, event: IsolationEvent, set: Partial<typeof edrIsolationRequests.$inferInsert> = {}): Promise<EdrIsolationRequestRow | null> {
   const [row] = await db
     .update(edrIsolationRequests)
-    .set({ ...set, state: ISOLATION_MACHINE.transitions[event].to, updatedAt: sql`now()` })
-    .where(and(eq(edrIsolationRequests.id, id), inArray(edrIsolationRequests.state, sourcesOf(ISOLATION_MACHINE, event))))
+    .set({ ...set, state: ISOLATION_MACHINE.def.transitions[event].to, updatedAt: sql`now()` })
+    .where(and(eq(edrIsolationRequests.id, id), whereFrom(edrIsolationRequests.state, ISOLATION_MACHINE, event)))
     .returning();
   return row ?? null;
 }

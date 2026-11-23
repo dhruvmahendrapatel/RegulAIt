@@ -2,8 +2,8 @@
  * ADR-0360 slice 1a — endpoint agent fleet operations, end to end (real database).
  *
  *  - every route is admin-only;
- *  - device groups: per-source names, a device is in at most one group (adding moves it), only live devices of the
- *    group's own source, a group a rollout names is kept;
+ *  - device groups are ADR-0350's (lane E31's routes and table, reused): a stage or a one-line token names one, and
+ *    deleting the group is never blocked by either (the stage keeps the name as evidence and offers nothing);
  *  - self-update is off by default; turning it on is a `settings_relax` step-up bound to the source (a missing or
  *    mismatched grant is refused and nothing changes), recorded on the row and audited; the CHECK refuses "on" without
  *    a recorded relaxation; turning it off is free;
@@ -11,7 +11,7 @@
  *    pending → active → done, an illegal or stale event is refused (409) and changes nothing, one open rollout per
  *    source;
  *  - one-line enrolment: one device, 15 minutes by default and at most 60 (also the CHECK), the device joins the
- *    token's group, a second redemption is refused, and the secret is in no audit row.
+ *    token's ADR-0350 group, a second redemption is refused, and the secret is in no audit row.
  *
  * Everything this suite creates is removed in afterAll.
  */
@@ -25,19 +25,22 @@ import {
   discoveryPseudonymKeys,
   discoverySources,
   endpointDeviceGroupMembers,
+  endpointDeviceGroups,
   endpointEnrolmentTokens,
-  endpointFleetSettings,
+  endpointDeviceGroupFleetSettings,
+  endpointUpdateRolloutStages,
   endpointUpdateRollouts,
   eq,
   inArray,
   runMigrations,
+  runWithRlsSystem,
   sql,
   users,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { ROLLOUT_MACHINE, ROLLOUT_STAGE_MACHINE, describe as describeState, sourcesOf } from "./endpoint-fleet-lifecycle.js";
-import { selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
+import { ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE, STATE_MACHINES } from "@regulait/shared";
+import { haltThresholdRelaxStepUp, selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
 import { hashToken } from "./token-hash.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -62,6 +65,7 @@ let memberKey: { authorization: string };
 let adminId: string;
 const restores: Array<() => Promise<void>> = [];
 const sourceIds: string[] = [];
+const groupIds: string[] = [];
 
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -76,25 +80,21 @@ async function agentSource(enabled = true) {
   if (enabled) await db.update(discoverySources).set({ enabled: true, enabledAt: new Date(), enabledBy: adminId }).where(eq(discoverySources.id, id));
   return id;
 }
-async function group(sourceId: string, name: string) {
-  const r = await inject("POST", `/v1/discovery/sources/${sourceId}/device-groups`, AUTH, { name });
+/** an ADR-0350 device group, through lane E31's own route (org-wide, so the name carries the run) */
+async function group(name: string) {
+  const r = await inject("POST", "/v1/endpoint-device-groups", AUTH, { name: `e41-${name}-${RUN}-${++seq}` });
   expect(r.statusCode, r.body).toBe(201);
-  return r.json().group.id as string;
-}
-async function device(sourceId: string, host: string) {
-  const t = await inject("POST", `/v1/discovery/sources/${sourceId}/enrolment-tokens`, AUTH, { label: `e41-${RUN}`, deviceCap: 1 });
-  expect(t.statusCode, t.body).toBe(201);
-  const r = await ticket(t.json().enrolFile.token as string, host);
-  expect(r.statusCode, r.body).toBe(201);
-  return r.json().ticketId as string;
+  groupIds.push(r.json().id as string);
+  return r.json().id as string;
 }
 const ticket = (bulk: string, hostname: string) =>
   inject("POST", "/v1/endpoint-agent/enrolment-tickets", { authorization: `Bearer ${bulk}` }, { hostname, os: "linux", arch: "amd64", agentVersion: "0.1.0" });
-async function selfUpdateOn(sourceId: string) {
-  const g = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(sourceId));
-  const r = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${sourceId}/fleet-settings`, ...stepUpRequest(g), payload: { selfUpdate: true } });
+async function selfUpdateOn(groupId: string) {
+  const g = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(groupId));
+  const r = await app.inject({ method: "PUT", url: `/v1/endpoint-device-groups/${groupId}/fleet-settings`, ...stepUpRequest(g), payload: { selfUpdate: true } });
   expect(r.statusCode, r.body).toBe(200);
 }
+const settingsUrl = (groupId: string) => `/v1/endpoint-device-groups/${groupId}/fleet-settings`;
 const act = (rolloutId: string, action: string) => inject("POST", `/v1/discovery/update-rollouts/${rolloutId}/${action}`, AUTH, {});
 
 beforeAll(async () => {
@@ -121,11 +121,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (sourceIds.length) {
-    // rollouts first: a stage's group is ON DELETE RESTRICT
     await db.delete(endpointUpdateRollouts).where(inArray(endpointUpdateRollouts.sourceId, sourceIds));
     await db.update(discoverySources).set({ enabled: false }).where(inArray(discoverySources.id, sourceIds));
     await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
   }
+  if (groupIds.length) await db.delete(endpointDeviceGroups).where(inArray(endpointDeviceGroups.id, groupIds));
   for (const r of restores.reverse()) await r();
   await app?.close();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
@@ -134,92 +134,66 @@ afterAll(async () => {
 
 describe("ADR-0360: the declared lifecycles", () => {
   it("guards every write with the event's source states and says why a step is not allowed", () => {
-    expect(sourcesOf(ROLLOUT_MACHINE, "start")).toEqual(["draft"]);
-    expect(sourcesOf(ROLLOUT_MACHINE, "resume")).toEqual(["paused", "halted"]);
-    expect(sourcesOf(ROLLOUT_MACHINE, "abort")).toEqual(["draft", "running", "paused", "halted"]);
-    expect(sourcesOf(ROLLOUT_STAGE_MACHINE, "finish")).toEqual(["active"]);
-    // no event leaves a terminal state
-    for (const t of Object.values(ROLLOUT_MACHINE.transitions)) for (const s of ROLLOUT_MACHINE.terminal) expect(t.from).not.toContain(s);
-    const d = describeState(ROLLOUT_MACHINE, "completed");
+    // ADR-0348: registered, so GET /v1/state-machines lists them and the CHECK-equality test covers both columns
+    expect(STATE_MACHINES[ROLLOUT_MACHINE.def.id]).toBe(ROLLOUT_MACHINE);
+    expect(STATE_MACHINES[ROLLOUT_STAGE_MACHINE.def.id]).toBe(ROLLOUT_STAGE_MACHINE);
+    expect(ROLLOUT_MACHINE.sourcesOf("start")).toEqual(["draft"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("resume")).toEqual(["paused", "halted"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("abort")).toEqual(["draft", "running", "paused", "halted"]);
+    expect(ROLLOUT_STAGE_MACHINE.sourcesOf("finish")).toEqual(["active"]);
+    const d = ROLLOUT_MACHINE.describe("completed");
     expect(d.terminal).toBe(true);
     expect(d.transitions.every((t) => !t.allowed && t.reason)).toBe(true);
   });
 });
 
-describe("ADR-0360: device groups", () => {
+describe("ADR-0360: the fleet routes", () => {
   it("is admin-only", async () => {
     const s = await agentSource();
+    const g = await group("admin-only");
     const id = randomUUID();
     for (const [m, u] of [
-      ["GET", `/v1/discovery/sources/${s}/device-groups`],
-      ["POST", `/v1/discovery/sources/${s}/device-groups`],
-      ["DELETE", `/v1/discovery/device-groups/${id}`],
-      ["GET", `/v1/discovery/device-groups/${id}/members`],
-      ["POST", `/v1/discovery/device-groups/${id}/members`],
-      ["GET", `/v1/discovery/sources/${s}/fleet-settings`],
-      ["PUT", `/v1/discovery/sources/${s}/fleet-settings`],
+      ["GET", settingsUrl(g)],
+      ["PUT", settingsUrl(g)],
+      ["PUT", `/v1/discovery/update-rollouts/${id}/halt-threshold`],
       ["GET", `/v1/discovery/sources/${s}/update-rollouts`],
       ["POST", `/v1/discovery/sources/${s}/update-rollouts`],
       ["GET", `/v1/discovery/update-rollouts/${id}`],
       ["POST", `/v1/discovery/update-rollouts/${id}/start`],
       ["POST", `/v1/discovery/sources/${s}/one-line-enrolments`],
     ] as const) {
-      expect((await inject(m, u, memberKey, m === "GET" || m === "DELETE" ? undefined : {})).statusCode, `${m} ${u}`).toBe(403);
+      expect((await inject(m, u, memberKey, m === "GET" ? undefined : {})).statusCode, `${m} ${u}`).toBe(403);
     }
-  });
-
-  it("keeps a device in one group of its own source, and moves it on a second add", async () => {
-    const s = await agentSource();
-    const other = await agentSource();
-    const ring0 = await group(s, "ring-0");
-    const ring1 = await group(s, "ring-1");
-    const foreign = await group(other, "ring-0");
-    expect((await inject("POST", `/v1/discovery/sources/${s}/device-groups`, AUTH, { name: "ring-0" })).json().error).toBe("group_name_taken");
-    const d1 = await device(s, `e41-h1-${RUN}`);
-    const d2 = await device(s, `e41-h2-${RUN}`);
-    const add = await inject("POST", `/v1/discovery/device-groups/${ring0}/members`, AUTH, { add: [d1, d2] });
-    expect(add.statusCode, add.body).toBe(200);
-    expect((await inject("POST", `/v1/discovery/device-groups/${foreign}/members`, AUTH, { add: [d1] })).json().error).toBe("device_not_in_source");
-    expect((await inject("POST", `/v1/discovery/device-groups/${ring1}/members`, AUTH, { add: [d1] })).statusCode).toBe(200);
-    const rows = await db.select().from(endpointDeviceGroupMembers).where(inArray(endpointDeviceGroupMembers.deviceId, [d1, d2]));
-    expect(Object.fromEntries(rows.map((r) => [r.deviceId, r.groupId]))).toEqual({ [d1]: ring1, [d2]: ring0 });
-    const list = await inject("GET", `/v1/discovery/sources/${s}/device-groups`, AUTH);
-    expect(list.json().groups.map((g: { name: string; members: number }) => [g.name, g.members])).toEqual([
-      ["ring-0", 1],
-      ["ring-1", 1],
-    ]);
-    const members = await inject("GET", `/v1/discovery/device-groups/${ring0}/members`, AUTH);
-    expect(members.json().members.map((m: { deviceId: string }) => m.deviceId)).toEqual([d2]);
-    expect(JSON.stringify(members.json())).not.toContain(`e41-h2-${RUN}`);
-    const rm = await inject("POST", `/v1/discovery/device-groups/${ring0}/members`, AUTH, { remove: [d2] });
-    expect(rm.json()).toEqual({ added: 0, removed: 1 });
   });
 });
 
-describe("ADR-0360: self-update is off by default and a relaxation", () => {
-  it("needs a step-up bound to the source to turn on, records it, and is free to turn off", async () => {
-    const s = await agentSource();
-    const other = await agentSource();
-    expect((await inject("GET", `/v1/discovery/sources/${s}/fleet-settings`, AUTH)).json()).toMatchObject({ selfUpdate: false, strict: { selfUpdate: false } });
-    // a session with no grant, and a grant bound to another source, change nothing
+describe("ADR-0360: self-update is per device group, off by default, and a relaxation", () => {
+  it("needs a step-up bound to the group to turn on, records it, and is free to turn off", async () => {
+    const g = await group("self-update");
+    const other = await group("self-update-other");
+    expect((await inject("GET", settingsUrl(g), AUTH)).json()).toMatchObject({ groupId: g, selfUpdate: false, strict: { selfUpdate: false } });
+    expect((await inject("GET", settingsUrl(randomUUID()), AUTH)).statusCode).toBe(404);
+    // a session with no grant, and a grant bound to another group, change nothing
     const wrong = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(other));
-    const none = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${s}/fleet-settings`, ...sessionRequest(wrong), payload: { selfUpdate: true } });
+    const none = await app.inject({ method: "PUT", url: settingsUrl(g), ...sessionRequest(wrong), payload: { selfUpdate: true } });
     expect(none.statusCode, none.body).toBe(422);
     expect(none.json()).toMatchObject({ error: "step_up_unavailable", actionKind: "settings_relax" });
-    const mismatched = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${s}/fleet-settings`, ...stepUpRequest(wrong), payload: { selfUpdate: true } });
+    const mismatched = await app.inject({ method: "PUT", url: settingsUrl(g), ...stepUpRequest(wrong), payload: { selfUpdate: true } });
     expect(mismatched.statusCode, mismatched.body).toBe(422);
     expect(await grantSpent(db, wrong.grantId)).toBe(false);
-    expect(await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s))).toEqual([]);
-    await selfUpdateOn(s);
-    const [row] = await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s));
+    expect(await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g))).toEqual([]);
+    await selfUpdateOn(g);
+    const [row] = await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g));
     expect(row).toMatchObject({ selfUpdate: true, selfUpdateRelaxedBy: adminId });
     const [a] = await db.select().from(auditLog).where(eq(auditLog.id, row!.selfUpdateAuditId!));
-    expect(a).toMatchObject({ ruleId: "endpoint-fleet-self-update-relaxed", objectId: s });
+    expect(a).toMatchObject({ ruleId: "endpoint-fleet-self-update-relaxed", objectType: "endpoint_device_group", objectId: g });
+    // the other group is untouched: the setting is per group
+    expect((await inject("GET", settingsUrl(other), AUTH)).json().selfUpdate).toBe(false);
     // the CHECK: "on" only with a recorded relaxation
-    await expect(db.update(endpointFleetSettings).set({ selfUpdateStepUp: null }).where(eq(endpointFleetSettings.sourceId, s))).rejects.toThrow();
-    const off = await inject("PUT", `/v1/discovery/sources/${s}/fleet-settings`, AUTH, { selfUpdate: false });
+    await expect(db.update(endpointDeviceGroupFleetSettings).set({ selfUpdateStepUp: null }).where(eq(endpointDeviceGroupFleetSettings.groupId, g))).rejects.toThrow();
+    const off = await inject("PUT", settingsUrl(g), AUTH, { selfUpdate: false });
     expect(off.json().selfUpdate).toBe(false);
-    const [after] = await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s));
+    const [after] = await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g));
     expect(after).toMatchObject({ selfUpdate: false, selfUpdateStepUp: null, selfUpdateAuditId: null });
   });
 });
@@ -227,24 +201,28 @@ describe("ADR-0360: self-update is off by default and a relaxation", () => {
 describe("ADR-0360: staged rollouts", () => {
   it("follows the declared lifecycle and refuses what the table does not allow", async () => {
     const s = await agentSource();
-    const g1 = await group(s, "canary");
-    const g2 = await group(s, "broad");
+    const g1 = await group("canary");
+    const g2 = await group("broad");
     const bad = await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.2.0", stages: [g1, g1] });
     expect(bad.statusCode).toBe(400);
-    const foreign = await group(await agentSource(), "x");
-    expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.2.0", stages: [foreign] })).json().error).toBe("group_not_in_source");
+    expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.2.0", stages: [randomUUID()] })).json().error).toBe("group_not_found");
     const c = await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.2.0", stages: [g1, g2] });
     expect(c.statusCode, c.body).toBe(201);
     const id = c.json().rollout.id as string;
     expect(c.json().rollout.state).toBe("draft");
     expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.3.0", stages: [g1] })).json().error).toBe("rollout_open");
-    // self-update off: start is blocked, and says why
+    // self-update off in both stage groups: start is blocked, and names them
     const blocked = await act(id, "start");
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toMatchObject({ error: "transition_blocked" });
-    expect(blocked.json().detail).toMatch(/self-update is off/);
+    expect(blocked.json().detail).toMatch(/self-update is off for device groups 'e41-canary-.*', 'e41-broad-/);
     expect((await act(id, "pause")).json().error).toBe("illegal_transition");
-    await selfUpdateOn(s);
+    // on in one group only: still blocked, naming the other
+    await selfUpdateOn(g1);
+    const half = await act(id, "start");
+    expect(half.json().error).toBe("transition_blocked");
+    expect(half.json().detail).toMatch(/self-update is off for device group 'e41-broad-/);
+    await selfUpdateOn(g2);
     const started = await act(id, "start");
     expect(started.statusCode, started.body).toBe(200);
     expect(started.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["active", "pending"]);
@@ -254,8 +232,6 @@ describe("ADR-0360: staged rollouts", () => {
     const adv = await act(id, "advance");
     expect(adv.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["done", "active"]);
     expect((await act(id, "advance")).json().error).toBe("transition_blocked");
-    // a group a rollout names is kept
-    expect((await inject("DELETE", `/v1/discovery/device-groups/${g1}`, AUTH)).json().error).toBe("group_in_rollout");
     const done = await act(id, "complete");
     expect(done.json().rollout).toMatchObject({ state: "completed" });
     expect(done.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["done", "done"]);
@@ -272,21 +248,98 @@ describe("ADR-0360: staged rollouts", () => {
 
   it("refuses a stale write: a state moved underneath matches no row", async () => {
     const s = await agentSource();
-    const g = await group(s, "one");
+    const g = await group("one");
     const id = (await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "1.0.0", stages: [g] })).json().rollout.id as string;
     await db.update(endpointUpdateRollouts).set({ state: "aborted" }).where(eq(endpointUpdateRollouts.id, id));
     const r = await act(id, "abort");
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toBe("illegal_transition");
   });
+
+  it("pages the rollout list with the list contract's cursor, so older rollouts stay reachable", async () => {
+    const s = await agentSource();
+    // twelve closed rollouts, a second apart (one open rollout per source, so they are stored aborted)
+    await db.insert(endpointUpdateRollouts).values(
+      Array.from({ length: 12 }, (_, i) => ({ sourceId: s, targetVersion: `0.${i}.0`, state: "aborted" as const, createdAt: new Date(Date.now() - (12 - i) * 1000) })),
+    );
+    const first = await inject("GET", `/v1/discovery/sources/${s}/update-rollouts?limit=10`, AUTH);
+    expect(first.statusCode, first.body).toBe(200);
+    const p1 = first.json() as { items: Array<{ targetVersion: string; lifecycle: { terminal: boolean } }>; nextCursor: string | null };
+    expect(p1.items.map((r) => r.targetVersion)).toEqual(Array.from({ length: 10 }, (_, i) => `0.${11 - i}.0`));
+    expect(p1.items.every((r) => r.lifecycle.terminal)).toBe(true);
+    expect(p1.nextCursor).toBeTruthy();
+    const second = await inject("GET", `/v1/discovery/sources/${s}/update-rollouts?limit=10&cursor=${encodeURIComponent(p1.nextCursor!)}`, AUTH);
+    const p2 = second.json() as { items: Array<{ targetVersion: string }>; nextCursor: string | null };
+    expect(p2.items.map((r) => r.targetVersion)).toEqual(["0.1.0", "0.0.0"]);
+    expect(p2.nextCursor).toBeNull();
+    // another source's rollouts are not in this list
+    const other = await inject("GET", `/v1/discovery/sources/${await agentSource()}/update-rollouts`, AUTH);
+    expect(other.json().items).toEqual([]);
+  });
+
+  it("keeps a bounded halt threshold: strict by default, free to tighten, a step-up to loosen, capped, audited", async () => {
+    const s = await agentSource();
+    const g = await group("halt");
+    const c = await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "2.0.0", stages: [g] });
+    const id = c.json().rollout.id as string;
+    expect(c.json().rollout.haltThreshold).toEqual({ value: 1, strict: 1, min: 1, max: 10 });
+    const url = `/v1/discovery/update-rollouts/${id}/halt-threshold`;
+    // outside the bounds is refused before anything else
+    for (const v of [0, 11, 2.5]) expect((await inject("PUT", url, AUTH, { haltThreshold: v })).statusCode, String(v)).toBe(400);
+    // loosening needs a step-up bound to this rollout and this value
+    // (an admin session; the bootstrap credential passes a step-up only during first-admin setup, B4S-06)
+    const wrongValue = await grantStepUpForTest(db, adminId, haltThresholdRelaxStepUp(id, 4));
+    const noGrant = await app.inject({ method: "PUT", url, ...sessionRequest(wrongValue), payload: { haltThreshold: 5 } });
+    expect(noGrant.statusCode, noGrant.body).toBe(422);
+    expect((await app.inject({ method: "PUT", url, ...stepUpRequest(wrongValue), payload: { haltThreshold: 5 } })).statusCode).toBe(422);
+    const ok = await grantStepUpForTest(db, adminId, haltThresholdRelaxStepUp(id, 5));
+    const loosened = await app.inject({ method: "PUT", url, ...stepUpRequest(ok), payload: { haltThreshold: 5 } });
+    expect(loosened.statusCode, loosened.body).toBe(200);
+    expect(loosened.json().rollout.haltThreshold.value).toBe(5);
+    const [row] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(row).toMatchObject({ haltThreshold: 5 });
+    const [a] = await db.select().from(auditLog).where(eq(auditLog.id, row!.haltThresholdAuditId!));
+    expect(a).toMatchObject({ ruleId: "endpoint-update-rollout-halt-threshold-relaxed" });
+    expect(a!.detail).toMatchObject({ from: 1, to: 5, relaxation: true });
+    // tightening needs no step-up, keeps the loosening's evidence while above the default, and clears it at the default
+    const tighter = await inject("PUT", url, AUTH, { haltThreshold: 3 });
+    expect(tighter.statusCode, tighter.body).toBe(200);
+    const [mid] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(mid).toMatchObject({ haltThreshold: 3, haltThresholdAuditId: row!.haltThresholdAuditId });
+    expect((await inject("PUT", url, AUTH, { haltThreshold: 1 })).statusCode).toBe(200);
+    const [strict] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(strict).toMatchObject({ haltThreshold: 1, haltThresholdStepUp: null, haltThresholdAuditId: null });
+    // the CHECKs: never past the cap, and never above the default without a recorded relaxation
+    await expect(db.update(endpointUpdateRollouts).set({ haltThreshold: 11 }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    await expect(db.update(endpointUpdateRollouts).set({ haltThreshold: 2 }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    const audited = await db.select({ ruleId: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'rolloutId' = ${id}`);
+    expect(audited.filter((x) => x.ruleId === "endpoint-update-rollout-halt-threshold-tightened")).toHaveLength(2);
+    // a closed rollout's threshold no longer applies
+    expect((await act(id, "abort")).statusCode).toBe(200);
+    expect((await inject("PUT", url, AUTH, { haltThreshold: 1 })).json().error).toBe("rollout_closed");
+  });
+
+  it("never blocks deleting an ADR-0350 group: the stage keeps its name as evidence and offers nothing", async () => {
+    const s = await agentSource();
+    const g = await group("gone");
+    const c = await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "1.1.0", stages: [g] });
+    expect(c.statusCode, c.body).toBe(201);
+    const name = c.json().rollout.stages[0].groupName as string;
+    expect(name).toMatch(/^e41-gone-/);
+    // the delete is ADR-0350's (a step-up there); the foreign key is SET NULL, so a rollout never makes it fail
+    await db.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, g));
+    const [stage] = await db.select().from(endpointUpdateRolloutStages).where(eq(endpointUpdateRolloutStages.rolloutId, c.json().rollout.id as string));
+    expect(stage).toMatchObject({ groupId: null, groupName: name });
+    const read = await inject("GET", `/v1/discovery/update-rollouts/${c.json().rollout.id}`, AUTH);
+    expect(read.json().rollout.stages[0]).toMatchObject({ groupId: null, groupName: name });
+  });
 });
 
 describe("ADR-0360: one-line enrolment", () => {
   it("issues a single-use, short-lived token that places its device in its group, and never audits the secret", async () => {
     const s = await agentSource();
-    const g = await group(s, "laptops");
-    const foreign = await group(await agentSource(), "laptops");
-    expect((await inject("POST", `/v1/discovery/sources/${s}/one-line-enrolments`, AUTH, { label: "x", deviceGroupId: foreign })).json().error).toBe("group_not_in_source");
+    const g = await group("laptops");
+    expect((await inject("POST", `/v1/discovery/sources/${s}/one-line-enrolments`, AUTH, { label: "x", deviceGroupId: randomUUID() })).json().error).toBe("group_not_found");
     expect((await inject("POST", `/v1/discovery/sources/${s}/one-line-enrolments`, AUTH, { label: "x", expiresInMinutes: 61 })).statusCode).toBe(400);
     const r = await inject("POST", `/v1/discovery/sources/${s}/one-line-enrolments`, AUTH, { label: `one-${RUN}`, deviceGroupId: g });
     expect(r.statusCode, r.body).toBe(201);
@@ -300,8 +353,18 @@ describe("ADR-0360: one-line enrolment", () => {
     expect(row).toMatchObject({ singleUse: true, deviceCap: 1, deviceGroupId: g, tokenHash: hashToken(enrolment.token) });
     const first = await ticket(enrolment.token, `e41-one-${RUN}`);
     expect(first.statusCode, first.body).toBe(201);
-    const [m] = await db.select().from(endpointDeviceGroupMembers).where(eq(endpointDeviceGroupMembers.deviceId, first.json().ticketId as string));
-    expect(m?.groupId).toBe(g);
+    // the device joins the token's ADR-0350 group (which only narrows its policy)
+    const m = await db.select().from(endpointDeviceGroupMembers).where(eq(endpointDeviceGroupMembers.deviceId, first.json().ticketId as string));
+    expect(m.map((x) => x.groupId)).toEqual([g]);
+    // the redemption policy admits only that row: under public_ingest, the same device into another group is refused
+    const other = await group("not-the-token's");
+    const forged = await runWithRlsSystem("public_ingest", "test.e41-forged-membership", async () =>
+      db.insert(endpointDeviceGroupMembers).values({ deviceId: first.json().ticketId as string, groupId: other }).then(
+        () => "inserted",
+        (e: { message?: string; cause?: { message?: string } }) => e.cause?.message ?? e.message ?? String(e),
+      ),
+    );
+    expect(forged).toMatch(/row-level security/);
     const second = await ticket(enrolment.token, `e41-two-${RUN}`);
     expect(second.statusCode).toBe(409);
     expect(second.json().error).toBe("enrolment_cap_reached");
@@ -310,7 +373,9 @@ describe("ADR-0360: one-line enrolment", () => {
     // the CHECK holds a single-use token to one device and 60 minutes whatever writes the row
     await expect(db.update(endpointEnrolmentTokens).set({ deviceCap: 2 }).where(eq(endpointEnrolmentTokens.id, token.id))).rejects.toThrow();
     await expect(db.update(endpointEnrolmentTokens).set({ expiresAt: sql`created_at + interval '61 minutes'` }).where(eq(endpointEnrolmentTokens.id, token.id))).rejects.toThrow();
-    // the composite FK: a token's group is in its own source
-    await expect(db.update(endpointEnrolmentTokens).set({ deviceGroupId: foreign }).where(eq(endpointEnrolmentTokens.id, token.id))).rejects.toThrow();
+    // deleting the group leaves the token without one (ON DELETE SET NULL)
+    await db.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, g));
+    const [after] = await db.select({ g: endpointEnrolmentTokens.deviceGroupId }).from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, token.id));
+    expect(after?.g).toBeNull();
   });
 });

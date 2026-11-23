@@ -76,7 +76,7 @@ test("a vendor is proposed, assessed on the rails, and never offered a status co
   await expect(page.getByText("Vendor proposed — its assessment workflow is resting at the plan stage")).toBeVisible();
 
   // open the detail from the registry
-  await page.getByRole("cell", { name: "vnd-e2e-transcribe", exact: true }).click();
+  await page.getByRole("button", { name: "Open vendor vnd-e2e-transcribe" }).click();
   await expect(page.getByText("Vendor: vnd-e2e-transcribe")).toBeVisible();
   await expect(page.getByText("status follows the linked assessment workflow — it is decided, never edited here")).toBeVisible();
 

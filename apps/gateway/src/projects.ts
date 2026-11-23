@@ -39,6 +39,8 @@ import {
   type CsvWindow,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { databaseNow } from "./db-clock.js";
+import { expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
 import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
@@ -262,7 +264,7 @@ export function periodStart(now: Date = new Date()): Date {
 }
 
 /** True when a project's budget window is the current calendar month. */
-function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
+export function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
   return project.budgetPeriod === "monthly";
 }
 
@@ -270,32 +272,47 @@ function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
  * lifetime ('none') budget, but under a 'monthly' budget only while the latch's
  * period matches the current one — on a new month the latch is inert and
  * enforcement resumes. */
-function overageActive(project: ProjectRow, periodKey: string): boolean {
+export function overageActive(project: ProjectRow, periodKey: string): boolean {
   if (!project.overageApproved) return false;
   if (!isMonthly(project)) return true;
   return project.overageApprovedPeriod === periodKey;
 }
 
+/**
+ * Metered spend (pillar 5 actuals, `usage_events`) per project or per person, batched: one GROUP BY for many ids.
+ * `since` null is lifetime-cumulative; otherwise only spend at or after it counts (a 'monthly' window's
+ * `periodStart`). The ONE reader of budget spend: the project gate below and the budget alerts (ADR-0312,
+ * budget-alerts.ts) both read it, so the alert window and the enforcement window cannot drift apart.
+ */
+export async function meteredSpendUsdBy(
+  db: Db,
+  column: "project_id" | "user_id",
+  ids: readonly string[],
+  since: Date | null,
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const res = await db.execute<{ k: string; usd: number }>(sql`
+    SELECT ${sql.raw(column)}::text AS k, coalesce(sum(cost_usd), 0)::float8 AS usd
+      FROM usage_events
+     WHERE ${sql.raw(column)} = ANY(${sql`ARRAY[${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)}]`})
+       ${since ? sql`AND at >= ${since.toISOString()}::timestamptz` : sql``}
+     GROUP BY 1`);
+  return new Map(res.rows.map((r) => [r.k, Number(r.usd)]));
+}
+
 /** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
  * budget only spend within the current calendar-month window counts; otherwise
  * it is lifetime-cumulative (default, back-compat). */
-async function projectSpendUsd(
+export async function projectSpendUsd(
   db: Db,
   projectId: string,
   opts?: { monthly?: boolean; now?: Date },
 ): Promise<number> {
-  const where =
-    opts?.monthly
-      ? and(eq(usageEvents.projectId, projectId), gte(usageEvents.at, periodStart(opts.now)))
-      : eq(usageEvents.projectId, projectId);
-  const [row] = await db
-    .select({ spent: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
-    .from(usageEvents)
-    .where(where);
-  return row?.spent ?? 0;
+  const since = opts?.monthly ? periodStart(opts.now) : null;
+  return (await meteredSpendUsdBy(db, "project_id", [projectId], since)).get(projectId) ?? 0;
 }
 
-async function escalateProjectBudget(
+export async function escalateProjectBudget(
   db: Db,
   project: ProjectRow,
   userId: string,
@@ -364,6 +381,13 @@ type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
 
 const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, redact: 2, block: 3 };
 
+/** ADR-0363: the stricter of two PII modes (null = no enforcement, the least strict), by the cascade's own order */
+export function stricterPiiMode(a: PiiMode | null, b: PiiMode | null): PiiMode | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return PII_STRICTNESS[b]! > PII_STRICTNESS[a]! ? b : a;
+}
+
 /** §8.3: the effective policy of a SET of framework profiles. The spec gives
  * no strictness ordering among frameworks, so profiles compose additively:
  * required templates union, mcp defaults tighten to read_only if ANY profile
@@ -418,6 +442,11 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         : null,
     // ADR-0045 amendment 2026-11-14: model risk management is required if ANY framework requires it (OR: strictest wins)
     mrmRequiredBy: profiles.filter((p) => p.mrmRequired === true).map((p) => p.tag).sort(),
+    // ADR-0347: the agent memory lifetime CEILING — MIN composes (the shortest framework lifetime wins)
+    memoryTtlHours: profiles.reduce<number | null>(
+      (m, p) => (p.memoryTtlHours == null ? m : m == null ? p.memoryTtlHours : Math.min(m, p.memoryTtlHours)),
+      null,
+    ),
   };
 }
 
@@ -431,6 +460,13 @@ export async function projectMrmRequiredBy(db: Db, projectId: string | null | un
   const tags = await projectClassifications(db, projectId);
   if (tags.length === 0) return [];
   return effectiveCompliancePolicy(await profilesForTags(db, tags)).mrmRequiredBy;
+}
+
+/** ADR-0347: the shortest agent memory lifetime any classification on the project sets (null = none sets one) */
+export async function projectMemoryTtlHours(db: Db, projectId: string): Promise<number | null> {
+  const tags = await projectClassifications(db, projectId);
+  if (tags.length === 0) return null;
+  return effectiveCompliancePolicy(await profilesForTags(db, tags)).memoryTtlHours;
 }
 
 /** Exported for the pillar-3 infra layer (§8.3 cascade consumption): the
@@ -787,6 +823,24 @@ export type ProjectGate =
   | { ok: true; project: ProjectRow | null; spentUsd: number }
   | { ok: false; status: number; error: string; detail?: string };
 
+/** The project's effective budget: min(project budget, the compliance cascade's ceiling), the ceiling capping an
+ * unbudgeted project too (O2, ADR-0027). Shared by the pre-dispatch gate and the ADR-0313 paid-call reservation. */
+export async function effectiveProjectBudget(
+  db: Db,
+  project: ProjectRow,
+): Promise<{ tags: string[]; cascade: ReturnType<typeof effectiveCompliancePolicy>; ceilingUsd: number | null; effectiveBudgetUsd: number | null }> {
+  const tags = (project.classifications ?? []) as string[];
+  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
+  const ceilingUsd = cascade.maxProjectBudgetUsd ?? null;
+  const effectiveBudgetUsd =
+    project.budgetUsd == null
+      ? ceilingUsd
+      : ceilingUsd == null
+        ? project.budgetUsd
+        : Math.min(project.budgetUsd, ceilingUsd);
+  return { tags, cascade, ceilingUsd, effectiveBudgetUsd };
+}
+
 /** Pre-dispatch gate (pillar 5 enforcement): once a project's MEASURED spend
  * reaches its budget, further attributed dispatches are blocked until the
  * named approver sanctions the overage — same first-crossing-allowed
@@ -834,15 +888,7 @@ export async function preDispatchProjectGate(
   // when the org says warn_only — strictest wins; the org can never be
   // relaxed by a profile. Unclassified projects: cascade is empty, the gate
   // is byte-identical to before.
-  const tags = (project.classifications ?? []) as string[];
-  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
-  const ceilingUsd = cascade.maxProjectBudgetUsd;
-  const effectiveBudgetUsd =
-    project.budgetUsd == null
-      ? ceilingUsd
-      : ceilingUsd == null
-        ? project.budgetUsd
-        : Math.min(project.budgetUsd, ceilingUsd);
+  const { tags, cascade, ceilingUsd, effectiveBudgetUsd } = await effectiveProjectBudget(db, project);
   if (effectiveBudgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
@@ -1846,6 +1892,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       /** ADR-0050: the run/node that produced this write, when declared */
       producedByRunId?: string | undefined;
       producedByNodeId?: string | undefined;
+      /** ADR-0347: a shorter lifetime than the policy's, in hours */
+      expiresInHours?: number | undefined;
     },
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -1868,6 +1916,26 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(teamMembers.teamId, args.teamId), eq(teamMembers.userId, userId)));
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
     }
+    // ADR-0347: provenance of the producing run (checked, never caller-asserted), then the memory scan and the
+    // mandatory expiry. Both run before the transaction: a refused write stores nothing but its deny audit row.
+    const provenance = await resolveRunProvenance(db, {
+      runId: args.producedByRunId,
+      nodeId: args.producedByNodeId,
+      projectId,
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    if (!provenance.ok) return reply.status(provenance.status).send(provenance.body);
+    const memoryGate = await governMemoryWrite(db, {
+      store: "project_context",
+      text: `${args.key}\n${args.content}`,
+      classificationTtlHours: await projectMemoryTtlHours(db, projectId),
+      requestedHours: args.expiresInHours,
+      userId,
+      objectType: "project",
+      objectId: projectId,
+    });
+    if (!memoryGate.ok) return reply.status(memoryGate.status).send(memoryGate.body);
 
     // The read (maxRevision/latestAccepted) + insert run inside ONE
     // transaction, and (project_id, key, revision) is UNIQUE (migration 0019).
@@ -1917,6 +1985,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             contributedByUserId: userId,
             contributedByTeamId: teamId,
             sourceArtifactId: args.sourceArtifactId ?? null,
+            producedByRunId: provenance.runId,
+            producedByNodeId: provenance.nodeId,
+            producedByAgentId: provenance.agentId,
+            expiresAt: expiresAtSql(memoryGate.ttlHours),
           })
           .returning();
 
@@ -1946,6 +2018,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             conflicting,
             teamId,
             ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
+            ...(provenance.runId
+              ? { producedByRunId: provenance.runId, producedByNodeId: provenance.nodeId, producedByAgentId: provenance.agentId }
+              : {}),
+            ttlHours: memoryGate.ttlHours,
+            expiresAt: item!.expiresAt,
+            ...(memoryGate.hits.length ? { memoryScanHits: memoryGate.hits } : {}),
           },
           effect: conflicting ? "require_approval" : "allow",
           ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
@@ -1961,6 +2039,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             key: args.key,
             revision,
             accepted: !conflicting,
+            expiresAt: item!.expiresAt,
             ...(conflicting ? { conflict: true, approvalId } : {}),
           },
         };
@@ -2062,6 +2141,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(projectContextItems)
         .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
         .orderBy(projectContextItems.revision);
+      const histNow = await databaseNow(db);
       const [names, pendingMap] = await Promise.all([
         nameMaps(
           rows.map((r) => r.contributedByUserId),
@@ -2078,6 +2158,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           byName: names.userName.get(r.contributedByUserId) ?? null,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           pendingApprovalId: pendingMap.get(r.id) ?? null,
+          // ADR-0347: history keeps expired revisions for inspection, marked so
+          expired: r.expiresAt <= histNow,
         })),
       };
     }
@@ -2110,6 +2192,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
+    // ADR-0347: a key whose accepted head has expired is absent. An older revision is never resurrected in its place.
+    const now = await databaseNow(db);
+    for (const [k, row] of latest) if (row.expiresAt <= now) latest.delete(k);
     const pendingMap = await pendingConflictApprovals(
       projectId,
       retained.map((r) => r.id),
@@ -2132,7 +2217,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           teamId: r.contributedByTeamId,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           sourceArtifactId: r.sourceArtifactId,
+          // ADR-0347: which run, node and agent produced it, and when it stops being read
+          producedByRunId: r.producedByRunId,
+          producedByNodeId: r.producedByNodeId,
+          producedByAgentId: r.producedByAgentId,
           at: r.createdAt,
+          expiresAt: r.expiresAt,
         },
       })),
       pending: pendingItems.map((r) => ({
@@ -2182,6 +2272,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       ),
     ]);
 
+    // ADR-0347 (#905 security review [2]): every node says whether it has expired, as history does
+    const graphNow = await databaseNow(db);
     // accepted head per key = highest accepted revision (rows are asc by rev)
     const currentByKey = new Map<string, number>();
     for (const r of rows) if (r.accepted) currentByKey.set(r.key, r.revision);
@@ -2196,6 +2288,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         baseRevision: r.baseRevision,
         accepted: r.accepted,
         pending: pendingMap.has(r.id),
+        expired: r.expiresAt <= graphNow,
+        expiresAt: r.expiresAt,
         content:
           r.content.length > PREVIEW_LEN ? `${r.content.slice(0, PREVIEW_LEN)}…` : r.content,
         contributor: {
@@ -2253,6 +2347,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       minIsolationClass: body.minIsolationClass ?? null,
       // ADR-0045 amendment 2026-11-14: the framework requires model risk management (OR-composed; null = no requirement)
       mrmRequired: body.mrmRequired ?? null,
+      // ADR-0347: the longest agent memory lifetime on this tag's projects (MIN-composed; null = no opinion)
+      memoryTtlHours: body.memoryTtlHours ?? null,
     };
     // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
     // silent no-op for enforcement.
