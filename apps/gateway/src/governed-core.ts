@@ -51,6 +51,7 @@ import type { AbacPrincipalContext } from "./abac-principal.js";
 import { actorForGrant } from "./in-process-delegation.js";
 import { checkModelRateLimit } from "./model-rate-limits.js";
 import {
+  abacHoldOf,
   modelConsentState,
   queueModelConsent,
   spendModelConsents,
@@ -397,13 +398,16 @@ export async function governedModelGate(
     // ADR-0239 slice 2b: an engine error binds no consent here; the kernel refuses the call on the same error
     const verdict = matchingResourceApprovalRulesWith(restrictions.approvalRuleEvaluator, resource, restrictions.approvalRules);
     const matched = verdict.kind === "matched" ? verdict.rules : [];
-    if (matched.length) {
+    // ADR-0251 slice 4c: an ABAC hold is one more required consent, bound to the policy version
+    const abacHold = abacHoldOf(restrictions.abacDecision);
+    if (matched.length || abacHold) {
       consent = await modelConsentState(db, {
         userId: args.userId,
         target,
         projectId: args.projectId,
         invocation: { input: "", ...args.invocation, mode: args.mode },
         matchedRules: matched,
+        abacHold,
       });
     }
     decision = await governedEvaluateResource(db, {

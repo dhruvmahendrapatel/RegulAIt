@@ -224,7 +224,7 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
   }
   if (limits.length) chain.push({ rule: RESOURCE_RULE_IDS.rateLimit, outcome: "allow" });
 
-  // 3. ABAC never grants: forbid refuses, and so does require_approval (below)
+  // 3. ABAC never grants: forbid refuses; require_approval holds (step 4)
   const abac = input.abacDecision ?? null;
   if (abac?.effect === "forbid") {
     chain.push({ rule: RESOURCE_RULE_IDS.abacForbid, outcome: "deny", ...(abac.policyId ? { grantId: abac.policyId } : {}) });
@@ -235,10 +235,10 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
     });
   }
 
-  //    ADR-0251 slice 4 (review #836): an ABAC `require_approval` REFUSES a model, connector or A2A call (fail
-  //    closed). These paths bind consent to approval rules and the execution dial only, so the hold could otherwise be
-  //    released by another rule's consent, or queued with no consent bound to the policy version. Here, in the kernel,
-  //    so no caller can skip it; the audit chain then says `deny`, never `satisfied-by-approval`.
+  //    ADR-0251 slice 4c (P-01c item 1): an ABAC `require_approval` is a HOLD, decided in step 4 beside the dial and
+  //    the approval rules. The gateway binds one consent per required approver, and the ABAC one carries the policy's
+  //    id and version in its context digest (as the MCP path does), so another rule's consent can never release it.
+  //    `approvedApprovalId` is passed only when EVERY binding, the ABAC one included, holds an approved consent.
   const verdict = matchingResourceApprovalRulesWith(input.approvalRuleEvaluator, resource, input.approvalRules ?? []);
   if (verdict.kind === "error") {
     // ADR-0239 slice 2b: an engine failure is a deny, never "no rule binds" (ADR-0180)
@@ -251,34 +251,43 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
   }
   const matched = verdict.rules;
   const matchedIds = matched.map((r) => r.id);
-  if (abac?.effect === "require_approval") {
-    chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "deny", ...(abac.policyId ? { grantId: abac.policyId } : {}) });
+  const abacHold = abac?.effect === "require_approval" ? abac : null;
+  if (abacHold && !abacHold.approverUserId) {
+    // a hold with no one to sign it can never be released: refuse rather than queue an orphan
+    chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "deny", ...(abacHold.policyId ? { grantId: abacHold.policyId } : {}) });
     return out(
       {
         effect: "deny",
-        ruleId: abac.policyId ?? RESOURCE_RULE_IDS.abacApproval,
-        reason:
-          `${subject} requires approval under policy ${abac.policyName ? `'${abac.policyName}'` : (abac.policyId ?? "")}, and an ` +
-          "ABAC approval hold cannot be queued or released on this call type yet, so it is refused; nothing was sent",
+        ruleId: abacHold.policyId ?? RESOURCE_RULE_IDS.abacApproval,
+        reason: `${subject} requires approval under policy ${abacHold.policyName ? `'${abacHold.policyName}'` : (abacHold.policyId ?? "")}, but the policy names no approver; nothing was sent`,
       },
       matchedIds,
     );
   }
 
-  // 4. approval: the entitlement's own hold (the execution dial) and every matching approval rule
-  const needsApproval = base.effect === "require_approval" || matched.length > 0;
+  // 4. approval: the entitlement's own hold (the execution dial), an ABAC hold and every matching approval rule
+  const needsApproval = base.effect === "require_approval" || abacHold !== null || matched.length > 0;
   if (!needsApproval) {
     return out({ effect: "allow", ruleId: base.ruleId, reason: base.reason });
   }
+  if (abacHold) chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "require-approval", ...(abacHold.policyId ? { grantId: abacHold.policyId } : {}) });
   for (const r of matched) chain.push({ rule: RESOURCE_RULE_IDS.approvalRule, outcome: "require-approval", grantId: r.id });
   if (input.approvedApprovalId && base.effect !== "require_approval") {
     chain.push({ rule: "approval", outcome: "satisfied-by-approval", grantId: input.approvedApprovalId });
     return out({ effect: "allow", ruleId: base.ruleId, reason: `${base.reason}; released by approval ${input.approvedApprovalId}` }, matchedIds);
   }
+  // who is asked first: the dial's approver, then the ABAC policy's, then the most specific rule's (the gateway asks
+  // each named approver whose consent is still missing in turn)
   const first = matched[0];
-  const approverUserId = base.effect === "require_approval" ? base.approverUserId : first?.approverUserId;
-  const approverName = base.effect === "require_approval" ? null : (first?.approverName ?? null);
-  const ruleId = base.effect === "require_approval" ? base.ruleId : (first?.id ?? RESOURCE_RULE_IDS.approvalRule);
+  const approverUserId =
+    base.effect === "require_approval" ? base.approverUserId : abacHold ? abacHold.approverUserId : first?.approverUserId;
+  const approverName = base.effect === "require_approval" ? null : abacHold ? (abacHold.approverName ?? null) : (first?.approverName ?? null);
+  const ruleId =
+    base.effect === "require_approval"
+      ? base.ruleId
+      : abacHold
+        ? (abacHold.policyId ?? RESOURCE_RULE_IDS.abacApproval)
+        : (first?.id ?? RESOURCE_RULE_IDS.approvalRule);
   const who = approverName ?? approverUserId ?? "a named approver";
   if (!approverUserId) {
     // a hold with no one to sign it can never be released: refuse rather than queue an orphan
@@ -302,7 +311,12 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
       ruleId,
       approverUserId,
       approverName,
-      reason: base.effect === "require_approval" ? base.reason : `${subject} requires approval from ${who}; the call is queued, not refused`,
+      reason:
+        base.effect === "require_approval"
+          ? base.reason
+          : abacHold
+            ? `${subject} requires approval from ${who} under policy ${abacHold.policyName ? `'${abacHold.policyName}'` : (abacHold.policyId ?? "")}; the call is queued, not refused`
+            : `${subject} requires approval from ${who}; the call is queued, not refused`,
     },
     matchedIds,
   );

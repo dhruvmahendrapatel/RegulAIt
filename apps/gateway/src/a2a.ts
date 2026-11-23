@@ -400,7 +400,8 @@ function a2aRefusalStatus(d: GovernedResourceDecision): [number, string] {
   if (d.ruleId === RESOURCE_RULE_IDS.attribution) return [409, "attribution_required"];
   if (d.ruleId === RESOURCE_RULE_IDS.coreError) return [503, "governed_core_error"];
   if (d.ruleChain.some((t) => t.rule === RESOURCE_RULE_IDS.rateLimit && t.outcome === "deny")) return [429, "rate_limited"];
-  if (d.matchedApprovalRuleIds.length) return [403, "approval_required"];
+  // an approval rule, or (ADR-0251 slice 4c) an ABAC hold: A2A has no approval queue yet, so it refuses (fail closed)
+  if (d.matchedApprovalRuleIds.length || d.ruleChain.some((t) => t.rule === RESOURCE_RULE_IDS.abacApproval)) return [403, "approval_required"];
   return [403, "forbidden"];
 }
 

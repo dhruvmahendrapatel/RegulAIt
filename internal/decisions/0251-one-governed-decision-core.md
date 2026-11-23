@@ -376,7 +376,7 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
 - **ABAC `require_approval` on these call types refuses** (fail closed). Their consent binds approval rules and the
   execution dial only, so an ABAC hold could otherwise be released by a rule's approver, or queued with no consent
   bound to the policy version. Queueing it needs the policy version in the consent's context digest, as the MCP path
-  has (follow-up).
+  has (follow-up). Done for model and connector calls in slice 4c (below); A2A still refuses.
 - **Latency** (`REGULAIT_BENCH=1`): no rules p95 2.4 ms, ten rules 4.6 ms, within the budget; the added cost with no
   v5 policy is one concurrent policy load.
 - **Tests.** `abac-v5.test.ts` (kernel, 8): the schema, write-time refusal of a governed action under v4, the
@@ -419,6 +419,36 @@ facts and defaults as a tool call:
   - depth and chain-membership policies on a two-hop chain, leaving the person's own call alone;
   - an `Agent`-scoped forbid refusing a chain that contains the matching actor;
   - an unreadable identity and an unreadable grant each refusing.
+
+#### Slice 4c (2026-11-21): an ABAC hold on a model or connector call is queued
+
+P-01c item 1. An ABAC v5 `require_approval` on a governed call is now a hold, decided beside the execution dial and the
+approval rules, instead of a refusal:
+
+- **Kernel** (`composeResourceDecision`). The ABAC hold joins step 4:
+  - it answers `require_approval` naming the policy's approver (asked after the dial's and before any rule's);
+  - it is released only by `approvedApprovalId`;
+  - it is refused where the call type cannot queue (`canQueue: false`, A2A) or where the policy names no approver.
+  - The chain records `abac-require-approval: require-approval`, and `satisfied-by-approval` once released.
+- **Consent binding.** The ABAC hold is its own required consent, never merged with a rule whose approver happens to be
+  the same person:
+  - model: `modelConsentState`;
+  - connector: the `required` slots in `executeGovernedConnectorCall`.
+  - Its context digest carries `abacPolicies: [{policyId, version}]`. Versions are immutable rows, so a new active
+    version, a deactivation or a re-activation makes an approved consent stale.
+  - The gateway passes `approvedApprovalId` only when every binding (dial, ABAC, rules) holds an approved, bound
+    consent, and each is spent exactly once, as before. A rule's approver can therefore never release an ABAC hold, nor
+    the reverse.
+- **A2A** has no approval queue yet, so its ABAC hold still refuses: 403 `approval_required`, the same answer as a
+  matching approval rule.
+- **Tests.**
+  - Kernel `resource.test.ts`: the hold, its release, the dial's precedence, and refusal without a queue or approver.
+  - `zz-adr0251-abac-v5.test.ts`: the connector hold, refused without a queue, and a read left alone.
+  - `zz-adr0251-abac-v5-approval-queue.test.ts` (own scratch database), on the model path:
+    - held (202, nothing billed), released once, then held again;
+    - a new policy version makes an approved consent stale;
+    - a rule beside the policy gets a separate consent, its approver cannot sign the ABAC hold, and both are spent.
+  - The same file, on the connector path: a write held with nothing sent, released once, and a read not held.
 
 #### Review #836 (2026-11-14)
 

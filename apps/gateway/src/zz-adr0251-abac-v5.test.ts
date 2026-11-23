@@ -4,7 +4,8 @@
  *  - no active v5 policy: the core's ABAC slot is null (nothing can apply);
  *  - a v5 `forbid` on `ModelInvoke` refuses a real model dispatch for its principal (audited, no usage row) and leaves
  *    another person's call alone; a v5 `forbid` on `ConnectorCall` refuses the core's decision;
- *  - a v5 `require_approval` on these call types refuses (fail closed: no consent binds an ABAC hold on them yet);
+ *  - slice 4c: a v5 `require_approval` holds a queueable call for the policy's approver, and refuses where nothing
+ *    can queue it (A2A);
  *  - a v4 policy (written for `McpToolCall`) never applies to a model call, however broadly it is written;
  *  - review #836: a model forbid answers 403 `forbidden`; a failed read (the verdict's, a sibling's, or both, in
  *    either order) denies with no unhandled rejection; an engine error on a governed call denies.
@@ -151,7 +152,7 @@ describe("ADR-0251 slice 4: ABAC v5 on the governed core", () => {
     }
   });
 
-  it("review #836: a v5 require_approval on ConnectorCall refuses a QUEUEABLE call, and a consent bound to another rule does not release it", async () => {
+  it("slice 4c: a v5 require_approval on ConnectorCall HOLDS a queueable call for the policy's approver", async () => {
     const connectorId = "00000000-0000-4000-a000-0000000000c3";
     const id = await activePolicy(
       `forbid (principal == RegulAIt::User::"${caller.id}", action == RegulAIt::Action::"ConnectorCall", resource) when { resource.operation == "write" };`,
@@ -166,18 +167,26 @@ describe("ADR-0251 slice 4: ABAC v5 on the governed core", () => {
         base: allow,
         canQueue: true,
       });
-      expect(held).toMatchObject({ effect: "deny", ruleId: id });
-      expect(held.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "deny", grantId: id });
-      const released = await governedEvaluateResource(k.db, {
+      expect(held).toMatchObject({ effect: "require_approval", ruleId: id, approverUserId: approver.id });
+      expect(held.ruleChain.at(-1)).toEqual({ rule: "abac-require-approval", outcome: "require-approval", grantId: id });
+      // where nothing can queue it, it still refuses (fail closed)
+      const unqueueable = await governedEvaluateResource(k.db, {
         userId: caller.id,
         resource: { type: "connector", id: connectorId, operation: "write" },
         projectId: caller.projectId,
         base: allow,
-        canQueue: true,
-        approvedApprovalId: "00000000-0000-4000-a000-0000000000a9",
+        canQueue: false,
       });
-      expect(released).toMatchObject({ effect: "deny", ruleId: id });
-      expect(released.ruleChain.some((t) => t.outcome === "satisfied-by-approval")).toBe(false);
+      expect(unqueueable).toMatchObject({ effect: "deny", ruleId: id });
+      // a read is not held by a write-only condition
+      const read = await governedEvaluateResource(k.db, {
+        userId: caller.id,
+        resource: { type: "connector", id: connectorId, operation: "read" },
+        projectId: caller.projectId,
+        base: allow,
+        canQueue: true,
+      });
+      expect(read.effect).toBe("allow");
     } finally {
       await dropPolicy(id);
     }
