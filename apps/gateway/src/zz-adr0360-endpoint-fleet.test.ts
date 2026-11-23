@@ -27,7 +27,7 @@ import {
   endpointDeviceGroupMembers,
   endpointDeviceGroups,
   endpointEnrolmentTokens,
-  endpointFleetSettings,
+  endpointDeviceGroupFleetSettings,
   endpointUpdateRolloutStages,
   endpointUpdateRollouts,
   eq,
@@ -40,7 +40,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE, STATE_MACHINES } from "@regulait/shared";
-import { selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
+import { haltThresholdRelaxStepUp, selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
 import { hashToken } from "./token-hash.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -89,11 +89,12 @@ async function group(name: string) {
 }
 const ticket = (bulk: string, hostname: string) =>
   inject("POST", "/v1/endpoint-agent/enrolment-tickets", { authorization: `Bearer ${bulk}` }, { hostname, os: "linux", arch: "amd64", agentVersion: "0.1.0" });
-async function selfUpdateOn(sourceId: string) {
-  const g = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(sourceId));
-  const r = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${sourceId}/fleet-settings`, ...stepUpRequest(g), payload: { selfUpdate: true } });
+async function selfUpdateOn(groupId: string) {
+  const g = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(groupId));
+  const r = await app.inject({ method: "PUT", url: `/v1/endpoint-device-groups/${groupId}/fleet-settings`, ...stepUpRequest(g), payload: { selfUpdate: true } });
   expect(r.statusCode, r.body).toBe(200);
 }
+const settingsUrl = (groupId: string) => `/v1/endpoint-device-groups/${groupId}/fleet-settings`;
 const act = (rolloutId: string, action: string) => inject("POST", `/v1/discovery/update-rollouts/${rolloutId}/${action}`, AUTH, {});
 
 beforeAll(async () => {
@@ -149,10 +150,12 @@ describe("ADR-0360: the declared lifecycles", () => {
 describe("ADR-0360: the fleet routes", () => {
   it("is admin-only", async () => {
     const s = await agentSource();
+    const g = await group("admin-only");
     const id = randomUUID();
     for (const [m, u] of [
-      ["GET", `/v1/discovery/sources/${s}/fleet-settings`],
-      ["PUT", `/v1/discovery/sources/${s}/fleet-settings`],
+      ["GET", settingsUrl(g)],
+      ["PUT", settingsUrl(g)],
+      ["PUT", `/v1/discovery/update-rollouts/${id}/halt-threshold`],
       ["GET", `/v1/discovery/sources/${s}/update-rollouts`],
       ["POST", `/v1/discovery/sources/${s}/update-rollouts`],
       ["GET", `/v1/discovery/update-rollouts/${id}`],
@@ -164,30 +167,33 @@ describe("ADR-0360: the fleet routes", () => {
   });
 });
 
-describe("ADR-0360: self-update is off by default and a relaxation", () => {
-  it("needs a step-up bound to the source to turn on, records it, and is free to turn off", async () => {
-    const s = await agentSource();
-    const other = await agentSource();
-    expect((await inject("GET", `/v1/discovery/sources/${s}/fleet-settings`, AUTH)).json()).toMatchObject({ selfUpdate: false, strict: { selfUpdate: false } });
-    // a session with no grant, and a grant bound to another source, change nothing
+describe("ADR-0360: self-update is per device group, off by default, and a relaxation", () => {
+  it("needs a step-up bound to the group to turn on, records it, and is free to turn off", async () => {
+    const g = await group("self-update");
+    const other = await group("self-update-other");
+    expect((await inject("GET", settingsUrl(g), AUTH)).json()).toMatchObject({ groupId: g, selfUpdate: false, strict: { selfUpdate: false } });
+    expect((await inject("GET", settingsUrl(randomUUID()), AUTH)).statusCode).toBe(404);
+    // a session with no grant, and a grant bound to another group, change nothing
     const wrong = await grantStepUpForTest(db, adminId, selfUpdateRelaxStepUp(other));
-    const none = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${s}/fleet-settings`, ...sessionRequest(wrong), payload: { selfUpdate: true } });
+    const none = await app.inject({ method: "PUT", url: settingsUrl(g), ...sessionRequest(wrong), payload: { selfUpdate: true } });
     expect(none.statusCode, none.body).toBe(422);
     expect(none.json()).toMatchObject({ error: "step_up_unavailable", actionKind: "settings_relax" });
-    const mismatched = await app.inject({ method: "PUT", url: `/v1/discovery/sources/${s}/fleet-settings`, ...stepUpRequest(wrong), payload: { selfUpdate: true } });
+    const mismatched = await app.inject({ method: "PUT", url: settingsUrl(g), ...stepUpRequest(wrong), payload: { selfUpdate: true } });
     expect(mismatched.statusCode, mismatched.body).toBe(422);
     expect(await grantSpent(db, wrong.grantId)).toBe(false);
-    expect(await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s))).toEqual([]);
-    await selfUpdateOn(s);
-    const [row] = await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s));
+    expect(await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g))).toEqual([]);
+    await selfUpdateOn(g);
+    const [row] = await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g));
     expect(row).toMatchObject({ selfUpdate: true, selfUpdateRelaxedBy: adminId });
     const [a] = await db.select().from(auditLog).where(eq(auditLog.id, row!.selfUpdateAuditId!));
-    expect(a).toMatchObject({ ruleId: "endpoint-fleet-self-update-relaxed", objectId: s });
+    expect(a).toMatchObject({ ruleId: "endpoint-fleet-self-update-relaxed", objectType: "endpoint_device_group", objectId: g });
+    // the other group is untouched: the setting is per group
+    expect((await inject("GET", settingsUrl(other), AUTH)).json().selfUpdate).toBe(false);
     // the CHECK: "on" only with a recorded relaxation
-    await expect(db.update(endpointFleetSettings).set({ selfUpdateStepUp: null }).where(eq(endpointFleetSettings.sourceId, s))).rejects.toThrow();
-    const off = await inject("PUT", `/v1/discovery/sources/${s}/fleet-settings`, AUTH, { selfUpdate: false });
+    await expect(db.update(endpointDeviceGroupFleetSettings).set({ selfUpdateStepUp: null }).where(eq(endpointDeviceGroupFleetSettings.groupId, g))).rejects.toThrow();
+    const off = await inject("PUT", settingsUrl(g), AUTH, { selfUpdate: false });
     expect(off.json().selfUpdate).toBe(false);
-    const [after] = await db.select().from(endpointFleetSettings).where(eq(endpointFleetSettings.sourceId, s));
+    const [after] = await db.select().from(endpointDeviceGroupFleetSettings).where(eq(endpointDeviceGroupFleetSettings.groupId, g));
     expect(after).toMatchObject({ selfUpdate: false, selfUpdateStepUp: null, selfUpdateAuditId: null });
   });
 });
@@ -205,13 +211,18 @@ describe("ADR-0360: staged rollouts", () => {
     const id = c.json().rollout.id as string;
     expect(c.json().rollout.state).toBe("draft");
     expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.3.0", stages: [g1] })).json().error).toBe("rollout_open");
-    // self-update off: start is blocked, and says why
+    // self-update off in both stage groups: start is blocked, and names them
     const blocked = await act(id, "start");
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toMatchObject({ error: "transition_blocked" });
-    expect(blocked.json().detail).toMatch(/self-update is off/);
+    expect(blocked.json().detail).toMatch(/self-update is off for device groups 'e41-canary-.*', 'e41-broad-/);
     expect((await act(id, "pause")).json().error).toBe("illegal_transition");
-    await selfUpdateOn(s);
+    // on in one group only: still blocked, naming the other
+    await selfUpdateOn(g1);
+    const half = await act(id, "start");
+    expect(half.json().error).toBe("transition_blocked");
+    expect(half.json().detail).toMatch(/self-update is off for device group 'e41-broad-/);
+    await selfUpdateOn(g2);
     const started = await act(id, "start");
     expect(started.statusCode, started.body).toBe(200);
     expect(started.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["active", "pending"]);
@@ -264,6 +275,48 @@ describe("ADR-0360: staged rollouts", () => {
     // another source's rollouts are not in this list
     const other = await inject("GET", `/v1/discovery/sources/${await agentSource()}/update-rollouts`, AUTH);
     expect(other.json().items).toEqual([]);
+  });
+
+  it("keeps a bounded halt threshold: strict by default, free to tighten, a step-up to loosen, capped, audited", async () => {
+    const s = await agentSource();
+    const g = await group("halt");
+    const c = await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "2.0.0", stages: [g] });
+    const id = c.json().rollout.id as string;
+    expect(c.json().rollout.haltThreshold).toEqual({ value: 1, strict: 1, min: 1, max: 10 });
+    const url = `/v1/discovery/update-rollouts/${id}/halt-threshold`;
+    // outside the bounds is refused before anything else
+    for (const v of [0, 11, 2.5]) expect((await inject("PUT", url, AUTH, { haltThreshold: v })).statusCode, String(v)).toBe(400);
+    // loosening needs a step-up bound to this rollout and this value
+    // (an admin session; the bootstrap credential passes a step-up only during first-admin setup, B4S-06)
+    const wrongValue = await grantStepUpForTest(db, adminId, haltThresholdRelaxStepUp(id, 4));
+    const noGrant = await app.inject({ method: "PUT", url, ...sessionRequest(wrongValue), payload: { haltThreshold: 5 } });
+    expect(noGrant.statusCode, noGrant.body).toBe(422);
+    expect((await app.inject({ method: "PUT", url, ...stepUpRequest(wrongValue), payload: { haltThreshold: 5 } })).statusCode).toBe(422);
+    const ok = await grantStepUpForTest(db, adminId, haltThresholdRelaxStepUp(id, 5));
+    const loosened = await app.inject({ method: "PUT", url, ...stepUpRequest(ok), payload: { haltThreshold: 5 } });
+    expect(loosened.statusCode, loosened.body).toBe(200);
+    expect(loosened.json().rollout.haltThreshold.value).toBe(5);
+    const [row] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(row).toMatchObject({ haltThreshold: 5 });
+    const [a] = await db.select().from(auditLog).where(eq(auditLog.id, row!.haltThresholdAuditId!));
+    expect(a).toMatchObject({ ruleId: "endpoint-update-rollout-halt-threshold-relaxed" });
+    expect(a!.detail).toMatchObject({ from: 1, to: 5, relaxation: true });
+    // tightening needs no step-up, keeps the loosening's evidence while above the default, and clears it at the default
+    const tighter = await inject("PUT", url, AUTH, { haltThreshold: 3 });
+    expect(tighter.statusCode, tighter.body).toBe(200);
+    const [mid] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(mid).toMatchObject({ haltThreshold: 3, haltThresholdAuditId: row!.haltThresholdAuditId });
+    expect((await inject("PUT", url, AUTH, { haltThreshold: 1 })).statusCode).toBe(200);
+    const [strict] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(strict).toMatchObject({ haltThreshold: 1, haltThresholdStepUp: null, haltThresholdAuditId: null });
+    // the CHECKs: never past the cap, and never above the default without a recorded relaxation
+    await expect(db.update(endpointUpdateRollouts).set({ haltThreshold: 11 }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    await expect(db.update(endpointUpdateRollouts).set({ haltThreshold: 2 }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    const audited = await db.select({ ruleId: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'rolloutId' = ${id}`);
+    expect(audited.filter((x) => x.ruleId === "endpoint-update-rollout-halt-threshold-tightened")).toHaveLength(2);
+    // a closed rollout's threshold no longer applies
+    expect((await act(id, "abort")).statusCode).toBe(200);
+    expect((await inject("PUT", url, AUTH, { haltThreshold: 1 })).json().error).toBe("rollout_closed");
   });
 
   it("never blocks deleting an ADR-0350 group: the stage keeps its name as evidence and offers nothing", async () => {

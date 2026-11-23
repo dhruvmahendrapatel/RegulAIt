@@ -1,9 +1,10 @@
 -- ADR-0360 slice 1a (lane E41): endpoint agent fleet operations.
 --
--- The per-source self-update setting (absent row or false = off; on only with a recorded settings_relax step-up), staged
--- update rollouts and their stages (lifecycles declared in the gateway's endpoint-fleet-lifecycle.ts; at most one open
--- rollout per source), and one-line enrolment tokens on endpoint_enrolment_tokens (single use: device cap 1 and at
--- most 60 minutes; an optional device group).
+-- The per-device-group self-update setting (owner decision D-2026-11-22-04: per ADR-0350 device group, not per source;
+-- absent row or false = off; on only with a recorded settings_relax step-up), staged update rollouts and their stages
+-- (lifecycles ENDPOINT_ROLLOUT_MACHINE and ENDPOINT_ROLLOUT_STAGE_MACHINE in @regulait/shared; at most one open rollout
+-- per source; a bounded halt threshold, strict default 1, loosened only with a recorded step-up), and one-line enrolment
+-- tokens on endpoint_enrolment_tokens (single use: device cap 1 and at most 60 minutes; an optional device group).
 --
 -- Device groups are ADR-0350's (lane E31, migration endpoint_command_exceptions, which runs first): this migration
 -- creates no group table. A stage and a token reference endpoint_device_groups ON DELETE SET NULL, so deleting a
@@ -16,14 +17,14 @@
 -- exempt route) places the device in its one-line token's group in the same transaction that creates the device. Joining a group only narrows a device's policy (ADR-0350 rules are ask or deny), so this grants nothing.
 --
 -- Hand-authored, additive and idempotent. No functions or triggers (zz-dbguard-0185 checked by hand).
-CREATE TABLE IF NOT EXISTS "endpoint_fleet_settings" (
-  "source_id" uuid PRIMARY KEY NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS "endpoint_device_group_fleet_settings" (
+  "group_id" uuid PRIMARY KEY NOT NULL REFERENCES "endpoint_device_groups"("id") ON DELETE CASCADE,
   "self_update" boolean DEFAULT false NOT NULL,
   "self_update_relaxed_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "self_update_step_up" text,
   "self_update_audit_id" uuid,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "endpoint_fleet_settings_self_update_check"
+  CONSTRAINT "endpoint_device_group_fleet_settings_self_update_check"
     CHECK (NOT "self_update" OR ("self_update_step_up" IS NOT NULL AND "self_update_audit_id" IS NOT NULL))
 );
 --> statement-breakpoint
@@ -32,13 +33,20 @@ CREATE TABLE IF NOT EXISTS "endpoint_update_rollouts" (
   "source_id" uuid NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
   "target_version" text NOT NULL,
   "state" text DEFAULT 'draft' NOT NULL,
+  "halt_threshold" integer DEFAULT 1 NOT NULL,
+  "halt_threshold_step_up" text,
+  "halt_threshold_audit_id" uuid,
   "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "endpoint_update_rollouts_version_check"
     CHECK ("target_version" ~ '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'),
   CONSTRAINT "endpoint_update_rollouts_state_check"
-    CHECK ("state" IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted'))
+    CHECK ("state" IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')),
+  CONSTRAINT "endpoint_update_rollouts_halt_threshold_check" CHECK ("halt_threshold" BETWEEN 1 AND 10),
+  -- above the strict default only with the recorded step-up and audit row of the loosening
+  CONSTRAINT "endpoint_update_rollouts_halt_relaxed_check"
+    CHECK ("halt_threshold" = 1 OR ("halt_threshold_step_up" IS NOT NULL AND "halt_threshold_audit_id" IS NOT NULL))
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "endpoint_update_rollouts_open_uq"
@@ -81,13 +89,13 @@ ALTER TABLE "endpoint_enrolment_tokens" ADD CONSTRAINT "endpoint_enrolment_token
 CREATE INDEX IF NOT EXISTS "endpoint_enrolment_tokens_device_group_idx"
   ON "endpoint_enrolment_tokens" ("device_group_id") WHERE "device_group_id" IS NOT NULL;
 --> statement-breakpoint
-ALTER TABLE "endpoint_fleet_settings" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "endpoint_device_group_fleet_settings" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
-ALTER TABLE "endpoint_fleet_settings" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "endpoint_device_group_fleet_settings" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
-DROP POLICY IF EXISTS "endpoint_fleet_settings_admin" ON "endpoint_fleet_settings";
+DROP POLICY IF EXISTS "endpoint_device_group_fleet_settings_admin" ON "endpoint_device_group_fleet_settings";
 --> statement-breakpoint
-CREATE POLICY "endpoint_fleet_settings_admin" ON "endpoint_fleet_settings" FOR ALL
+CREATE POLICY "endpoint_device_group_fleet_settings_admin" ON "endpoint_device_group_fleet_settings" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
 --> statement-breakpoint

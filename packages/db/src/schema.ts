@@ -20737,19 +20737,20 @@ export type PaidCallHoldRow = typeof paidCallHolds.$inferSelect;
 // ===== end ADR-0313 =================================================================================================
 
 // ===== ADR-0360 (lane E41): endpoint agent fleet operations =====
-// The per-source self-update setting (off unless relaxed with a recorded step-up) and staged update rollouts whose
+// The per-device-group self-update setting (owner decision D-2026-11-22-04; off unless relaxed with a recorded step-up)
+// and staged update rollouts whose
 // stages are ADR-0350 device groups (lane E31's table, reused: no second group concept). A device may be in several
 // groups; it is offered an update by the first stage, in ordinal order, whose group holds it. The lifecycles are
 // ENDPOINT_ROLLOUT_MACHINE and ENDPOINT_ROLLOUT_STAGE_MACHINE (@regulait/shared, ADR-0348, in STATE_MACHINES);
 // every state write is a guarded UPDATE over the event's source states (`whereFrom`).
 
-/** absent row = every setting at its strict default (self-update off) */
-export const endpointFleetSettings = pgTable(
-  "endpoint_fleet_settings",
+/** one ADR-0350 device group's fleet settings; absent row = every setting at its strict default (self-update off) */
+export const endpointDeviceGroupFleetSettings = pgTable(
+  "endpoint_device_group_fleet_settings",
   {
-    sourceId: uuid("source_id")
+    groupId: uuid("group_id")
       .primaryKey()
-      .references(() => discoverySources.id, { onDelete: "cascade" }),
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
     selfUpdate: boolean("self_update").notNull().default(false),
     /** the admin who relaxed self-update on, the step-up method, and the audit row the relaxation wrote */
     selfUpdateRelaxedBy: uuid("self_update_relaxed_by").references(() => users.id, { onDelete: "set null" }),
@@ -20759,12 +20760,12 @@ export const endpointFleetSettings = pgTable(
   },
   (t) => [
     check(
-      "endpoint_fleet_settings_self_update_check",
+      "endpoint_device_group_fleet_settings_self_update_check",
       sql`NOT ${t.selfUpdate} OR (${t.selfUpdateStepUp} IS NOT NULL AND ${t.selfUpdateAuditId} IS NOT NULL)`,
     ),
   ],
 );
-export type EndpointFleetSettingsRow = typeof endpointFleetSettings.$inferSelect;
+export type EndpointDeviceGroupFleetSettingsRow = typeof endpointDeviceGroupFleetSettings.$inferSelect;
 
 export const endpointUpdateRollouts = pgTable(
   "endpoint_update_rollouts",
@@ -20775,6 +20776,13 @@ export const endpointUpdateRollouts = pgTable(
       .references(() => discoverySources.id, { onDelete: "cascade" }),
     targetVersion: text("target_version").notNull(),
     state: text("state", { enum: ENDPOINT_ROLLOUT_STATES }).notNull().default("draft"),
+    /**
+     * failed installs or rollbacks that halt the rollout (D-2026-11-22-04): strict default 1, bounded 1 to 10. Raising
+     * it is a relaxation, recorded with its step-up method and audit row (the CHECK below); lowering it is free.
+     */
+    haltThreshold: integer("halt_threshold").notNull().default(1),
+    haltThresholdStepUp: text("halt_threshold_step_up"),
+    haltThresholdAuditId: uuid("halt_threshold_audit_id"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -20782,6 +20790,11 @@ export const endpointUpdateRollouts = pgTable(
   (t) => [
     check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
     check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')`),
+    check("endpoint_update_rollouts_halt_threshold_check", sql`${t.haltThreshold} BETWEEN 1 AND 10`),
+    check(
+      "endpoint_update_rollouts_halt_relaxed_check",
+      sql`${t.haltThreshold} = 1 OR (${t.haltThresholdStepUp} IS NOT NULL AND ${t.haltThresholdAuditId} IS NOT NULL)`,
+    ),
     // at most one open rollout per source
     uniqueIndex("endpoint_update_rollouts_open_uq").on(t.sourceId).where(sql`${t.state} NOT IN ('completed', 'aborted')`),
     index("endpoint_update_rollouts_source_idx").on(t.sourceId, t.createdAt),

@@ -1,14 +1,15 @@
 {
   "adr": "ADR-0360",
   "lane": "E41",
-  "tracking": "ADR-0360 (lane E41): API-only under the lane brief rule 3; the fleet operations screens (self-update, rollouts over ADR-0350 device groups, one-line enrolment) are requested on #453 (Governed Designer)",
+  "tracking": "ADR-0360 (lane E41): API-only under the lane brief rule 3; the fleet operations screens (per-group self-update, rollouts and their halt threshold over ADR-0350 device groups, one-line enrolment) are requested on #453 (Governed Designer)",
   "gaps": {
-    "GET /v1/discovery/sources/:sourceId/fleet-settings": "reads a source's self-update setting (off by default)",
-    "PUT /v1/discovery/sources/:sourceId/fleet-settings": "turns self-update on (settings_relax step-up, audited) or off",
+    "GET /v1/endpoint-device-groups/:groupId/fleet-settings": "reads a device group's self-update setting (off by default)",
+    "PUT /v1/endpoint-device-groups/:groupId/fleet-settings": "turns a device group's self-update on (settings_relax step-up, audited) or off",
     "GET /v1/discovery/sources/:sourceId/update-rollouts": "lists a source's staged agent update rollouts with their declared lifecycle",
     "POST /v1/discovery/sources/:sourceId/update-rollouts": "creates a staged agent update rollout over ADR-0350 device groups (audited)",
     "GET /v1/discovery/update-rollouts/:rolloutId": "reads one rollout, its stages and the allowed next steps",
     "POST /v1/discovery/update-rollouts/:rolloutId/:action": "starts, advances, completes, pauses, resumes or aborts a rollout (guarded by the declared table; audited)",
-    "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "issues a single-use, 15-minute enrolment token and the one line to paste as root (audited; the secret is shown once)"
+    "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "issues a single-use, 15-minute enrolment token and the one line to paste as root (audited; the secret is shown once)",
+    "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "sets a rollout's halt threshold within its bounds (tightening free, loosening a settings_relax step-up; audited)"
   }
 }
