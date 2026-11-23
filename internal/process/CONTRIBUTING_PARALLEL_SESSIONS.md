@@ -110,7 +110,16 @@ Two related traps from the same mechanism:
 >    provisional number never reaches one. Do not set the variable on a database you keep.
 > 3. After the merge, `.github/workflows/assign-at-merge.yml` runs `scripts/assign-at-merge.mjs`. It numbers every pending
 >    file (number and idx one above the journal's highest, `when` = last `when` + 1,000,000), renames it, appends
->    its entry and pushes the result to `assign-at-merge/<main sha>`. The master opens that PR and enqueues it.
+>    its entry and pushes the result to `assign-at-merge/<main sha>` (with `GITHUB_TOKEN`). Then, by mode:
+   - **`ASSIGN_AT_MERGE_TOKEN` repo secret set:** the job opens the PR against `main` itself with that token (title
+     "chore: assign migration numbers and fold docs at merge (ADR-0252)", body = the plan), so the PR's CI runs; a PR
+     opened with `GITHUB_TOKEN` would start none. The token is used only to open the PR. It must be a fine-grained
+     token scoped to this repository only, with Contents read/write and Pull requests read/write, or a GitHub App
+     with the same rights.
+   - **Secret empty:** push only; the run summary says the master opens the PR from the branch.
+
+   Either way the job never merges, approves or enables auto-merge, and opens nothing while an `assign-at-merge/` PR
+   is open or an earlier branch is unmerged. The master enqueues the PR.
 > 4. The guard (`scripts/migration-watermark-guard.mjs`, on PRs and in the merge queue) refuses: a changed or removed
 >    merged entry; a changed merged `.sql`; a numbered file with no entry, or an entry with no file; a bad pending name;
 >    and any new journal entry that is not exactly the assign step's numbering of pending files the same diff removes.
@@ -339,8 +348,9 @@ For a builder lane, from branch to merge:
    goes through the queue too. Until it lands, `main` holds your migration unnumbered, and a long-lived database
    refuses to migrate, by design (§4.1).
 
-**For the master:** enqueue instead of merging. When an `assign-at-merge/<sha>` branch appears, open a PR from the
-newest one (title "chore: assign migration numbers and fold docs at merge (ADR-0252)") and enqueue it. Keep one
+**For the master:** enqueue instead of merging. When the job has opened an assignment PR (the
+`ASSIGN_AT_MERGE_TOKEN` secret is set, §4.1), enqueue it. Otherwise, when an `assign-at-merge/<sha>` branch appears,
+open a PR from the newest one (title "chore: assign migration numbers and fold docs at merge (ADR-0252)") and enqueue it. Keep one
 open at a time, and delete older `assign-at-merge/*` branches that never got a PR: while one is unmerged, the job
 pushes no new branch and its summary names the one waiting. If the job cannot run,
 `node scripts/assign-at-merge.mjs --write` on a branch from main gives the same result.
