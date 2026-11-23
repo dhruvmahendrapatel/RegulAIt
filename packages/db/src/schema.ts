@@ -20917,3 +20917,26 @@ export const behaviourAnomalyFindings = pgTable(
 );
 export type BehaviourAnomalyFindingRow = typeof behaviourAnomalyFindings.$inferSelect;
 // ===== end ADR-0359 =====
+
+// ===== ADR-0364 S3 (D-2026-11-22-07): cross-replica caller cancel =====
+/**
+ * A caller's `notifications/cancelled` that the receiving replica did not serve, for every replica to see
+ * (apps/gateway/src/caller-cancel.ts). Short-lived; system task only (RLS).
+ */
+export const mcpCallerCancellations = pgTable(
+  "mcp_caller_cancellations",
+  {
+    /** scrypt hash (hex) of the caller's cancellation scope and the JSON-RPC request id (caller-cancel.ts) */
+    requestKey: text("request_key").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("mcp_caller_cancellations_created_idx").on(t.createdAt),
+    index("mcp_caller_cancellations_user_idx").on(t.userId),
+    check("mcp_caller_cancellations_key_check", sql`${t.requestKey} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type McpCallerCancellationRow = typeof mcpCallerCancellations.$inferSelect;

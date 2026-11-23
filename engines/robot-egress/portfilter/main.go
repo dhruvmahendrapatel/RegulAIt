@@ -1,11 +1,14 @@
 // ADR-0364 S3 — the robot egress proxy's entry point: smokescreen v0.1.0's own main.go (MIT, Copyright (c) 2016 Stripe:
 // the same configuration, flags, role function and JSON logging), plus the port filter (portfilter.go) as its
-// PostDecisionRequestHandler. Nothing else differs from the upstream binary.
+// PostDecisionRequestHandler, and the front filter (front.go) on the address the flags name, with Smokescreen moved
+// to a loopback listener behind it (D-2026-11-22-07). Nothing else differs from the upstream binary.
 package main
 
 import (
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stripe/smokescreen/cmd"
@@ -38,6 +41,22 @@ func main() {
 			conf.Log.Fatalf("regulait port filter: %v", err)
 		}
 		conf.PostDecisionRequestHandler = filter.Check
+
+		// the front filter takes the flags' address (--listen-ip, --listen-port); Smokescreen listens on loopback only,
+		// so nothing outside this process reaches it. Either listener failing stops the proxy (fail closed).
+		front, err := net.Listen("tcp", net.JoinHostPort(conf.Ip, strconv.Itoa(int(conf.Port))))
+		if err != nil {
+			conf.Log.Fatalf("regulait front filter: %v", err)
+		}
+		inner, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			conf.Log.Fatalf("regulait front filter: the loopback listener: %v", err)
+		}
+		conf.Listener = inner
+		go func() {
+			err := NewFront(filter, inner.Addr().String(), conf.Log.WithField("component", "front")).Serve(front)
+			conf.Log.Fatalf("regulait front filter stopped: %v", err)
+		}()
 
 		adapter := &smokescreen.Log2LogrusWriter{
 			Entry: conf.Log.WithField("stdlog", "1"),

@@ -71,4 +71,32 @@ The ports file is `/etc/regulait-egress/ports.txt` (fixed in the binary), one `h
 executor beside the ACL from the same offer targets (`egressPortsFile`, 0600, the same owner, mount and cleanup). A
 missing, empty or malformed file stops the binary before it listens (fail closed). Tests: `go test` in `portfilter/`
 (run in the image build too), and the executor's network-level test `robot-egress.integration.test.ts` (an allowed host
-on a port it does not name is refused with 407).
+on a port it does not name is refused by the front filter, below, with 403).
+
+### Front filter (D-2026-11-22-07: defence in depth)
+
+The sandbox never reaches Smokescreen directly. `portfilter/front.go` listens on the address the executor's flags name
+(`--listen-ip`, `--listen-port 4750`, unchanged), and Smokescreen listens on a loopback port inside the same process
+(`Config.Listener`), so nothing outside the container can reach it. For each connection the front filter:
+
+- refuses anything that is not `CONNECT`, a CONNECT whose `Host` differs from its target, and a target that is not
+  `host:port` (a DNS name and a canonical decimal port; never an IP literal, brackets or userinfo), parsed by its own
+  strict parser rather than Smokescreen's;
+- refuses a `host:port` not in the run's ports file;
+- re-writes the request (`CONNECT <target> HTTP/1.1`, `Host: <target>`, no other header) and hands the connection to
+  Smokescreen, which applies its ACL, its address checks and the hook above as the second layer;
+- fails closed: if either listener cannot start or the front stops, the binary exits; if Smokescreen cannot be dialled,
+  the CONNECT is refused (502).
+
+Its refusals answer **403** with `X-Regulait-Egress-Front: refused` and log one JSON line (`regulait front filter`);
+Smokescreen's own refusals answer 407. Tests: `front_test.go` (go test), and the integration test asserts the 403 and
+the log line.
+
+Approaches compared (ADR-0176):
+
+| Option | Licence | Fit | Verdict |
+|---|---|---|---|
+| Go standard library (`net/http`, `net`), in the same binary | BSD-3-Clause (Go) | No new module, one process, about 150 lines, the same ports file | **chosen** |
+| `stripe/goproxy` as the front (already linked) | BSD-3-Clause | Its CONNECT handler can chain to an upstream proxy, but it brings its MITM and HTTP-proxy paths into the front, more surface than the filter needs | rejected |
+| tinyproxy (`ConnectPort`) | GPL-2.0 | Port-only allow-list (not per host), a second process, licence not on the ADR-0176 list | rejected |
+| Envoy (CONNECT matching on `:authority`) | Apache-2.0 | Fits, but a third, large binary and its configuration in a minimal distroless image | rejected |
