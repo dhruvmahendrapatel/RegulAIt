@@ -4,6 +4,6 @@
 set -u
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --global disable regulait-agent.service >/dev/null 2>&1 || true
-  systemctl disable --now regulait-agent-update.timer >/dev/null 2>&1 || true
+  systemctl disable --now regulait-agent-update-check.timer >/dev/null 2>&1 || true
 fi
 exit 0

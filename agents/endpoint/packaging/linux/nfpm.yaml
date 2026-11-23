@@ -26,8 +26,8 @@ contents:
     dst: /usr/lib/systemd/system/regulait-agent-update.service
     file_info:
       mode: 0644
-  - src: ./regulait-agent-update.timer
-    dst: /usr/lib/systemd/system/regulait-agent-update.timer
+  - src: ./regulait-agent-update-check.timer
+    dst: /usr/lib/systemd/system/regulait-agent-update-check.timer
     file_info:
       mode: 0644
   - dst: /etc/regulait-agent

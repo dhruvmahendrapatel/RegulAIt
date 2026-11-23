@@ -46,7 +46,7 @@ device ticket still lives 7 days; a one-line-enrolled device needs a new token (
 
 ## Self-update (ADR-0360 §4; off by default)
 
-`regulait-agent update` runs as root from the package's system timer (`regulait-agent-update.timer` on Linux, the
+`regulait-agent update` runs as root from the package's system timer (`regulait-agent-update-check.timer` on Linux, the
 `com.regulait.agent.update` LaunchDaemon on macOS). It installs nothing unless **all** of these hold:
 
 1. The config pins the device-policy keys (`devicePolicyKeys`) **and** the release keys (`releaseKeys`, at most two:

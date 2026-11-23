@@ -1,4 +1,5 @@
 # ADR-0360 §4: check the update spool hourly, spread over the fleet.
+# Named apart from its service (the repo's basename-collision guard), so Unit= names the service explicitly.
 [Unit]
 Description=RegulAIt endpoint agent self-update check
 
@@ -6,6 +7,7 @@ Description=RegulAIt endpoint agent self-update check
 OnBootSec=15min
 OnUnitActiveSec=1h
 RandomizedDelaySec=30min
+Unit=regulait-agent-update.service
 
 [Install]
 WantedBy=timers.target

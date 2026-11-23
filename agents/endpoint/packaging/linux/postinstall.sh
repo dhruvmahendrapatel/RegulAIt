@@ -26,6 +26,6 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --global enable regulait-agent.service >/dev/null 2>&1 || true
   # the timer runs `regulait-agent update` as root; it installs nothing unless the gateway signs a directive (ADR-0360)
   systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable --now regulait-agent-update.timer >/dev/null 2>&1 || true
+  systemctl enable --now regulait-agent-update-check.timer >/dev/null 2>&1 || true
 fi
 exit 0
