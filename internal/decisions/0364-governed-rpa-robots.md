@@ -598,6 +598,14 @@ S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`ste
     - Each run writes a `robot_run` usage row with a NULL cost. A robot run has no price yet, and no figure is invented.
     - A robot tools/call gets a deadline that covers placement, the run and its margin, with one attempt and no retry.
     - The call's abort signal cancels the run (`caller_aborted`).
+    - **Cancel on any replica (owner, D-2026-11-22-07).** A `notifications/cancelled` that lands on a replica not
+      serving the call is written to `mcp_caller_cancellations` (pending migration `mcp_caller_cancellations`). The
+      row is keyed by a sha256 of the caller's scope and request id, so no credential id is stored and a caller can
+      name only its own calls. Every replica with calls in flight reads the table each second and aborts a call whose
+      key appears after the call started (`apps/gateway/src/caller-cancel.ts`).
+    - **Fail closed.** Each heartbeat of a run with a caller confirms that shared state. It accepts a read from the
+      last 3 s, or makes a fresh read bounded at 2 s. When it cannot confirm, the heartbeat answers `{cancel:true}`
+      and the run ends `cancelled` / `cancel_unconfirmed`. A test run has no caller and does not depend on the table.
 
 ## Addendum: free-form browsing limits (owner decision, 2026-11-19)
 
