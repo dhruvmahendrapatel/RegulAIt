@@ -1,6 +1,6 @@
 ---
 phase: parallel-build-orchestrated
-last_updated: 2026-11-21
+last_updated: 2026-11-23
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -19,7 +19,32 @@ roadmap: ../product/ROADMAP.md
 > at the end of a long batch** — a session that ended unexpectedly during that window would have
 > handed its successor a file describing a project with "no workload to deploy".
 
-## Snapshot (2026-11-21, 19:45 UTC) - read this first
+## Snapshot (2026-11-23, 19:30 UTC) - read this first
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **Merged 2026-11-22 evening to 2026-11-23 (every merge audited against its released head):** CX Codex slices
+  #1216, #1217, #1219, #1221, #1223, #1227; UI-C E18 screens #1215, #1218, #1220; E38 #965, #974, #981, #984 (policy
+  inheritance); E23 #1001; E2 #1224 (budget `warn_only`); E45 #1226 (robot port filter, cross-replica cancel, MPL
+  exception); CI and repo hygiene #1230 (e2e fix for #1227), #1234 (assign-at-merge: 84 migrations numbered 0327-0410
+  and 226 fragments folded), #1235 (assign-at-merge can open its own PR), #1236 (`spa-journeys` runs on UI and gateway
+  PRs), #1237 (migration context in two migrations, flagged by the ADR-0234 RLS guard once numbered), #976 (E42 M365
+  Copilot connector), #1238 (endpoint-agent flaky test), #875 (Node digest refresh across all engine Dockerfiles).
+- **Main was red on `spa-journeys` from about 10:05 to 15:50 on 2026-11-23.** #1227 changed row semantics and the check
+  never ran on its PR (ADR-0262 runs it only in the full suite, and this user-owned repo has no merge queue). #1230
+  fixed the specs and #1236 makes the check run on UI and gateway PRs. M-122 records the process mistake.
+- **Owner decisions 2026-11-23:** D-2026-11-23-01 to -04 in `internal/process/orchestration/DecisionLog.md` (Codex
+  follow-ups, runtime enforcement of inherited policy as the governed-core lane's next slice, a lane for the ChatGPT
+  review #1180, and the stale-PR triage).
+- **Sessions (10 workers):** builders CX (Codex slices 19-27), L1 (slice 4c, then inherited-policy enforcement), E41
+  (#962, #968, #979), E42 (#985, #991), E50 (#1133), GX (#1180 response); reviewers R2, R3 (code), S3, S4 (security).
+  The 50 stale PRs are revived through rotation, security first (#956 E34 first).
+- **Owner actions open:** add the `ASSIGN_AT_MERGE_TOKEN` repo secret (fine-grained, this repo only, Contents and Pull
+  requests write); approve the engine-image republish after #875; E41's push-permission prompt if it recurs; L4's
+  engine-images release approval; the Atlassian Guard key as a GitHub secret.
+- **Open CI follow-ups:** #1239 (seventh gateway shard, ADR-0234 guard over `pending/`); the assign-at-merge PR for
+  `pending/ai_saas_monitoring.sql` (from #976).
+
+## Snapshot (2026-11-21, 19:45 UTC) - superseded by the 2026-11-23 snapshot above
 
 - **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
 - **Merged on 2026-11-21 (23 PRs, every merge audited against its released head):**
