@@ -106,6 +106,36 @@ export class GitHubProvider implements GitProvider {
     return res.json();
   }
 
+  /** a request whose success has no JSON body (204): the status only */
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    // each ref segment is encoded; the slashes between segments stay (GitHub reads the ref as a path)
+    const ref = branch.split("/").map(encodeURIComponent).join("/");
+    const path = `/repos/${repo}/git/refs/heads/${ref}`;
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "regulait-gateway",
+      },
+    });
+    if (res.status < 400) return { deleted: true };
+    const text = await res.text();
+    // ADR-0340: only a ref that does not exist is "already gone" (404, or GitHub's 422 "Reference does not
+    // exist"). Any other refusal (branch protection, a rule set, a validation error) leaves the branch in place,
+    // so it throws and the compensation fails instead of recording an undo that did not happen.
+    if (res.status === 404 || (res.status === 422 && /reference does not exist/i.test(text))) return { deleted: false };
+    throw new GitProviderError(`github DELETE ${path} failed: ${scrubSecrets(text, [this.token])}`, res.status);
+  }
+
+  async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {
+    const pr = await this.getPullRequest(repo, prId);
+    if (pr.state === "merged") throw new GitProviderError(`github pull request #${prId} is merged; closing cannot undo it`, 409);
+    if (pr.state === "closed") return { closed: false };
+    await this.request("PATCH", `/repos/${repo}/pulls/${prId}`, { state: "closed" });
+    return { closed: true };
+  }
+
   async createBranch(repo: string, branch: string, fromBranch: string): Promise<void> {
     const ref = (await this.request("GET", `/repos/${repo}/git/ref/heads/${fromBranch}`)) as {
       object: { sha: string };
@@ -197,6 +227,8 @@ interface MockRepoState {
       title: string;
       body: string;
       merged: boolean;
+      /** ADR-0340: closed without merging */
+      closed?: boolean;
       strategy?: MergeStrategy;
       checks: CheckRun[];
     }
@@ -245,12 +277,25 @@ export class MockGitProvider implements GitProvider {
     return {
       id: prId,
       url: `mock://${repo}/pull/${prId}`,
-      state: pr.merged ? "merged" : "open",
+      state: pr.merged ? "merged" : pr.closed ? "closed" : "open",
       head: pr.head,
       base: pr.base,
       title: pr.title,
       headSha: state.branches.get(pr.head) ?? null,
     };
+  }
+
+  async deleteBranch(repo: string, branch: string): Promise<{ deleted: boolean }> {
+    return { deleted: this.repoState(repo).branches.delete(branch) };
+  }
+
+  async closePullRequest(repo: string, prId: string): Promise<{ closed: boolean }> {
+    const pr = this.repoState(repo).prs.get(prId);
+    if (!pr) throw new GitProviderError(`unknown pr '${prId}'`, 404);
+    if (pr.merged) throw new GitProviderError(`pr '${prId}' is merged; closing cannot undo it`, 409);
+    if (pr.closed) return { closed: false };
+    pr.closed = true;
+    return { closed: true };
   }
 
   async listChecks(repo: string, prId: string): Promise<CheckRun[]> {

@@ -197,3 +197,25 @@ export async function grantBuilderAgentAsAdmin(
     if (!reuse) await ctx.dispose();
   }
 }
+
+/**
+ * ADR-0180 addendum (lane E51): Ada relaxes a builder agent's oversight gate, as an admin does
+ * (`PUT /v1/builder/agents/:id/autonomy/enforcement`, a `settings_relax` step-up answered with her authenticator).
+ * A journey uses it when its agent is delegated or autonomous by setup (a template's sub-agent, a schedule) and the
+ * journey is not about oversight; the gate itself is pinned by the gateway suite.
+ */
+export async function relaxAutonomyGateAsAdmin(
+  baseURL: string,
+  oneTimePassword: string,
+  builderAgentId: string,
+  reason: string,
+  reuse?: APIRequestContext,
+): Promise<void> {
+  const ctx = reuse ?? (await adminContext(baseURL, oneTimePassword));
+  try {
+    const r = await steppedUpAs(ctx, ADMIN_EMAIL, "PUT", `/v1/builder/agents/${builderAgentId}/autonomy/enforcement`, { event: "relax", reason });
+    expect(r.status(), `autonomy gate relax: ${await r.text()}`).toBe(200);
+  } finally {
+    if (!reuse) await ctx.dispose();
+  }
+}

@@ -1,0 +1,3 @@
+<!-- fold: pending -->
+
+**E21 — compensation follow-ups (ADR-0340, 2026-11-16).** (1) A compensation undoes only the current round's records: an earlier round's branch or pull request (moved to `effects:history` by a re-open) is not closed or deleted; decide whether a cancel should also close earlier rounds' unmerged pull requests. (2) The template editor (`WorkflowTemplatesPage`) does not offer `compensates`, `delete_branch` or `close_pr` yet (screens are tracked on #453); templates are authored through the API. (3) The PM-tool mirror (pillar 8) shows a compensating instance by its status only (`awaiting_execution`), not as "compensating".

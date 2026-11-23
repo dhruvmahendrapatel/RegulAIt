@@ -206,7 +206,10 @@ the role split, because it is the only option that protects real boundaries insi
    | #614 | model_signing_keys, model_artifact_signatures, model_artifact_supply_chain_relaxations | none (deployment-wide evidence) unless a principal key appears |
    | #628 | model_drift_settings, model_drift_monitors, model_drift_reports, model_explainability_artefacts | none (deployment-wide), or 5 if they carry `project_id` |
    | #633 | fairness_datasets, fairness_runs | 5 if they carry `project_id`, else none |
-   | #862 (merged; ADR-0327, lane E12) | rule_step_settings, rule_step_suggestions | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
+   | #862 (merged; ADR-0327, lane E12), slice 3b (`rule_step_shadows`) and slice 4a (`rule_step_switches`) | rule_step_settings, rule_step_suggestions, rule_step_shadows, rule_step_switches | none (deployment-wide by the appendix rule: no project, team, owner or listed actor column; admin-only routes; a suggestion names an agent, not a principal) |
+   | #892 (ADR-0339 slice 2, lane E20) | agent_identity_links, agent_authorship | none: `agent_identity_links` is actor-stamped (`decided_by_user_id`, also `staged_by_user_id`), `agent_authorship` deployment-wide (`author_user_id` is not a listed actor column); written by admin routes and insert triggers, read only by admin or the agent's owner |
+   | ADR-0327 addendum (lane E12, decision tables) | decision_tables, decision_table_versions | none (deployment-wide by the appendix rule: configuration bound to an agent and step, no project, team or owner column; admin-only routes; `created_by`, `author_user_id` and `decided_by` record who acted, not who may read) |
+   | ADR-0328 slice 2 (lane E12, repetitive asks) | repetitive_ask_settings, repetitive_ask_clusters, repetitive_ask_cluster_spans | none (deployment-wide by the appendix rule: a measured read model keyed by agent and fingerprint, no project, team or owner column; admin-only routes; `updated_by` and `dismissed_by` record who acted, not who may read) |
    | #604, #605, #627, #673 | no new tables (columns, guards and triggers only); a new column that names a user is checked against the table's batch | — |
 
    Deployment-wide (191) and actor-stamped (49) tables get no row policy: their rows are not owned by a principal. The
@@ -692,6 +695,74 @@ an admin still clears its dependent rows.
 
 The existing webhook, mirror, drift, alert-ticket and importer suites pass unchanged under the policies.
 
+### As built (PM follow-on, 2026-11-21)
+
+Migration `pending/rls_pm_tables_followon.sql` layers on `rls_pm_tables` and keeps the extra coverage of an earlier
+draft of the PM batch. It sorts right after `rls_pm_tables.sql` and adds no system reason, so the registry is
+unchanged.
+
+**Per-row visibility under `pm_sync`.** `pm_sync` no longer opens every link. The helper
+`regulait_rls_pm_object_visible(type, id, writing)` mirrors the gateway's own object checks. It is plpgsql, STABLE,
+with a pinned `search_path`, and runs under `rls_membership` like the 0272 helpers:
+
+- `run`, `run_node`: the run's initiator; for a read only, the named approver of a pending approval on the run;
+- `workflow_instance`: the instance's initiator; for a read only, the named approver of a pending approval on it;
+- `decision`: its maker, or whoever the rules above admit for its run or instance (one level, never recursive);
+- `governance_alert`: its owner, read only.
+
+`pm_links_all` keeps the admin, `approval_maintenance`, `system_task` and `migration`. Under `pm_sync`, three new
+policies admit a read of an object the principal may see, and an insert or update of an object it may write. There is
+no delete under `pm_sync`; the code never deletes a link.
+
+**Column grant.** The app role may UPDATE only the sync-state columns of `pm_links`: `last_synced_at`, `orphaned_at`,
+`inbound_state`, `inbound_at` and `adopted_state`, the only ones `pm.ts` updates. A link's connection, object and
+external id are immutable, for an admin request too.
+
+**Append-only inbound log.** UPDATE, DELETE and TRUNCATE on `pm_sync_events` are revoked from the app role. An
+admin's connection delete still cascades: the foreign-key action runs as the table owner, outside row-level security.
+
+**`decisions`** is ENABLED and FORCED.
+
+- Read by an admin, `migration`, `rls_membership` (the helper), the decision's maker, and whoever may see its object.
+- Inserted only in the principal's own name, on an object it may write (or as an admin).
+- UPDATE, DELETE and TRUNCATE are revoked from the app role.
+
+Only `pm.ts`'s two `/v1/decisions` routes read or write the table, both under `pm_sync`.
+
+**Every `pm_sync` call site still runs for a principal whose rows the helper admits:**
+
+- the run and instance sync routes: admin or initiator;
+- the links and decisions reads: admin, initiator or pending approver;
+- the decision record: admin or initiator, then the maker for its own mirror link;
+- `mirrorNodeStatus`: admin or initiator, through `loadRunFor`;
+- the alert-ticket reads: the owner on `PUT …/owner`; filing is admin-only, a job, or the decide path;
+- the connection reads in `alert-ownership.ts` and `credential-inventory.ts`: `pm_connections` is unchanged.
+
+The decided-approval mirror needs no helper branch. `decideOneApproval` runs the whole step as the decider under
+`approval_maintenance`, so a decider who is not the initiator still mirrors once the approval is no longer pending.
+The same holds for the governance monitor that a decision re-runs.
+
+**Not done here.** The signed webhook still runs under `approval_maintenance`. A dedicated `pm_inbound` reason
+would mean redefining the 7a `users_select` and audit-append policies, and sorting after `shared_context_graph`,
+which last redefines the registry. That is more than a small follow-on. Separately, a non-admin who reassigns an
+alert they own no longer sees its ticket in the response, because they are no longer the owner.
+
+**Tests.** `zz-adr0234-rls-pm-followon.test.ts` (19) runs with no application filter. It checks:
+
+- the registry, SQL against TS;
+- the FORCE and the privileges;
+- no context sees nothing;
+- bob under `pm_sync` reads, inserts, updates and deletes nothing of alice's;
+- a pending approver reads, never writes, and loses the read once the approval is decided, except their own decision;
+- the decide scope still mirrors;
+- alice works on her own;
+- the column grant holds;
+- the append-only log and the cascade;
+- an admin sees everything.
+
+`zz-adr0234-rls-pm.test.ts` now seeds the alert its link points at, owned by the `pm_sync` principal. It expects
+that link to be read-only.
+
 ## Appendix: the inventory (2026-11-06, migrated head)
 
 - **User-owned (49):** a2a_agent_grants, agent_grants, agent_revocations, agents, ai_incident_actions, ai_incidents,
@@ -704,12 +775,12 @@ The existing webhook, mirror, drift, alert-ticket and importer suites pass uncha
   use_case_conditions, use_case_drafts, use_case_feedback, use_case_idempotency_keys, user_agent_policies,
   user_model_credentials, vendor_account_aliases, webauthn_challenges, webauthn_credentials. Some (agents, connectors,
   mcp_servers, ai_vendors) carry an owner column on fleet objects; each batch confirms the key before writing a policy.
-- **Project-scoped (31):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
+- **Project-scoped (32):** ai_risks, ai_use_cases, approval_assignment_rules, builder_agents,
   config_canary_observations, conversations, copilot_queries, cost_events, delegation_grants, engine_runs, eval_runs,
-  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, policy_simulation_flips,
-  processing_records, project_context_items, project_members, prompts, redteam_runs, spend_anomalies,
-  spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs, usage_events,
-  virtual_keys, workflow_instances.
+  lineage_edges, lineage_nodes, model_artifacts, mrm_retest_runs, orchestration_runs, paid_call_holds (ADR-0313),
+  policy_simulation_flips, processing_records, project_context_items, project_members, prompts, redteam_runs,
+  spend_anomalies, spend_monitor_policies, spend_scheduled_changes, traces, training_datasets, training_jobs,
+  usage_events, virtual_keys, workflow_instances.
 - **Team-scoped (5):** approval_rules, data_scope_rules, model_rate_limits, rate_limits, team_members.
 - **Actor-stamped (49) and deployment-wide (191):** every other table in `public`. To regenerate every list from a
   migrated database, classify each table by its columns, in this order: `project_id`, then `team_id`, then an owner

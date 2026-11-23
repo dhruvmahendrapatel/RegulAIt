@@ -30,6 +30,7 @@ import type {
   LanguageModelV4Prompt,
   LanguageModelV4StreamPart,
   LanguageModelV4ToolChoice,
+  LanguageModelV4Usage,
 } from "@ai-sdk/provider";
 import { ModelProviderError, isModelDeadlineError, modelDispatchTimeout } from "./core.js";
 import type { ModelChatMessage, ModelContentBlock, ModelDispatchRequest } from "./index.js";
@@ -225,6 +226,10 @@ export interface StreamCollected {
   content: LanguageModelV4Content[];
   responseId: string | null;
   finishRaw: string | undefined;
+  /** ADR-0352: the spec's normalised finish reason, for adapters that map from it */
+  finishUnified: string | undefined;
+  /** ADR-0352: the spec's usage block from the finish part */
+  usage: LanguageModelV4Usage | undefined;
   providerMetadata: Record<string, unknown> | undefined;
   rawChunks: unknown[];
 }
@@ -252,6 +257,8 @@ export async function collectStream(
     content: [],
     responseId: null,
     finishRaw: undefined,
+    finishUnified: undefined,
+    usage: undefined,
     providerMetadata: undefined,
     rawChunks: [],
   };
@@ -278,6 +285,8 @@ export async function collectStream(
           break;
         case "finish":
           out.finishRaw = value.finishReason.raw;
+          out.finishUnified = value.finishReason.unified;
+          out.usage = value.usage;
           out.providerMetadata = value.providerMetadata as Record<string, unknown> | undefined;
           break;
         case "error":

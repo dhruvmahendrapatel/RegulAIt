@@ -10,7 +10,7 @@
  * The document format, the normal form and the classification are `@regulait/shared` (governance-config.ts).
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { CORE_SCHEMA, dump, load } from "js-yaml";
+import { CORE_SCHEMA, YAMLException, dump, load } from "js-yaml";
 import { z } from "zod";
 import {
   agents,
@@ -321,7 +321,10 @@ export function parseGovernanceDocument(content: string) {
     });
   } catch (e) {
     if (e instanceof AnchorRefused) throw new GovernanceDocumentError("anchors_refused", "YAML anchors and aliases are not accepted in a governance document");
-    throw new GovernanceDocumentError("unparseable", `the document is not valid YAML or JSON: ${(e as Error).message.split("\n")[0]}`);
+    // the parser's own reason and position only: its message quotes the document, which is never echoed back
+    const where = e instanceof YAMLException && e.mark ? ` at line ${e.mark.line + 1}, column ${e.mark.column + 1}` : "";
+    const reason = e instanceof YAMLException && typeof e.reason === "string" ? `: ${e.reason.slice(0, 200)}` : "";
+    throw new GovernanceDocumentError("unparseable", `the document is not valid YAML or JSON${reason}${where}`);
   }
   const parsed = governanceConfigSchema.safeParse(raw);
   if (!parsed.success) {
@@ -428,7 +431,14 @@ export async function referenceIssues(db: Db, plan: GovernancePlan, desired: Nor
       r.toolGrants.forEach((g) => tool(g.server, g.tool));
       r.serverGrants.forEach((g) => {
         server(g.server);
-        if (!g.readOnlyAll) miss(c, "inert_server_grant", `server ${g.server}: readOnlyAll false confers nothing; grant tools by name instead`);
+        // the UI path refuses the same write (app.ts INERT_SERVER_GRANT): the row would list as a grant while
+        // granting nothing. The schema still accepts false, so a legacy live row round-trips and surfaces here.
+        if (!g.readOnlyAll)
+          miss(
+            c,
+            "inert_server_grant",
+            `server grant on ${g.server} has readOnlyAll=false, which confers nothing: set readOnlyAll: true for read-all on this server, or grant individual tools`,
+          );
       });
       r.agentGrants.forEach((g) => hasAgent.has(g.agent) || miss(c, "unknown_agent", `no agent named ${g.agent}`));
       r.connectorGrants.forEach((g) => hasConnector.has(g.connector) || miss(c, "unknown_connector", `no connector named ${g.connector}`));

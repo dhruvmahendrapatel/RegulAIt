@@ -131,6 +131,12 @@ name: CI
 #     ~16.5 at the slowest seen). Hence a fifth matrix entry, as this header prescribes; the cap
 #     stays at 20. Vitest 4.1 has no duration-based --shard; a custom sequencer would be our own code
 #     for a solved problem, so the count split stays (ADR-0176).
+#     RE-MEASURED 2026-11-22 (669 files): five shards reached the 20-min cap in turn, each cancelled
+#     with every finished test passing: main's shard 3 ran 19:42 (run 45003062253), and on #1082
+#     shards 3 and 4 (run 45000694944) and then shard 5 (run 45009845308) were cancelled. Each file
+#     also pays ~3-5 s of fresh-database setup (75 unnumbered migrations), so a count slice of 134
+#     files spends more of its 20 minutes on setup than on tests. Hence a sixth matrix entry, as this
+#     header prescribes; the cap stays at 20.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
 # cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
@@ -175,6 +181,8 @@ permissions:
 # ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
 # are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
 env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
   REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
@@ -348,9 +356,11 @@ jobs:
       # on a reasoned list in that script (machine-only by category,
       # superseded by a route the UI calls, an indirect call with its
       # evidence), or is a 501 stub. Real gaps sit in a TEMPORARY
-      # `KNOWN_UI_GAPS` list that this step prints loudly and whose count may
-      # only go down. A list entry that no longer matches fails the step, so
-      # the lists cannot rot.
+      # `KNOWN_UI_GAPS` list (one file per ADR and lane in
+      # scripts/known-ui-gaps/, ADR-0252 addendum) that this step prints
+      # loudly; its count is the number of entries. A list entry that no longer
+      # matches fails the step, so the lists cannot rot and the count falls as
+      # screens land.
       #
       # Two steps, and the census runs whenever the affordance step RAN (passed
       # or failed), so both reports always show in one run. Neither runs after a
@@ -422,7 +432,7 @@ jobs:
     # ADR-0262 (PR trim): skipped only on a docs-only PR. ADR-0323: on a web-only PR (`gateway` is 'false') the matrix
     # is ONE runner, `web-readers`, which runs only the gateway tests that read apps/web sources or walk the repository
     # (`node scripts/ci-scope.mjs --gateway-web-readers`; step-up-posture-guard walks every product source). Any other
-    # value of `gateway`, an empty one included, gives the five shards.
+    # value of `gateway`, an empty one included, gives the six shards.
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
@@ -456,9 +466,9 @@ jobs:
         # deadline upper bounds (a timeout fires within N ms) and each shard
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
-        # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
-        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full five.
-        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5]') }}
+        # SIX since 2026-11-22 (see "RE-MEASURED 2026-11-22" at the top): five shards reached the 20-min cap in turn.
+        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full six.
+        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5, 6]') }}
 
 
     services:
