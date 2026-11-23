@@ -12,6 +12,7 @@
  *    a release needs the same plus a settings_relax step-up; the CHECK holds two people.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import path from "node:path";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -25,7 +26,6 @@ import {
   edrIsolationRequests,
   egressAllowHosts,
   eq,
-  inArray,
   runMigrations,
   sql,
   users,
@@ -97,7 +97,8 @@ let sourceId: string;
 let deviceA: string;
 let deviceB: string;
 const restores: Array<() => Promise<void>> = [];
-const egressIds: string[] = [];
+// M-068/M-078: the allow entries this file adds on the shared database, removed through the shared helper
+const allowed = trackEgressAllowHosts();
 
 type Method = "GET" | "POST" | "PUT";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -132,8 +133,7 @@ beforeAll(async () => {
   });
   // the vendor host and (for Defender) the Entra sign-in host, as an admin allow-lists them
   for (const host of [VENDOR_HOST, "login.microsoftonline.com"]) {
-    const eg = await db.insert(egressAllowHosts).values({ host, note: "e41 edr test" }).onConflictDoNothing().returning({ id: egressAllowHosts.id });
-    if (eg[0]) egressIds.push(eg[0].id);
+    await db.insert(egressAllowHosts).values({ host: allowed.trackHost(host), note: "e41 edr test" }).onConflictDoNothing();
   }
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, edrEgress: egress });
   await app.ready();
@@ -157,7 +157,7 @@ afterAll(async () => {
     await db.update(discoverySources).set({ enabled: false }).where(eq(discoverySources.id, sourceId));
     await db.delete(discoverySources).where(eq(discoverySources.id, sourceId));
   }
-  if (egressIds.length) await db.delete(egressAllowHosts).where(inArray(egressAllowHosts.id, egressIds));
+  (await allowed.removeAll(app, AUTH)).assertRemoved();
   for (const r of restores.reverse()) await r();
   await app?.close();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
