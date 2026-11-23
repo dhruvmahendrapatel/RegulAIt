@@ -109,7 +109,22 @@ async function layersFor(db: Db, chain: readonly ChainLink[]): Promise<PolicyLay
   return out;
 }
 
-/** the effective policy at a level (what the decision core reads for a call attributed there) */
+/**
+ * Whether stored policy is applied to calls yet. ADR-0357 §4 slice 2 stores and resolves layers, but no call path
+ * reads them yet: wiring the decision core belongs to the ADR-0251 lane (fragment
+ * `2026-11-17-e38-policy-enforcement-pending.md`). Every layer and effective-policy response carries this, so an admin
+ * (or an agent) is never told a stored rule is in force when it is not (ADR-0180). The enforcement slice flips it.
+ */
+export const POLICY_ENFORCEMENT = Object.freeze({
+  enforced: false,
+  status: "not_enforced",
+  reason: "stored and resolved, not yet applied at call time: the decision core does not read the effective policy yet",
+} as const);
+
+/**
+ * The effective policy at a level: the chain and each rule's merged value. No call path reads this yet
+ * (see POLICY_ENFORCEMENT); it is exported for the enforcement slice, which must fail closed when the read is empty.
+ */
 export async function effectivePolicyAt(db: Db, level: PolicyLevel, id: string | null) {
   const chain = await policyChain(db, level, id);
   return { chain, rules: effectivePolicy(await layersFor(db, chain)) };
@@ -309,7 +324,12 @@ export function registerGovernancePolicyRoutes(app: FastifyInstance, db: Db): vo
       throw e;
     }
     const row = await loadLayer(db, q.data.level, q.data.id ?? null);
-    return { level: q.data.level, id: q.data.id ?? null, layer: row ? { policy: row.policy, version: row.version, updatedAt: row.updatedAt } : null };
+    return {
+      level: q.data.level,
+      id: q.data.id ?? null,
+      layer: row ? { policy: row.policy, version: row.version, updatedAt: row.updatedAt } : null,
+      enforcement: POLICY_ENFORCEMENT,
+    };
   });
 
   app.put("/v1/governance-policy/layer", async (req, reply) => {
@@ -366,7 +386,7 @@ export function registerGovernancePolicyRoutes(app: FastifyInstance, db: Db): vo
         after: policy,
         relaxed: first.relaxed,
       });
-      return { level, id, layer: { policy: row!.policy, version: row!.version } };
+      return { level, id, layer: { policy: row!.policy, version: row!.version }, enforcement: POLICY_ENFORCEMENT };
     });
     return out === undefined ? reply : out;
   });
@@ -408,6 +428,7 @@ export function registerGovernancePolicyRoutes(app: FastifyInstance, db: Db): vo
         id: q.data.id ?? null,
         chain,
         rules: rules.map((r) => ({ ...r, setBy: r.setBy ? { ...r.setBy, name: nameOf(r.setBy) } : null })),
+        enforcement: POLICY_ENFORCEMENT,
       };
     } catch (e) {
       if (e instanceof PolicySubjectNotFound) return reply.status(404).send({ error: "unknown_subject", detail: e.message });

@@ -14,3 +14,11 @@
 
   The decision core belongs to its own lane, so this lane did not change it. Also open: policy layers as a section of
   the governance-config document.
+
+  When this lands, flip `POLICY_ENFORCEMENT` in the same file. Until then it tells every layer and effective-policy
+  response that stored rules are not applied at call time (review R2 B1 on #984). Two review notes from S4 on #984
+  belong to that slice:
+  - the layer tables are admin-only under FORCE RLS, so a non-admin call path needs a system reason or a definer
+    read, and must fail closed when the read returns nothing (an empty read is a looser policy);
+  - re-parenting outside this module (a use case's `project_id` changed through the use-case routes, or a unit deleted
+    directly) changes the effective policy without the move's loosening check; route it through `effectiveLoosening`.

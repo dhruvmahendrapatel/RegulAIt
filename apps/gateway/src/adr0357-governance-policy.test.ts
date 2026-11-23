@@ -101,11 +101,14 @@ const effective = async (level: string, id?: string) => {
   return r.json() as { chain: Array<{ level: string; name: string | null }>; rules: Array<{ rule: string; value: unknown; setBy: { level: string; name: string | null } | null }> };
 };
 const rule = (e: Awaited<ReturnType<typeof effective>>, name: string) => e.rules.find((r) => r.rule === name)!;
+const NOT_ENFORCED = { enforced: false, status: "not_enforced" };
 const relaxGrant = (facts: Record<string, unknown>) => grantStepUpForTest(db, adminId, { kind: "settings_relax", facts });
 
 describe("layers and the effective view", () => {
   it("builds a chain that only ever narrows, and the effective view names who set each rule", async () => {
-    expect((await put({ level: "org", policy: { allowedAgents: ["a", "b", "c"], maxBudgetUsd: 1000, requirePlanGate: true } })).statusCode).toBe(200);
+    const orgWrite = await put({ level: "org", policy: { allowedAgents: ["a", "b", "c"], maxBudgetUsd: 1000, requirePlanGate: true } });
+    expect(orgWrite.statusCode, orgWrite.body).toBe(200);
+    expect(orgWrite.json().enforcement).toMatchObject(NOT_ENFORCED);
     expect((await put({ level: "business_unit", id: buId, policy: { allowedAgents: ["a", "b"] } })).statusCode).toBe(200);
     expect((await put({ level: "project", id: projectId, policy: { maxBudgetUsd: 500 } })).statusCode).toBe(200);
     expect((await put({ level: "use_case", id: useCaseId, policy: { allowedAgents: ["a"], piiMode: "block" } })).statusCode).toBe(200);
@@ -119,6 +122,15 @@ describe("layers and the effective view", () => {
     expect(rule(e, "minApprovers")).toMatchObject({ value: null, setBy: null });
     // the project sees its business unit's narrowing, not the use case's
     expect(rule(await effective("project", projectId), "allowedAgents")).toMatchObject({ value: ["a", "b"], setBy: { level: "business_unit", name: n("bu") } });
+  });
+
+  it("says on the layer and effective reads that stored policy is not yet enforced at call time (ADR-0180)", async () => {
+    const layer = await app.inject({ method: "GET", url: "/v1/governance-policy/layer?level=org", headers: AUTH });
+    expect(layer.statusCode, layer.body).toBe(200);
+    expect(layer.json()).toMatchObject({ layer: { version: 1 }, enforcement: NOT_ENFORCED });
+    const project = await app.inject({ method: "GET", url: `/v1/governance-policy/layer?level=project&id=${projectId}`, headers: AUTH });
+    expect(project.json()).toMatchObject({ layer: { policy: { maxBudgetUsd: 500 } }, enforcement: NOT_ENFORCED });
+    expect(((await effective("use_case", useCaseId)) as unknown as { enforcement: unknown }).enforcement).toMatchObject(NOT_ENFORCED);
   });
 
   it("a child that widens its parent is refused, naming each rule, and audited", async () => {
