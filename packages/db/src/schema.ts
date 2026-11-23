@@ -7279,6 +7279,9 @@ export const REPORT_FORMATS = ["csv", "json", "both"] as const;
 export const REPORT_ENTITLEMENT_SCOPES = ["org", "team", "project"] as const;
 export const REPORT_CADENCES = ["daily", "weekly", "monthly", "quarterly"] as const;
 export const REPORT_TRIGGERS = ["manual", "scheduled"] as const;
+/** `report_definitions.status` (CXR-REV-002, ADR-0047 addendum 2026-11-22): a definition is archived, never deleted,
+ * so its generated runs stay as evidence. Same values as `REPORT_DEFINITION_MACHINE` in @regulait/shared. */
+export const REPORT_DEFINITION_STATUSES = ["active", "archived"] as const;
 
 export const reportDefinitions = pgTable(
   "report_definitions",
@@ -7306,10 +7309,21 @@ export const reportDefinitions = pgTable(
     packId: uuid("pack_id").references((): AnyPgColumn => compliancePacks.id, { onDelete: "set null" }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** CXR-REV-002 (migration report_definition_archive): the lifecycle the declared machine reads. Deliberately
+     * stored beside `archived_at` rather than derived from it, as `redteam_libraries.status`/`retired_at` are: the
+     * ADR-0348 machines read a CHECKed status column, and `report_definitions_archived_check` keeps the two equal. */
+    status: text("status", { enum: REPORT_DEFINITION_STATUSES }).notNull().default("active"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     uniqueIndex("report_definitions_name_uq").on(t.name),
     index("report_definitions_kind_idx").on(t.kind),
+    check("report_definitions_status_ck", sql`${t.status} IN ('active', 'archived')`),
+    check(
+      "report_definitions_archived_check",
+      sql`(${t.status} = 'archived') = (${t.archivedAt} IS NOT NULL) AND (${t.archivedAt} IS NOT NULL OR ${t.archivedByUserId} IS NULL)`,
+    ),
   ],
 );
 

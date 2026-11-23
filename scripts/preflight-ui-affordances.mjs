@@ -48,6 +48,8 @@ export const DELIBERATELY_API_ONLY = new Map([
   ["/mcp/:x", "MCP protocol plumbing (ADR-0311): the Streamable HTTP session-end DELETE, which this stateless proxy answers with 405 Allow: POST; it deletes nothing, so there is no object for a screen to remove"],
   // A DELETE that is still a 501 `notBuilt` stub needs no entry: a stub deletes nothing, so the census skips it until
   // it becomes a real handler, and an entry for one is reported stale (see staleExemptions).
+  // CXR-REV-002 (ADR-0047 addendum 2026-11-22): this DELETE archives (it deletes nothing); the screen calls POST .../archive
+  ["/v1/reports/definitions/:x", "a report definition is archived, never deleted (ADR-0047 addendum): DELETE is kept only so an older client archives too, and the Reports screen's Archive action calls POST /v1/reports/definitions/:id/archive"],
   // Lane L2 (ADR-0219 follow-up, P10): API-only brief; the role-grant and revocation controls are posted on #453 (route
   // census KNOWN_UI_GAPS). RAISED for the master's review on the PR: delete these entries when the controls land
   ["/v1/a2a/agents/:x/role-grants/:x", "removing a role's access to a remote agent: API-only until the controls on #453 (lane L2 brief)"],
