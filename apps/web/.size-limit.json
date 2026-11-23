@@ -85,6 +85,12 @@
     "limit": "11.3 kB"
   },
   {
+    "name": "chunk: AssetScore",
+    "path": "dist/assets/AssetScore-????????.js",
+    "gzip": true,
+    "limit": "4.2 kB"
+  },
+  {
     "name": "chunk: BomEvidencePanel",
     "path": "dist/assets/BomEvidencePanel-????????.js",
     "gzip": true,
@@ -223,6 +229,12 @@
     "limit": "4.3 kB"
   },
   {
+    "name": "chunk: McpPinning",
+    "path": "dist/assets/McpPinning-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
     "name": "chunk: ModelRateLimits",
     "path": "dist/assets/ModelRateLimits-????????.js",
     "gzip": true,
@@ -253,6 +265,12 @@
     "limit": "3.4 kB"
   },
   {
+    "name": "chunk: ProcessAnalyticsPage",
+    "path": "dist/assets/ProcessAnalyticsPage-????????.js",
+    "gzip": true,
+    "limit": "7.1 kB"
+  },
+  {
     "name": "chunk: ProfileEditModal",
     "path": "dist/assets/ProfileEditModal-????????.js",
     "gzip": true,
@@ -263,6 +281,12 @@
     "path": "dist/assets/ProjectArchiveDialogs-????????.js",
     "gzip": true,
     "limit": "3.8 kB"
+  },
+  {
+    "name": "chunk: ReadSetupPage",
+    "path": "dist/assets/ReadSetupPage-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
   },
   {
     "name": "chunk: ReasonedAction",

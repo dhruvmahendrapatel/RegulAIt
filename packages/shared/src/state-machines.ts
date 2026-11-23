@@ -257,6 +257,40 @@ export const SAAS_APP_AGENT_LINK_MACHINE = defineMachine({
   },
 });
 export type SaasAppAgentLinkState = (typeof SAAS_APP_AGENT_LINK_MACHINE.def.states)[number];
+/** `saas_finding_reviews.status` (ADR-0337 §5, slice 3b). An admin raises a SaaS entitlement finding into the approvals
+ * queue for a second administrator's decision. Nothing executes either way: RegulAIt never revokes a vendor-side
+ * grant. Approved records that the grant is to be removed or narrowed in the vendor's console; denied records the risk
+ * as accepted, with the decider's reason. A raised review can be withdrawn while it is pending. Every outcome is final:
+ * the same finding can be raised again as a new review. Same values as `SAAS_FINDING_REVIEW_STATES` below. */
+export const SAAS_FINDING_REVIEW_MACHINE = defineMachine({
+  id: "saas_finding_review",
+  stored: "saas_finding_reviews.status",
+  states: ["pending", "remediate", "accepted", "withdrawn"],
+  initial: ["pending"],
+  terminal: ["remediate", "accepted", "withdrawn"],
+  transitions: {
+    approve: {
+      from: ["pending"],
+      to: "remediate",
+      by: ["approver"],
+      summary: "The second administrator agreed: the grant is to be removed or narrowed in the vendor's own console (RegulAIt does not revoke it).",
+    },
+    deny: {
+      from: ["pending"],
+      to: "accepted",
+      by: ["approver"],
+      summary: "The second administrator kept the grant: the risk is accepted, with the decider's reason; the finding stays visible, marked accepted.",
+    },
+    withdraw: {
+      from: ["pending"],
+      to: "withdrawn",
+      by: ["admin"],
+      summary: "An admin withdrew the review before it was decided; its queue item is superseded.",
+    },
+  },
+});
+export type SaasFindingReviewState = (typeof SAAS_FINDING_REVIEW_MACHINE.def.states)[number];
+export const SAAS_FINDING_REVIEW_STATES = SAAS_FINDING_REVIEW_MACHINE.def.states;
 /** `detection_incidents.status` (ADR-0333, lane E15). An admin acknowledges an open incident (again, idempotently)
  * or closes it; a closed incident is final, so a later burst raises a new incident instead of reopening this one.
  * Same values as `DETECTION_INCIDENT_STATUSES` in @regulait/db. */
@@ -278,6 +312,30 @@ export const DETECTION_INCIDENT_MACHINE = defineMachine({
       to: "closed",
       by: ["admin"],
       summary: "An admin closes the incident; it is final, and a new match raises a new incident.",
+    },
+  },
+});
+
+/** `behaviour_anomaly_findings.status` (ADR-0359, lane E40). A shadow finding: an admin acknowledges it or dismisses
+ * it, and a dismissed finding is final. Same values as `BEHAVIOUR_FINDING_STATUSES` in ./behaviour-baseline.ts. */
+export const BEHAVIOUR_FINDING_MACHINE = defineMachine({
+  id: "behaviour_finding",
+  stored: "behaviour_anomaly_findings.status",
+  states: ["open", "acknowledged", "dismissed"],
+  initial: ["open"],
+  terminal: ["dismissed"],
+  transitions: {
+    acknowledge: {
+      from: ["open"],
+      to: "acknowledged",
+      by: ["admin"],
+      summary: "An admin has seen the finding and is looking into it; nothing is enforced either way (shadow mode).",
+    },
+    dismiss: {
+      from: ["open", "acknowledged"],
+      to: "dismissed",
+      by: ["admin"],
+      summary: "An admin dismisses the finding; it is final, and a later departure records a new finding.",
     },
   },
 });
@@ -456,7 +514,12 @@ export const ROBOT_RUN_MACHINE = defineMachine({
     start: { from: ["queued"], to: "running", by: ["system"], summary: "The sandbox placement was accepted and the runner started." },
     succeed: { from: ["running"], to: "succeeded", by: ["worker"], summary: "Every step ran and the outputs matched the output schema." },
     fail: { from: ["running"], to: "failed", by: ["worker"], summary: "A step failed; the run stopped with evidence." },
-    time_out: { from: ["running"], to: "timed_out", by: ["worker", "system"], summary: "The run hit its wall-clock or step limit." },
+    time_out: {
+      from: ["queued", "running"],
+      to: "timed_out",
+      by: ["worker", "system"],
+      summary: "The run hit its wall-clock or step limit, or the stale-run sweep ended a run no gateway still holds.",
+    },
     cancel: {
       from: ["queued", "running"],
       to: "cancelled",
@@ -833,6 +896,27 @@ export const AUTONOMY_ENFORCEMENT_MACHINE = defineMachine({
 export type AutonomyEnforcementState = (typeof AUTONOMY_ENFORCEMENT_STATES)[number];
 export type AutonomyEnforcementEvent = keyof typeof AUTONOMY_ENFORCEMENT_MACHINE.def.transitions;
 
+/** `report_definitions.status` (ADR-0047 addendum 2026-11-22, CXR-REV-002). A definition is archived instead of
+ * deleted, so the runs it generated stay readable as evidence. Archiving disables its schedules in the same
+ * transaction and refuses new generations; there is no unarchive (create a new definition instead). */
+export const REPORT_DEFINITION_STATES = ["active", "archived"] as const;
+export type ReportDefinitionState = (typeof REPORT_DEFINITION_STATES)[number];
+export const REPORT_DEFINITION_MACHINE = defineMachine({
+  id: "report_definition",
+  stored: "report_definitions.status",
+  states: REPORT_DEFINITION_STATES,
+  initial: ["active"],
+  terminal: ["archived"],
+  transitions: {
+    archive: {
+      from: ["active"],
+      to: "archived",
+      by: ["admin"],
+      summary: "Archive the definition: its schedules are disabled and stop firing, no new report is generated from it, and every run it already generated is kept and stays readable.",
+    },
+  },
+});
+
 /** Every declared machine, by id: the one list an agent or a document reads. */
 /** `shadow_ai_findings.disposition` (ADR-0055). A triage verdict an admin may revise in any direction, re-setting
  * the same one with a new reason included; declared so that is a stated rule rather than an accident. Linking a
@@ -998,8 +1082,11 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,
   [SAAS_APP_AGENT_LINK_MACHINE.def.id]: SAAS_APP_AGENT_LINK_MACHINE,
+  [SAAS_FINDING_REVIEW_MACHINE.def.id]: SAAS_FINDING_REVIEW_MACHINE,
   [DETECTION_INCIDENT_MACHINE.def.id]: DETECTION_INCIDENT_MACHINE,
   [DETECTION_RESPONSE_MACHINE.def.id]: DETECTION_RESPONSE_MACHINE,
+  // ADR-0359 (lane E40): a behaviour baseline shadow finding
+  [BEHAVIOUR_FINDING_MACHINE.def.id]: BEHAVIOUR_FINDING_MACHINE,
   [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
@@ -1022,6 +1109,8 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
   [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
   [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
+  // ADR-0047 addendum (CXR-REV-002): archive instead of delete
+  [REPORT_DEFINITION_MACHINE.def.id]: REPORT_DEFINITION_MACHINE,
   // ADR-0366: a rogue-agent containment (proposed, contained, declined, release_pending, released)
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
 } as Record<string, StateMachine<string, string>>);

@@ -116,9 +116,14 @@ const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "Con
 // ADR-0255: the governed connector catalogue is its own lazy chunk, loaded only when opened, so it adds nothing to the
 // entry bundle or to admin-integrations (ADR-0344 per-route budgets)
 const ConnectorCataloguePage = screen(() => import("./views/admin/integrations/ConnectorCataloguePage"), "default");
+const ReadSetupPage = screen(() => import("./views/admin/governance/ReadSetupPage"), "default");
+const ProcessAnalyticsPage = screen(() => import("./views/admin/governance/ProcessAnalyticsPage"), "default");
 // P3 (#453 c6527514889): each long operations/cost area is one lazy chunk whose module owns its nested <Routes> — the
 // overview at the index, each full list on its own page — so the sub-pages add nothing to the entry bundle.
 const McpServersArea = screen(() => import("./screens/admin-integrations"), "McpServersArea");
+// ADR-0246 (P27): a server's definition pins, in the MCP pinning chunk rather than admin-integrations (ADR-0344 budgets)
+const McpDefinitionPinsPage = screen(() => import("./views/admin/integrations/McpPinning"), "McpDefinitionPinsPage");
+const McpPinningPage = screen(() => import("./views/admin/integrations/McpPinning"), "McpPinningPage");
 const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
 const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
 const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
@@ -337,12 +342,14 @@ function ApplicationRoutes() {
                 <Route path="shadow-ai" element={<ShadowAiPage />} />
                 {/* ADR-0195 SD0 */}
                 {/* P3 (#453): one lazy chunk owns the overview and its full lists (see DiscoveryListPages) */}
+                <Route path="shadow-ai/discovery-sources/read-setup/:sourceId" element={<ReadSetupPage />} />
                 <Route path="shadow-ai/discovery-sources/*" element={<DiscoverySourcesArea />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
                 <Route path="chatops/*" element={<ChatOpsArea />} />
                 <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
+                <Route path="process-analytics" element={<ProcessAnalyticsPage />} />
                 <Route path="agents/*" element={<AgentsArea />} />
                 <Route path="model-credentials" element={<ModelCredentialsPage />} />
                 <Route path="custom-providers" element={<CustomProvidersPage />} />
@@ -350,6 +357,8 @@ function ApplicationRoutes() {
                 <Route path="external-scorers" element={<ExternalScorersPage />} />
                 <Route path="connectors" element={<ConnectorsPage />} />
                 <Route path="connectors/catalogue" element={<ConnectorCataloguePage />} />
+                <Route path="mcp-servers/pinning" element={<McpPinningPage />} />
+                <Route path="mcp-servers/definition-pins/:serverId" element={<McpDefinitionPinsPage />} />
                 <Route path="mcp-servers/*" element={<McpServersArea />} />
                 {/* ADR-0173 batch 2b */}
                 <Route path="webhooks" element={<WebhooksPage />} />

@@ -15,21 +15,34 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Db } from "@regulait/db";
+import type { McpEgressDeps } from "./mcp-egress.js";
 import { createRobotsMcpServer, ROBOTS_SERVER_URL } from "./robots-mcp.js";
 
-const FIRST_PARTY_SERVERS: ReadonlyMap<string, (db: Db, serverId: string) => Server> = new Map([
-  [ROBOTS_SERVER_URL, createRobotsMcpServer],
-]);
+/** the governed call a connect serves (the person, the project, the agent and grant), or null (a sync or a probe) */
+export type FirstPartyCallContext = NonNullable<McpEgressDeps["placement"]> | null;
+
+type FirstPartyFactory = (db: Db, serverId: string, call: FirstPartyCallContext) => Server;
+/** built on first use, not at module init, so a module loaded alone never reads robots-mcp's bindings mid-cycle */
+let firstPartyServers: ReadonlyMap<string, FirstPartyFactory> | null = null;
+function servers(): ReadonlyMap<string, FirstPartyFactory> {
+  firstPartyServers ??= new Map<string, FirstPartyFactory>([[ROBOTS_SERVER_URL, createRobotsMcpServer]]);
+  return firstPartyServers;
+}
 
 export function isFirstPartyServerUrl(url: string): boolean {
-  return FIRST_PARTY_SERVERS.has(url);
+  return servers().has(url);
 }
 
 /** open a client session to the in-process server named by `url`; null = not a first-party server we serve */
-export async function connectFirstPartyServer(db: Db, row: { id: string; url: string }, deadlineMs: number): Promise<Client | null> {
-  const factory = FIRST_PARTY_SERVERS.get(row.url);
+export async function connectFirstPartyServer(
+  db: Db,
+  row: { id: string; url: string },
+  deadlineMs: number,
+  call: FirstPartyCallContext = null,
+): Promise<Client | null> {
+  const factory = servers().get(row.url);
   if (!factory) return null;
-  const server = factory(db, row.id);
+  const server = factory(db, row.id, call);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "regulait-gateway", version: "0.1.0" });

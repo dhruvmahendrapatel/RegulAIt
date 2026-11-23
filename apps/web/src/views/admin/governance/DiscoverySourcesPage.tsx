@@ -30,6 +30,7 @@ import { Badge, Button, Card, EmptyState, Field, Fieldset, InfoButton, Input, Ro
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
+import { ThirdPartyIngestCard } from "./ThirdPartyIngestCard";
 import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
 import { EndpointMcpServersCard } from "./EndpointMcpServersCard";
@@ -453,6 +454,7 @@ export default function DiscoverySourcesPage() {
                       }
                     />
                     {!s.enabled && !s.scannerBuilt ? <div className={v.faint}>Its scanner is not built yet, so it cannot be enabled.</div> : null}
+                    {s.kind === "entitlement_m365" || s.kind === "entitlement_salesforce" ? <Link to={`/admin/shadow-ai/discovery-sources/read-setup/${s.id}`}>Read setup</Link> : null}
                     </>
                   ),
                 },
@@ -526,6 +528,8 @@ export default function DiscoverySourcesPage() {
           </Card>
 
           <FederationCard />
+
+          <ThirdPartyIngestCard />
 
           <Card title="Settings">
             {/* A15: the stated ages wait for the read; a failed read says so, with Retry */}
