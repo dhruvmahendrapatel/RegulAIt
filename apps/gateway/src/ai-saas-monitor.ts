@@ -396,18 +396,21 @@ export async function runAiSaasMonitor(db: Db, connectorId: string, opts: RunOpt
     const deadline = AbortSignal.timeout(RUN_MAX_MS);
     const limiter = spacingRateLimiter(opts.deps?.minSpacingMs ?? impl.minSpacingMs ?? MIN_SPACING_MS);
     let backoffs = 0;
+    const allowList = await loadEgressAllowList(db);
+    const guardDeps = {
+      ...(opts.deps?.fetchImpl ? { fetchImpl: opts.deps.fetchImpl } : {}),
+      ...(opts.deps?.resolve ? { resolve: opts.deps.resolve } : {}),
+    };
     const ctx: ConnectorContext = {
       config: connector.publicConfig,
       credential: { secret },
-      fetch: createGuardedFetch({
-        allowList: await loadEgressAllowList(db),
-        maxResponseBytes: AI_SAAS_MONITOR_MAX_RESPONSE_BYTES,
-        // a redirect comes back to the connector (never followed here); only the ChatGPT log download re-requests one,
-        // through this same guard, and every other connector treats a 3xx as an error
-        returnRedirects: true,
-        ...(opts.deps?.fetchImpl ? { fetchImpl: opts.deps.fetchImpl } : {}),
-        ...(opts.deps?.resolve ? { resolve: opts.deps.resolve } : {}),
-      }),
+      // every request, token requests included, refuses a redirect (ADR-0034, ADR-0180)
+      fetch: createGuardedFetch({ allowList, maxResponseBytes: AI_SAAS_MONITOR_MAX_RESPONSE_BYTES, ...guardDeps }),
+      // only a connector that declares a signed-URL download gets a fetch that hands a 3xx back (never followed here);
+      // it is used for that download alone (review #985 R2 [1], S4 [2])
+      ...(impl.signedRedirectDownload
+        ? { downloadFetch: createGuardedFetch({ allowList, maxResponseBytes: impl.signedRedirectDownload.maxBytes, returnRedirects: true, ...guardDeps }) }
+        : {}),
       throttle: () => limiter.acquire(connector.id, deadline),
       backoff: async (res) => {
         if (res.status !== 429 && res.status !== 503) return false;
@@ -758,8 +761,10 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     if (unknown.length) return reply.status(400).send({ error: "unknown_compliance_tag", detail: `no compliance profile named ${unknown.join(", ")}` });
     const beforeTags = await connectorTags(db, connector.id);
     const afterTags = [...new Set(parsed.data.complianceTags)].sort();
-    const widens = configWidens(connector.publicConfig, cfg.data);
-    // widening who is read (more users, every user, fewer app filters) on an enabled connector is a relaxation
+    // each connector declares its own scope fields (review #985 S4 [1]); a vendor with no connector fails closed
+    const impl = (opts.deps?.connectors ?? AI_SAAS_CONNECTORS).get(connector.vendor);
+    const widens = impl ? impl.configWidens(connector.publicConfig, cfg.data) : true;
+    // widening who is read (more people, a wider tenant scope, a longer backfill) on an enabled connector is a relaxation
     if (connector.enabled && widens && !(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values: { config: "widened" } } })).ok) return reply;
     // a tag change that keeps evidence for less time, or makes the PII action less strict, is a relaxation on any
     // connector, enabled or not: the daily retention sweep acts on it either way (review R7 [3], ADR-0180)
@@ -793,12 +798,12 @@ export function registerAiSaasMonitorRoutes(app: FastifyInstance, db: Db, opts: 
     const parsed = credentialBody.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, attestReadOnly?: true, reason }"));
     const entry = AI_SAAS_MONITOR_CATALOGUE[connector.vendor];
+    if (resolveDeployMode() === "air_gapped") return reply.status(409).send(airGapped);
+    if (!(await loadAiSaasPolicy(db)).enabled) return reply.status(409).send(policyOff);
     // a vendor that offers no probe of a key's scopes: the admin attests the key is read-only, and the attestation is audited
     if (!entry.scopeVerifiable && parsed.data.attestReadOnly !== true) {
       return reply.status(409).send({ error: "read_only_attestation_required", detail: `${entry.scopeCheck}. Send attestReadOnly: true to store it.` });
     }
-    if (resolveDeployMode() === "air_gapped") return reply.status(409).send(airGapped);
-    if (!(await loadAiSaasPolicy(db)).enabled) return reply.status(409).send(policyOff);
     if (!opts.dataKey) return reply.status(503).send({ error: "data_key_unavailable" });
     if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { aiSaasConnector: connector.id, values: { credential: "store" } } })).ok) return reply;
     const existing = await liveCredential(db, connector.id);
@@ -1150,18 +1155,3 @@ export async function manualRunRateCheck(
   return { ok: false, status: 429, retryAfterSeconds: retry, body: { error: "rate_limited", detail: `too many manual runs; the limit is ${max} a minute`, retryAfterSeconds: retry } };
 }
 
-/** does a configuration change read MORE than before (every user, more users, fewer app-class filters, more backfill)? */
-export function configWidens(before: unknown, after: unknown): boolean {
-  const b = (before ?? {}) as { users?: { mode?: string; ids?: string[] }; appClasses?: string[]; backfillDays?: number };
-  const a = (after ?? {}) as typeof b;
-  if (a.users?.mode === "all" && b.users?.mode !== "all") return true;
-  if (a.users?.mode === "listed" && b.users?.mode === "listed") {
-    const prev = new Set(b.users.ids ?? []);
-    if ((a.users.ids ?? []).some((id) => !prev.has(id))) return true;
-  }
-  const bc = b.appClasses ?? [];
-  const ac = a.appClasses ?? [];
-  if (bc.length > 0 && (ac.length === 0 || ac.some((c) => !bc.includes(c)))) return true;
-  if ((a.backfillDays ?? 0) > (b.backfillDays ?? 0)) return true;
-  return false;
-}

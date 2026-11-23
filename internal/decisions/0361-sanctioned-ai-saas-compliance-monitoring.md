@@ -256,20 +256,31 @@ Verified against the vendors' own documentation on 2026-11-17: OpenAI's Admin AP
 - **ChatGPT Enterprise.** `GET …/logs?event_type=CONVERSATION_MESSAGE&after=&before=&limit=100`, paged by
   `last_end_time` while `has_more`; each file `GET …/logs/{id}` answers 307 to a short-lived signed URL. The guarded
   fetch gained one opt-in, `returnRedirects` (default off for every other caller): it hands the 307 back with only its
-  `Location`, never following it. The connector checks the target is plain https, registers the signed URL as a
-  secret, and re-requests it through the same guard **without our key**. OpenAI does not document the storage host, so
-  a run that meets an unlisted one fails `egress_refused` naming that host for the admin to allow-list. The file's
-  listed SHA-256 is checked before any record is written. Only `CONVERSATION_MESSAGE` records are kept; the idempotency
-  key is `event_id` (delivery is at least once). Spacing 700 ms (100 requests a minute per route).
+  `Location`, never following it. Only this download uses it: a connector that declares `signedRedirectDownload` gets a
+  second guarded fetch with the opt-in, and every other request of every connector, the M365 token request included,
+  still refuses a redirect (review #985 R2 [1]). The connector checks the target is plain https, registers the signed
+  URL as a secret, and re-requests it through the same guard **without our key**. OpenAI does not document the storage
+  host, so a run that meets an unlisted one fails `egress_refused` naming that host for the admin to allow-list. A file
+  is read whole, up to 128 MiB (its listed size is checked first, and a larger one fails `response_too_large` saying a
+  shorter window cannot split it); its listed SHA-256 is checked over the bytes before any record is written. Only
+  `CONVERSATION_MESSAGE` records are kept; the idempotency key is `event_id` (delivery is at least once). Spacing 700 ms
+  (100 requests a minute per route).
 - **Claude Enterprise.** Org-wide polling as Anthropic documents it: `order_by=updated_at`, `updated_at.gte/lt` on the
   window, `after_id` paging, optional `organization_ids[]` (a user filter is rejected with `updated_at` windows). Each
-  chat's messages are read with `after_id` paging; text blocks and the text inside tool results are scanned; a message
-  created after the window waits for the next run. The actor is the chat's user (Anthropic records it on the chat).
+  chat's messages are read with `after_id` paging; text blocks and the text inside tool results are scanned. Only
+  messages inside the window (less five minutes of settling slack) are kept: one created after it waits for the next
+  run, and one before it was read by an earlier run. Pages wholly outside the window have their own, higher cap, so a
+  long-lived chat cannot exhaust the in-window cap on every run (review #985 R2 [3]). The actor is the chat's user (Anthropic records it on the chat).
   Spacing 150 ms (600 a minute per parent organization, shared by every key).
 - **Read-only attestation.** Neither vendor offers a probe of a key's scopes, so the catalogue marks them
   `scopeVerifiable: false` and storing such a credential needs `attestReadOnly: true` (the admin attests the key holds
   only the read scope named in the catalogue, not `compliance_export` delete or `delete:compliance_user_data`), audited
   with the credential row. The posture stays `unverified`.
+- **Scope widening is per connector.** Each connector declares `configWidens` (required by the contract, so a new one
+  cannot forget its scope fields). ChatGPT: any change of `principal` or `principalId`. Claude: a non-empty
+  `organizationIds` becoming empty (org-wide) or gaining an organization. M365: every user, an added user, a dropped
+  app-class filter. All three: a longer backfill. On an enabled connector a widening needs a `settings_relax` step-up
+  and is audited `widened: true` (review #985 S4 [1]).
 - **Open source** (ADR-0176): no maintained, permissively licensed client exists for either API (an Anthropic Python
   SDK is GPL-3.0; another client has no licence; OpenAI ships only Bash and PowerShell scripts), so both are thin
   guarded-fetch clients against the vendor spec.

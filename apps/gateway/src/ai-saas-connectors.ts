@@ -5,7 +5,9 @@
  * WHAT A CONNECTOR MAY DO, EXHAUSTIVELY
  *  - read its validated public configuration and its decrypted credential (never logged, never returned);
  *  - call out ONLY through `ctx.fetch`, the egress-guarded fetch (ADR-0034: allow list, DNS pinning, no redirects, a
- *    response cap), wrapped by `connectorFetch` so every request waits on the rate limiter and a 429/503 backs off;
+ *    response cap), wrapped by `connectorFetch` so every request waits on the rate limiter and a 429/503 backs off.
+ *    The one exception is `ctx.downloadFetch`, given only to a connector that declares `signedRedirectDownload`: the
+ *    same guard, but a 3xx is handed back (never followed) so the connector can re-request a signed URL itself;
  *  - hand every short-lived token it obtains to `ctx.registerSecret`, so no error text can carry it;
  *  - yield pages of `MonitoredInteraction`s. It never writes to the database and never decides a finding: the engine
  *    (`ai-saas-monitor.ts`) records evidence and runs the detectors.
@@ -22,6 +24,7 @@ import { azureCredential } from "@regulait/cloud-discovery";
 import {
   AI_SAAS_MONITOR_MAX_PAGES_PER_USER,
   AI_SAAS_MONITOR_MAX_USERS,
+  AI_SAAS_MONITOR_SETTLE_MS,
   chatGptConversationMessageSchema,
   chatGptEnterpriseConfigSchema,
   chatGptLogFileListSchema,
@@ -54,8 +57,14 @@ export interface ConnectorCredential {
 export interface ConnectorContext {
   config: Readonly<Record<string, unknown>>;
   credential: ConnectorCredential;
-  /** the ONLY network access a connector gets: the egress-guarded fetch */
+  /** the ONLY network access a connector gets: the egress-guarded fetch. It refuses every redirect. */
   fetch: typeof fetch;
+  /**
+   * Only for a connector that declares `signedRedirectDownload`: a second guarded fetch whose 3xx comes back to the
+   * connector (never followed by the guard), with that connector's larger per-file body cap. Every other request,
+   * a token request included, goes through `fetch` (review #985 R2 [1], S4 [2]; ADR-0180).
+   */
+  downloadFetch?: typeof fetch;
   /** await before every outbound request (the per-connector spacing limiter) */
   throttle: () => Promise<void>;
   /** on 429/503: waits the bounded Retry-After and answers true to retry, false to give up */
@@ -85,6 +94,14 @@ export interface ComplianceConnector {
   minSpacingMs: number;
   /** shape-check the public configuration: null when acceptable, else the problem */
   validateConfig: (config: unknown) => string | null;
+  /**
+   * Does a configuration change make the connector read MORE than before (more people, a wider tenant scope, a longer
+   * backfill)? Required of every connector, so a new one cannot forget its own scope fields (review #985 S4 [1]): on an
+   * enabled connector a widening needs a `settings_relax` step-up and is audited as `widened: true`.
+   */
+  configWidens: (before: unknown, after: unknown) => boolean;
+  /** declared by a connector whose export answers with a 3xx to a signed URL: the per-file body cap for `downloadFetch` */
+  signedRedirectDownload?: { maxBytes: number };
   authorise: (ctx: ConnectorContext) => Promise<ConnectorAuthorisation>;
   listInteractions: (ctx: ConnectorContext, auth: ConnectorAuthorisation, window: { start: Date; end: Date }) => AsyncIterable<InteractionPage>;
 }
@@ -102,6 +119,17 @@ export class ConnectorError extends Error {
     this.name = "ConnectorError";
   }
 }
+
+/** a connector's `validateConfig`: the schema's first problem, bounded, or null */
+function zodValidator(schema: { safeParse: (v: unknown) => { success: true } | { success: false; error: { issues: { message: string }[] } } }) {
+  return (config: unknown): string | null => {
+    const parsed = schema.safeParse(config);
+    return parsed.success ? null : (parsed.error.issues[0]?.message ?? "invalid configuration").slice(0, 200);
+  };
+}
+
+const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+const backfillWidens = (b: Record<string, unknown>, a: Record<string, unknown>) => Number(a.backfillDays ?? 0) > Number(b.backfillDays ?? 0);
 
 /** the discovery worker's throttle-and-backoff wrapper around the guarded fetch; token responses are never digested */
 export function connectorFetch(ctx: ConnectorContext): typeof fetch {
@@ -246,13 +274,26 @@ async function* m365ListInteractions(ctx: ConnectorContext, auth: ConnectorAutho
   }
 }
 
+/** M365: every user, an added listed user, a dropped app-class filter, or a longer backfill */
+export function m365ConfigWidens(before: unknown, after: unknown): boolean {
+  const b = asRecord(before) as { users?: { mode?: string; ids?: string[] }; appClasses?: string[] };
+  const a = asRecord(after) as typeof b;
+  if (a.users?.mode === "all" && b.users?.mode !== "all") return true;
+  if (a.users?.mode === "listed" && b.users?.mode === "listed") {
+    const prev = new Set(b.users.ids ?? []);
+    if ((a.users.ids ?? []).some((id) => !prev.has(id))) return true;
+  }
+  const bc = b.appClasses ?? [];
+  const ac = a.appClasses ?? [];
+  if (bc.length > 0 && (ac.length === 0 || ac.some((c) => !bc.includes(c)))) return true;
+  return backfillWidens(asRecord(before), asRecord(after));
+}
+
 export const M365_COPILOT_CONNECTOR: ComplianceConnector = {
   vendor: "m365_copilot",
   minSpacingMs: 250,
-  validateConfig: (config) => {
-    const parsed = m365CopilotConfigSchema.safeParse(config);
-    return parsed.success ? null : (parsed.error.issues[0]?.message ?? "invalid configuration").slice(0, 200);
-  },
+  validateConfig: zodValidator(m365CopilotConfigSchema),
+  configWidens: m365ConfigWidens,
   authorise: m365Authorise,
   listInteractions: m365ListInteractions,
 };
@@ -263,6 +304,12 @@ export const M365_COPILOT_CONNECTOR: ComplianceConnector = {
 
 export const CHATGPT_ORIGIN = "https://api.chatgpt.com";
 const CHATGPT_MAX_LIST_PAGES = 50;
+/**
+ * One compliance log file, read whole (its SHA-256 is checked before anything in it is written). The vendor decides a
+ * file's size and a narrower window cannot split it, so this cap sits well above the 16 MiB per-response cap that
+ * applies to every other request (review #985 R2 [2]).
+ */
+export const CHATGPT_MAX_LOG_FILE_BYTES = 128 * 1024 * 1024;
 
 function chatGptLogsBase(raw: unknown): string {
   const parsed = chatGptEnterpriseConfigSchema.safeParse(raw);
@@ -282,8 +329,13 @@ async function chatGptAuthorise(ctx: ConnectorContext): Promise<ConnectorAuthori
   return { scope: "unverified", permissions: [], headers };
 }
 
-/** the log file's body: a 307 to a signed URL (re-requested through the guard, without our key), or the body itself */
-async function chatGptDownload(ctx: ConnectorContext, fetchImpl: typeof fetch, url: string, headers: Record<string, string>): Promise<string> {
+/**
+ * The log file's bytes: a 307 to a signed URL (re-requested through the guard, without our key), or the body itself.
+ * Only this function uses `ctx.downloadFetch`, the one fetch that hands a 3xx back.
+ */
+async function chatGptDownload(ctx: ConnectorContext, url: string, headers: Record<string, string>): Promise<Uint8Array> {
+  if (!ctx.downloadFetch) throw new ConnectorError("internal", "the log download fetch was not provided to this connector");
+  const fetchImpl = scannerFetch({ fetch: ctx.downloadFetch, throttle: ctx.throttle, backoff: ctx.backoff, recordRaw: () => undefined }, { digest: false });
   const first = await fetchImpl(url, { method: "GET", headers, signal: ctx.signal });
   let res = first;
   if (first.status >= 300 && first.status < 400) {
@@ -315,7 +367,7 @@ async function chatGptDownload(ctx: ConnectorContext, fetchImpl: typeof fetch, u
     await res.arrayBuffer().catch(() => undefined);
     throw statusError(res.status, "a compliance log file");
   }
-  return res.text();
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAuthorisation, window: { start: Date; end: Date }): AsyncIterable<InteractionPage> {
@@ -335,10 +387,18 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
     for (const file of list.data.data) {
       if (seen.has(file.id)) continue;
       seen.add(file.id);
-      const body = await chatGptDownload(ctx, fetchImpl, `${base}/${encodeURIComponent(file.id)}`, auth.headers);
-      if (file.file_sha256 && createHash("sha256").update(body, "utf8").digest("hex") !== file.file_sha256.toLowerCase()) {
+      if ((file.file_size ?? 0) > CHATGPT_MAX_LOG_FILE_BYTES) {
+        throw new ConnectorError(
+          "response_too_large",
+          `compliance log file ${file.id} is ${Math.ceil((file.file_size ?? 0) / 1048576)} MiB, over the ${CHATGPT_MAX_LOG_FILE_BYTES / 1048576} MiB per-file limit; a shorter window cannot split a vendor file, so ask OpenAI support to split it and run again`,
+        );
+      }
+      const bytes = await chatGptDownload(ctx, `${base}/${encodeURIComponent(file.id)}`, auth.headers);
+      // the hash is over the bytes as sent: decoding first would drop a BOM or replace invalid bytes (review #985 R2 [4])
+      if (file.file_sha256 && createHash("sha256").update(bytes).digest("hex") !== file.file_sha256.toLowerCase()) {
         throw new ConnectorError("bad_response", "a compliance log file did not match the SHA-256 the vendor listed for it; nothing from it was written");
       }
+      const body = new TextDecoder("utf-8").decode(bytes);
       const interactions = [];
       for (const line of body.split("\n")) {
         if (!line.trim()) continue;
@@ -363,14 +423,25 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
   }
 }
 
+/**
+ * ChatGPT: any change of principal is a different population (another workspace, or a workspace to the whole API
+ * Platform organization), so it is a widening, as is a longer backfill. Defaults apply as the schema applies them.
+ */
+export function chatGptConfigWidens(before: unknown, after: unknown): boolean {
+  const b = asRecord(before);
+  const a = asRecord(after);
+  if ((a.principal ?? "workspace") !== (b.principal ?? "workspace")) return true;
+  if (a.principalId !== b.principalId) return true;
+  return backfillWidens(b, a);
+}
+
 export const CHATGPT_ENTERPRISE_CONNECTOR: ComplianceConnector = {
   vendor: "chatgpt_enterprise",
   // 100 requests a minute per workspace per route (OpenAPI info): one request every 700 ms stays under it
   minSpacingMs: 700,
-  validateConfig: (config) => {
-    const parsed = chatGptEnterpriseConfigSchema.safeParse(config);
-    return parsed.success ? null : (parsed.error.issues[0]?.message ?? "invalid configuration").slice(0, 200);
-  },
+  validateConfig: zodValidator(chatGptEnterpriseConfigSchema),
+  configWidens: chatGptConfigWidens,
+  signedRedirectDownload: { maxBytes: CHATGPT_MAX_LOG_FILE_BYTES },
   authorise: chatGptAuthorise,
   listInteractions: chatGptListInteractions,
 };
@@ -382,7 +453,16 @@ export const CHATGPT_ENTERPRISE_CONNECTOR: ComplianceConnector = {
 export const ANTHROPIC_ORIGIN = "https://api.anthropic.com";
 export const ANTHROPIC_COMPLIANCE_VERSION = "2026-10-21";
 const CLAUDE_MAX_CHAT_PAGES = 50;
+/** message pages that held a message inside the window, per chat */
 const CLAUDE_MAX_MESSAGE_PAGES = 50;
+/**
+ * message pages wholly outside the window, per chat: a long-lived chat updated in the window still pages through its
+ * older history to reach the new messages, and those pages must not exhaust the in-window cap on every run, which a
+ * shorter window cannot fix (review #985 R2 [3]). Bounded separately, and higher, because each such page is cheap.
+ */
+const CLAUDE_MAX_SKIPPED_MESSAGE_PAGES = 500;
+/** a message this far before the window start is still read: the export settles behind real time (the evidence key dedupes) */
+const CLAUDE_WINDOW_SLACK_MS = AI_SAAS_MONITOR_SETTLE_MS;
 
 function claudeConfig(raw: unknown) {
   const parsed = claudeEnterpriseConfigSchema.safeParse(raw);
@@ -415,17 +495,32 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
     if (afterId) u.searchParams.set("after_id", afterId);
     const chats = claudeChatListSchema.safeParse(await getJson(fetchImpl, u.toString(), auth.headers, ctx.signal, "the chat list"));
     if (!chats.success) throw new ConnectorError("bad_response", "the chat list did not match the vendor's documented shape");
+    const from = window.start.getTime() - CLAUDE_WINDOW_SLACK_MS;
     for (const chat of chats.data.data) {
       let msgAfter: string | null = null;
       const msgCursors = new Set<string>();
-      for (let mp = 1; ; mp++) {
-        if (mp > CLAUDE_MAX_MESSAGE_PAGES) throw new ConnectorError("page_limit", `one chat had more than ${CLAUDE_MAX_MESSAGE_PAGES} message pages; the window was not advanced`);
+      let inWindowPages = 0;
+      let skippedPages = 0;
+      for (;;) {
         const mu = new URL(`${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(chat.id)}/messages`);
         if (msgAfter) mu.searchParams.set("after_id", msgAfter);
         const msgs = claudeChatMessagesSchema.safeParse(await getJson(fetchImpl, mu.toString(), auth.headers, ctx.signal, "a chat's messages"));
         if (!msgs.success) throw new ConnectorError("bad_response", "a chat's messages did not match the vendor's documented shape");
-        // a message after the window belongs to the next run; one before it was read already (the evidence key dedupes)
-        yield { unit: chat.id, interactions: normalizeClaudeMessages(msgs.data).filter((i) => i.occurredAt < window.end) };
+        // only the window's messages are yielded: one after it belongs to the next run, one before it to an earlier run
+        const all = normalizeClaudeMessages(msgs.data);
+        const inWindow = all.filter((i) => i.occurredAt.getTime() >= from && i.occurredAt < window.end);
+        if (inWindow.length > 0) {
+          if (++inWindowPages > CLAUDE_MAX_MESSAGE_PAGES) {
+            throw new ConnectorError("page_limit", `one chat had more than ${CLAUDE_MAX_MESSAGE_PAGES} message pages in the window; the window was not advanced, and the next run asks for half as long`);
+          }
+          yield { unit: chat.id, interactions: inWindow };
+        } else if (++skippedPages > CLAUDE_MAX_SKIPPED_MESSAGE_PAGES) {
+          throw new ConnectorError("page_limit", `one chat had more than ${CLAUDE_MAX_SKIPPED_MESSAGE_PAGES} message pages outside the window; the window was not advanced`);
+        }
+        // newest-first paging: once a page reaches back before the window, every later page is older still
+        const times = msgs.data.chat_messages.map((m) => Date.parse(m.created_at));
+        const newestFirst = times.length > 1 && times[0]! > times[times.length - 1]!;
+        if (newestFirst && Math.min(...times) < from) break;
         if (!msgs.data.has_more || !msgs.data.last_id) break;
         if (msgCursors.has(msgs.data.last_id)) throw new ConnectorError("bad_response", "the vendor returned a message cursor it had already returned");
         msgCursors.add(msgs.data.last_id);
@@ -439,14 +534,23 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
   }
 }
 
+/** Claude: an empty organization list is org-wide, so narrowed → org-wide or an added organization widens; so does a longer backfill */
+export function claudeConfigWidens(before: unknown, after: unknown): boolean {
+  const b = asRecord(before);
+  const a = asRecord(after);
+  const bo = Array.isArray(b.organizationIds) ? (b.organizationIds as unknown[]) : [];
+  const ao = Array.isArray(a.organizationIds) ? (a.organizationIds as unknown[]) : [];
+  if (bo.length > 0 && ao.length === 0) return true;
+  if (bo.length > 0 && ao.some((o) => !bo.includes(o))) return true;
+  return backfillWidens(b, a);
+}
+
 export const CLAUDE_ENTERPRISE_CONNECTOR: ComplianceConnector = {
   vendor: "claude_enterprise",
   // 600 requests a minute per parent organization, shared by every key: one every 150 ms leaves room for others
   minSpacingMs: 150,
-  validateConfig: (config) => {
-    const parsed = claudeEnterpriseConfigSchema.safeParse(config);
-    return parsed.success ? null : (parsed.error.issues[0]?.message ?? "invalid configuration").slice(0, 200);
-  },
+  validateConfig: zodValidator(claudeEnterpriseConfigSchema),
+  configWidens: claudeConfigWidens,
   authorise: claudeAuthorise,
   listInteractions: claudeListInteractions,
 };

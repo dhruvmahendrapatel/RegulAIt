@@ -471,6 +471,8 @@ function claudeBlocksText(blocks: readonly ClaudeBlock[] | null | undefined, dep
   const out: string[] = [];
   if (!blocks || depth > 3) return out;
   for (const b of blocks) {
+    // nested `content` is not schema-checked, so a null or a non-object element is skipped, never dereferenced
+    if (!b || typeof b !== "object") continue;
     if (typeof b.text === "string" && b.text) out.push(b.text);
     if (Array.isArray(b.content)) out.push(...claudeBlocksText(b.content as ClaudeBlock[], depth + 1));
   }

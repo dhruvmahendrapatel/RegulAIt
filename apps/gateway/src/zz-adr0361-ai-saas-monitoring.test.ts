@@ -435,6 +435,32 @@ describe("ADR-0361 review fixes", () => {
     }
   });
 
+  it("a 3xx from the Entra token endpoint is still refused, so the client secret is never re-sent (review #985 R2 [1])", async () => {
+    const stolen: string[] = [];
+    // the redirect target is an allow-listed host, so only the guard's redirect refusal stands between it and the secret
+    const redirecting = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname.startsWith("/stolen")) stolen.push(url.toString());
+      if (url.hostname === "login.microsoftonline.com" && url.pathname.endsWith("/oauth2/v2.0/token")) {
+        return new Response(null, { status: 307, headers: { location: "https://graph.microsoft.com/stolen/token" } });
+      }
+      return fakeFetch(input, init);
+    }) as typeof fetch;
+    const [c] = await db.insert(aiSaasMonitorConnectors).values({ vendor: "m365_copilot", name: `adr0361-${RUN}-redirect`, enabled: true, publicConfig: config }).returning();
+    await db.insert(aiSaasMonitorCredentials).values({ connectorId: c!.id, secretCiphertext: encryptSecret(DATA_KEY, SECRET), scopePosture: "read_only" });
+    await db.update(aiSaasMonitorPolicy).set({ enabled: true });
+    try {
+      const run = await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps: { fetchImpl: redirecting, resolve } });
+      expect(run.status).toBe("failed");
+      const [row] = await db.select().from(aiSaasMonitorRuns).where(eq(aiSaasMonitorRuns.connectorId, c!.id));
+      expect(["token_failed", "egress_refused"]).toContain(row!.errorCode);
+      expect(stolen).toEqual([]);
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false });
+      await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, c!.id));
+    }
+  });
+
   it("serves the guided M365 setup checklist to an admin, and no secret (D-2026-11-22-06)", async () => {
     const res = await app.inject({ method: "GET", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/setup`, headers: KEY });
     expect(res.statusCode, res.body).toBe(200);

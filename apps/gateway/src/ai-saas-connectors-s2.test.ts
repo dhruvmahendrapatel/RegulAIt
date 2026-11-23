@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
 import {
   ANTHROPIC_COMPLIANCE_VERSION,
   CHATGPT_ENTERPRISE_CONNECTOR,
+  CHATGPT_MAX_LOG_FILE_BYTES,
   CLAUDE_ENTERPRISE_CONNECTOR,
-  ConnectorError,
   type ConnectorContext,
 } from "./ai-saas-connectors.js";
 import { createGuardedFetch, EgressRedirectError } from "./egress-guard.js";
@@ -18,12 +18,13 @@ const window = { start: new Date("2026-11-16T00:00:00Z"), end: new Date("2026-11
 const publicResolver = async () => [{ address: "93.184.216.34", family: 4 }];
 const allow = (...hosts: string[]) => hosts.map((host) => ({ host, allowPrivateRanges: false, allowPlaintextHttp: false }));
 
-function ctxFor(fetchImpl: typeof fetch, config: Record<string, unknown>) {
+function ctxFor(fetchImpl: typeof fetch, config: Record<string, unknown>, downloadFetch: typeof fetch | null = fetchImpl) {
   const secrets: string[] = [];
   const ctx: ConnectorContext = {
     config,
     credential: { secret: "sk-admin-test-key" },
     fetch: fetchImpl,
+    ...(downloadFetch ? { downloadFetch } : {}),
     throttle: async () => undefined,
     backoff: async () => false,
     registerSecret: (v) => secrets.push(v),
@@ -49,21 +50,27 @@ const gptRecord = (id: string, author: "user" | "assistant", value: string) => (
 });
 
 /** a fake ChatGPT: the log list, a 307 per file to a signed URL on a storage host, and the JSONL behind it */
-function fakeChatGpt(jsonl: string, opts: { sha?: string; storageHost?: string } = {}) {
+function fakeChatGpt(
+  jsonl: string | Uint8Array,
+  opts: { sha?: string | null; storageHost?: string; location?: string; storageRedirects?: boolean; fileSize?: number } = {},
+) {
   const calls: Array<{ url: URL; headers: Headers }> = [];
-  const sha = opts.sha ?? createHash("sha256").update(jsonl, "utf8").digest("hex");
+  const bytes = typeof jsonl === "string" ? new TextEncoder().encode(jsonl) : jsonl;
+  const sha = opts.sha === undefined ? createHash("sha256").update(bytes).digest("hex") : opts.sha;
   const storage = opts.storageHost ?? "files.example-storage.net";
   const f = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     calls.push({ url, headers: new Headers(init?.headers) });
     if (url.hostname === "api.chatgpt.com" && url.pathname === "/v1/compliance/workspaces/ws-1/logs") {
       if (url.searchParams.get("limit") === "1") return json({ data: [], has_more: false, last_end_time: null });
-      return json({ data: [{ id: "log-1", event_type: "CONVERSATION_MESSAGE", end_time: "2026-11-16T10:10:00Z", file_name: "a.jsonl", file_size: jsonl.length, file_sha256: sha }], has_more: false, last_end_time: "2026-11-16T10:10:00Z" });
+      const file = { id: "log-1", event_type: "CONVERSATION_MESSAGE", end_time: "2026-11-16T10:10:00Z", file_name: "a.jsonl", file_size: opts.fileSize ?? bytes.length, ...(sha === null ? {} : { file_sha256: sha }) };
+      return json({ data: [file], has_more: false, last_end_time: "2026-11-16T10:10:00Z" });
     }
     if (url.hostname === "api.chatgpt.com" && url.pathname === "/v1/compliance/workspaces/ws-1/logs/log-1") {
-      return new Response(null, { status: 307, headers: { location: `https://${storage}/log-1.jsonl?sig=SIGNED-SECRET` } });
+      return new Response(null, { status: 307, headers: { location: opts.location ?? `https://${storage}/log-1.jsonl?sig=SIGNED-SECRET` } });
     }
-    if (url.hostname === storage) return new Response(jsonl, { status: 200, headers: { "content-type": "application/jsonl" } });
+    if (url.hostname === storage && opts.storageRedirects) return new Response(null, { status: 302, headers: { location: `https://${storage}/again` } });
+    if (url.hostname === storage) return new Response(bytes, { status: 200, headers: { "content-type": "application/jsonl" } });
     return json({ error: "unexpected" }, 599);
   }) as typeof fetch;
   return { fetch: f, calls };
@@ -108,21 +115,55 @@ describe("ADR-0361 ChatGPT Enterprise connector", () => {
     expect(secrets.some((s) => s.includes("SIGNED-SECRET"))).toBe(true);
   });
 
-  it("refuses a file whose SHA-256 does not match, a redirect to plaintext, and a non-JSON line", async () => {
+  const run = async (v: ReturnType<typeof fakeChatGpt>, downloadFetch: typeof fetch | null = v.fetch) => {
+    const { ctx } = ctxFor(v.fetch, config, downloadFetch);
+    return collect(CHATGPT_ENTERPRISE_CONNECTOR.listInteractions(ctx, await CHATGPT_ENTERPRISE_CONNECTOR.authorise(ctx), window));
+  };
+
+  it("refuses a file whose SHA-256 does not match, and a non-JSON line", async () => {
     const jsonl = JSON.stringify(gptRecord("e1", "user", "x"));
-    const wrong = fakeChatGpt(jsonl, { sha: "0".repeat(64) });
-    const c1 = ctxFor(wrong.fetch, config).ctx;
-    await expect(collect(CHATGPT_ENTERPRISE_CONNECTOR.listInteractions(c1, await CHATGPT_ENTERPRISE_CONNECTOR.authorise(c1), window))).rejects.toMatchObject({ code: "bad_response" });
-    const broken = fakeChatGpt("not json");
-    const c2 = ctxFor(broken.fetch, config).ctx;
-    await expect(collect(CHATGPT_ENTERPRISE_CONNECTOR.listInteractions(c2, await CHATGPT_ENTERPRISE_CONNECTOR.authorise(c2), window))).rejects.toBeInstanceOf(ConnectorError);
+    await expect(run(fakeChatGpt(jsonl, { sha: "0".repeat(64) }))).rejects.toMatchObject({ code: "bad_response", detail: expect.stringContaining("SHA-256") });
+    await expect(run(fakeChatGpt("not json"))).rejects.toMatchObject({ code: "bad_response", detail: expect.stringContaining("not JSON") });
+  });
+
+  it("refuses a redirect to plaintext http or with credentials, and a second redirect, without following either (review #985 R2 [5])", async () => {
+    const jsonl = JSON.stringify(gptRecord("e1", "user", "x"));
+    const plain = fakeChatGpt(jsonl, { location: "http://files.example-storage.net/log-1.jsonl?sig=S" });
+    await expect(run(plain)).rejects.toMatchObject({ code: "bad_response", detail: expect.stringContaining("plain https") });
+    expect(plain.calls.some((c) => c.url.protocol === "http:")).toBe(false);
+    const userinfo = fakeChatGpt(jsonl, { location: "https://u:p@files.example-storage.net/log-1.jsonl" });
+    await expect(run(userinfo)).rejects.toMatchObject({ code: "bad_response" });
+    const twice = fakeChatGpt(jsonl, { storageRedirects: true });
+    await expect(run(twice)).rejects.toMatchObject({ code: "bad_response", detail: expect.stringContaining("redirected again") });
+    expect(twice.calls.some((c) => c.url.pathname === "/again")).toBe(false);
+  });
+
+  it("reads a file the vendor listed without a SHA-256, and checks a listed one over the bytes, BOM included (review #985 R2 [4], [5])", async () => {
+    const jsonl = JSON.stringify(gptRecord("e1", "user", "x"));
+    expect((await run(fakeChatGpt(jsonl, { sha: null })))[0]!.interactions.map((i) => i.vendorInteractionId)).toEqual(["e1"]);
+    // a UTF-8 BOM is part of the file the vendor hashed; decoding before hashing would drop it and fail every run
+    const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(jsonl)]);
+    expect((await run(fakeChatGpt(withBom)))[0]!.interactions.map((i) => i.vendorInteractionId)).toEqual(["e1"]);
+  });
+
+  it("refuses a file listed over the per-file limit before downloading it, with a sentence saying what to do (review #985 R2 [2])", async () => {
+    const jsonl = JSON.stringify(gptRecord("e1", "user", "x"));
+    const big = fakeChatGpt(jsonl, { fileSize: CHATGPT_MAX_LOG_FILE_BYTES + 1 });
+    await expect(run(big)).rejects.toMatchObject({ code: "response_too_large", detail: expect.stringMatching(/log-1 .*per-file limit.*cannot split/) });
+    expect(big.calls.some((c) => c.url.pathname.endsWith("/logs/log-1"))).toBe(false);
+  });
+
+  it("downloads only through the redirect-returning fetch it declares, and fails closed without it (review #985 R2 [1])", async () => {
+    expect(CHATGPT_ENTERPRISE_CONNECTOR.signedRedirectDownload).toEqual({ maxBytes: CHATGPT_MAX_LOG_FILE_BYTES });
+    await expect(run(fakeChatGpt(JSON.stringify(gptRecord("e1", "user", "x"))), null)).rejects.toMatchObject({ code: "internal" });
   });
 
   it("names the storage host when the egress guard refuses it", async () => {
     const jsonl = JSON.stringify(gptRecord("e1", "user", "x"));
     const v = fakeChatGpt(jsonl);
-    const guarded = createGuardedFetch({ allowList: allow("api.chatgpt.com"), resolve: publicResolver, fetchImpl: v.fetch, returnRedirects: true });
-    const { ctx } = ctxFor(guarded, config);
+    const guarded = createGuardedFetch({ allowList: allow("api.chatgpt.com"), resolve: publicResolver, fetchImpl: v.fetch });
+    const download = createGuardedFetch({ allowList: allow("api.chatgpt.com"), resolve: publicResolver, fetchImpl: v.fetch, returnRedirects: true });
+    const { ctx } = ctxFor(guarded, config, download);
     const auth = await CHATGPT_ENTERPRISE_CONNECTOR.authorise(ctx);
     await expect(collect(CHATGPT_ENTERPRISE_CONNECTOR.listInteractions(ctx, auth, window))).rejects.toMatchObject({
       code: "egress_refused",
@@ -194,5 +235,70 @@ describe("ADR-0361 Claude Enterprise connector", () => {
     await expect(collect(CLAUDE_ENTERPRISE_CONNECTOR.listInteractions(c1, await CLAUDE_ENTERPRISE_CONNECTOR.authorise(c1), window))).rejects.toMatchObject({ code: "bad_response" });
     const denied = (async () => json({ error: { message: "scopes: read:compliance_activities" } }, 403)) as typeof fetch;
     await expect(CLAUDE_ENTERPRISE_CONNECTOR.authorise(ctxFor(denied, config).ctx)).rejects.toMatchObject({ code: "forbidden" });
+  });
+
+  /** one chat updated in the window whose messages come `pages` pages deep, oldest or newest first */
+  function longChat(order: "oldest_first" | "newest_first", oldPages: number) {
+    const msg = (id: string, at: string) => ({ id, role: "user", created_at: at, content: [{ type: "text", text: id }] });
+    const old = Array.from({ length: oldPages }, (_, p) => [msg(`old-${p}-a`, "2026-11-01T00:00:00Z"), msg(`old-${p}-b`, "2026-11-01T00:00:01Z")]);
+    const fresh = [msg("new-1", "2026-11-16T09:00:00Z"), msg("new-2", "2026-11-16T09:00:01Z")];
+    const pages = order === "oldest_first" ? [...old, fresh] : [[...fresh].reverse(), ...old.map((p) => [...p].reverse())];
+    const calls: URL[] = [];
+    const f = (async (input: string | URL | Request) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      calls.push(url);
+      if (url.pathname === "/v1/compliance/apps/chats") {
+        if (url.searchParams.get("limit") === "1") return json({ data: [], has_more: false, last_id: null });
+        return json({ data: [chat("long_chat")], has_more: false, last_id: "c1" });
+      }
+      const i = Number(url.searchParams.get("after_id")?.slice(1) ?? "0");
+      return json({ id: "long_chat", user: { id: "user_xyz" }, chat_messages: pages[i], has_more: i + 1 < pages.length, last_id: `p${i + 1}` });
+    }) as typeof fetch;
+    return { fetch: f, calls };
+  }
+
+  it("keeps only the window's messages of a long chat, and its older pages do not exhaust the in-window cap (review #985 R2 [3])", async () => {
+    // 60 pages of history from before the window, then the window's two messages: more pages than the in-window cap of 50
+    const v = longChat("oldest_first", 60);
+    const { ctx } = ctxFor(v.fetch, config);
+    const pages = await collect(CLAUDE_ENTERPRISE_CONNECTOR.listInteractions(ctx, await CLAUDE_ENTERPRISE_CONNECTOR.authorise(ctx), window));
+    expect(pages.flatMap((p) => p.interactions.map((i) => i.vendorInteractionId))).toEqual(["new-1", "new-2"]);
+    expect(pages).toHaveLength(1); // a page wholly before the window yields nothing, so nothing old is counted as seen
+  });
+
+  it("stops paging a newest-first chat once a page reaches back before the window", async () => {
+    const v = longChat("newest_first", 60);
+    const { ctx } = ctxFor(v.fetch, config);
+    const pages = await collect(CLAUDE_ENTERPRISE_CONNECTOR.listInteractions(ctx, await CLAUDE_ENTERPRISE_CONNECTOR.authorise(ctx), window));
+    expect(pages.flatMap((p) => p.interactions.map((i) => i.vendorInteractionId))).toEqual(["new-2", "new-1"]);
+    expect(v.calls.filter((u) => u.pathname.endsWith("/messages")).length).toBe(2); // the window's page and the first older one
+  });
+
+  it("still bounds a chat whose history outside the window is endless", async () => {
+    const v = longChat("oldest_first", 600);
+    const { ctx } = ctxFor(v.fetch, config);
+    await expect(collect(CLAUDE_ENTERPRISE_CONNECTOR.listInteractions(ctx, await CLAUDE_ENTERPRISE_CONNECTOR.authorise(ctx), window))).rejects.toMatchObject({
+      code: "page_limit",
+      detail: expect.stringContaining("outside the window"),
+    });
+  });
+
+  it("skips a null or non-object nested content block instead of failing the run (review #985 R2 [4])", async () => {
+    const f = (async (input: string | URL | Request) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname === "/v1/compliance/apps/chats") {
+        if (url.searchParams.get("limit") === "1") return json({ data: [], has_more: false, last_id: null });
+        return json({ data: [chat("c_null")], has_more: false, last_id: "c1" });
+      }
+      return json({
+        id: "c_null",
+        chat_messages: [{ id: "m1", role: "assistant", created_at: "2026-11-16T09:00:00Z", content: [{ type: "tool_result", content: [null, 7, { type: "text", text: "kept" }] }] }],
+        has_more: false,
+        last_id: null,
+      });
+    }) as typeof fetch;
+    const { ctx } = ctxFor(f, config);
+    const pages = await collect(CLAUDE_ENTERPRISE_CONNECTOR.listInteractions(ctx, await CLAUDE_ENTERPRISE_CONNECTOR.authorise(ctx), window));
+    expect(pages[0]!.interactions[0]!.text).toBe("kept");
   });
 });
