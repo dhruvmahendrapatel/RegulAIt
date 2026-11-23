@@ -296,6 +296,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/robots/:robotId/versions/:version/retire",
   "PUT /v1/robots/:robotId/secrets/:name/:scope",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope",
+  // ADR-0364 S3: the author's test run (owner or admin; one of the requester's projects) and one run's record
+  "POST /v1/robots/:robotId/versions/:version/test-runs",
+  "GET /v1/robots/:robotId/runs/:runId",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
@@ -438,6 +441,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // list and the link writes stay admin through the default gate.
   "GET /v1/agent-identity/:kind/:subjectId",
   "GET /v1/risks",
+  // CXR-REV-003: the register's Excel export reads the list's own WHERE (own risks for a non-admin)
+  "GET /v1/risks/export.xlsx",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
   "GET /v1/risks/scenarios",

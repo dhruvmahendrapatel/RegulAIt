@@ -187,7 +187,7 @@ test("users: create a user, issue a one-time password and an API key (one-time r
   await shot(page, "phase2-02-users-created");
 
   // open the detail panel and issue a one-time password
-  await page.getByRole("link", { name: "Manage E2E User" }).click();
+  await page.getByRole("button", { name: "Manage E2E User" }).click();
   await page.getByRole("button", { name: "Set one-time password" }).click();
   // B4S-02: issuing someone else's password is a settings_relax step-up — Ada confirms with her authenticator
   await settleWithStepUp(page, page.getByTestId("revealed-secret"));
@@ -598,7 +598,7 @@ test("cost dashboard: fleet meters, project rollup with charts, Unattributed buc
   await expect(page.getByText("Projects — fleet spend")).toBeVisible();
   await expect(page.getByText("Unattributed spend", { exact: false }).first()).toBeVisible();
 
-  await page.getByRole("link", { name: "Open cost rollup for demo-project" }).click();
+  await page.getByRole("button", { name: "Open cost rollup for demo-project" }).click();
   // scope to the rollup card: the fleet table ABOVE it also has a "Budget vs
   // actual" column, so an unscoped text match is ambiguous the moment the
   // rollup query resolves. This assertion only ever passed by racing that

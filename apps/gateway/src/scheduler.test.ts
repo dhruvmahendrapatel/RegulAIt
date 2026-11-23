@@ -35,6 +35,7 @@ import {
 import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
 import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
 import { AGENT_RISK_PROOF_JOB_NAME } from "./agent-risk-proof-runner.js"; // ADR-0345 slice 2a
+import { ROBOT_RUN_STALE_SWEEP_JOB_NAME } from "./robot-runs.js"; // ADR-0364 S3
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -813,6 +814,8 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0359 (E40): behaviour baselines (shadow findings); driven end to end in zz-adr0359-behaviour.test.ts
+        SCHEDULER_JOB_NAMES.behaviourBaselineSweep,
         // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows; driven end-to-end in
         // zz-adr0333-detection.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.agentDetectionSweep,
@@ -840,6 +843,8 @@ describe("every sweep is registered", () => {
         // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
         // in zz-adr0345-proof-runner.test.ts
         AGENT_RISK_PROOF_JOB_NAME,
+        // ADR-0364 S3 (lane E45): ends robot runs no gateway still holds; driven in zz-adr0364-robots-s3.test.ts
+        ROBOT_RUN_STALE_SWEEP_JOB_NAME,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

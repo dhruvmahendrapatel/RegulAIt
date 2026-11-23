@@ -115,7 +115,7 @@ test("FS-4: a sortable header is reached with Tab and sorts with Enter", async (
 
 test("FS-15: the success toast sits left of an open side drawer, not over its pinned action row (G5 Acknowledge)", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   const detail = page.getByTestId("alert-detail");
   await detail.getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await detail.getByRole("button", { name: "Acknowledge" }).click();

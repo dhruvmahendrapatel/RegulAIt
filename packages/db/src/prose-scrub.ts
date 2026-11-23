@@ -314,12 +314,19 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.engineRunners, ["revokeReason"]],
   // ADR-0217: an automatic re-test's reason (a runner's gate reason or refusal detail, which can quote a case)
   [s.mrmRetestRuns, ["reason"]],
+  // ADR-0359 (lane E40): a behaviour finding's generated sentence, which quotes the tool or destination key it saw
+  [s.behaviourAnomalyFindings, ["explanation"]],
   // ADR-0331: the admin's reason for removing an MCP server from endpoints (shown in the list and the audit)
   [s.endpointAddonRemovals, ["reason"]],
   // ADR-0338: the admin's reason for a vendor agent control action
   [s.vendorAgentActions, ["reason"]],
   // ADR-0313: the admin's note on a paid-call price (free text, shown in the price list)
   [s.paidCallPrices, ["note"]],
+  // ADR-0337 §5 slice 3b: the admin's reason for raising a SaaS finding, and the rationale rendered from vendor-read
+  // evidence (app and scope names a vendor returned, which an attacker-controlled app could fill)
+  [s.saasFindingReviews, ["reason", "rationale"]],
+  // ADR-0337 §5: a reader's usage note (built by the reader, but it can carry vendor-read text in future readers)
+  [s.saasEntitlementUsageReads, ["note"]],
 ];
 
 /**

@@ -48,6 +48,7 @@ export const WRITE_SYSTEM_PERMISSIONS = Object.freeze([
   "PermissionsManageSharing",
   "PermissionsResetPasswords",
 ] as const);
+export type WriteSystemPermission = (typeof WRITE_SYSTEM_PERMISSIONS)[number];
 
 /** the session's effective system permissions (one row); no free-text column is selected */
 export const SALESFORCE_PERMISSIONS_QUERY = `SELECT ${WRITE_SYSTEM_PERMISSIONS.join(", ")} FROM UserPermissionAccess`;
@@ -66,13 +67,31 @@ export function objectWriteQuery(userId: string, kind = "agent_registry_agentfor
  * read-only by both checks. A check that cannot be read throws a ReadFailure (the caller then records `unverified`).
  */
 export async function salesforceWritePermissions(get: (url: string) => Promise<unknown>, queryUrl: (soql: string) => string, userId: string, kind: string): Promise<string[]> {
+  return (await salesforceWriteCheck(get, queryUrl, userId, kind)).refused;
+}
+
+/**
+ * The same check, with system permissions an admin's audited opt-in TOLERATES (ADR-0337 §4a, owner decision
+ * 2026-11-22: only `PermissionsCustomizeApplication`, for the org-wide OAuth token read). A tolerated permission the
+ * user holds is reported apart and never refuses; every other write permission, and any object-level write, still
+ * refuses. A caller that tolerates a held permission must not record the credential as `read_only`.
+ */
+export async function salesforceWriteCheck(
+  get: (url: string) => Promise<unknown>,
+  queryUrl: (soql: string) => string,
+  userId: string,
+  kind: string,
+  tolerate: readonly WriteSystemPermission[] = [],
+): Promise<{ refused: string[]; tolerated: WriteSystemPermission[] }> {
   const rows = atPath(await get(queryUrl(SALESFORCE_PERMISSIONS_QUERY)), "records");
   if (!Array.isArray(rows) || rows.length !== 1) throw new ReadFailure("error", "the permission check returned no single row");
   const unknown = WRITE_SYSTEM_PERMISSIONS.filter((p) => typeof atPath(rows[0], p) !== "boolean");
   if (unknown.length) throw new ReadFailure("error", `the permission check did not report ${unknown.join(", ")}`);
-  const held: string[] = WRITE_SYSTEM_PERMISSIONS.filter((p) => atPath(rows[0], p) === true);
-  if (held.length) return held;
+  const heldAll = WRITE_SYSTEM_PERMISSIONS.filter((p) => atPath(rows[0], p) === true);
+  const tolerated = heldAll.filter((p) => tolerate.includes(p));
+  const held: string[] = heldAll.filter((p) => !tolerate.includes(p));
+  if (held.length) return { refused: held, tolerated };
   const objects = atPath(await get(queryUrl(objectWriteQuery(userId, kind))), "records");
   if (!Array.isArray(objects)) throw new ReadFailure("error", "the object permission check was not readable");
-  return objects.map((o) => `write on ${str(atPath(o, "SobjectType"), 80) ?? "an object"}`);
+  return { refused: objects.map((o) => `write on ${str(atPath(o, "SobjectType"), 80) ?? "an object"}`), tolerated };
 }

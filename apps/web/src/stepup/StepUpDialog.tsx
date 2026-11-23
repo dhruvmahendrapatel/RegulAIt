@@ -58,6 +58,8 @@ export default function StepUpDialog() {
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState("");
   const [waitingSso, setWaitingSso] = useState(false);
+  // the options read failed (not a 422 "no method"): show Retry, never an endless "Getting ready…" (Codex CXR-ACC-001)
+  const [optsFailed, setOptsFailed] = useState(false);
   const promptRef = useRef<StepUpPrompt | null>(null);
 
   useEffect(() => installGlobalStepUp(), []);
@@ -74,6 +76,7 @@ export default function StepUpDialog() {
   const begin = async (p: StepUpPrompt) => {
     setOpts(null);
     setUnavailable(null);
+    setOptsFailed(false);
     setWaitingSso(false);
     setCode("");
     try {
@@ -82,7 +85,10 @@ export default function StepUpDialog() {
     } catch (err) {
       if (promptRef.current?.id !== p.id) return;
       if (err instanceof ApiError && err.status === 422) setUnavailable(reasonOf(err));
-      else setError(reasonOf(err));
+      else {
+        setError(reasonOf(err));
+        setOptsFailed(true);
+      }
     }
   };
 
@@ -188,6 +194,21 @@ export default function StepUpDialog() {
             <Link to="/account?section=passkeys" onClick={() => prompt.finish(null)}>
               Set up a passkey or an authenticator app on your Account page
             </Link>
+          </div>
+        ) : !opts && optsFailed ? (
+          <div className={v.stack}>
+            <p className={`${v.faint} ${v.flush}`}>
+              The confirmation could not be prepared. Nothing was sent for this action yet.
+            </p>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setError(null);
+                void begin(prompt);
+              }}
+            >
+              Try again
+            </Button>
           </div>
         ) : !opts ? (
           <div className={v.faint} role="status">

@@ -185,11 +185,18 @@ import {
   VENDOR_AGENT_ACTION_STATES,
   VENDOR_AGENT_CONTROL_ACTIONS,
   VENDOR_AGENT_STATES,
+  // ADR-0359 (lane E40): behaviour baselines, in lockstep with the CHECKs
+  BEHAVIOUR_FINDING_STATUSES,
+  BEHAVIOUR_METHODS,
+  BEHAVIOUR_MODES,
+  BEHAVIOUR_SIGNAL_NAMES,
+  BEHAVIOUR_SUBJECT_KINDS,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
   bigint,
   check,
+  date,
   integer,
   boolean,
   doublePrecision,
@@ -1912,6 +1919,9 @@ export const auditLog = pgTable(
         "robot",
         "robot_version",
         "robot_secret",
+        // ADR-0364 S3: one robot run (objectId = robot_runs.id; detail carries the version, the outcome and evidence
+        // hashes, never an input value, an output value or a secret). Plain text column — no DDL.
+        "robot_run",
         // ADR-0232 (lane E49 slice 1): a pipeline run (objectId = the run). Plain text column — no DDL.
         "pipeline_run",
         // ADR-0173 batch 2c (K): a KRI or a monitoring dashboard created /
@@ -2078,6 +2088,12 @@ export const auditLog = pgTable(
         "agent_containment",
         // ADR-0310 (G2): a signed managed-settings bundle export (objectId = the bundle). Plain text column — no DDL.
         "managed_settings_bundle",
+        // ADR-0357 (lane E38): a governance-config export, plan (dry run) or apply, and each object an apply changes
+        // (objectId = null; the detail names the section and key). Plain text column — no DDL.
+        "governance_config",
+        // ADR-0357 §4 (lane E38): a policy layer written or removed, a business unit created or changed, a project
+        // moved between units, and every refusal. Plain text column — no DDL.
+        "governance_policy",
         // ADR-0310 addendum (lane E1): an endpoint device's hook decisions, permission-bypass sessions and managed-file
         // changes (objectId = the device). Plain text column — no DDL.
         "endpoint_device",
@@ -2098,10 +2114,16 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0337 §5 slice 3b: a SaaS entitlement finding review (raised, decided, withdrawn; objectId = the review).
+        // Plain text column — no DDL.
+        "saas_finding_review",
         // ADR-0358 (lane E39): the adoption-analytics privacy policy writes and each per-person ranking read; the CMDB
         // sync connector (its policy, credential and enable writes, and each sync run). Plain text column — no DDL needed.
         "adoption_analytics",
         "cmdb_connector",
+        // ADR-0359 (lane E40): a behaviour finding, its status change, a day's evaluation summary or a mode change
+        // (objectId = the finding when there is one). Plain text column — no DDL.
+        "behaviour_baseline",
       ],
     })
       .notNull()
@@ -4046,7 +4068,12 @@ export const projects = pgTable("projects", {
    * governance or budget behaviour. onDelete 'set null': deleting an initiative
    * orphans its children back to ungrouped, never deletes project rows. */
   initiativeId: uuid("initiative_id").references(() => initiatives.id, { onDelete: "set null" }),
+  /** ADR-0357: the business unit whose policy layer this project inherits (org → business unit → project). Null =
+   * directly under the org. Set null when the unit is removed, so the project inherits the org's layer alone. */
+  businessUnitId: uuid("business_unit_id").references((): AnyPgColumn => businessUnits.id, { onDelete: "set null" }),
   budgetUsd: doublePrecision("budget_usd"),
+  /** ADR-0364 addendum: an admin's per-project override of the free-form browser session budget (NULL = org default) */
+  freeformBrowserBudgetUsd: doublePrecision("freeform_browser_budget_usd"),
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
@@ -4087,6 +4114,8 @@ export const projects = pgTable("projects", {
   archivedReason: text("archived_reason"),
   archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
 }, (t) => [
+  // ADR-0357: the policy fold looks up a business unit's projects
+  index("projects_business_unit_idx").on(t.businessUnitId).where(sql`${t.businessUnitId} IS NOT NULL`),
   check(
     "projects_isolation_sensitivity_check",
     sql`${t.isolationSensitivity} IS NULL OR ${t.isolationSensitivity} IN ('public', 'internal', 'confidential', 'regulated')`,
@@ -4922,6 +4951,13 @@ export const orgSettings = pgTable(
     engineMaxRunTimeoutMinutes: integer("engine_max_run_timeout_minutes").notNull().default(30),
     /** the budget a run gets when it names none (USD); higher relaxes it */
     engineDefaultRunBudgetUsd: doublePrecision("engine_default_run_budget_usd").notNull().default(2),
+    /**
+     * ADR-0364 addendum (owner decision 2026-11-19): a free-form browser session's default budget ($2, counted against
+     * the project budget; an admin may override it per project, `projects.freeform_browser_budget_usd`) and its maximum
+     * run time (30 minutes, besides the end-of-turn and 5-minute-idle ends). Free-form browsing itself stays off.
+     */
+    freeformBrowserSessionBudgetUsd: doublePrecision("freeform_browser_session_budget_usd").notNull().default(2),
+    freeformBrowserMaxRunMinutes: integer("freeform_browser_max_run_minutes").notNull().default(30),
     /** a run whose budget is above this waits for approval (USD); higher relaxes it */
     engineRunApprovalThresholdUsd: doublePrecision("engine_run_approval_threshold_usd").notNull().default(10),
     /** raw engine reports kept (encrypted) this many days; longer relaxes it */
@@ -5000,6 +5036,10 @@ export const orgSettings = pgTable(
     /** the stdio MCP and engine worker floors (decision 3, OWNER DECISION 4): L2; L1 relaxes them */
     isolationFloorMcpStdio: text("isolation_floor_mcp_stdio", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
     isolationFloorEngineWorker: text("isolation_floor_engine_worker", { enum: REQUIRABLE_ISOLATION_CLASSES })
+      .notNull()
+      .default("user_space_kernel"),
+    /** ADR-0364 S3 (pending migration robot_browser_isolation): the robot run floor, L2; L1 relaxes it (never below L1) */
+    isolationFloorRobotBrowser: text("isolation_floor_robot_browser", { enum: REQUIRABLE_ISOLATION_CLASSES })
       .notNull()
       .default("user_space_kernel"),
     /** an executor's self-test is fresh this long, 60–1440 minutes; longer relaxes it */
@@ -5824,6 +5864,11 @@ export const orgSettings = pgTable(
     check(
       "org_settings_isolation_floors_check",
       sql`${t.isolationFloorPublic} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorInternal} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorConfidential} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorRegulated} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorMcpStdio} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorEngineWorker} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
+    ),
+    /** ADR-0364 S3: a robot run is never placed below a hardened container (there is no L0 value) */
+    check(
+      "org_settings_isolation_floor_robot_browser_check",
+      sql`${t.isolationFloorRobotBrowser} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
     ),
     check(
       "org_settings_executor_attestation_max_age_minutes_check",
@@ -7061,6 +7106,14 @@ export type ApprovalEscalateAction = (typeof APPROVAL_ESCALATE_ACTIONS)[number];
 export const APPROVAL_SLA_STATES = ["ok", "warning", "breached"] as const;
 export type ApprovalSlaState = (typeof APPROVAL_SLA_STATES)[number];
 
+/** ADR-0342 slice 2: a human task's priority, lowest to highest (the queue sorts on it; nothing decides on it) */
+export const APPROVAL_TASK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
+export type ApprovalTaskPriority = (typeof APPROVAL_TASK_PRIORITIES)[number];
+/** ADR-0342 slice 2: where an assignment's warn/due times came from. `policy` = derived from its SLA policy (or none);
+ * `explicit` = set by an admin; `stage_timer` = set by a workflow stage timer (lane E21) through the same function */
+export const APPROVAL_DUE_SOURCES = ["policy", "explicit", "stage_timer"] as const;
+export type ApprovalDueSource = (typeof APPROVAL_DUE_SOURCES)[number];
+
 export const approvalSlaPolicies = pgTable(
   "approval_sla_policies",
   {
@@ -7174,9 +7227,15 @@ export const approvalAssignments = pgTable(
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
     escalationAssigneeKind: text("escalation_assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
     escalationAssigneeId: uuid("escalation_assignee_id"),
+    /** ADR-0342 slice 2 (pending migration `approval_task_priority`) */
+    priority: text("priority", { enum: APPROVAL_TASK_PRIORITIES }).notNull().default("normal"),
+    dueSource: text("due_source", { enum: APPROVAL_DUE_SOURCES }).notNull().default("policy"),
   },
   (t) => [
     check("approval_assignments_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignments_priority_check", sql`${t.priority} IN ('low','normal','high','urgent')`),
+    check("approval_assignments_due_source_check", sql`${t.dueSource} IN ('policy','explicit','stage_timer')`),
+    check("approval_assignments_warn_due_check", sql`${t.warnAt} IS NULL OR (${t.dueAt} IS NOT NULL AND ${t.warnAt} <= ${t.dueAt})`),
     check("approval_assignments_quorum_check", sql`${t.quorum} >= 1`),
     check("approval_assignments_sla_state_check", sql`${t.slaState} IN ('ok','warning','breached')`),
     check(
@@ -7242,6 +7301,9 @@ export const REPORT_FORMATS = ["csv", "json", "both"] as const;
 export const REPORT_ENTITLEMENT_SCOPES = ["org", "team", "project"] as const;
 export const REPORT_CADENCES = ["daily", "weekly", "monthly", "quarterly"] as const;
 export const REPORT_TRIGGERS = ["manual", "scheduled"] as const;
+/** `report_definitions.status` (CXR-REV-002, ADR-0047 addendum 2026-11-22): a definition is archived, never deleted,
+ * so its generated runs stay as evidence. Same values as `REPORT_DEFINITION_MACHINE` in @regulait/shared. */
+export const REPORT_DEFINITION_STATUSES = ["active", "archived"] as const;
 
 export const reportDefinitions = pgTable(
   "report_definitions",
@@ -7269,10 +7331,21 @@ export const reportDefinitions = pgTable(
     packId: uuid("pack_id").references((): AnyPgColumn => compliancePacks.id, { onDelete: "set null" }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** CXR-REV-002 (migration report_definition_archive): the lifecycle the declared machine reads. Deliberately
+     * stored beside `archived_at` rather than derived from it, as `redteam_libraries.status`/`retired_at` are: the
+     * ADR-0348 machines read a CHECKed status column, and `report_definitions_archived_check` keeps the two equal. */
+    status: text("status", { enum: REPORT_DEFINITION_STATUSES }).notNull().default("active"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
     uniqueIndex("report_definitions_name_uq").on(t.name),
     index("report_definitions_kind_idx").on(t.kind),
+    check("report_definitions_status_ck", sql`${t.status} IN ('active', 'archived')`),
+    check(
+      "report_definitions_archived_check",
+      sql`(${t.status} = 'archived') = (${t.archivedAt} IS NOT NULL) AND (${t.archivedAt} IS NOT NULL OR ${t.archivedByUserId} IS NULL)`,
+    ),
   ],
 );
 
@@ -8453,6 +8526,10 @@ export const discoverySettings = pgTable(
     /** ADR-0337 §4: whether a Google Workspace entitlement source may use the Directory token listing (off by default;
      * turning it on is a `settings_relax` step-up bound to `discoveryGoogleDirectoryTokens`) */
     googleDirectoryTokensEnabled: boolean("google_directory_tokens_enabled").notNull().default(false),
+    /** ADR-0337 §4a (owner, 2026-11-22): whether a Salesforce entitlement source may read the org-wide OAuth tokens, which
+     * needs Customize Application (off by default; turning it on is a `settings_relax` step-up bound to
+     * `discoverySalesforceOrgTokens`, audited with its trade-off). Pending migration `saas_entitlement_usage`. */
+    salesforceOrgTokensEnabled: boolean("salesforce_org_tokens_enabled").notNull().default(false),
     // ADR-0331: the governed removal of flagged MCP servers from endpoints, off (pending migration endpoint_addon_removal)
     endpointAddonRemovalEnabled: boolean("endpoint_addon_removal_enabled").notNull().default(false),
     // ADR-0338: governed vendor agent control (disable, quarantine, restore), off (pending migration vendor_agent_control)
@@ -15992,7 +16069,7 @@ export const executionPlacements = pgTable(
     check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "execution_placements_workload_kind_check",
-      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`,
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
     ),
     check(
       "execution_placements_required_class_check",
@@ -16143,9 +16220,30 @@ export const executionOffers = pgTable(
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     reportedAt: timestamp("reported_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    /**
+     * ADR-0364 S3 (pending migration robot_browser_isolation): a robot_browser offer's per-run egress targets
+     * (`[{host, port}]`), required on that kind and NULL on every other. Exception comment (ADR-0200 3NF): a
+     * point-in-time "as offered" snapshot of the version's `robot_version_allowed_sites` (the source of truth), the
+     * instruction the executor builds the run's proxy ACL from; written once with the offer.
+     */
+    egressTargets: jsonb("egress_targets").$type<Array<{ host: string; port: number }>>(),
+    /**
+     * ADR-0364 S3: the robot run this offer is for (`robot_runs.id`), required on a robot_browser offer and NULL on every
+     * other; the executor hands it to the runner. Its foreign key to `robot_runs` is added by the migration that
+     * creates `robot_runs` (pending robots_s3_runs.sql, `execution_offers_robot_run_fk`, runs after this one).
+     */
+    robotRunId: uuid("robot_run_id").references(() => robotRuns.id, { onDelete: "restrict" }),
   },
   (t) => [
-    check("execution_offers_workload_kind_check", sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`),
+    check(
+      "execution_offers_workload_kind_check",
+      sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker', 'robot_browser')`,
+    ),
+    check(
+      "execution_offers_egress_targets_check",
+      sql`(${t.workloadKind} = 'robot_browser') = (${t.egressTargets} IS NOT NULL) AND (${t.egressTargets} IS NULL OR (jsonb_typeof(${t.egressTargets}) = 'array' AND jsonb_array_length(${t.egressTargets}) BETWEEN 1 AND 64))`,
+    ),
+    check("execution_offers_robot_run_check", sql`(${t.workloadKind} = 'robot_browser') = (${t.robotRunId} IS NOT NULL)`),
     check("execution_offers_required_class_check", sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
     check(
       "execution_offers_required_by_check",
@@ -18448,6 +18546,115 @@ export const saasEntitlementGrantPrincipals = pgTable(
   ],
 );
 export type SaasEntitlementGrantPrincipalRow = typeof saasEntitlementGrantPrincipals.$inferSelect;
+
+// ADR-0337 §5 (slice 3, pending migration `saas_entitlement_usage`): what the latest read of a source could observe of
+// use, and each app's latest observed use. Times only move forward (a later read never makes an app look less used).
+export const SAAS_ENTITLEMENT_USAGE_COVERAGES = ["none", "app", "verb"] as const;
+
+/** SAAS_ACTIVITY_LOG_STATES (@regulait/shared), as a literal tuple for the column type; the CHECK below pins them */
+export const SAAS_ACTIVITY_LOG_STATE_VALUES = ["off", "not_enabled", "unreadable", "no_activity_yet", "flowing"] as const;
+/** the usage coverage of a source's latest read (one row per source; replaced by each read) */
+export const saasEntitlementUsageReads = pgTable(
+  "saas_entitlement_usage_reads",
+  {
+    sourceId: uuid("source_id")
+      .primaryKey()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    coverage: text("coverage", { enum: SAAS_ENTITLEMENT_USAGE_COVERAGES }).notNull(),
+    /** the earliest moment the read could see use from; null when the vendor's last-use time is not window-bounded */
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    note: text("note").notNull(),
+    /** what the read observed of a guided activity-log setup (Microsoft 365 only; null elsewhere). An observation each
+     * read replaces, not a lifecycle: SAAS_ACTIVITY_LOG_STATES (@regulait/shared) */
+    activityLogState: text("activity_log_state", { enum: SAAS_ACTIVITY_LOG_STATE_VALUES }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    runId: uuid("run_id").references(() => discoveryRuns.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("saas_entitlement_usage_reads_coverage_check", sql`${t.coverage} IN ('none', 'app', 'verb')`),
+    check(
+      "saas_entitlement_usage_reads_activity_log_state_check",
+      sql`${t.activityLogState} IS NULL OR ${t.activityLogState} IN ('off', 'not_enabled', 'unreadable', 'no_activity_yet', 'flowing')`,
+    ),
+    check("saas_entitlement_usage_reads_note_check", sql`length(${t.note}) BETWEEN 1 AND 300`),
+  ],
+);
+export type SaasEntitlementUsageReadRow = typeof saasEntitlementUsageReads.$inferSelect;
+
+/** an app's latest observed use (one row per app; reads and writes only where the coverage could tell them apart) */
+export const saasEntitlementAppUsage = pgTable(
+  "saas_entitlement_app_usage",
+  {
+    appId: uuid("app_id")
+      .primaryKey()
+      .references(() => saasEntitlementApps.id, { onDelete: "cascade" }),
+    lastUseAt: timestamp("last_use_at", { withTimezone: true }).notNull(),
+    lastReadAt: timestamp("last_read_at", { withTimezone: true }),
+    lastWriteAt: timestamp("last_write_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check(
+      "saas_entitlement_app_usage_last_use_check",
+      sql`${t.lastUseAt} >= coalesce(${t.lastReadAt}, ${t.lastUseAt}) AND ${t.lastUseAt} >= coalesce(${t.lastWriteAt}, ${t.lastUseAt})`,
+    ),
+  ],
+);
+export type SaasEntitlementAppUsageRow = typeof saasEntitlementAppUsage.$inferSelect;
+
+// ADR-0337 §5 slice 3b (pending migration `saas_finding_reviews`): a finding raised into the approvals queue for a
+// second administrator's recorded decision. Nothing executes: RegulAIt never revokes a vendor-side grant.
+/** the states of SAAS_FINDING_REVIEW_MACHINE (@regulait/shared); the ADR-0348 suite pins them to the CHECK */
+export const SAAS_FINDING_REVIEW_STATE_VALUES = ["pending", "remediate", "accepted", "withdrawn"] as const;
+export const SAAS_FINDING_RULE_ID_VALUES = ["unused-grant", "excessive-scope", "oversharing", "publicly-exposed-agent"] as const;
+
+export const saasFindingReviews = pgTable(
+  "saas_finding_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the finding's stable key (rule + grant row, or rule + registry record) */
+    findingKey: text("finding_key").notNull(),
+    ruleId: text("rule_id", { enum: SAAS_FINDING_RULE_ID_VALUES }).notNull(),
+    ruleVersion: integer("rule_version").notNull(),
+    /** the subject; SET NULL when the vendor-side grant or the registry record goes (the review then says so) */
+    grantId: uuid("grant_id").references(() => saasEntitlementGrants.id, { onDelete: "set null" }),
+    agentRecordId: uuid("agent_record_id").references(() => agentRegistryRecords.id, { onDelete: "set null" }),
+    /** DELIBERATE COPY (point-in-time evidence, ADR-0200 addendum): the source the finding was read from, as raised;
+     * it outlives the grant row the source is otherwise reached through. Deleting the source deletes its reviews. */
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    /** DELIBERATE COPY (point-in-time evidence): the rendered rationale and the evidence as raised, so the decision
+     * is bound to what the approver saw (the arguments digest covers them) */
+    rationale: text("rationale").notNull(),
+    evidence: jsonb("evidence").$type<Record<string, string | number | boolean | null>>().notNull(),
+    /** ADR-0348 machine SAAS_FINDING_REVIEW_MACHINE (@regulait/shared) */
+    status: text("status", { enum: SAAS_FINDING_REVIEW_STATE_VALUES }).notNull().default("pending"),
+    reason: text("reason").notNull(),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "restrict" }),
+    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("saas_finding_reviews_pending_uq").on(t.findingKey).where(sql`${t.status} = 'pending'`),
+    uniqueIndex("saas_finding_reviews_approval_uq").on(t.approvalId),
+    index("saas_finding_reviews_key_idx").on(t.findingKey, t.createdAt),
+    index("saas_finding_reviews_source_idx").on(t.sourceId),
+    check("saas_finding_reviews_status_check", sql`${t.status} IN ('pending', 'remediate', 'accepted', 'withdrawn')`),
+    check("saas_finding_reviews_rule_check", sql`${t.ruleId} IN ('unused-grant', 'excessive-scope', 'oversharing', 'publicly-exposed-agent')`),
+    check("saas_finding_reviews_key_check", sql`${t.findingKey} ~ '^[a-z-]{1,40}:(grant|record):[0-9a-f-]{36}$'`),
+    check("saas_finding_reviews_subject_check", sql`${t.grantId} IS NULL OR ${t.agentRecordId} IS NULL`),
+    check("saas_finding_reviews_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 1000`),
+    check("saas_finding_reviews_rationale_check", sql`length(${t.rationale}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type SaasFindingReviewRow = typeof saasFindingReviews.$inferSelect;
 // ===== end ADR-0337 =====
 
 // ===== ADR-0339 (lane E20) — the agent risk score, recomputed on every change =====
@@ -18805,7 +19012,9 @@ export const workflowTemplateVersions = pgTable(
     version: integer("version").notNull(),
     definition: jsonb("definition").notNull(),
     contentHash: text("content_hash").notNull(),
-    origin: text("origin", { enum: ["baseline", "builder"] }).notNull(),
+    /** ADR-0357: `governance_apply` = written by a reviewed governance-config apply (the pending
+     * `workflow_template_version_origin_apply` migration) */
+    origin: text("origin", { enum: ["baseline", "builder", "governance_apply"] }).notNull(),
     publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
     publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -18813,7 +19022,7 @@ export const workflowTemplateVersions = pgTable(
     uniqueIndex("workflow_template_versions_template_version_uq").on(t.templateId, t.version),
     check("workflow_template_versions_version_check", sql`${t.version} >= 1`),
     check("workflow_template_versions_hash_check", sql`${t.contentHash} ~ '^[0-9a-f]{64}$'`),
-    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder')`),
+    check("workflow_template_versions_origin_check", sql`${t.origin} IN ('baseline', 'builder', 'governance_apply')`),
   ],
 );
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
@@ -19503,6 +19712,60 @@ export type FairnessRunEvidenceRow = typeof fairnessRunEvidence.$inferSelect;
 export type FairnessBreachReviewRow = typeof fairnessBreachReviews.$inferSelect;
 // ===== end ADR-0346 =====
 
+// ===== ADR-0357 (lane E38): business units and tighten-only policy layers =====
+/**
+ * A business unit: the level between the org and its projects in the policy hierarchy
+ * (org → business unit → project → use case). A project belongs to at most one (`projects.business_unit_id`).
+ */
+export const businessUnits = pgTable("business_units", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique("business_units_name_uq"),
+  description: text("description"),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type BusinessUnitRow = typeof businessUnits.$inferSelect;
+
+/**
+ * One policy layer per level and subject. `policy` is a schema-validated configuration document (ADR-0200
+ * exception): `governancePolicySchema` in `@regulait/shared`, validated on every write; the rules it names are a
+ * closed set declared in `POLICY_RULES`. The subject is a foreign key per level (DB CHECK: exactly the one the level
+ * needs), never a copied name. `version` is a compare-and-set counter for edits.
+ */
+export const governancePolicyLayers = pgTable(
+  "governance_policy_layers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    level: text("level", { enum: ["org", "business_unit", "project", "use_case"] }).notNull(),
+    businessUnitId: uuid("business_unit_id").references(() => businessUnits.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "cascade" }),
+    policy: jsonb("policy").$type<Record<string, unknown>>().notNull(),
+    version: integer("version").notNull().default(1),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("governance_policy_layers_org_uq").on(t.level).where(sql`${t.level} = 'org'`),
+    uniqueIndex("governance_policy_layers_bu_uq").on(t.businessUnitId).where(sql`${t.businessUnitId} IS NOT NULL`),
+    uniqueIndex("governance_policy_layers_project_uq").on(t.projectId).where(sql`${t.projectId} IS NOT NULL`),
+    uniqueIndex("governance_policy_layers_use_case_uq").on(t.useCaseId).where(sql`${t.useCaseId} IS NOT NULL`),
+    check(
+      "governance_policy_layers_subject_check",
+      sql`CASE ${t.level}
+        WHEN 'org' THEN ${t.businessUnitId} IS NULL AND ${t.projectId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'business_unit' THEN ${t.businessUnitId} IS NOT NULL AND ${t.projectId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'project' THEN ${t.projectId} IS NOT NULL AND ${t.businessUnitId} IS NULL AND ${t.useCaseId} IS NULL
+        WHEN 'use_case' THEN ${t.useCaseId} IS NOT NULL AND ${t.businessUnitId} IS NULL AND ${t.projectId} IS NULL
+        ELSE false END`,
+    ),
+    check("governance_policy_layers_policy_check", sql`jsonb_typeof(${t.policy}) = 'object' AND octet_length(${t.policy}::text) <= 262144`),
+    check("governance_policy_layers_version_check", sql`${t.version} >= 1`),
+  ],
+);
+export type GovernancePolicyLayerRow = typeof governancePolicyLayers.$inferSelect;
+// ===== end ADR-0357 =====
 // ===== ADR-0364 (lane E45 S2): governed RPA "Robots" ================================================================
 // Migration `pending/robots.sql` (numbered at merge, ADR-0252). Third normal form: the allow-list and the secret
 // bindings are join tables, and a version binds only its own robot's secrets, on one of its own allowed sites, by
@@ -19699,14 +19962,56 @@ export const robotRuns = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    /** ADR-0364 S3: the decision 7 placement the run executed under (set once) */
+    executionPlacementId: uuid("execution_placement_id").references(() => executionPlacements.id, { onDelete: "restrict" }),
   },
   (t) => [
+    index("robot_runs_placement_idx").on(t.executionPlacementId),
     index("robot_runs_version_idx").on(t.robotVersionId, t.status, t.contentDigest),
     check("robot_runs_kind_check", sql`${t.kind} IN ('test', 'agent', 'freeform')`),
     check("robot_runs_status_check", sql`${t.status} IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'refused')`),
   ],
 );
 export type RobotRunRow = typeof robotRuns.$inferSelect;
+
+/**
+ * ADR-0364 S3: one stored evidence item of a run (a redacted screenshot, a download, the egress log). The bytes are in
+ * the content-addressed store under `sha256/<hex>`; the row is append-only (a trigger refuses UPDATE, DELETE and
+ * TRUNCATE). Evidence leaves only by retention expiry.
+ */
+export const ROBOT_EVIDENCE_KINDS_E45 = ["screenshot", "download", "egress_log"] as const;
+export const ROBOT_EVIDENCE_WITHHELD_E45 = ["pii_block", "no_store"] as const;
+export const robotRunEvidence = pgTable(
+  "robot_run_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    robotRunId: uuid("robot_run_id")
+      .notNull()
+      .references(() => robotRuns.id, { onDelete: "restrict" }),
+    item: integer("item").notNull(),
+    kind: text("kind", { enum: ROBOT_EVIDENCE_KINDS_E45 }).notNull(),
+    step: integer("step"),
+    contentType: text("content_type").notNull(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    /**
+     * ADR-0364 §7: NULL = the bytes are in the store under the sha256. Otherwise why they were never kept: `pii_block`
+     * (the project's PII mode is `block`, so a download is recorded by its sha256 and size only) or `no_store` (no
+     * artifact store is configured).
+     */
+    bytesWithheld: text("bytes_withheld", { enum: ROBOT_EVIDENCE_WITHHELD_E45 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("robot_run_evidence_item_uq").on(t.robotRunId, t.item),
+    index("robot_run_evidence_sha_idx").on(t.sha256),
+    check("robot_run_evidence_kind_check", sql`${t.kind} IN ('screenshot', 'download', 'egress_log')`),
+    // items 0..63 are the runner's; item 64 (ROBOT_EGRESS_LOG_ITEM) is the executor's egress log, and only it
+    check("robot_run_evidence_item_check", sql`${t.item} >= 0 AND ${t.item} <= 64`),
+    check("robot_run_evidence_egress_slot_check", sql`(${t.item} = 64) = (${t.kind} = 'egress_log')`),
+  ],
+);
+export type RobotRunEvidenceRow = typeof robotRunEvidence.$inferSelect;
 // ===== end ADR-0364 =================================================================================================
 
 // ===== ADR-0333 (lane E15): rule-based detection of risky agent behaviour =========================================
@@ -20512,3 +20817,126 @@ export const agentContainments = pgTable(
 );
 export type AgentContainmentRow = typeof agentContainments.$inferSelect;
 // ===== end ADR-0366 =====
+
+// ===== ADR-0359 (lane E40): behaviour baselines and anomaly findings =====
+/** Singleton settings. `shadow` (the default) records findings and never enforces; `off` stops the sweep, a relaxation
+ * that needs a `settings_relax` step-up. */
+export const behaviourBaselineSettings = pgTable(
+  "behaviour_baseline_settings",
+  {
+    id: smallint("id").primaryKey().default(1),
+    mode: text("mode", { enum: BEHAVIOUR_MODES }).notNull().default("shadow"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("behaviour_baseline_settings_singleton_check", sql`${t.id} = 1`),
+    check("behaviour_baseline_settings_mode_check", sql`${t.mode} IN ('shadow', 'off')`),
+  ],
+);
+
+/** The sweep's leased cursor over `audit_log.seq` (rollup) and the last UTC day it evaluated. */
+export const behaviourEngineState = pgTable(
+  "behaviour_engine_state",
+  {
+    id: smallint("id").primaryKey().default(1),
+    cursorSeq: bigint("cursor_seq", { mode: "number" }).notNull().default(0),
+    evaluatedThrough: date("evaluated_through", { mode: "string" }),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    leaseToken: uuid("lease_token"),
+    lastSweepAt: timestamp("last_sweep_at", { withTimezone: true }),
+  },
+  (t) => [check("behaviour_engine_state_singleton_check", sql`${t.id} = 1`)],
+);
+
+/**
+ * The per-day rollup of the audit chain the baselines are computed from. ADR-0200 exception: a measured read model
+ * whose source of truth is `audit_log`; `subject_id` is a `users.id` (kind `user`) or a `workload_identities.id` (kind
+ * `agent`) and is FK-free on purpose, like the audit trail it is rolled up from (a deleted subject's history stays
+ * countable and the audit prune is never blocked). `key` is '' for a volume signal.
+ */
+export const behaviourDailyCounts = pgTable(
+  "behaviour_daily_counts",
+  {
+    day: date("day", { mode: "string" }).notNull(),
+    subjectKind: text("subject_kind", { enum: BEHAVIOUR_SUBJECT_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    signal: text("signal", { enum: BEHAVIOUR_SIGNAL_NAMES }).notNull(),
+    key: text("key").notNull(),
+    count: integer("count").notNull(),
+  },
+  (t) => [
+    primaryKey({ name: "behaviour_daily_counts_pk", columns: [t.day, t.subjectKind, t.subjectId, t.signal, t.key] }),
+    check("behaviour_daily_counts_subject_kind_check", sql`${t.subjectKind} IN ('user', 'agent')`),
+    check("behaviour_daily_counts_signal_check", sql`${t.signal} IN ('model_calls', 'data_scoped_calls', 'tool', 'destination', 'hour_of_day')`),
+    check("behaviour_daily_counts_key_check", sql`char_length(${t.key}) <= 200`),
+    check("behaviour_daily_counts_count_check", sql`${t.count} >= 1`),
+  ],
+);
+
+/**
+ * One anomaly finding. ADR-0200 exception: a point-in-time snapshot of the baseline it was measured against (the
+ * numbers must not move when later rows arrive); `subject_id` is FK-free for the reason given on
+ * `behaviour_daily_counts`. Unique per (day, subject, signal, key), so a re-run adds nothing.
+ */
+export const behaviourAnomalyFindings = pgTable(
+  "behaviour_anomaly_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    day: date("day", { mode: "string" }).notNull(),
+    subjectKind: text("subject_kind", { enum: BEHAVIOUR_SUBJECT_KINDS }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    signal: text("signal", { enum: BEHAVIOUR_SIGNAL_NAMES }).notNull(),
+    key: text("key").notNull(),
+    method: text("method", { enum: BEHAVIOUR_METHODS }).notNull(),
+    observed: integer("observed").notNull(),
+    baselineDays: integer("baseline_days").notNull(),
+    baselineMedian: doublePrecision("baseline_median"),
+    baselineMad: doublePrecision("baseline_mad"),
+    baselineKeyCount: integer("baseline_key_count"),
+    baselineTotal: integer("baseline_total"),
+    score: doublePrecision("score"),
+    threshold: doublePrecision("threshold").notNull(),
+    explanation: text("explanation").notNull(),
+    status: text("status", { enum: BEHAVIOUR_FINDING_STATUSES }).notNull().default("open"),
+    statusChangedBy: uuid("status_changed_by").references(() => users.id, { onDelete: "set null" }),
+    statusChangedAt: timestamp("status_changed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("behaviour_anomaly_findings_subject_signal_uq").on(t.day, t.subjectKind, t.subjectId, t.signal, t.key),
+    index("behaviour_anomaly_findings_status_created_idx").on(t.status, t.createdAt),
+    index("behaviour_anomaly_findings_subject_idx").on(t.subjectKind, t.subjectId, t.day),
+    check("behaviour_anomaly_findings_subject_kind_check", sql`${t.subjectKind} IN ('user', 'agent')`),
+    check("behaviour_anomaly_findings_signal_check", sql`${t.signal} IN ('model_calls', 'data_scoped_calls', 'tool', 'destination', 'hour_of_day')`),
+    check("behaviour_anomaly_findings_method_check", sql`${t.method} IN ('mad_z', 'ratio_over_median', 'share_of_history')`),
+    check("behaviour_anomaly_findings_status_check", sql`${t.status} IN ('open', 'acknowledged', 'dismissed')`),
+    check("behaviour_anomaly_findings_key_check", sql`char_length(${t.key}) <= 200`),
+    check("behaviour_anomaly_findings_explanation_check", sql`char_length(${t.explanation}) BETWEEN 1 AND 2000`),
+  ],
+);
+export type BehaviourAnomalyFindingRow = typeof behaviourAnomalyFindings.$inferSelect;
+// ===== end ADR-0359 =====
+
+// ===== ADR-0364 S3 (D-2026-11-22-07): cross-replica caller cancel =====
+/**
+ * A caller's `notifications/cancelled` that the receiving replica did not serve, for every replica to see
+ * (apps/gateway/src/caller-cancel.ts). Short-lived; system task only (RLS).
+ */
+export const mcpCallerCancellations = pgTable(
+  "mcp_caller_cancellations",
+  {
+    /** scrypt hash (hex) of the caller's cancellation scope and the JSON-RPC request id (caller-cancel.ts) */
+    requestKey: text("request_key").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("mcp_caller_cancellations_created_idx").on(t.createdAt),
+    index("mcp_caller_cancellations_user_idx").on(t.userId),
+    check("mcp_caller_cancellations_key_check", sql`${t.requestKey} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type McpCallerCancellationRow = typeof mcpCallerCancellations.$inferSelect;
