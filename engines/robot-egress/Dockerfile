@@ -1,7 +1,8 @@
 # ADR-0364 S3 — the ROBOT EGRESS image: stripe/smokescreen (MIT), the per-run CONNECT proxy that is a robot_browser
 # sandbox's only network peer (§7), built as a library into ONE static binary with RegulAIt's port filter
 # (`portfilter/`: smokescreen's own main.go plus a PostDecisionRequestHandler that refuses a destination port the run's
-# targets do not name; ADR-0176 exception, ADR-0364 §7). Distroless base, non-root, no shell. UNPUBLISHED: built twice
+# targets do not name; ADR-0176 exception, ADR-0364 §7) and a front CONNECT filter (`front.go`) that the sandbox reaches
+# instead of Smokescreen, which listens on loopback only (D-2026-11-22-07). Distroless base, non-root, no shell. UNPUBLISHED: built twice
 # and compared by engine-images-build.yml and scanned by security.yml, never pushed or locked yet.
 #
 #   docker build -f engines/robot-egress/Dockerfile -t regulait/engine-robot-egress:0.1.0 .

@@ -5,7 +5,8 @@
  * as a placement is. From INSIDE the sandbox the workload then tries every way out, and each must be DENIED:
  *
  *  - through the proxy: a host not in the ACL, an IP literal, 169.254.169.254, the network's gateway address, an
- *    allowed host on a port the run's targets do not name (the port filter, Security B3), a plain-HTTP proxy request;
+ *    allowed host on a port the run's targets do not name (the front filter, then the port filter: Security B3), a
+ *    plain-HTTP proxy request;
  *  - around the proxy: TCP to the run network's first address (where `--internal` alone puts the HOST: code review 2)
  *    and to the uplink's gateway, the allowed target's own address, 169.254.169.254, and UDP to the same addresses and
  *    to a public resolver (nothing arrives at the host's listeners), and DNS for a public name;
@@ -311,6 +312,10 @@ describe.skipIf(!enabled)(`a robot run's egress ${why}`, () => {
         expect(v.status, k).not.toBe("tunnelled");
         expect(v.status, k).not.toMatch(/ 200 /);
       }
+      // the front filter (D-2026-11-22-07) refuses a target's host on another port with ITS 403, before Smokescreen
+      // (whose own refusals answer 407) sees the request
+      expect((r.otherPort as { status: string }).status).toMatch(/ 403 /);
+      expect((r.plainHttp as { status: string }).status).toMatch(/ 403 /);
       // DENIED around the proxy: no TCP connection to the host, the uplink, the target or the metadata address
       for (const k of ["directFirst", "directUplinkGw", "directTarget", "directMetadata"]) expect(r[k], k).not.toBe("connected");
       // only the loopback and the one interface on the run's network; no IPv6 address
@@ -327,10 +332,10 @@ describe.skipIf(!enabled)(`a robot run's egress ${why}`, () => {
     await new Promise((res) => setTimeout(res, 500));
     expect(udpHits, "UDP reached the host").toEqual([]);
     expect(tcpHits, "TCP reached the host").toEqual([]);
-    // the evidence: the proxy logged an allowed decision and the port filter's refusal
+    // the evidence: the proxy logged an allowed decision and the front filter's refusal
     const log = await h.egressLog!();
     expect(log).toContain(`"allow":true`);
-    expect(log).toContain("regulait port filter");
+    expect(log).toContain("regulait front filter");
     // and everything of the run is gone
     expect(spawnSync("docker", ["inspect", names.proxy], { stdio: "ignore" }).status).not.toBe(0);
     expect(spawnSync("docker", ["network", "inspect", names.network], { stdio: "ignore" }).status).not.toBe(0);
