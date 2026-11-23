@@ -451,11 +451,11 @@ test("builder and MCP: a stricter profile is assigned without step-up, a looser 
   await page.route("**/v1/users", (route) => json(route, { users: [] }));
   await page.goto("/ui/admin/mcp-servers");
   await expect(page.getByRole("heading", { level: 1, name: "MCP servers", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Show tools on Synthetic stdio" }).click();
+  await page.getByRole("button", { name: "Show tools on Synthetic stdio" }).click();
   const serverSelect = page.getByLabel("Execution profile · Synthetic stdio", { exact: true });
   await expect(serverSelect).toBeEnabled();
   await expect(serverSelect).toHaveValue("");
-  await page.getByRole("link", { name: "Show tools on Synthetic remote" }).click();
+  await page.getByRole("button", { name: "Show tools on Synthetic remote" }).click();
   await expect(page.getByText(/This is a remote MCP server: it runs on its own host, which regulAIt does not isolate/)).toBeVisible();
   await axe(page);
 });

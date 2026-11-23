@@ -170,19 +170,19 @@ test.describe("per-asset posture scores", () => {
     await page.goto("/ui/admin/posture");
     const s = section(page);
     await expect(s.getByText(DISCLAIMER)).toBeVisible();
-    await expect(s.getByRole("link", { name: "Open the posture score of Claims triage" })).toContainText("31 of 100");
-    await expect(s.getByRole("link", { name: "Open the posture score of Intake summariser" })).toBeVisible();
-    await expect(s.getByRole("link", { name: "Open the posture score of Policy lookup" })).toHaveCount(0);
+    await expect(s.getByRole("row").filter({ has: page.getByRole("button", { name: "Open the posture score of Claims triage" }) })).toContainText("31 of 100");
+    await expect(s.getByRole("button", { name: "Open the posture score of Intake summariser" })).toBeVisible();
+    await expect(s.getByRole("button", { name: "Open the posture score of Policy lookup" })).toHaveCount(0);
     expect(calls).toContain("GET /v1/reports/posture/assets?kind=agent&limit=100");
 
     // keyset: the next page is asked for with the cursor the last page returned, and appended
     await s.getByRole("button", { name: "Load more" }).click();
-    await expect(s.getByRole("link", { name: "Open the posture score of Policy lookup" })).toContainText("76 of 100");
+    await expect(s.getByRole("row").filter({ has: page.getByRole("button", { name: "Open the posture score of Policy lookup" }) })).toContainText("76 of 100");
     expect(calls).toContain(`GET /v1/reports/posture/assets?kind=agent&limit=100&cursor=${A2}`);
     await expect(s.getByRole("button", { name: "Load more" })).toHaveCount(0);
 
     // a row opens the asset's score, read from the detail route
-    await s.getByRole("link", { name: "Open the posture score of Claims triage" }).click();
+    await s.getByRole("button", { name: "Open the posture score of Claims triage" }).click();
     const drawer = page.getByRole("dialog", { name: "Claims triage" });
     await expect(drawer.getByText("Estimate", { exact: true })).toBeVisible();
     await expect(drawer.getByText(DISCLAIMER)).toBeVisible();
@@ -218,9 +218,9 @@ test.describe("per-asset posture scores", () => {
     await page.goto("/ui/admin/posture");
     const panel = section(page).getByRole("tabpanel");
     await expect(panel.locator("table[aria-busy=true]")).toBeVisible();
-    await expect(panel.getByRole("link", { name: /Open the posture score/ })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: /Open the posture score/ })).toHaveCount(0);
     gw.release();
-    await expect(panel.getByRole("link", { name: "Open the posture score of Claims triage" })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Open the posture score of Claims triage" })).toBeVisible();
   });
 
   test("a failed read is an error with Retry, never an empty list", async ({ page }) => {
@@ -231,13 +231,13 @@ test.describe("per-asset posture scores", () => {
     await expect(s.getByText("No agent you can read")).toHaveCount(0);
     await expectAxeClean(page, "Posture: per-asset scores, failed read");
     await s.getByRole("button", { name: "Retry" }).click();
-    await expect(s.getByRole("link", { name: "Open the posture score of Claims triage" })).toBeVisible();
+    await expect(s.getByRole("button", { name: "Open the posture score of Claims triage" })).toBeVisible();
   });
 
   test("a score the caller cannot read is 'No such asset'; a credential with no user gets the access message", async ({ page }) => {
     await mockApi(page, { detailStatus: 404 });
     await page.goto("/ui/admin/posture");
-    await section(page).getByRole("link", { name: "Open the posture score of Claims triage" }).click();
+    await section(page).getByRole("button", { name: "Open the posture score of Claims triage" }).click();
     const drawer = page.getByRole("dialog", { name: "Claims triage" });
     await expect(drawer.getByText("No such asset")).toBeVisible();
     await expect(drawer.getByRole("button", { name: "Retry" })).toHaveCount(0);
