@@ -67,7 +67,8 @@ let readOverride: ((keys: string[]) => Promise<Array<{ requestKey: string; creat
 
 function startWatch(): void {
   if (timer || !store) return;
-  timer = setInterval(() => void pollOnce(), CALLER_CANCEL_POLL_MS);
+  // the tick runs in system_task, like every scheduled interval (the RLS census, zz-adr0234-rls-batch7a)
+  timer = setInterval(() => void runWithRlsSystem("system_task", "mcp.caller-cancel.tick", () => pollOnce()), CALLER_CANCEL_POLL_MS);
   timer.unref?.();
   void pollOnce();
 }
