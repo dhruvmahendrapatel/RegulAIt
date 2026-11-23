@@ -3,7 +3,7 @@
     "subject": "github.com/hashicorp/golang-lru",
     "licence": "MPL-2.0",
     "condition": "unmodified",
-    "decision": "reused from ADR-0187 decision 194 (MPL-2.0 admitted while its files are unmodified) for robot-egress; owner to confirm (ADR-0364 S3)",
-    "why": "v1.0.2 is linked into smokescreen v0.1.0 through its proxy library stripe/goproxy (https.go, a certificate cache). It is a weak, file-level copyleft licence outside the ADR-0176 list; the module is shipped exactly as published (verified against go.sum and the checksum database, `go mod verify`) and never patched. Until the owner records the decision, the image builds but is not admissible."
+    "decision": "accepted by owner (D-2026-11-22-07, 2026-11-22): an ADR-0176 exception for robot-egress, v1.0.2 only, while unmodified (the ADR-0187 decision 194 condition); re-checked when the ecosystem changes",
+    "why": "v1.0.2 is linked into smokescreen v0.1.0 through its proxy library stripe/goproxy (https.go, a certificate cache). It is a weak, file-level copyleft licence outside the ADR-0176 list. Unmet requirement: no permissively licensed replacement can be linked without forking Smokescreen or goproxy (goproxy imports it directly, and Smokescreen is the only maintained per-host CONNECT ACL proxy that fits, ADR-0364 §7). The module is shipped exactly as published (verified against go.sum and the checksum database, `go mod verify`) and never patched. Re-check when goproxy or Smokescreen drops the dependency, or a permissive drop-in appears."
   }
 ]
