@@ -657,8 +657,8 @@ test.describe("ADR-0072 — an operator can SEE which baselines are stranded", (
     await page.getByRole("button", { name: "Create", exact: true }).click();
     expect((await created).status()).toBe(201);
 
-    // the kit gives a clickable table row `role="link"`, not `role="row"`
-    await page.getByRole("link", { name: /e2e-groundedness/ }).click();
+    // UIS-04: a dataset row selects in place through a real button in its primary cell, named "<name> vN"
+    await page.getByRole("button", { name: /^e2e-groundedness v\d+$/ }).click();
     await expect(page.getByText(/one chunk per blank-line-separated block/)).toBeVisible();
     await expect(
       page.getByText(/uncheck to hold it back and score against it/),
