@@ -390,7 +390,7 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
       if ((file.file_size ?? 0) > CHATGPT_MAX_LOG_FILE_BYTES) {
         throw new ConnectorError(
           "response_too_large",
-          `compliance log file ${file.id} is ${Math.ceil((file.file_size ?? 0) / 1048576)} MiB, over the ${CHATGPT_MAX_LOG_FILE_BYTES / 1048576} MiB per-file limit; a shorter window cannot split a vendor file, so ask OpenAI support to split it and run again`,
+          `compliance log file ${file.id} is ${Math.ceil((file.file_size ?? 0) / 1048576)} MiB, over the ${CHATGPT_MAX_LOG_FILE_BYTES / 1048576} MiB per-file limit; a shorter window cannot split a vendor file, so ask the vendor to split it and run again`,
         );
       }
       const bytes = await chatGptDownload(ctx, `${base}/${encodeURIComponent(file.id)}`, auth.headers);
