@@ -15,6 +15,11 @@
 -- The four-eyes CHECK passes when `staged_by_user_id` is NULL (an importer stage, or a stager since deleted): that is
 -- intended, because the decide route still requires a NAMED admin, so the bootstrap credential can never decide.
 -- Every function pins its search_path (zz-dbguard-0185). Hand-authored, additive and idempotent.
+-- Enter the migration system context (ADR-0234): this file's policy and trigger bodies name an RLS table, so the
+-- RLS-slice-1 guard (zz-adr0234-rls-slice1.test.ts) requires it once the file is numbered; transaction-local, and
+-- cleared again at the end of the file.
+SELECT set_config('regulait.system_context', 'migration', true);
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "agent_authorship" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "agent_id" uuid REFERENCES "agents"("id") ON DELETE CASCADE,
@@ -128,3 +133,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS "agent_identity_links_builder_uq"
   ON "agent_identity_links" ("builder_agent_id", "provider", "external_id") WHERE "builder_agent_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_identity_links_external_idx" ON "agent_identity_links" ("provider", "external_id");
+--> statement-breakpoint
+SELECT set_config('regulait.system_context', '', true);

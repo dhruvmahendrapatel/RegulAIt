@@ -20,6 +20,11 @@
 --  - robot_secrets: the owner, an admin and the runner (system_task) only, for read and write. The ciphertext never
 --    leaves the gateway (no route returns it).
 --  - robot_runs: the requester, the robot's owner, an admin and system_task.
+-- Enter the migration system context (ADR-0234): this file's policy and trigger bodies name an RLS table, so the
+-- RLS-slice-1 guard (zz-adr0234-rls-slice1.test.ts) requires it once the file is numbered; transaction-local, and
+-- cleared again at the end of the file.
+SELECT set_config('regulait.system_context', 'migration', true);
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "robots" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "slug" text NOT NULL,
@@ -462,3 +467,5 @@ DROP POLICY IF EXISTS robot_runs_write ON "robot_runs";
 CREATE POLICY robot_runs_write ON "robot_runs" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+SELECT set_config('regulait.system_context', '', true);
