@@ -244,6 +244,13 @@ export {
   selectAssignmentRule,
   slaDeadlines,
   evaluateSla,
+  APPROVAL_TASK_PRIORITY_ORDER,
+  taskScheduleRelaxations,
+  slaStateAt,
+  APPROVAL_SLA_MACHINE,
+  slaTransitionAllowed,
+  type TaskPriority,
+  type TaskSchedule,
   bulkCapRefusal,
   bulkSensitivityFenced,
   createApprovalSlaPolicySchema,
@@ -3512,6 +3519,7 @@ export {
   seatRosterAdapter,
   seatRosterConfigSchema,
   vendorAliasRequestSchema,
+  costResolutionRuleRemovalSchema,
   vendorDomainRuleRequestSchema,
   type AccountResolution,
   type AccountResolutionMethod,
@@ -5180,6 +5188,10 @@ export * from "./adoption-analytics.js";
 
 // ADR-0341: RFC 6902 patches for diff views
 export { jsonPatch, type JsonPatchOperation } from "./json-patch.js";
+// ADR-0357: governance configuration as code (the document schema and the dry-run plan)
+export * from "./governance-config.js";
+// ADR-0357 §4: tighten-only policy inheritance (the declared merge table)
+export * from "./governance-policy.js";
 
 // ADR-0359 (lane E40): behaviour baselines' pure statistics (robust z-score and share of history)
 export {

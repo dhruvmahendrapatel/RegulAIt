@@ -84,12 +84,12 @@ test.describe("ADR-0172: agent inbox", () => {
     await expect(page.getByRole("heading", { level: 1, name: "Agent inbox" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Needs attention" })).toHaveAttribute("aria-selected", "true");
     const list = page.locator('[data-list="builder-threads"]');
-    const rows = list.getByRole("link", { name: /^Open thread/ });
+    const rows = list.getByRole("button", { name: /^Open thread/ });
     await expect(rows).toHaveCount(1);
     await expect(page.getByText("Choose a thread")).toBeVisible();
     await expectAxeClean(page, "inbox");
 
-    await list.getByRole("link", { name: /Morning sweep/ }).click();
+    await list.getByRole("button", { name: /Morning sweep/ }).click();
     await expect(page).toHaveURL(/thread=th-0001/);
     await expect(page.getByText("Two are missing a data owner")).toBeVisible();
     await expect(page.getByText("Scheduled run: Morning sweep")).toBeVisible();

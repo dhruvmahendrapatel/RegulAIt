@@ -475,7 +475,7 @@ export default function RunsPage() {
             defaultSort={{ key: "created", dir: "desc" }}
             columns={RUN_COLUMNS}
             rowKey={(r) => r.id}
-            onRowClick={(r) => navigate(`/runs/${r.id}`)}
+            rowHref={(r) => `/runs/${r.id}`}
             rowLabel={(r) => `Open run ${r.name}`}
             empty={
               statusFilter ? (

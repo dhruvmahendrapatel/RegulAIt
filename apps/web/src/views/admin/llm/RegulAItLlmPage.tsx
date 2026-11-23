@@ -609,6 +609,8 @@ export default function RegulAItLlmPage() {
                 rows={datasets.data?.datasets ?? []}
                 rowKey={(r) => r.id}
                 onRowClick={(r) => setSelectedDataset(r.id)}
+                // the version too, so two versions of one dataset are two distinct buttons (UIS-04)
+                rowLabel={(r) => `${r.name} v${r.version}`}
                 columns={[
                   { key: "name", header: "Dataset", render: (r) => r.name },
                   { key: "version", header: "Version", render: (r) => `v${r.version}` },

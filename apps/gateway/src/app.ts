@@ -451,6 +451,9 @@ import { registerIntegrationLifecycleRoutes, withLifecycle } from "./integration
 import { disableUpstreamExchangeOnUrlMove, registerUpstreamTokenExchangeRoutes } from "./upstream-token-exchange.js";
 import { registerA2aRoutes } from "./a2a.js";
 import { registerMcpBundleRoutes } from "./mcp-bundles.js";
+import { registerGovernanceConfigRoutes } from "./governance-config.js";
+import { registerGovernancePolicyRoutes } from "./governance-policy.js";
+import { registerGovernanceConfigApplyRoute } from "./governance-config-apply.js";
 import { registerPrivacyOpsRoutes } from "./privacy-ops.js";
 import { ExternalEffectBlockedError } from "./external-effects.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
@@ -6320,6 +6323,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0236 (P11) — governed MCP bundles: admin-only through the default gate, default-off, audited; enforcement is
   // the kernel's bundle-tool-allow-list rule, fed by loadEntitlements at the existing MCP interception point
   registerMcpBundleRoutes(app, db);
+  // ADR-0357 (lane E38): governance configuration as code (schema, export, dry-run plan)
+  registerGovernanceConfigRoutes(app, db);
+  // ADR-0357 §4: business units, tighten-only policy layers and the effective-policy view
+  registerGovernancePolicyRoutes(app, db);
+  registerGovernanceConfigApplyRoute(app, db);
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
