@@ -1,3 +1,5 @@
+import type { CompiledDetectionFeedRule, DetectionFeedRule } from "./detection-feed.js";
+import { normaliseForInjection } from "./detection-content/index.js";
 /**
  * ADR-0042 — the GUARDRAIL ENGINE's pure half.
  *
@@ -41,7 +43,7 @@ import { detectPII, type PiiHit } from "./pii.js";
 // runner (the data is slice V's; this file only calls the runner)
 import type { VendoredDetectionPack } from "./batch4.js";
 import { VENDORED_INJECTION_RULES, VENDORED_SECRET_RULES } from "./detection-content/index.js";
-import { injectionText, vendoredInjectionHits, vendoredSecretCount } from "./detection-content/match.js";
+import { injectionRuleHits, injectionText, vendoredInjectionHits, vendoredSecretCount } from "./detection-content/match.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -121,6 +123,7 @@ export interface GuardrailDetector {
 /** ADR-0186 V: the deployment facts a detector may consult. Absent = the
  * strict default (every vendored pack on). */
 export interface GuardrailDetectContext {
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
   /** `org_settings.vendored_detection_packs` */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }
@@ -271,6 +274,10 @@ export const promptInjectionDetector: GuardrailDetector = {
       const same = hits.find((h) => h.category === v.category);
       if (same) same.count += v.count;
       else hits.push({ detector: "prompt_injection", category: v.category, count: v.count });
+    }
+    if(ctx?.detectionFeedRules?.length) {
+      for(const v of injectionRuleHits(normaliseForInjection(text), ctx.detectionFeedRules, false))
+        hits.push({detector:"prompt_injection",category:`feed.${v.category}`,count:v.count});
     }
     const custom = countTerms(text, terms);
     if (custom > 0) hits.push({ detector: "prompt_injection", category: "custom_term", count: custom });
@@ -701,6 +708,7 @@ export function evaluateGuardrails(args: {
   exclude?: readonly GuardrailDetectorId[] | undefined;
   /** ADR-0186 V: `org_settings.vendored_detection_packs`; absent = all on */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
   /**
    * ADR-0363 slice 2: the org's PUBLISHED customer classifiers. Each runs with its OWN mode (an approved publish is
    * the admin's explicit act, so it does not wait on the `semantic_dlp` switch) and reports as a `semantic_dlp`
@@ -717,7 +725,7 @@ export function evaluateGuardrails(args: {
     if (mode === "off") continue;
     const detector = GUARDRAIL_DETECTORS[id];
     if (!detector.phases.includes(args.phase)) continue;
-    const hits = detector.detect(args.text, args.terms?.[id], { vendoredPacks: args.vendoredPacks });
+    const hits = detector.detect(args.text, args.terms?.[id], { vendoredPacks: args.vendoredPacks, detectionFeedRules: args.detectionFeedRules });
     if (hits.length === 0) continue;
     // mode -> action is exactly enforcePII's mapping: block blocks, warn
     // warns, log allows-but-records.

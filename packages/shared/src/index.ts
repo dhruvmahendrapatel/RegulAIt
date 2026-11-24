@@ -5224,6 +5224,8 @@ export {
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
 
+export * from "./detection-feed.js";
+
 // ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
 export * from "./fairness-evaluation.js";
 

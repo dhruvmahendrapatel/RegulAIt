@@ -19080,6 +19080,30 @@ export const workflowTemplateVersions = pgTable(
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
 
+// ADR-0367: singleton policy-content stream. All writes are admin/migration-only under its RLS policy.
+export const detectionFeed = pgTable("detection_feed", {
+  id: boolean("id").primaryKey().default(true),
+  enabled: boolean("enabled").notNull().default(false),
+  version: bigint("version", {mode:"number"}).notNull().default(0),
+  // ADR-0200 exception: feedId, version, digest and issuedAt are derived from the signed bundle on purpose. They are the
+  // rollback/freeze watermark compared under a row lock, and every read cross-checks them against the signed bytes.
+  feedId: text("feed_id"),
+  // Verbatim signed external/configuration snapshot: byte-exact retention is required to reverify its signature.
+  bundle: text("bundle"),
+  signature: text("signature"),
+  keyId: text("key_id"),
+  digest: text("digest"),
+  issuedAt: timestamp("issued_at", {withTimezone:true}),
+  installedAt: timestamp("installed_at", {withTimezone:true}),
+  installedBy: uuid("installed_by").references(()=>users.id,{onDelete:"set null"}),
+}, (t)=>[
+  check("detection_feed_id_check",sql`${t.id}`),
+  check("detection_feed_version_check",sql`${t.version} BETWEEN 0 AND 9007199254740991`),
+  check("detection_feed_document_check",sql`(${t.version}=0 AND ${t.feedId} IS NULL AND ${t.bundle} IS NULL AND ${t.signature} IS NULL AND ${t.keyId} IS NULL AND ${t.digest} IS NULL AND ${t.issuedAt} IS NULL AND ${t.installedAt} IS NULL AND NOT ${t.enabled}) OR (${t.version}>0 AND ${t.feedId} IS NOT NULL AND ${t.bundle} IS NOT NULL AND ${t.signature} IS NOT NULL AND ${t.keyId} IS NOT NULL AND ${t.digest} IS NOT NULL AND ${t.digest} ~ '^[0-9a-f]{64}$' AND ${t.issuedAt} IS NOT NULL AND ${t.installedAt} IS NOT NULL)`),
+  check("detection_feed_size_check",sql`octet_length(${t.bundle})<=262144`),
+  check("detection_feed_fields_check",sql`length(${t.signature})<=256 AND length(${t.keyId})<=80 AND length(${t.feedId})<=80`),
+]);
+export type DetectionFeedRow = typeof detectionFeed.$inferSelect;
 // ===== ADR-0350 §11 (lane E31): credential reuse across endpoints (pending migration endpoint_credential_fingerprints) =====
 // A device reports a keyed HMAC of each discovered secret under the tenant's credential-reuse key, never the value. The
 // stored `fingerprint` is HMAC(server key, key id ‖ device fingerprint) under a key derived from the gateway's data key,
