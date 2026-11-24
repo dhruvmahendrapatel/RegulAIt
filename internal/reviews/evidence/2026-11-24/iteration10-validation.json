@@ -1,0 +1,100 @@
+{
+  "recorded_at": "2026-11-24T03:04:22.689158+00:00",
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "scope": "Review/mockup/evidence docs only; tests use current main source",
+  "workspace_build": {
+    "command": "pnpm -r --workspace-concurrency=2 build",
+    "exit_code": 0
+  },
+  "migration_guard": {
+    "command": "node scripts/migration-watermark-guard.mjs origin/main",
+    "exit_code": 0
+  },
+  "adr_index": {
+    "passed": 8,
+    "failed": 0
+  },
+  "bundle_budgets": {
+    "passed": 115,
+    "failed": 0,
+    "gzip_bytes": [
+      {
+        "name": "entry JS (index)",
+        "passed": true,
+        "size": 40751,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "entry CSS (index)",
+        "passed": true,
+        "size": 6013,
+        "sizeLimit": 10700
+      },
+      {
+        "name": "first-load JS",
+        "passed": true,
+        "size": 135327,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "first-paint JS",
+        "passed": true,
+        "size": 179666,
+        "sizeLimit": 182000
+      }
+    ]
+  },
+  "real_report_runtime": {
+    "checks": 25,
+    "passed": 25,
+    "seam": "Fresh local PostgreSQL, compiled buildApp and inject, privileged database login; application authorisation, not RLS or production boot",
+    "deleted_rows": false
+  },
+  "merged_browser_suites": {
+    "passed": 21,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "duration_seconds": 29.5,
+    "gateway_mocked": true
+  },
+  "password_retests": {
+    "passed": 11,
+    "failed": 0,
+    "duration_seconds": 31.96,
+    "separate_fresh_local_db": true
+  },
+  "phone_pending_probes": {
+    "passed": 4,
+    "duration_seconds": 6.5,
+    "purpose": "Confirm controls/layout plus existing pending-dismissal defect, not successful acceptance of that defect",
+    "writes_mocked": true
+  },
+  "mockup_documents": 12,
+  "wireframes": 11,
+  "links_fences_task_acceptance": "pass",
+  "numbered_feedback_cards": 71,
+  "original_design_proposals": 6,
+  "new_brainstorm_topics": 18,
+  "route_inventory_only": 157,
+  "new_whole_route_run": false,
+  "scheduler": {
+    "requested_interval_hours": 4,
+    "available": false,
+    "created": false,
+    "reason": "No persistent assistant scheduler exposed by tools or Cloud runtime capabilities"
+  },
+  "limits": [
+    "No all-page/function completion",
+    "No native screen-reader/IME/password-manager/IdP/passkey results",
+    "User studies deferred; no measured usability gain",
+    "No product or production/cloud implementation"
+  ],
+  "policy_merge": {
+    "vitest_reported_tests": 34,
+    "reported_files": 2,
+    "type_errors": 0,
+    "additional_compiled_helper_edge_probes": 6,
+    "gateway_runtime_enforcement": false
+  }
+}

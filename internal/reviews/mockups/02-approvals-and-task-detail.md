@@ -166,3 +166,12 @@ Verify each filename when implementing; this plan proposes no new route registry
 7. Check admin, named reviewer, delegate, own-call and read-only cases; inaccessible data never leaks through totals.
 8. Validate keyboard and 375/768/1440 layouts in both themes, including zoom and long reasons.
 9. Record the fixing SHA and independent retest against the linked feedback IDs; a wireframe is not closure evidence.
+
+## 2026-11-24 follow-up — pending drawer dismissal
+
+At main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`, four mocked keyboard probes at 375/768 px in both themes
+found the action row reachable and opposing decisions locked while pending, but Escape still closes the drawer
+before the response arrives. This is additional consumer evidence for the existing pending-action cause, not a
+new decision protocol. Integrate the current shared busy/close guard and keep submitted identity/outcome visible.
+See [iteration 10](../codexreviews.md#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps)
+and its phone evidence. No native soft-keyboard/screen-reader or actual decision was tested.

@@ -143,12 +143,15 @@ Do not add a fetch for every suite tile or background provider/model requests to
 
 ## Claude pickup and acceptance
 
+Owner decision D-2026-11-23-01 approves the attention-first order and moving the launcher below it.
+Keep eligible-for-me counts and ranking gated; no further order confirmation is needed.
+
 1. Fix Home's unknown-to-zero handling before moving cards. Preserve the successful empty state.
 2. Build the attention region from existing scoped data; use one primary action and secondary record links.
 3. Move the existing launcher below immediate work while retaining its destinations and accessibility.
 4. Verify admin/member views, loading, successful zero, populated data, 403, 503 and failed background refresh.
 5. At 375/768/1440px, both themes and keyboard-only: no page-wide horizontal scroll, hidden focus targets or
    loss of important warnings. Check a real screen reader separately from axe.
-6. Run a small synthetic-task comparison: can people locate a decision or resume a record without being told
+6. User studies are deferred by owner decision D-2026-11-23-01; no participant target is passed. For a future study, run a synthetic-task comparison: can people locate a decision or resume a record without being told
    a suite name? Record completion, wrong destinations and time before/after; do not claim an improvement
    from these wireframes alone.

@@ -1,8 +1,9 @@
 # UI mockups for Claude
 
-**Pickup pack, 2026-11-22.** Nine Markdown wireframes for making regulAIt easier to use.
+**Pickup pack, 2026-11-22.** Eleven Markdown wireframes for making regulAIt easier to use.
 Original eight-document baseline: main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
 2026-11-23: mockups 06/08 refined and 09 added against main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`; each document names its own baseline.
+2026-11-24: mockups 10/11 added against main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`.
 These are proposed layouts and interaction contracts, not shipped screens or completed usability tests.
 All records and figures in examples are synthetic.
 
@@ -23,10 +24,12 @@ The [design guidelines](../../DESIGN_GUIDELINES.md) and current server contracts
 | [07 — Sign-in and account linking](07-sign-in-and-account-linking.md) | Choose an available method, finish required setup/proof and complete linking without repeated dead ends. | ACC-001/004/005; SSO-003/004; UXP-002/003/006 | Verify merged proof fixes before new changes |
 | [08 — Reports and costs](08-reports-and-costs.md) | Understand recorded figures and date scope; retain evidence when archiving definitions. | REV-001..005; CST-001..006; UXP-002..006 | Reuse merged archive/reason/date/renderer work; verify pending actions |
 | [09 — Project work and chat](09-project-work-and-chat.md) | Keep project/thread context, drafts and tool-decision outcomes clear. | UIW-01..05; UXP-001/002/003/005/006 | Reuse Composer fixes; coordinate history/context work with E35/E50 |
+| [10 — Refusal explanations](10-denial-explanations-and-recovery.md) | Understand a denial, known outcome and safe next step at the current reader’s authority. | BRN-UX-03; existing proof/outcome cards | Reuse current refusal mapping; gate missing per-reader facts |
+| [11 — First run and navigation](11-first-run-and-navigation.md) | Resume configuration or inspect readiness through clear task entry points. | BRN-UX-01/02; UXP-001 | Reuse existing wizard/readiness lifecycle and attention-first Home |
 
 IDs above use the `CXR-` prefix in the review. This is a task-first implementation order, subject to the master's
-assigned slices and security prerequisites. It is not permission to open nine parallel implementation PRs.
-These nine journeys do not exhaust the current 157-route inventory or every page's functions and states.
+assigned slices and security prerequisites. It is not permission to open eleven parallel implementation PRs.
+These eleven journeys do not exhaust the current 157-route inventory or every page's functions and states.
 
 ## What the user should gain
 
@@ -106,7 +109,10 @@ prefer larger targets for frequent/high-impact actions. Check long names, errors
 Run existing accessibility gates, then separately record real screen-reader, password-manager, native proof/device,
 IME and provider checks where relevant. Automated or mocked results do not prove those native journeys.
 
-Before/after comparison should record task completion, wrong-record or duplicate-action attempts, successful
+Owner decision D-2026-11-23-01 approves attention-first Home and defers user studies. Participant targets remain
+unmet; report automated/mock/keyboard evidence only and retain the untested native-device list.
+
+A future before/after comparison could record task completion, wrong-record or duplicate-action attempts, successful
 recovery, repeated entry/navigation and confidence about what persisted. A shorter flow is useful only if its
 meaning and consequences remain clear. No usability gain has been measured by these Markdown wireframes.
 
@@ -114,6 +120,15 @@ The research basis is the main review's [best-practice and comparison section](.
 NN/g task/status/error principles; GOV.UK progressive disclosure and error handling; WCAG authentication/focus/targets;
 OWASP contextual reauthentication and per-request authorisation; documented Camunda, Defender/Sentinel and n8n
 patterns. These are cited design references, not copied code or claims of live competitor testing.
+
+## Current Claude and owner response
+
+The [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112)
+agrees with mockups 02/08 and narrows 01/03/04/05/06/07 to assigned slices and available facts.
+[Owner answers](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102576169) approve attention-first
+Home and defer user studies. Iteration 10 in the main review records the detailed reasoning, independent retests
+and new BRN discussion topics. Mockups 09/10/11 still need a direct assessment. No recommendation is closed merely
+from agreement.
 
 ## Reply format for Claude
 

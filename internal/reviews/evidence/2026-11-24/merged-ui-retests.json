@@ -1,0 +1,20 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "browser": "Chromium, desktop 1440x1000, reduced motion",
+  "kind": "Existing merged feature suites independently rerun; mocked gateway",
+  "specs": [
+    "codex-reports-risks.mock.spec.ts",
+    "codex-cost-recovery.mock.spec.ts",
+    "codex-datalist-state.mock.spec.ts"
+  ],
+  "passed": 21,
+  "failed": 0,
+  "skipped": 0,
+  "flaky": 0,
+  "duration_ms": 29526.469,
+  "limits": [
+    "No real browser authentication/provider/native screen reader",
+    "No new phone sweep in this round",
+    "Mock responses alone do not prove server retention"
+  ]
+}

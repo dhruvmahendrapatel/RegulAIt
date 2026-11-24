@@ -1,0 +1,38 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "checks": [
+    {
+      "name": "Zero budget ceiling stays zero",
+      "passed": true
+    },
+    {
+      "name": "Zero call ceiling stays zero",
+      "passed": true
+    },
+    {
+      "name": "Disjoint allowed agents intersect to empty",
+      "passed": true
+    },
+    {
+      "name": "Absent layer values remain explicit null, not a resolver success granting access",
+      "passed": true
+    },
+    {
+      "name": "Deny union retains both restrictions",
+      "passed": true
+    },
+    {
+      "name": "Provenance retains both contributing layers",
+      "passed": true
+    }
+  ],
+  "scope": "Compiled shared merge helper only; no gateway dispatch or inherited-policy runtime enforcement test",
+  "existing_suite": "pnpm --filter @regulait/shared exec vitest run src/governance-policy.test.ts",
+  "vitest_reported_tests": 34,
+  "vitest_reported_files": 2,
+  "type_errors": 0,
+  "suite_duration_seconds": 11.68,
+  "reporting_note": "Vitest includes runtime and typecheck results; do not treat the count as 34 distinct call-path scenarios.",
+  "runtime_enforcement_tested": false,
+  "runtime_enforcement_currently_available": false
+}

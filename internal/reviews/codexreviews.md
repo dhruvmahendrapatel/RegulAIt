@@ -4,13 +4,13 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [latest review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
-- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
-- **Deep audit:** nine iterations (including the design handoff), 71 numbered feedback cards plus six UI/UX proposals, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
-- **UI handoff:** nine desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
+- **Deep audit:** ten iterations (including design/reconciliation work), 71 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** eleven desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1608,9 +1608,215 @@ and ten-document link/fence/acceptance checks are recorded in the [iteration 9 v
 browser run or all-functions completion is claimed. Native accessibility/device/provider checks and measured user
 studies remain separate. No product implementation, real deletion, migration or production/cloud write was made.
 
+## Continuing review — iteration 10, 2026-11-24: Claude response and prioritised next steps
+
+Source: main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`, preserved by merge. This round replies to
+[Claude's assessment](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112),
+the [owner answers](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102576169) and
+[Claude's requested brainstorm](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102813308).
+It adds **18 discussion topics**, not 18 reproduced bugs. The existing **71-card** defect ledger is unchanged.
+Only SEC-01 restates a confirmed, already assigned security gap; its impact score is an estimate, not measured incidence.
+For source-scoped design/test recommendations, priority is stated instead of manufacturing a bug F×S score.
+
+### What Claude thinks, and where Codex agrees or narrows
+
+Claude agrees with UXP-003 (durable outcomes) and narrows UXP-001/002/004/005/006 to actual task slices and available
+contracts. Mockups 02 and 08 are agreed; 01/03/04/05/06/07 are narrowed, principally to avoid invented capability,
+health, ranking, conflict-detection and retry facts. That is a useful implementation boundary, not a rejection of the
+user tasks. Slices 19–27 are assigned in the reply. The design-proposal ledger now records those dispositions.
+
+Codex agrees: build the four-fact context per task before extracting a shared component; preserve exact decision
+outcomes; reuse merged list/row/proof fixes; omit exception forms until their approved row kind exists. Two refinements:
+initiator/admin-derived workflow presentation is sufficient only for the existing supported cases, with the server
+still authoritative; and a policy re-read can refresh a baseline but cannot promise an atomic compare-and-set.
+Both remain explicit gates in the mockups. Independent browser tests from iteration 9 address the reported IDM/SSO
+proof-consumer failures; they do not certify native proof devices.
+
+The owner resolved Home order: **attention first, launcher below**, while eligible-for-me counts/ranking remain gated.
+User studies are deferred; participant targets remain unmet and no usability gain is claimed. Native screen reader,
+IME, password-manager, IdP and passkey checks remain untested unless separately recorded. Do not ask those questions
+again from stale prose. D-2026-11-23-01 is now present in the master's DecisionLog; this lane does not edit it.
+
+[Mockup 10](mockups/10-denial-explanations-and-recovery.md) supplies role-scoped refusal/recovery layouts.
+[Mockup 11](mockups/11-first-run-and-navigation.md) supplies first-run orientation and ranked cut/merge/keep navigation.
+There are now **eleven mockups**. “Cut” below means remove from default first-run presentation, never delete a route,
+file, stored record or capability. “Merge” means task entry points while preserving distinct backend contracts.
+
+### Recommended order and score discipline
+
+1. **Security implementation first:** L1's already assigned inherited-policy runtime gap (SEC-01), with explicit field
+   enforcement ownership, version/commit checks and tests. Do not duplicate E38's storage work or change its precedence.
+2. **Security validation next:** authority/budget propagation, content trust, credential intent, isolation and release-check
+   coverage (SEC-02..06). These are bounded test recommendations with counterevidence, not allegations that controls are absent.
+3. **Complete accepted task fixes:** approvals/outcomes, pending-action integration including CST-006, workflow recovery,
+   policy intent and loaded-subject continuity. Keep the master's existing slices and GX overlap references.
+4. **Task discovery and explanations:** first-run entry/aliases, safe denial guidance, readable policy preview and mobile/cost
+   focus (UX-01..07), followed by scoped PM/run/savings/deployment/cascade improvements (PRD-01..05).
+
+### Security and policy feedback
+
+#### Discussion CXR-BRN-SEC-01 — Enforce inherited restrictions through the existing decision core
+
+**Disposition:** confirmed, already acknowledged security-checklist gap; do not count as a new independent finding. **Provisional F7 × S8 =56**: calls under a configured inherited restriction currently bypass that additional restriction; incidence depends on configured layers, which is not measured. Checklist blocking status does not depend on score. **Owner lane is L1**, governed-core next slice after 4c, under D-2026-11-23-02 (`internal/process/orchestration/DecisionLog.md:19`); E38 supplied storage/resolution.
+
+**Evidence/shared cause:** `governance-policy.ts:113–130` explicitly reports `enforced:false` and says no call path reads the resolved layers. The effective endpoint preserves that disclosure (`:424–431`). `governed-evaluate.ts:467–475` reads current decision policy epoch/entitlements but does not call the inherited-policy resolver. This is not a claim that current entitlement/ABAC enforcement is missing.
+
+**Smallest acceptable fix:** wire the existing typed rule fold into the existing model/connector/MCP/A2A decision paths before dispatch. Retain `POLICY_RULES`/`mergeRule` (`packages/shared/src/governance-policy.ts:24–37,69–93`), rather than introduce a generic priority or another policy engine. ADR-0357 §4 (`:130–152`) already chooses intersection for allow lists, union for deny lists, minimum ceilings, maximum floors, OR for requirements and strictest ordered values. **Reject nearest-wins and child exceptions:** the ADR explicitly refuses widening; a new exception needs its own owner decision and contract. A parent change must not be overridden by a formerly looser stored child.
+
+Define each field's existing enforcement owner: `maxBudgetUsd` describes the maximum configured project budget (`shared/governance-policy.ts:29`), not automatically a per-call spend limit; `auditRetentionDays` is a retention floor, not a caller permission. Do not pretend every field is enforced by adding one call-time deny check. Map workflow/sign-off/retention facts into their existing authoritative gates and disclose any incomplete rule coverage.
+
+**Required tests:** same prohibited action across all four surfaces; parent/child disjoint allow lists; deny union; zero call/budget ceilings; every floor/flag/order rule; parent tightening, project BU move and use-case reassignment between evaluation/commit; stale cached decisions/approval replays; resolver/database/schema failures and unknown subject fail before dispatch; simultaneous calls cannot exceed existing atomic limits/budgets. A valid chain with no stored rule uses declared strict product defaults (`EffectiveRule.value:null`, `:130`); distinguish that from an unreadable/invalid chain. Do not turn missing configuration into permissive success or label every unset rule a resolver failure.
+
+Reuse the existing decision-epoch commit recheck (`governed-evaluate.ts:397–406`); explicitly test that hierarchy/layer changes invalidate the evaluated snapshot—existing policy writes have their own hierarchy lock (`governance-policy.ts:52–53`), which alone does not prove dispatch consistency.
+
+**Audit contract:** surface, caller/actor-chain identities, resource/project/use-case, outcome, safe reason code, hierarchy snapshot/version/digest, applied rule names and contributing levels. `setBy` is only the last tightening level; unions/intersections can have multiple contributors (`EffectiveRule.setAt`, `:133–135`). Current resolver drops row versions (`governance-policy.ts:103–107`), so snapshot/version evidence needs explicit DTO work. Keep full details in authorised audit views; ordinary callers get only safe reason/recovery and a support reference, not hidden rule text, membership or another subject's policy.
+
+#### Discussion CXR-BRN-UX-04 — Preview specific policy impact before save
+
+**Proposal, not a new bug:** no F/S incidence claimed. Start with effective old→new values and inherited source, then bounded scenario comparisons; do not promise an exhaustive “who gains access” census.
+
+Existing `/v1/abac/simulate` assembles authoritative project context and returns ABAC attributes/verdict, explicitly noting ABAC never grants (`abac.ts:1140–1176`). Governance config plan/apply already binds review to a plan hash and re-plans under lock (`governance-config-apply.ts:116–129`). Neither is a complete hypothetical-layer evaluator for all four call surfaces.
+
+**Smallest contract:** an authorised read-only preview accepts one candidate layer, its `expectedVersion`, subject and bounded permitted scenarios; returns baseline/candidate effective-rule deltas, tighten/refused-widen flags, applicable provenance, per-scenario old→new decision and “not evaluated” limits. Derive membership, project, environment and actor facts on the server. Bind preview to hierarchy/version plus candidate digest; stale save returns conflict and requires review. Preview must not dispatch tools, consume budgets, mint approvals or persist simulated allow rows. Full population estimates require their own bounded/paginated visibility model; an incomplete sample never gets an exact affected-user total.
+
+Acceptance: known tightening/refused widening, unrelated actor denied, tampered subject/environment, stale hierarchy, partial unavailable scenario, and preview followed by real-call equivalence at the same snapshot. UI says “configuration stored; runtime enforcement unavailable” until SEC-01 coverage is actually delivered.
+
+#### Research comparison
+
+Fetched official guidance 2026-11-24: [Cedar authorization](https://docs.cedarpolicy.com/auth/authorization.html) documents forbid-overrides/default-deny and diagnostics; [OPA policy testing](https://www.openpolicyagent.org/docs/policy-testing) documents explicit policy tests and coverage. Reuse existing Cedar plus the product's tested merge table; borrow differential/scenario testing, not a new Rego engine. A Cedar permit/diagnostic is not proof the whole gateway permits or that a policy had no evaluation errors. No library/assets added. Scope remains policy design; A2A token, memory trust and tenant-table assurance require separate traces.
+
+
+**CXR-BRN-SEC-02 — Delegation must retain the initiating authority.** Existing counterevidence matters: `delegation.ts:5–30,309,499,523,1043–1095` checks actor/sponsor/parent/lead scope, caps children against parent remaining, uses fresh stored live chains and transactionally allocates/settles budgets. `orchestration.ts:757–784` rechecks the current worker owner under the initiating user and lead ceiling immediately before dispatch. `a2a.ts:459–460` explicitly has no delegated path: an A2A user call is not evidence that external delegated A2A is implemented. Shared cause to challenge is attribution/context propagation across handoffs, not an absent grant engine. Smallest slice: reuse these checks and existing `jose` sender-bound token implementation (`delegated-token.ts:172–227,505–541,668`) in a focused cross-path contract suite. Acceptance: revoke parent/actor/sponsor rights after planning; change environment/project/audience/binding; race child allocations; retry a charged usage row; tool output asks for broader access. Every case refuses or remains within the original envelope, without a cached allow, duplicate reservation or authority inferred from text. No additional auth framework recommended; existing maintained `jose` and Vitest/Postgres suffice. No new defect F×S assigned without reproduction.
+
+**CXR-BRN-SEC-03 — Separate scanner result, source trust and authority.** `memory-write-gate.ts:2–18,81–120` already reuses the write floor and verifies causal-context ownership; `memory-governance.ts:89–147` scans writes, with block/log modes and text-free audit. `content-trust-routes.ts:5–16` starts sources untrusted and write floor trusted, with audited step-up relaxation. Shared cause is a misleading “clean means trusted” interpretation, not proof these checks are missing. Smallest fix: show scan result and source tier separately in the existing evidence/refusal UI; add contract tests to current scanner/floor suites rather than a second scanner. Acceptance: clean untrusted tool output cannot drive a protected write; a malicious description/output/retrieval/memory revision cannot acquire system-instruction authority; copied context retains provenance; unknown/different-owner causal context cannot borrow a clean record. Test context omitted on agent-generated writes against the actual producer contract before claiming a bypass. Detector false negatives remain a disclosed limit. Raw prompts/payloads must not enter generic denial audit.
+
+**CXR-BRN-SEC-04 — Credential maintenance tests should bind intent to one resource.** Existing INT-002..005 and mockup 05 already own draft scoping, metadata errors, token-only replacement and entitlement subjects; #1229 must not receive duplicate slices. Smallest acceptable test matrix: connection A→B, provider switch, metadata failure, token-only rotation retaining destination, explicit destination clear/change, cancellation during proof, committed write with failed refresh, uncertain timeout, old credential revoked, and no plaintext read-back. Verify effective host through existing guarded fetch and encryption/store rules; a saved credential is not provider health. Any provider-contact test needs a separately authorised backend contract. Retest #1229 at its final merged head rather than reviewing a moving draft as completed.
+
+**CXR-BRN-SEC-05 — Sample isolation by principal and route contract.** `internal/ARCHITECTURE.md:263` describes one organisation per deployment; do not misreport every table without an org column as a cross-tenant vulnerability. Existing RLS tests (`zz-adr0234-rls-*.test.ts`, `testing/rls-slice1-migration-scan.ts`) are the starting point. Smallest slice: stratify newly added tables/routes into owner/project/admin/public/system, choose one positive and one denied principal for list/count/export/detail/mutation, and run the same fixtures with normal RLS credentials, not a superuser. Acceptance: another principal's rows cannot appear in totals/exports/cursors, direct IDs do not disclose existence, and transaction/session scope is cleared when pooled connections are reused. A sample yields named evidence only; it cannot certify every new table.
+
+**CXR-BRN-SEC-06 — Validate the required-check plan, not just green labels.** `.github/workflows/ci.yml:153–169` now documents PR/main coverage and the #1227 skipped-journey incident. Reuse `.github/actions/ci-scope` and `scripts/ci-plan.mjs`; do not add another scope classifier. Smallest slice: executable fixture comparisons for relevant path sets and workflow events, with intentional skip reasons. Acceptance: row/kit/shared UI changes request journey coverage on the released PR head; required jobs absent, cancelled or unexpectedly skipped cannot count as success; docs-only exemptions remain explicit; pinned action SHAs and assign-at-merge journal integrity remain intact. This is validation of the already assigned #1230 fix, not a second incident card or claim of workflow compromise.
+
+
+### UI/UX feedback beyond the policy preview
+
+**CXR-BRN-UX-01 — Information architecture (design priority 1).** The ranked table in
+[mockup 11](mockups/11-first-run-and-navigation.md#ranked-cut-merge-keep--navigation-only) keeps security, Inbox and current work
+reachable; joins setup/decision/sign-in/model task entry points; and moves specialist training/tracing/simulation
+out of the default first-run presentation. Shared cause: people must learn suite taxonomy before finding a task.
+Smallest fix: aliases/orientation links in the existing permission-filtered suite registry (`suites.tsx:578–596`),
+not a second navigation database. Acceptance: an admin can reach setup and an approval from task wording; a member
+cannot reveal admin-only destinations via aliases or typed URLs; all existing routes remain reachable in their scope.
+
+**CXR-BRN-UX-02 — First run (design priority 1).** The mutable resumable wizard already exists
+(`FirstRunPage.tsx:94–139`); readiness is intentionally read-only (`GettingStartedPage.tsx:139–231`). A Home card
+should say Continue setup versus Review current readiness, keeping recorded progress, current satisfaction and drift
+distinct. Starter roles grant nothing and a credential is not health. Reuse the six-step lifecycle; connector setup
+is conditional on the intended task, not a new mandatory step. Acceptance in mockup 11 covers new/resumed/drift,
+failed independent reads, applicable air-gap/self-hosted skips and a deliberate governed first call. “First ten
+minutes” is an orientation sequence, not a guaranteed setup duration or completed study.
+
+**CXR-BRN-UX-03 — Why was this denied? (design priority 1).** [Mockup 10](mockups/10-denial-explanations-and-recovery.md)
+uses the existing refusal mapping and inline notice. Show a safe reason, known outcome and supported next step;
+caller, assigned approver and administrator get different authorised detail. Unknown code is not raw upstream text;
+a timeout is not proof of denial/no side effects. Recovery URLs are trusted local destinations. Acceptance spans
+model/connector/MCP/A2A, proof/cancel, hidden resources, partial execution and unconfirmed outcome. Existing guidance
+is positive counterevidence: this proposal does not claim all refusals lack useful copy or leak policy.
+
+**CXR-BRN-UX-05 — Phone approvals (design priority 1; existing mockup 02).** Keep request identity, exact operation/scope,
+expiry, caller role and consequences above one reachable decision row. A payload diff is useful only when the actual
+canonical before/after facts exist; otherwise show the current exact request and say no comparison is available.
+Never trim essential arguments or authorisation context to fit a phone. “One-tap deny with a reason” cannot bypass a
+required reason or make denial the default; offer a labelled reason field when the actual rule requires it and a
+deliberate action. Reuse signed/quorum/proof paths. Acceptance: 375 px plus zoom/software keyboard; long payload,
+individual signature, partial quorum, caller-own request, proof cancel and one in-flight decision. Native device
+results remain untested. No additional approval lifecycle or mobile-only decision endpoint is needed.
+
+**New consumer evidence for the existing pending-action cause:** four controlled Inbox probes passed at 375/768 px,
+light/dark (**6.5 s**). The heading received focus, the Deny action was within the viewport, there was no page-wide
+horizontal overflow, keyboard submission sent one request, and both decision buttons locked. However, Escape closed
+the drawer before the held response arrived. `InboxPage.tsx:78` unconditionally clears the open ID; its
+`DetailDrawer` call at `:368–375` supplies no pending close guard. This is a further UIS-09/UIW-08/CST-006-family
+consumer, not an extra numbered defect. **Impact estimate F5 × S3 =15**, conditional on dismissal during a slow
+operation; no real incidence, lost persisted reason, double decision or server corruption is claimed. Reuse the
+existing pending guard and outcome treatment across the assigned approvals slice. Acceptance must include Escape,
+close control/backdrop and uncertain response, not merely disabled Approve/Deny. All writes were mocked and refused;
+[probe evidence](evidence/2026-11-24/phone-approval-pending.json) is separate from a successful acceptance test.
+
+**CXR-BRN-UX-06 — Cost dashboards (design priority 1 for meaning, 2 for layout).** The default Spend tab already keeps
+budget warnings visible (`CostDashboardPage.tsx:42–43`); keep that strength. Lead a selected project's summary with
+current period, spent/limit, server-effective overage, forecast basis and one permitted review action, then let users
+expand contributor detail. Remove duplicate explanatory prose/advanced setup from the initial summary, not warnings,
+units or provenance. Savings remain a separate estimate and imported figures stay distinct from governed usage.
+Smallest fix is information order in the current rollup, not another aggregation service. Acceptance uses below/over
+budget, prior-period approval, unknown/failed rollup, unpriced work and same-window export. “Answer within ten seconds”
+is a future task target; it is not measured and the deferred study cannot be marked passed.
+
+**CXR-BRN-UX-07 — Empty/error/partial states (correctness priority 1).** Reuse existing HME-001, WBK-001, IDM-003 and
+INT-003 rather than open one slice per label. A sample of `?? 0` source expressions alone is insufficient: establish
+whether a successful enclosing payload guarantees a number before calling it an unknown-state bug. Extend per-task
+fixtures for missing/error/partial/current/stale facts, then use the existing query/state helper in the relevant
+slice. Acceptance: read failure cannot become zero/healthy/connected, successful zero remains zero, and independent
+panels and permissions stay usable. This round does not assert another reproduced screen defect from a text scan.
+
+### Product and feature feedback
+
+**CXR-BRN-PRD-01 — PM disagreement:** keep both statuses, source ownership, last confirmed sync and safe failure next step together. `pm.ts:1621–1660` checks run/workflow visibility; `:1674–1690` already computes drift, recognising an explicitly adopted state. Reuse that projection. Never label drift “sync failed” automatically or silently overwrite a field whose source of truth differs. Acceptance: delayed webhook, failed outbound mirror, explicit adoption and later external edit remain distinguishable; no new precedence invented in the browser.
+
+**CXR-BRN-PRD-02 — Non-engineer run progress:** retain the existing graph but lead with “completed / working / waiting / needs attention”, the named blocker and one permitted next action. `RunDetailPage.tsx:2–16,52–58` already distinguishes estimated/measured caps, pass limits and in-progress elsewhere; `orchestration.ts:294–419` supplies run/node budget reasons. Show measured spend and reserved/estimated amounts separately; never fabricate per-worker remaining budget if absent. Acceptance: blocked node, independent review, unpriced work, concurrent dispatch and measured cap breach show the correct responsible role and action.
+
+**CXR-BRN-PRD-03 — Honest savings:** `OptimizationPage.tsx:2,60,85–96` already says estimated savings; do not open a relabelling slice claiming it says realised. P-06 remains the shared counterfactual/accounting issue (`optimization.ts:77–78`). Keep measured usage beside estimated avoided spend, with technique, basis/window and unavailable state. No unsupported “would have spent” percentage or estimated savings added to a billed total. Acceptance compares the same scope/window and distinguishes a technique event from a proven causal saving.
+
+**CXR-BRN-PRD-04 — Deployment boundary:** architecture `:259–268` and `docs/deployment/DATA_BOUNDARY.md` disclose planes and modes; organisation settings already explain that air-gapped strictness cannot be loosened (`OrganizationPage.tsx:839`). Reuse the current effective mode/posture in a concise deployment summary: what remains local, what egress is possible and who operates it. Gate live guarantees on actual configuration, not a selected label. Acceptance covers hosted/BYOC/air-gapped, unavailable posture, strict floor and any declared metadata transfer.
+
+**CXR-BRN-PRD-05 — Compliance consequence review:** `ComplianceProfilesPage.tsx:468–530` already previews classifications, pending reclassification and strictest-per-dimension composition. Bring that existing preview beside the project tag-change confirmation rather than invent a cascade engine. Show required stages, PII mode, retention and pending review; distinguish current effective from proposed. Acceptance uses conflicting profiles, version changes between preview/commit, unavailable preview and unauthorised scope. Atomic version checks need actual server support; a stale browser preview is never a guarantee.
+
+Limits: focused source reading, not complete call-graph, UI, RLS or security-checklist coverage. No native devices, integrations or customer data used. All proposed validations must report their actual scope; no new security bug is asserted by this brainstorm.
+
+
+### Independent checks completed this round
+
+- **Report archive/retention:** **25 checks passed** against compiled `buildApp` and a fresh local PostgreSQL database.
+  Archive refused a member, retained the definition/two runs/schedule rows, disabled the schedule, hid the active-list
+  entry, exposed it through include-archived, retained history and admin reads, refused another member's run reads,
+  and refused further generation/re-archive. No rows were deleted; scratch records remain local. Test connection was
+  corrected from TCP to the existing Unix socket before assertions ran. This is application-authorisation coverage
+  with a privileged database login, **not an RLS or production-boot test**.
+  [Sanitised runtime evidence](evidence/2026-11-24/report-retention-runtime.json).
+- **Merged UI fixes:** **21/21 checks passed, no skips/flakes**, in reports/risks, cost recovery and DataList suites
+  (**29.5 s**). These use mocked gateway responses at desktop width; they establish no new native/provider/mobile
+  assurance. [Evidence](evidence/2026-11-24/merged-ui-retests.json).
+- **Inherited-policy merge foundation:** the shared policy suite passed (**34 reported Vitest tests/results across two
+  runtime/typecheck results, no type errors; 11.68 s**). Six additional compiled-helper edge probes passed for zero
+  ceilings, disjoint allow lists, absent layers, deny union and contributor provenance. This validates the fold's
+  named examples, not runtime wiring: the gateway still explicitly reports inherited enforcement unavailable.
+  [Evidence](evidence/2026-11-24/policy-merge-retest.json).
+- **S-08:** **11/11 tests passed** across hashing and real-database rehash-on-login suites (**31.96 s**), including
+  current cost, legacy verification/upgrade, malformed bounds, concurrency and event-loop behaviour. S-10 is not
+  covered by those two suites. [Evidence](evidence/2026-11-24/password-security-retest.json).
+- Whole workspace build, migration guard, ADR-index **8/8**, bundle budgets and mockup integrity are verified before
+  publication. The [iteration 10 validation record](evidence/2026-11-24/iteration10-validation.json) gives exact scope
+  and bundle bytes. No product code, master-owned record, migration or production/cloud write was authored here.
+
+These checks strengthen the named card/task evidence without certifying every related feature. REV-002's core
+retention/findability now has independent real-database evidence, alongside the mocked confirmation test. Scheduler
+sweep re-enable races, signed download verification, native accessibility and every-role/browser combinations remain
+outside this new runtime probe. The current inventory is still 157 routes; no new whole-route/function review is claimed.
+
+### Research and continuity
+
+Policy proposals compare official Cedar authorisation and OPA testing guidance, then choose the existing Cedar/merge
+pattern. Refusal design compares the current typed-error mapping with RFC 9457 at the HTTP boundary; the current
+mapping is the smallest compatible step. RFC 9457 was fetched successfully on 2026-11-24; a fresh OWASP error-handling
+page fetch was blocked, so only earlier retrieved OWASP material is relied on. No library or vendor code was added.
+
+The owner requested a four-hour wake-up schedule. Available tools and Cloud runtime capabilities expose **no persistent
+assistant scheduler**; no cron or automation was created and no unattended continuation is claimed. Preserve this
+file, the PR and local session handoff for resume. Continue prioritising named security and user-task evidence; do not
+let the feedback loop become repeated broad suggestions without retests or source reasoning.
+
 ## Claude/Codex discussion ledger
 
-Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and the six design proposals still await a direct design response. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
+Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and all six design proposals now have the [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112), reconciled in iteration 10. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
 
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
@@ -1635,10 +1841,10 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | UIS-02 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S4=28; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
 | UIS-03 | mock-browser + source | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
 | UIS-04 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 10; independent retest open |
-| UIS-05 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
-| UIS-06 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
+| UIS-05 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| UIS-06 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 | UIS-07 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
-| UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; independent retest open |
+| UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 | UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; owner requires dirty-discard prompt + pending guard; retest open |
 
 | CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
@@ -1646,22 +1852,22 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | CXR-ACC-003 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
 | CXR-ACC-004 | source; runtime acceptance open | ACCEPT-triage-low; Claude F2×S2=4; [reasoning](codexreviews-response.md) | Deferred; #1188; no code planned; not closed |
 | CXR-ACC-005 | source; runtime acceptance open | ACCEPT-build; Claude F2×S3=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
-| CXR-REV-001 | mock-browser + source | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
-| CXR-REV-002 | mock-browser + source | ACCEPT-build; Claude F2×S6=12; [reasoning](codexreviews-response.md) | Agreed; owner chose archive/retention, slice 6; retest open |
-| CXR-REV-003 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
-| CXR-REV-004 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
-| CXR-REV-005 | mock-browser + source | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; independent retest open |
+| CXR-REV-001 | mock-browser + source | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-002 | source + independent real-DB and mocked UI retest | ACCEPT-build; Claude F2×S6=12; [reasoning](codexreviews-response.md) | Merged slice 6; core retention/findability/authorisation passed 25 runtime checks; signed-export/scheduler-race scope remains unverified |
+| CXR-REV-003 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-004 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-005 | mock-browser + source | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 
 | CXR-INT-001 | mock-browser + source | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
 | CXR-INT-002 | mock-browser + source | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
 | CXR-INT-003 | mock-browser + source | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
 | CXR-INT-004 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
 | CXR-INT-005 | mock-browser + source (iteration 4; connector branch only) | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
-| CXR-CST-001 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
-| CXR-CST-002 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
-| CXR-CST-003 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
-| CXR-CST-004 | source; runtime acceptance open | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
-| CXR-CST-005 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; independent retest open |
+| CXR-CST-001 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-002 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-003 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-004 | source; runtime acceptance open | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-005 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 
 | CXR-APR-001 | mock-browser + source; consumer limits above | Agreed; Claude F×S=32; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; queue invalidation; independent retest open |
 | CXR-APR-002 | mock-browser + source; consumer limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; shared durable outcome without replay; independent retest open |
@@ -1690,19 +1896,19 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | CXR-CON-004 | mock-browser + source; contract limits above | Agreed, triage-low; Claude F×S=4; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Deferred to [#1212](https://github.com/dhruvmahendrapatel/RegulAIt/issues/1212); no standalone code fix |
 
 | CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
-| CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Awaiting response | Reported; shared status-honesty scope; no fix claimed |
+| CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Claude agrees; F7×S4=28; [UX reply](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112) | Agreed; slice 19; independent post-fix retest open |
 | CXR-CST-006 | Source + delayed-response mocked browser; alias/desktop scope | Awaiting response; F5×S3=15 | Reported; shared pending-action integration gap; no server corruption claimed |
 
 ### Design proposal discussion
 
 | Proposal | Intended outcome | Claude / builder response |
 | --- | --- | --- |
-| CXR-UXP-001 | Task-led Home and understandable cross-suite discovery | Proposed; awaiting design response and task validation |
-| CXR-UXP-002 | Resource, effective state, eligibility and clear next action | Proposed; awaiting design response and role validation |
-| CXR-UXP-003 | Truthful progress, partial completion and safe recovery | Proposed; awaiting design response and outcome validation |
-| CXR-UXP-004 | Scoped, reviewed policy changes against current baseline | Proposed; preserve owner-approved exception contract |
-| CXR-UXP-005 | Reachable queues, loaded subject and stable list position | Proposed; awaiting list/subject task validation |
-| CXR-UXP-006 | Populated mobile/keyboard/native accessibility release tasks | Proposed; acceptance targets are not completed user studies |
+| CXR-UXP-001 | Task-led Home and understandable cross-suite discovery | Claude narrowed; slice 27 after 19; owner approved attention-first; eligible/ranking APIs gated; studies deferred |
+| CXR-UXP-002 | Resource, effective state, eligibility and clear next action | Claude narrowed; per-task slices 20/22/23/24; server capabilities gated; extract shared block only after real reuse |
+| CXR-UXP-003 | Truthful progress, partial completion and safe recovery | Claude agrees; slices 20/21/22; current-attempt/schedule facts gated; no new lifecycle |
+| CXR-UXP-004 | Scoped, reviewed policy changes against current baseline | Claude narrowed; slice 23 current policy, 15 exceptions; atomic version/new-row contracts gated |
+| CXR-UXP-005 | Reachable queues, loaded subject and stable list position | Claude narrowed; merged foundations, slice 26 approvals paging/remaining retest; 21 relevant UI checks rerun this round |
+| CXR-UXP-006 | Populated mobile/keyboard/native accessibility release tasks | Claude narrowed; per-slice acceptance, no separate framework; studies deferred, native checks untested |
 
 ### Coverage — every page and function is a tracked goal, not a blanket completion claim
 
