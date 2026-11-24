@@ -39,7 +39,7 @@ import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 import { errMessage } from "./err-serializer.js";
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -69,6 +69,7 @@ import { auditRoutingClassification, classifyForRouting, routingClassifierDetail
 import {
   defaultBaseUrlFor,
   isModelProviderKind,
+  validateVendorCredential,
   ModelProviderError,
   resolveModelProvider,
   type ModelChatMessage,
@@ -87,6 +88,8 @@ import {
   createConnectorGrantSchema,
   createConnectorSchema,
   createModelCredentialSchema,
+  ENV_FALLBACK_MODEL_PROVIDERS,
+  VENDOR_MODEL_PROVIDERS,
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
@@ -563,6 +566,11 @@ export interface GovernedDispatchArgs {
   delegationGrantId?: string | undefined;
   /** §5.1 lead ceiling (agent ids) for the delegated decision; null/absent = none */
   delegationCeilingAgentIds?: readonly string[] | null | undefined;
+  /**
+   * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`) for the governed core's ABAC v5
+   * request. Absent (an internal dispatch with no request behind it) = each reads as its strict value.
+   */
+  principal?: AbacPrincipalContext | null | undefined;
 }
 
 /**
@@ -1429,6 +1437,9 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     provider: served.provider ?? null,
     model: served.model ?? null,
+    // ADR-0251 slice 4b: the request's session facts and the delegation chain feed the ABAC v5 request
+    principal: args.principal ?? null,
+    delegationGrantId: args.delegationGrantId ?? null,
     // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
     invocation: {
       input: args.input,
@@ -2696,10 +2707,13 @@ async function performDispatch(
     virtualKey?: VirtualKeyContext | null | undefined;
     /** ADR-0173 batch 2c: the pillar-6 compaction state, for the span only */
     compaction?: { active: boolean; compacted?: boolean | undefined } | null | undefined;
+    /** ADR-0251 slice 4b: the request's session facts for the governed core's ABAC v5 request */
+    principal: AbacPrincipalContext;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
   return executeGovernedDispatch(db, dataKey, {
+    principal: args.principal,
     userId,
     served: registry.find((a) => a.id === routing.selectedAgentId),
     requestedAgentId,
@@ -2750,6 +2764,10 @@ export function platformEnvKey(
     openai: { key: ["OPENAI_API_KEY"], base: ["OPENAI_BASE_URL"] },
     google: { key: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], base: ["GOOGLE_BASE_URL", "GEMINI_BASE_URL"] },
     xai: { key: ["XAI_API_KEY"], base: ["XAI_BASE_URL"] },
+    // ADR-0352: the API-key vendors. Base URLs come only from the stored credential.
+    mistral: { key: ["MISTRAL_API_KEY"], base: [] },
+    cohere: { key: ["COHERE_API_KEY", "CO_API_KEY"], base: [] },
+    qwen: { key: ["DASHSCOPE_API_KEY", "ALIBABA_API_KEY"], base: [] },
   };
   const entry = map[provider];
   if (!entry) return null;
@@ -2774,13 +2792,16 @@ export function platformEnvKeyName(provider: string): string | null {
     openai: "OPENAI_API_KEY",
     google: "GOOGLE_API_KEY",
     xai: "XAI_API_KEY",
+    mistral: "MISTRAL_API_KEY",
+    cohere: "COHERE_API_KEY",
+    qwen: "DASHSCOPE_API_KEY",
   };
   return names[provider] ?? null;
 }
 
 /** The non-mock providers that support the platform-key env fallback, i.e. the
  * provider kinds `platformEnvKey` can resolve. */
-export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
+export const ENV_FALLBACK_PROVIDERS = ENV_FALLBACK_MODEL_PROVIDERS;
 
 /**
  * ADR-0181: the request header a client sends to say "if this call may not
@@ -3215,6 +3236,10 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/model-credentials", async (req, reply) => {
     const body = createModelCredentialSchema.parse(req.body);
+    // ADR-0352: a structured (Bedrock / Vertex) secret is checked when it is typed,
+    // not on a user's first call. The message never contains the secret.
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     }
@@ -3298,7 +3323,8 @@ export function registerAgentConnectorRoutes(
     const providers: Record<string, { configured: boolean }> = {
       mock: { configured: true },
     };
-    for (const provider of ENV_FALLBACK_PROVIDERS) {
+    // ADR-0352: every shipped vendor kind; the env half only for kinds that have one
+    for (const provider of VENDOR_MODEL_PROVIDERS) {
       providers[provider] = {
         configured:
           stored.has(provider) ||
@@ -3411,6 +3437,8 @@ export function registerAgentConnectorRoutes(
       return reply.status(403).send({ error: "forbidden" });
     }
     const body = createModelCredentialSchema.parse(req.body);
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     // ADR-0024 (O15): under enforced key custody, per-user BYO credentials
     // stop working — creation AND update (this endpoint upserts) are refused
     // with an explanation, and every refusal is audited. Existing rows are not
@@ -4307,6 +4335,7 @@ export function registerAgentConnectorRoutes(
       if (ruleAnswer && body.input) {
         const ruleStep = ruleAnswer.ref;
         const governed = await executeGovernedDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
           userId,
           served: agent,
           requestedAgentId: agent.id,
@@ -4424,6 +4453,7 @@ export function registerAgentConnectorRoutes(
         });
         if (hit) {
           const governed = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,
@@ -5138,6 +5168,7 @@ export function registerAgentConnectorRoutes(
         const send = (event: string, data: unknown) =>
           reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         const outcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5204,6 +5235,7 @@ export function registerAgentConnectorRoutes(
       }
       if (body.dispatch) {
         dispatchOutcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5674,6 +5706,8 @@ export function registerAgentConnectorRoutes(
       object: body.object,
       payload: body.payload,
       projectId: body.projectId ?? null,
+      // ADR-0251 slice 4b: the request's session facts for the ABAC v5 request
+      principal: abacPrincipalFromRequest(req),
     });
     return reply.status(out.status).send(out.body);
   });

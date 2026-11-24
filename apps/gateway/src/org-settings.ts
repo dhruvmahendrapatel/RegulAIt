@@ -483,6 +483,10 @@ const ENV_KEY_NAMES: ReadonlyArray<{ provider: string; envVar: string; aliases: 
   { provider: "openai", envVar: "OPENAI_API_KEY", aliases: [] },
   { provider: "google", envVar: "GOOGLE_API_KEY", aliases: ["GEMINI_API_KEY"] },
   { provider: "xai", envVar: "XAI_API_KEY", aliases: [] },
+  // ADR-0352
+  { provider: "mistral", envVar: "MISTRAL_API_KEY", aliases: [] },
+  { provider: "cohere", envVar: "COHERE_API_KEY", aliases: ["CO_API_KEY"] },
+  { provider: "qwen", envVar: "DASHSCOPE_API_KEY", aliases: ["ALIBABA_API_KEY"] },
 ];
 
 /** which conventional platform-key env vars are currently PRESENT on this
@@ -778,6 +782,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         return reply.status(422).send({
           error: "approver_disabled",
           detail: "the chosen infra approver account is deactivated",
+        });
+      }
+    }
+    // ADR-0366: rogue-agent containment proposals are decided by an administrator, so the named approver must be an
+    // ACTIVE ADMIN — anyone else could never decide them, and every proposal would wait unrouted
+    if (body.containmentApproverUserId) {
+      const [approver] = await db
+        .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.containmentApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (!approver.isAdmin || approver.disabledAt) {
+        return reply.status(422).send({
+          error: "containment_approver_not_admin",
+          detail: "the containment approver must be an active administrator",
         });
       }
     }

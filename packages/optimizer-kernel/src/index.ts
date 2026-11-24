@@ -993,3 +993,4 @@ export function planFilePreprocessing(input: PlanFilePreprocessingInput): FilePr
 
 export * from "./rule-induction.js";
 export * from "./decision-table.js";
+export * from "./repetitive-asks.js";

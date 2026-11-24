@@ -71,6 +71,9 @@ import {
   ISOLATION_SETTING_KEYS,
   ISOLATION_STRICT_DEFAULTS,
   type UpdateOrgSettings,
+  CONTAINMENT_AUTO_THRESHOLD_DEFAULT,
+  containmentThresholdLooser,
+  type ContainmentAutoThreshold,
 } from "@regulait/shared";
 
 /** every key `PUT /v1/org/settings` can store (the confirm flag is write-only) */
@@ -287,9 +290,22 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   sapWriteRatePerHour: atMost(10),
   sapUnattributedWritesAllowed: notEqual(false),
   sapReadsApproveFirst: fromStored(false, (v, b) => b === true && v === false),
+  // ADR-0347: a longer memory lifetime and storing flagged memory writes are looser than the default
+  agentMemoryTtlHours: atMost(24),
+  agentMemoryScanMode: notEqual("block"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),
+  // ADR-0366: 'off' (never automatic) is looser than the 'critical' default; raising the threshold is looser than the
+  // stored value (an org that lowered it to 'high' raises it back only with the step-up). Lowering it only tightens.
+  containmentAutoSeverity: rule(
+    CONTAINMENT_AUTO_THRESHOLD_DEFAULT,
+    (v) => containmentThresholdLooser(v as ContainmentAutoThreshold, CONTAINMENT_AUTO_THRESHOLD_DEFAULT),
+    (v, b) => containmentThresholdLooser(v as ContainmentAutoThreshold, b as ContainmentAutoThreshold),
+  ),
+  containmentApproverUserId: exempt(
+    "names the administrator containment proposals go to; it routes a proposal and refuses or allows nothing (automatic containment does not depend on it)",
+  ),
   energyRegion: exempt("reporting only: which grid factor the energy estimate uses"),
   egressCompiledDefaultPolicy: notEqual("strict"),
   useCaseGateMode: notEqual("enforce"),
