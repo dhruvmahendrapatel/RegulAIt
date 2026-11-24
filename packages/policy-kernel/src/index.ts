@@ -486,7 +486,7 @@ export interface ApprovalRule {
    * reads as 'action' — the strict default — so an older rule body that carries
    * no scope can never be the loose one. The kernel itself does not branch on
    * this: the gateway resolves the strictest scope across the MATCHED rules
-   * (see `matchingApprovalRules` below) and uses it to decide whether an
+   * (see `matchingApprovalRulesWith` below) and uses it to decide whether an
    * already-approved queue entry has to fingerprint-match this call.
    */
   approvalScope?: "action" | "tool" | null;
@@ -693,9 +693,11 @@ export interface EvaluationInput {
   revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
   /**
-   * ADR-0239 slice 2 — which engine matches approval rules. The gateway passes the Cedar evaluator; absent/null = the
-   * hand-written predicate (`matchingApprovalRules`), kept for one release as ADR-0239 decision 4 did for rate limits.
-   * An evaluator that errors or throws DENIES the call (`approval-rule-engine-error`).
+   * ADR-0239 slice 2 — which engine matches approval rules: the Cedar evaluator
+   * (`@regulait/policy-kernel/approval-rule-cedar`), which the gateway passes. P8a (2026-11-21): the hand-written
+   * predicate is gone, so absent/null with any approval rule present REFUSES the call (`approval-rule-engine-error`,
+   * "no approval-rule evaluator is configured"), as decision 4 did for rate limits. An evaluator that errors or throws
+   * also DENIES.
    */
   approvalRuleEvaluator?: ApprovalRuleEvaluator | null;
   rateLimits?: readonly RateLimit[];
@@ -989,47 +991,25 @@ export function approvalRulesMayOverlap(a: ApprovalRuleRouting, b: ApprovalRuleR
 }
 
 /**
- * The approval-rule MATCH predicate, extracted so there is exactly one.
- *
- * `evaluate` uses it to find the rule that pauses a call; ADR-0104's gateway
- * matcher uses it to read the strictest `approvalScope` across the rules that
- * bound THIS call, so "which rules govern this approval" is one answer computed
- * once, not two answers that can disagree. The result is sorted by ADR-0229
- * precedence (`compareApprovalRulePrecedence`): the first element is the most
- * specific matching rule, the one `evaluate` reports as the pausing rule,
- * whatever order the caller passed the rules in.
+ * ADR-0239 P8a (2026-11-21): the hand-written approval-rule predicate (`matchingApprovalRules`) is removed. The match
+ * runs only on an injected engine (`matchingApprovalRulesWith`, Cedar in the gateway); with no engine the kernel
+ * refuses. `approval-rule-cedar.test.ts` keeps an independent transcription of the old predicate as its oracle.
  */
-export function matchingApprovalRules(
-  rules: readonly ApprovalRule[],
-  ctx: {
-    userId: string;
-    serverId: string;
-    tool: ToolRef;
-    deployContext?: readonly string[] | null | undefined;
-  },
-): ApprovalRule[] {
-  return rules.filter(
-    (r) =>
-      ruleAppliesToSubject(r, ctx.userId) &&
-      ruleAppliesToServer(r, ctx.serverId) &&
-      ruleAppliesToDeployMode(r, ctx.deployContext ?? null) &&
-      matchesScope(r.toolName, ctx.tool.name) &&
-      (!r.writeOnly || ctx.tool.kind === "write"),
-  ).sort(compareApprovalRulePrecedence);
-}
+const NO_APPROVAL_RULE_EVALUATOR_MESSAGE = "no approval-rule evaluator is configured";
 
 /**
  * ADR-0239 slice 2 — the approval-rule match on an injected engine, in ADR-0229 precedence order (the first element
- * names the approver). No engine = the hand-written `matchingApprovalRules`. An engine error or throw is returned as
- * an error verdict, never as "nothing matched": the kernel turns it into a deny, and a gateway caller must not read
- * an error as "no rule binds this call".
+ * names the approver). No rules = nothing matched, with no engine call. Rules but no engine, an engine error or a
+ * throw is returned as an error verdict, never as "nothing matched": the kernel turns it into a deny, and a gateway
+ * caller must not read an error as "no rule binds this call".
  */
 export function matchingApprovalRulesWith(
   evaluator: ApprovalRuleEvaluator | null | undefined,
   rules: readonly ApprovalRule[],
   ctx: { userId: string; serverId: string; tool: ToolRef; deployContext?: readonly string[] | null | undefined },
 ): ApprovalRuleVerdict {
-  if (!evaluator || rules.length === 0) return { kind: "matched", rules: matchingApprovalRules(rules, ctx) };
+  if (rules.length === 0) return { kind: "matched", rules: [] };
+  if (!evaluator) return { kind: "error", message: NO_APPROVAL_RULE_EVALUATOR_MESSAGE };
   try {
     const v = evaluator.matching(rules, {
       userId: ctx.userId,
@@ -1530,11 +1510,10 @@ function evaluateTool(input: EvaluationInput): Decision {
   // PILLAR 1: any matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.
   // ADR-0229: the MOST SPECIFIC matching rule is the one reported (and names
-  // the approver); `matchingApprovalRules` returns them in precedence order.
-  // The MATCH itself lives in `matchingApprovalRules` (above) because ADR-0104
-  // needs the same predicate outside the kernel, to read the strictest
-  // `approvalScope` off exactly the rules that bound this call. Two copies of
-  // that predicate could drift into governing different rule sets.
+  // the approver); `matchingApprovalRulesWith` returns them in precedence order.
+  // The MATCH runs on the injected engine (Cedar, ADR-0239), and the gateway
+  // reads the strictest ADR-0104 `approvalScope` through the SAME engine, so
+  // the two can never govern different rule sets. No engine = refused (P8a).
   const approvalVerdict = matchingApprovalRulesWith(input.approvalRuleEvaluator, input.approvalRules ?? [], {
     userId,
     serverId,
