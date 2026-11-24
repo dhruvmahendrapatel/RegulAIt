@@ -23,10 +23,10 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@aws-sdk/client-sagemaker` | `3.1160.0` | Apache-2.0 | SageMaker endpoints and models. |
 | `@aws-sdk/client-sts` | `3.1160.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
 | `@aws-sdk/credential-providers` | `3.1160.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |
-| `@smithy/fetch-http-handler` (github.com/smithy-lang/smithy-typescript) | `5.8.0` | Apache-2.0 | The AWS SDK's own fetch handler; its `customFetch` option is how every AWS call goes through the guarded fetch. |
+| `@smithy/fetch-http-handler` (github.com/smithy-lang/smithy-typescript) | `5.8.1` | Apache-2.0 | The AWS SDK's own fetch handler; its `customFetch` option is how every AWS call goes through the guarded fetch. |
 | `@smithy/types` | `4.19.0` | Apache-2.0 | AWS credential identity types. |
 | `@azure/identity` (github.com/Azure/azure-sdk-for-js) | `4.14.1` | MIT | `ClientAssertionCredential` (federated) and `ClientSecretCredential` (static relaxation), built with the guarded `HttpClient`. |
-| `@azure/core-rest-pipeline` | `1.25.0` | MIT | The `HttpClient` interface our guarded adapter implements. |
+| `@azure/core-rest-pipeline` | `1.25.1` | MIT | The `HttpClient` interface our guarded adapter implements. |
 | `@azure/core-auth` | `1.11.0` | MIT | `TokenCredential` type. |
 | `@azure/arm-resourcegraph` | `5.0.0` | MIT | Resource Graph queries for Cognitive Services accounts, deployments and ML workspaces. |
 | `@azure/arm-cognitiveservices` | `8.1.0` | MIT | ARM list-deployments when Resource Graph has no deployment rows. |
@@ -35,7 +35,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@google-cloud/service-usage` (github.com/googleapis/google-cloud-node) | `5.2.0` | Apache-2.0 | `batchGetServices`: is the Vertex AI or Generative Language API enabled. REST fallback mode. |
 | `@google-cloud/asset` | `7.2.0` | Apache-2.0 | `searchAllResources` for Vertex endpoints, models and index endpoints. REST fallback mode. |
 | `@google-cloud/resource-manager` | `7.2.0` | Apache-2.0 | `getIamPolicy`, read only for its audit configuration (are Data Access logs on). REST fallback mode. |
-| `google-auth-library` (github.com/googleapis/google-auth-library-nodejs) | `11.3.2` | Apache-2.0 | `IdentityPoolClient` (workload identity federation with a programmatic subject token) and `JWT` (service-account key relaxation); its Gaxios transporter carries the guarded fetch. Also used directly for the Logging `entries:list` REST call. |
+| `google-auth-library` (github.com/googleapis/google-auth-library-nodejs) | `11.3.4` | Apache-2.0 | `IdentityPoolClient` (workload identity federation with a programmatic subject token) and `JWT` (service-account key relaxation); its Gaxios transporter carries the guarded fetch. Also used directly for the Logging `entries:list` REST call. |
 | `zod` (github.com/colinhacks/zod) | `4.6.7` | MIT | Credential input schemas. |
 
 ## Notable transitive dependencies
