@@ -115,7 +115,7 @@ describe("external provider mutation admission", () => {
     // ADR-0331: the device-policy signer; a signature is what lets a directive act on a device
     { adapter: "device_policy", module: path.join(here, "directive-signer.ts"), source: path.join(here, "directive-signer.ts"), iface: "DirectiveSigner", reads: ["keyId"] },
     // ADR-0338: a vendor adapter's control member; `apply` takes an agent out of service, `reverse` puts it back
-    { adapter: "vendor_agent_control", module: path.join(here, "vendor-agent-control-contract.ts"), source: path.join(here, "vendor-agent-control-contract.ts"), iface: "VendorAgentControl", reads: ["actions", "readState"] },
+    { adapter: "vendor_agent_control", module: path.join(here, "vendor-agent-control-contract.ts"), source: path.join(here, "vendor-agent-control-contract.ts"), iface: "VendorAgentControl", reads: ["actions", "acceptedModes", "token", "locatorOf", "readState"] },
     // ADR-0361 slice 3: a sanctioned AI SaaS connector's remediation member; `deleteConversation` deletes a monitored conversation
     { adapter: "vendor", module: path.join(here, "ai-saas-remediation-contract.ts"), source: path.join(here, "ai-saas-remediation-contract.ts"), iface: "ConnectorRemediation", reads: ["conversationGone"] },
   ] as const;

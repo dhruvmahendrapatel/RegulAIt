@@ -14,6 +14,8 @@ const TENANT = "00000000-0000-4000-8000-000000000336";
 const CLIENT = "00000000-0000-4000-8000-000000000337";
 const USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BOT_1 = "b0000000-0000-4000-8000-000000000001";
+/** ADR-0338 slice 1b: the environment's Power Platform id (the quarantine's locator) */
+const ENV_ID = "e1000000-0000-4000-8000-000000000338";
 const BOT_2 = "b0000000-0000-4000-8000-000000000002";
 const REF = "c0000000-0000-4000-8000-000000000001";
 const ORG = "https://contoso.crm4.dynamics.com";
@@ -37,6 +39,8 @@ interface FakeOpts {
   botsNextLink?: string;
   /** this many knowledge sources on the first agent, in one page */
   manyComponents?: number;
+  /** ADR-0338 slice 1b: the organization detail answers this status instead (its environment id unreadable) */
+  orgDetailStatus?: number;
 }
 
 function fakeDataverse(opts: FakeOpts = {}) {
@@ -65,6 +69,11 @@ function fakeDataverse(opts: FakeOpts = {}) {
     if (url.origin === ORG) {
       const p = url.pathname;
       if (p === "/api/data/v9.2/WhoAmI") return json({ UserId: USER, BusinessUnitId: CLIENT, OrganizationId: TENANT });
+      if (p === "/api/data/v9.2/RetrieveCurrentOrganization(AccessType=@p1)") {
+        if (opts.orgDetailStatus) return json({ error: { message: "no" } }, opts.orgDetailStatus);
+        if (url.searchParams.get("@p1") !== "Microsoft.Dynamics.CRM.EndpointAccessType'Default'") return json({}, 400);
+        return json({ Detail: { OrganizationId: TENANT, EnvironmentId: ENV_ID.toUpperCase(), UrlName: "contoso" } });
+      }
       if (p === `/api/data/v9.2/systemusers(${USER})/Microsoft.Dynamics.CRM.RetrieveUserPrivileges()`) {
         if (opts.privilegesStatus) return json({ error: { message: "no" } }, opts.privilegesStatus);
         return json({ RolePrivileges: (opts.privileges ?? ["prvReadbot", "prvReadbotcomponent", "prvReadconnectionreference"]).map((n) => ({ PrivilegeName: n, Depth: "Global" })) });
@@ -185,7 +194,7 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
     const [hr, invoice] = res.registryAgents!;
     expect(hr!.externalId).toBe(`contoso.crm4.dynamics.com/${BOT_1}`);
     expect(hr!.displayName).toBe("HR helper");
-    expect(hr!.attributes).toMatchObject({ environment: "contoso.crm4.dynamics.com", botId: BOT_1, state: "active", language: "English", authenticationMode: "custom_entra_id", accessControlPolicy: "group_membership" });
+    expect(hr!.attributes).toMatchObject({ environment: "contoso.crm4.dynamics.com", environmentId: ENV_ID, botId: BOT_1, state: "active", language: "English", authenticationMode: "custom_entra_id", accessControlPolicy: "group_membership" });
     expect(invoice!.attributes).toMatchObject({ state: "inactive", authenticationMode: "integrated", accessControlPolicy: "any_multi_tenant" });
     expect(hr!.components).toEqual([
       { kind: "knowledge", vendorRef: "d0000000-0000-4000-8000-000000000001", displayName: "HR handbook", enabled: true, providedBy: null },
@@ -208,6 +217,16 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
     expect(calls.secrets).toContain(dv.accessToken);
     // the worker's own check accepts what the adapter produced
     expect(checkRegistryAgents("agent_registry_copilot_studio", res.registryAgents, res.registriesComplete).records).toHaveLength(2);
+  });
+
+  it("ADR-0338 slice 1b: an unreadable environment id still stages the agents, without the locator (so no control)", async () => {
+    const { promise } = run({ orgDetailStatus: 403 });
+    const res = await promise;
+    expect(res.registryAgents).toHaveLength(2);
+    for (const r of res.registryAgents!) expect(r.attributes!.environmentId ?? null).toBeNull();
+    expect(res.readOutcomes).toContainEqual(expect.objectContaining({ read: "environment id of contoso.crm4.dynamics.com", status: "denied" }));
+    // the inventory read is unaffected: the registry still reads as complete
+    expect(res.registriesComplete).toEqual(["copilot_studio"]);
   });
 
   it("decision 4, pinned: the exact columns read, and no content column among them", () => {

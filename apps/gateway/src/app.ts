@@ -6503,9 +6503,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
-  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
-  // production until slice 1b; both come only through the code-only test seam below
-  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // ADR-0338: governed vendor agent control (Copilot Studio quarantine since slice 1b); the control credential is the
+  // source's `platform_write` row. The data key comes from buildApp's own option, never from the test seam
+  registerVendorAgentControlRoutes(app, db, { ...(opts.vendorAgentControl ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
   // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
   registerContainmentRoutes(app, db);
   // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
