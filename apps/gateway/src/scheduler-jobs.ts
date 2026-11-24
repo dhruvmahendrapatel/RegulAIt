@@ -31,6 +31,7 @@
  * stated reason when that human is gone. That asymmetry is deliberate: nothing
  * a timer does should be able to reach a model the initiating user could not.
  */
+import { edrJobDefinitions } from "./edr/routes.js";
 import { runMrmAutoRetestSweep } from "./mrm-auto-retest.js";
 import type { Db } from "@regulait/db";
 import { runMrmExpirySweep } from "./mrm.js";
@@ -143,6 +144,9 @@ export const SCHEDULER_JOB_NAMES = {
   paidCallHoldSweeper: "paid-call-hold-sweeper",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0360 slice 2 (lane E41): EDR signal sync and isolation polling (edr/routes.ts)
+  edrSync: "edr-sync",
+  edrIsolationPoll: "edr-isolation-poll",
   // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
   browserPromptCaptureRetentionSweep: "browser-prompt-capture-retention-sweep",
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
@@ -907,6 +911,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...engineJobDefinitions(), // ADR-0187: engine-run-sweep, engine-schedule-sweep
     ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
+    ...edrJobDefinitions({ dataKey: opts.dataKey }), // ADR-0360 slice 2: edr-sync, edr-isolation-poll
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
