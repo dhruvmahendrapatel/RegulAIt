@@ -1,4 +1,4 @@
-# ADR-0351: Signed offline detection-content feed
+# ADR-0367: Signed offline detection-content feed
 
 - **Status**: Proposed
 - **Date**: 2026-11-17

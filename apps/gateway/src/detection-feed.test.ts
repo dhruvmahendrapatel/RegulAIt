@@ -1,6 +1,6 @@
 import path from "node:path";
 import {fileURLToPath} from "node:url";
-/** ADR-0351: real PostgreSQL and the real admin gate; no remote feed or model is contacted. */
+/** ADR-0367: real PostgreSQL and the real admin gate; no remote feed or model is contacted. */
 import {afterAll,beforeAll,describe,it,expect,vi} from "vitest";
 import {generateKeyPairSync,sign,randomUUID} from "node:crypto";
 import {createDb,runMigrations,sql,auditLog,agentGrants,eq,type Db} from "@regulait/db";

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ADR-0351: offline signing; no network, payload rewrite, or key material in output.
+// ADR-0367: offline signing; no network, payload rewrite, or key material in output.
 import { readFileSync } from "node:fs";
 import { signOfflineBundle } from "./lib/offline-bundle.mjs";
 const [bundlePath,keyPath,keyId]=process.argv.slice(2);

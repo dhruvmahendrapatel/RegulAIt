@@ -1,4 +1,4 @@
-/** Offline pinned-Ed25519 bundles, extracted from ADR-0256 for ADR-0351. No network or supplied trust roots. */
+/** Offline pinned-Ed25519 bundles, extracted from ADR-0256 for ADR-0367. No network or supplied trust roots. */
 import { createHash, createPublicKey, verify, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { z } from "zod";

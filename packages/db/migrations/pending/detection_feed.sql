@@ -1,4 +1,4 @@
--- ADR-0351: one signed policy-content stream. The signed document is a verbatim external/configuration snapshot,
+-- ADR-0367: one signed policy-content stream. The signed document is a verbatim external/configuration snapshot,
 -- intentionally retained byte-exact for re-verification, not denormalized references. No customer telemetry.
 CREATE TABLE IF NOT EXISTS detection_feed (
   id boolean PRIMARY KEY DEFAULT true CONSTRAINT detection_feed_id_check CHECK (id),

@@ -63,6 +63,6 @@ maintained; pinned; works air-gapped). npm dependencies are pinned through `pnpm
 - A JSONC parser for `.vscode/*.json` files with comments: `jsonc-parser` (MIT, last release 2024-06), `strip-json-comments` (MIT, last release 2025-08) and `json5` (MIT, last release 2022-12) all fall outside ADR-0176's maintenance window. Such a file is still reported as an assistant config by its path; its servers or extension ids are counted in `unparsedConfigs` and not read. Re-check when a maintained parser exists.
 | `rfc6902` (npm, github.com/chbrown/rfc6902, © Christopher Brown) | `5.3.0` (exact, pinned in `pnpm-lock.yaml`; released 2026-07-23; 5.4.0 of 2026-10-30 was too new to admit) | MIT | ADR-0246 — the admin diff of an MCP tool, prompt or resource that changed since approval (`src/mcp-definition-pins.ts`, `definitionDiff`) is an RFC 6902 JSON Patch from the approved definition to the served one, made by its `createPatch`, instead of a hand-written differ; ADR-0341 — the workflow template builder's diff view (`src/json-patch.ts`, `jsonPatch`). No dependencies, pure TypeScript, no runtime downloads, works air-gapped. |
 
-ADR-0351 reuses the existing pinned MIT `re2js` dependency above for offline feed validation and the same injection
+ADR-0367 reuses the existing pinned MIT `re2js` dependency above for offline feed validation and the same injection
 matching semantics; imported rule matching uses a call-local snapshot rather than the static pattern cache. No new
 runtime dependency or upstream detection content is bundled by this lane.

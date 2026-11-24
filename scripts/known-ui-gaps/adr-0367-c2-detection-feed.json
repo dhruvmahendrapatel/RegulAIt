@@ -1,7 +1,7 @@
 {
-  "adr": "ADR-0351",
+  "adr": "ADR-0367",
   "lane": "C2",
-  "tracking": "ADR-0351 (lane C2): feed controls are API-only; the design screen is tracked on #453",
+  "tracking": "ADR-0367 (lane C2): feed controls are API-only; the design screen is tracked on #453",
   "gaps": {
     "GET /v1/detection-content/feed": "reports the verified offline detection-feed version and status",
     "POST /v1/detection-content/feed/import": "imports a signed offline detection-rule bundle with rollback protection",

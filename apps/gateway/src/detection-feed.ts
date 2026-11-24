@@ -1,4 +1,4 @@
-/** ADR-0351: offline signed detection content. No fetch path, global active registry, or customer data. */
+/** ADR-0367: offline signed detection content. No fetch path, global active registry, or customer data. */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { auditLog, sql, type Db } from "@regulait/db";

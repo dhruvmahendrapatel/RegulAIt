@@ -19061,7 +19061,7 @@ export const workflowTemplateVersions = pgTable(
 export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferSelect;
 // ===== end ADR-0341 =====
 
-// ADR-0351: singleton policy-content stream. All writes are admin/migration-only under its RLS policy.
+// ADR-0367: singleton policy-content stream. All writes are admin/migration-only under its RLS policy.
 export const detectionFeed = pgTable("detection_feed", {
   id: boolean("id").primaryKey().default(true),
   enabled: boolean("enabled").notNull().default(false),

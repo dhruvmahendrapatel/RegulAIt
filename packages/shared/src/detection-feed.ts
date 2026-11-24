@@ -1,4 +1,4 @@
-/** ADR-0351: one offline, signed, additive injection-rule stream. No code, URLs or trust roots in the payload. */
+/** ADR-0367: one offline, signed, additive injection-rule stream. No code, URLs or trust roots in the payload. */
 import { z } from "zod";
 import { RE2JS } from "re2js";
 
