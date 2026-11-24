@@ -36,6 +36,7 @@ import {
   ne,
   or,
   count,
+  externalScorers,
   orgSettings,
   ORG_SETTINGS_ID,
   pmConnections,
@@ -56,6 +57,7 @@ import {
   accountabilitySettingRelaxed,
   aiBomSnapshotTriggerPosture,
   alertTicketSettingsProblem,
+  routingClassifierProblem,
   composeAuditRetentionDays,
   type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
@@ -783,6 +785,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         });
       }
     }
+    // ADR-0366: rogue-agent containment proposals are decided by an administrator, so the named approver must be an
+    // ACTIVE ADMIN — anyone else could never decide them, and every proposal would wait unrouted
+    if (body.containmentApproverUserId) {
+      const [approver] = await db
+        .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.containmentApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (!approver.isAdmin || approver.disabledAt) {
+        return reply.status(422).send({
+          error: "containment_approver_not_admin",
+          detail: "the containment approver must be an active administrator",
+        });
+      }
+    }
     // The sign-in lockout guards (ADR-0025/0036 sso_only, ADR-0174
     // break-glass) run further down, INSIDE the sign-in invariant lock, over
     // the row as re-read under that lock (AER-056). `before` here serves only
@@ -856,6 +873,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         ? await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, connectionId))
         : [];
       const problem = alertTicketSettingsProblem({ mode, connectionId, connectionExists: Boolean(conn) });
+      if (problem) return reply.status(422).send(problem);
+    }
+    // ADR-0353 part 2: a routing classifier must be an enabled RegulAIt-contract scorer claiming routing_complexity.
+    // Clearing it (null) always passes: the heuristic is the default.
+    if (body.routingClassifierScorerId) {
+      const [scorer] = await db
+        .select({
+          name: externalScorers.name,
+          enabled: externalScorers.enabled,
+          scorerKinds: externalScorers.scorerKinds,
+          adapter: externalScorers.adapter,
+        })
+        .from(externalScorers)
+        .where(eq(externalScorers.id, body.routingClassifierScorerId));
+      const problem = routingClassifierProblem(scorer ? { ...scorer, scorerKinds: scorer.scorerKinds ?? [] } : null);
       if (problem) return reply.status(422).send(problem);
     }
     // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes

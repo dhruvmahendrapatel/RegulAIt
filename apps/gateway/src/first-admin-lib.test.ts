@@ -153,7 +153,7 @@ describe("createFirstAdmin (first-admin-lib.ts)", () => {
     const [u] = await db.select().from(users).where(eq(users.id, r.userId!));
     expect(u).toMatchObject({ username: "admin", email: "ops@acme.example", isAdmin: true, mustChangePassword: false, disabledAt: null });
     expect(u!.passwordUpdatedAt).toBeInstanceOf(Date);
-    expect(verifyPassword(password, u!.passwordHash)).toBe(true);
+    expect(await verifyPassword(password, u!.passwordHash)).toBe(true);
 
     const rows = await firstAdminAuditRows(db);
     expect(rows.map((a) => a.ruleId).sort()).toEqual(["first-admin-created", "initial-password-set", "username-set"]);
@@ -276,7 +276,7 @@ describe("first-admin.js (the CLI install.sh runs in the gateway container)", ()
     expect(made.out).not.toContain(password);
     // the trailing newline was the pipe's, not the password's
     const [u] = await db.select().from(users).where(eq(users.username, "admin"));
-    expect(verifyPassword(password, u!.passwordHash)).toBe(true);
+    expect(await verifyPassword(password, u!.passwordHash)).toBe(true);
 
     expect(cli(["--status"]).status).toBe(3);
     const again = cli(["--username", "other", "--email", "other@acme.example"], `${strongPassword()}\n`);

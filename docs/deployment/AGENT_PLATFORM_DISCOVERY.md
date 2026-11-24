@@ -16,6 +16,16 @@ allow list, and any other request is refused before it leaves. No adapter reads 
 conversation starters, topic bodies or knowledge-file content, and none calls an endpoint that returns credential
 material. People appear only as pseudonyms.
 
+**Plaintext credentials in an agent's configuration.** For all four platforms, RegulAIt also looks for credentials
+written into the agent itself: an API key pasted into a GPT's instructions or a custom action's schema, a token typed
+into an n8n node's parameters, a bearer token in a Copilot Studio topic's HTTP call or generative instructions, or a
+key in an Agentforce planner, topic or action description. The text is checked in memory, with the same credential rules RegulAIt
+uses elsewhere, and dropped straight after. A hit becomes a **critical** discovery finding that says only where the
+credential is: the agent, the field (for example `gpts/<id>/configs/<id>/instructions` or
+`workflows/<id>/nodes/<node id>/parameters/headerValue`) and the kind of credential (the rule id). The credential
+itself, any excerpt of the text and any position in it are never stored, shown or logged, so rotate the credential and
+move it into the platform's own credential store.
+
 Every call goes through the egress allow list: add the hosts named below before the first run.
 
 ## Copilot Studio — `agent_registry_copilot_studio`

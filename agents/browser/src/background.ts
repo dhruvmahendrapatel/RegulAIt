@@ -29,6 +29,7 @@ import { dynamicRulesFor, parseManagedConfig, verifyPolicy } from "./policy.js";
 import { GatewayClient } from "./oauth.js";
 import { generateDeviceKey, loadDeviceKey, publicJwkOf, saveDeviceKey } from "./proof.js";
 import type { ContentRequest, VerdictReply } from "./messages.js";
+import { allowedGatewayOrigin, BlockRecordGate } from "./guards.js";
 
 const REFRESH_ALARM = "policy-refresh";
 const EXPIRY_ALARM = "policy-expiry";
@@ -97,7 +98,9 @@ let registered: { gatewayUrl: string; reg: Registered } | null = null;
  * makes the key a `browser_extension` workload identity and answers its OAuth client id.
  */
 async function ensureRegistered(config: BrowserManagedConfig): Promise<Registered | null> {
-  const origin = trimTrailingSlashes(config.gatewayUrl);
+  // #1029: only the gateway origin this build was pinned to (its host permission); any other is refused, closed
+  const origin = allowedGatewayOrigin(trimTrailingSlashes(config.gatewayUrl));
+  if (!origin) return null;
   if (registered && registered.gatewayUrl === origin) return registered.reg;
   let key = await loadDeviceKey();
   if (!key) {
@@ -205,6 +208,8 @@ async function capture(siteId: BrowserEvent["siteId"], path: string, text: strin
 
 // ---- messages from the content script ------------------------------------------------------------------------------
 
+const blockRecords = new BlockRecordGate();
+
 chrome.runtime.onMessage.addListener((msg: ContentRequest, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id || !sender.url) return false;
   // the block page (an extension page): one event per redirected navigation, with no path (the URL never reaches it)
@@ -212,8 +217,17 @@ chrome.runtime.onMessage.addListener((msg: ContentRequest, sender, sendResponse)
     const siteId = BROWSER_SITE_CATALOGUE_IDS.find((s) => s === msg.siteId);
     const code = BROWSER_EVENT_CODES.find((c) => c === msg.code);
     if (siteId && code && code !== "dlp_match") {
-      const kind = code === "account_not_allowed" || code === "account_signed_out" ? "account_blocked" : "site_blocked";
-      void enqueue({ eventId: crypto.randomUUID(), kind, outcome: "blocked", code, siteId, ruleIds: [], path: null, occurredAt: now() }).finally(() => sendResponse({ ok: true }));
+      // #1031: a site can open the block page itself; record only a block the worker's own policy would apply now
+      void (async () => {
+        const verdict = siteVerdict(policy, siteId, await profileEmail(), now());
+        if (!blockRecords.accept({ siteId, code, verdict, frameId: sender.frameId, nowMs: Date.now() })) {
+          sendResponse({ ok: false });
+          return;
+        }
+        const kind = code === "account_not_allowed" || code === "account_signed_out" ? "account_blocked" : "site_blocked";
+        await enqueue({ eventId: crypto.randomUUID(), kind, outcome: "blocked", code, siteId, ruleIds: [], path: null, occurredAt: now() });
+        sendResponse({ ok: true });
+      })();
       return true;
     }
     return false;

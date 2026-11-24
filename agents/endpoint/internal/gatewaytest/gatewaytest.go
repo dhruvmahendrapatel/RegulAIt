@@ -41,6 +41,10 @@ type Gateway struct {
 	Reports      []contract.Report
 	ReportBodies [][]byte
 	Config       contract.ConfigResponse
+	// ConfigStatus, when set, answers the (authorized) config route with that status and ConfigCode instead of Config,
+	// as the real gateway answers 503 collection_pack_unavailable while it has no pack to serve.
+	ConfigStatus int
+	ConfigCode   string
 	Nonce        string
 	usedJTI      map[string]bool
 	tokens       map[string]string // access token -> client id
@@ -58,6 +62,21 @@ type Gateway struct {
 	DirectiveSigner bool
 	Directives      []json.RawMessage
 	Outcomes        []contract.DirectiveOutcome
+	// ADR-0360 §4 (slice 1c): RouteUpdate answers {"update": Update} when UpdateSigner is true, otherwise 503
+	// update_signer_unavailable. RouteUpdateBinary serves UpdateBinary as UpdateBinaryType (application/octet-stream
+	// when empty). UpdateResults collects the results posted; UpdateResultStatus and UpdateResultCode, when set, answer
+	// every result post with that refusal instead.
+	UpdateSigner       bool
+	Update             *contract.UpdateOffer
+	UpdateBinary       []byte
+	UpdateBinaryType   string
+	UpdateResults      []contract.UpdateResultRequest
+	UpdateResultStatus int
+	// UpdateResultHalts answers a recorded result with rolloutHalted, as the gateway does when it halted the rollout.
+	UpdateResultHalts bool
+	UpdateResultCode  string
+	// OnUpdateBinary, when set, runs (under the lock) before the binary is served, so a test can see the spool mid-sync.
+	OnUpdateBinary func()
 }
 
 // Request is what one call carried, for assertions.
@@ -109,6 +128,10 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		g.token(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == contract.RouteConfig:
 		if _, ok := g.authorized(w, r); ok {
+			if g.ConfigStatus != 0 {
+				refuse(w, g.ConfigStatus, g.ConfigCode)
+				return
+			}
 			writeJSON(w, http.StatusOK, g.Config)
 		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteReports:
@@ -138,6 +161,41 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			g.Outcomes = append(g.Outcomes, req.Outcomes...)
 			writeJSON(w, http.StatusOK, map[string]any{"accepted": len(req.Outcomes), "refused": []any{}})
+		}
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteUpdate:
+		if _, ok := g.authorized(w, r); ok {
+			if !g.UpdateSigner {
+				refuse(w, http.StatusServiceUnavailable, contract.ErrUpdateSignerUnavailable)
+				return
+			}
+			writeJSON(w, http.StatusOK, contract.UpdateResponse{Update: g.Update})
+		}
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteUpdateBinary:
+		if _, ok := g.authorized(w, r); ok {
+			if g.OnUpdateBinary != nil {
+				g.OnUpdateBinary()
+			}
+			ct := g.UpdateBinaryType
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(g.UpdateBinary)
+		}
+	case r.Method == http.MethodPost && r.URL.Path == contract.RouteUpdateResults:
+		if _, ok := g.authorized(w, r); ok {
+			var req contract.UpdateResultRequest
+			if fsutil.StrictJSON(body, &req) != nil || req.AttemptID == "" || req.Result.Schema == "" {
+				refuse(w, http.StatusBadRequest, "invalid_body")
+				return
+			}
+			if g.UpdateResultStatus != 0 {
+				refuse(w, g.UpdateResultStatus, g.UpdateResultCode)
+				return
+			}
+			g.UpdateResults = append(g.UpdateResults, req)
+			writeJSON(w, http.StatusOK, contract.UpdateResultResponse{Recorded: true, State: "installed", RolloutHalted: g.UpdateResultHalts})
 		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteCredentials:
 		g.rotate(w, r, body)
@@ -176,7 +234,7 @@ func (g *Gateway) tickets(w http.ResponseWriter, r *http.Request, body []byte) {
 	t := fmt.Sprintf("ticket-%d-%s", g.Devices, randomish())
 	exp := time.Now().Add(7 * 24 * time.Hour).UTC()
 	g.Tickets[t] = exp
-	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("tkt_%d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8})
+	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("00000000-0000-4000-8000-%012d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8}) // a device id is a uuid, as the gateway's
 }
 
 func (g *Gateway) register(w http.ResponseWriter, r *http.Request, body []byte) {

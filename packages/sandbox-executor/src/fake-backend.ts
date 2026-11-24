@@ -19,7 +19,10 @@ import { removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-i
 import {
   BACKEND_ATTESTABLE_CLASSES,
   isolationClassRank,
+  ROBOT_EGRESS_PROXY_PORT,
+  robotEgressSchema,
   runscFlags,
+  smokescreenAclForTargets,
   type AppliedIsolationKind,
   type AttestationProbe,
   type ExecutionOffer,
@@ -30,6 +33,7 @@ import {
   type RequirableIsolationClass,
 } from "@regulait/shared";
 import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
+import { capEgressLog } from "./docker-backend.js";
 
 export interface FakeBackendOptions {
   backend?: ExecutorBackend;
@@ -61,6 +65,31 @@ export interface FakeBackendOptions {
     stdin: AsyncIterable<string>;
     write: (line: string) => void;
   }) => Promise<void>;
+  /**
+   * ADR-0364 S3: an in-process stand-in for a robot runner (a `robot_browser` placement), on the same task bridge as
+   * `engineTask`, also handed the run's egress as the real backend would set it up (the ACL it generated, the proxy URL
+   * and the run id the init would put in the workload's environment).
+   */
+  robotTask?: (ctx: {
+    secret: string | undefined;
+    workload: { command: string; args: string[] };
+    stdin: AsyncIterable<string>;
+    write: (line: string) => void;
+    egress: FakeEgressRecord;
+  }) => Promise<void>;
+  /** ADR-0364 S3: the Smokescreen log a robot run's sandbox reports (default: one allow line per target) */
+  egressLog?: (egress: FakeEgressRecord) => string;
+}
+
+/** ADR-0364 S3: what the fake built for a robot run's egress (the real backend's network, proxy and ACL, recorded) */
+export interface FakeEgressRecord {
+  runId: string;
+  targets: Array<{ host: string; port: number }>;
+  /** the ACL text, generated exactly as the real backend does (`smokescreenAclForTargets`) */
+  acl: string;
+  proxyUrl: string;
+  /** set when the sandbox ended: the network and proxy were removed */
+  removed: boolean;
 }
 
 type Lie<P extends AttestationProbe> = (observed: ProbeObserved<P>) => ProbeObserved<P>;
@@ -81,6 +110,8 @@ export interface FakeSandboxRecord {
   inputSha256: string | null;
   /** I5: the SHA-256 of the task secret the release carried (null: none; the value itself is not kept) */
   secretSha256: string | null;
+  /** ADR-0364 S3: a robot run's egress (null on every other sandbox) */
+  egress: FakeEgressRecord | null;
 }
 
 /** the runtime each backend's sandbox observes from inside, at a class */
@@ -175,6 +206,7 @@ export class FakeSandboxBackend implements SandboxBackend {
     profile: ExecutionProfileBody,
     cls: AppliedIsolationKind,
     input: { sha256: string; files: Map<string, Buffer>; root: string } | null = null,
+    egress: FakeEgressRecord | null = null,
   ): SandboxHandle {
     const rec: FakeSandboxRecord = {
       id: randomUUID(),
@@ -188,13 +220,23 @@ export class FakeSandboxBackend implements SandboxBackend {
       stdin: [],
       inputSha256: input?.sha256 ?? null,
       secretSha256: null,
+      egress,
     };
     this.sandboxes.push(rec);
     let endedResolve!: (o: "completed" | "failed" | "killed" | "limit_exceeded") => void;
     let settled = false;
     const ended = new Promise<"completed" | "failed" | "killed" | "limit_exceeded">((r) => (endedResolve = r));
     const self = this;
-    const engineTask = kind === "placement" && offer?.workloadKind === "engine_worker" ? this.opts.engineTask : undefined;
+    // ADR-0364 S3: a robot run rides the same task bridge as an engine task (its stand-in also sees its egress)
+    const robotTask = this.opts.robotTask;
+    const engineTask: FakeBackendOptions["engineTask"] =
+      kind !== "placement"
+        ? undefined
+        : offer?.workloadKind === "engine_worker"
+          ? this.opts.engineTask
+          : offer?.workloadKind === "robot_browser" && robotTask && egress
+            ? ({ secret, workload, stdin, write }) => robotTask({ secret, workload, stdin, write, egress })
+            : undefined;
     const server = kind === "placement" && !engineTask ? this.opts.stdioServer : undefined;
     // I5: the engine task's stdin lines, for its stand-in
     const inbound: string[] = [];
@@ -215,6 +257,8 @@ export class FakeSandboxBackend implements SandboxBackend {
       inboundEnded = true;
       inboundWake?.();
       if (input) void removeTaskInput(input.root);
+      // ADR-0364 S3: the run's network and proxy go with its sandbox
+      if (egress) egress.removed = true;
       endedResolve(how);
     };
     const stdio: SandboxStdio | undefined = engineTask
@@ -322,6 +366,16 @@ export class FakeSandboxBackend implements SandboxBackend {
         finish("killed");
       },
       ...(stdio ? { stdio } : {}),
+      ...(egress
+        ? {
+            async egressLog() {
+              return capEgressLog(
+                self.opts.egressLog?.(egress) ??
+                  egress.targets.map((t) => JSON.stringify({ msg: "CANONICAL-PROXY-DECISION", allow: true, proxy_type: "connect", requested_hostport: `${t.host}:${t.port}`, role: "", decision_reason: "rule has allow and report policy" })).join("\n"),
+              );
+            },
+          }
+        : {}),
       ended,
     };
   }
@@ -343,7 +397,19 @@ export class FakeSandboxBackend implements SandboxBackend {
       for (const f of task.manifest.files) files.set(f.path, await readFile(path.join(root, "jobs", f.path)));
       input = { sha256, files, root };
     }
-    return this.handle("placement", offer, profile, cls, input);
+    // ADR-0364 S3: as the Docker backends: a robot run only under an egress_proxy profile and with its own egress; no
+    // other kind ever has one
+    let egress: FakeEgressRecord | null = null;
+    if (offer.workloadKind === "robot_browser") {
+      if (profile.network.mode !== "egress_proxy") throw new Error("fake backend: a robot run's profile has no per-run egress proxy");
+      const e = robotEgressSchema.safeParse(offer.egress);
+      if (!e.success) throw new Error("fake backend: a robot run's offer carries no valid egress");
+      const targets = e.data.targets.map((t) => ({ host: t.host, port: t.port }));
+      egress = { runId: e.data.runId, targets, acl: smokescreenAclForTargets(targets), proxyUrl: `http://172.31.0.2:${ROBOT_EGRESS_PROXY_PORT}`, removed: false };
+    } else if (offer.egress !== undefined) {
+      throw new Error(`fake backend: a ${offer.workloadKind} placement has no egress`);
+    }
+    return this.handle("placement", offer, profile, cls, input, egress);
   }
 
   private assertClass(cls: AppliedIsolationKind) {

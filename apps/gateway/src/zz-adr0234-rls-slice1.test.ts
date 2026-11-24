@@ -8,7 +8,6 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -30,6 +29,7 @@ import {
   type RlsSystemContextEntry,
 } from "@regulait/db";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
+import { dmlOffenders, readOffenders } from "./testing/rls-slice1-migration-scan.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -468,29 +468,16 @@ describe("the audit chain stays one chain under a principal", () => {
 });
 
 describe("later migrations that touch rows of an RLS table enter the migration context", () => {
+  // numbered files after 0272 and every pending/*.sql (ADR-0252: not yet numbered, always "after 0272"); the scan is
+  // ./testing/rls-slice1-migration-scan.ts, unit-tested beside it
   it("every migration after 0272 with DML on a slice-1 table sets regulait.system_context = 'migration'", () => {
-    const dml = new RegExp(`\\b(insert\\s+into|update|delete\\s+from)\\s+(public\\.)?"?(${RLS_TABLES.join("|")})"?\\b`, "i");
-    const offenders = readdirSync(migrationsFolder)
-      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 272)
-      .filter((f) => {
-        const body = readFileSync(path.join(migrationsFolder, f), "utf8");
-        return dml.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);
-      });
-    expect(offenders).toEqual([]);
+    expect(dmlOffenders(migrationsFolder, RLS_TABLES)).toEqual([]);
   });
 
   // batch 2 (the #683 lesson): a data step on ANY table that READS a slice-1 table (an orphan clean-up's
   // `not exists (select 1 from users ...)`) sees ZERO rows there under FORCE without the migration context, and
   // would treat every reference as an orphan. So such a migration must enter the context too.
   it("every migration after 0272 whose data step reads a slice-1 table sets regulait.system_context = 'migration'", () => {
-    const dataStep = /\b(insert\s+into|update\s+(public\.)?"?\w+"?\s+set|delete\s+from)\b/i;
-    const reads = new RegExp(`\\b(from|join)\\s+(public\\.)?"?(${RLS_TABLES.join("|")})"?\\b`, "i");
-    const offenders = readdirSync(migrationsFolder)
-      .filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > 272)
-      .filter((f) => {
-        const body = readFileSync(path.join(migrationsFolder, f), "utf8");
-        return dataStep.test(body) && reads.test(body) && !/set_config\(\s*'regulait\.system_context'\s*,\s*'migration'\s*,\s*true\s*\)/i.test(body);
-      });
-    expect(offenders).toEqual([]);
+    expect(readOffenders(migrationsFolder, RLS_TABLES)).toEqual([]);
   });
 });

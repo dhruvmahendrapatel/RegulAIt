@@ -28,7 +28,7 @@ export const SALESFORCE_JWT_LIFETIME_S = 120;
 /** the smallest RSA key accepted for the assertion (#1111 S4 [2]) */
 export const SALESFORCE_JWT_MIN_RSA_BITS = 2048;
 /** the identity URL in the token response names the org and the session's user: `…/id/<org id>/<user id>` */
-const IDENTITY_USER = /\/id\/[A-Za-z0-9]{15,18}\/([A-Za-z0-9]{15,18})$/;
+const IDENTITY_USER = /\/id\/([A-Za-z0-9]{15,18})\/([A-Za-z0-9]{15,18})$/;
 
 /** an RSA key of at least SALESFORCE_JWT_MIN_RSA_BITS; anything else (another key type, a short modulus) is refused */
 export function rsaKeyStrongEnough(type: string | undefined, modulusBits: number | undefined): boolean {
@@ -39,6 +39,8 @@ export interface SalesforceSession {
   accessToken: string;
   /** the integration user the token acts as, from the response's identity URL (an 18- or 15-character id) */
   userId: string;
+  /** the org the token belongs to, from the same identity URL (an 18- or 15-character id) */
+  orgId: string;
 }
 
 export interface SalesforceJwtInput {
@@ -107,7 +109,7 @@ export async function salesforceJwtToken(kind: string, i: SalesforceJwtInput): P
     throw new WiderSourceConfigError(`${kind}: the Salesforce token request failed (HTTP ${res.status}${code ? `, ${code}` : ""})`);
   }
   i.onSecret(token);
-  const userId = IDENTITY_USER.exec(field("id") ?? "")?.[1];
-  if (!userId) throw new WiderSourceConfigError(`${kind}: the Salesforce token response named no user`);
-  return { accessToken: token, userId };
+  const identity = IDENTITY_USER.exec(field("id") ?? "");
+  if (!identity) throw new WiderSourceConfigError(`${kind}: the Salesforce token response named no user`);
+  return { accessToken: token, orgId: identity[1]!, userId: identity[2]! };
 }
