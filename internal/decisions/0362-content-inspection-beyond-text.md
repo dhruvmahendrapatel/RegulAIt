@@ -130,7 +130,7 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 2. **Widen the floor?** Should inspection also be forced on when any guardrail detector is at `block` for the project,
    not only the cascade PII mode? The builder kept the narrower floor so as not to change existing projects' attachment
    behaviour without a decision.
-3. **The OS libraries Debian's Tesseract brings (slice 2).** `tesseract-ocr` 5.5.0-1 depends on cairo, pango, glib,
+3. **The OS libraries Debian's Tesseract brings (slice 2).** `tesseract-ocr` 5.5.0-1+b1 depends on cairo, pango, glib,
    fontconfig and libcurl (its training tools and URL input, neither of which the extractor uses). That puts
    LGPL-licensed shared libraries (glib, pango, cairo; libcurl's GnuTLS/IDN dependencies) into the image's OS layer,
    unmodified and dynamically linked. The precedents are the OS layer's GPL system packages every engine image carries
@@ -194,7 +194,7 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 - **Review round 1 on #967 (2026-11-21)**: the DOCTYPE/ENTITY refusal moved from a byte search (which a UTF-16 part
   bypassed) into the parser (`refuse_dtd`, expat handlers on the decoded document); UTF-16 LE/BE and BOM tests added.
 - **Slice 2 (2026-11-17), OCR**: `extract.py` reads PNG and JPEG images and the pages of a PDF that have no text
-  layer with Tesseract 5.5.0 (Debian trixie `tesseract-ocr` 5.5.0-1, `tesseract-ocr-eng` and `-osd` 1:4.1.0-2, exact
+  layer with Tesseract 5.5.0 (Debian trixie `tesseract-ocr` 5.5.0-1+b1, `tesseract-ocr-eng` and `-osd` 1:4.1.0-2, exact
   versions, in the image's test stage and runtime; nothing is downloaded at run time). A scanned page is rendered by
   PDFium to an 8-bit greyscale PGM at 200 dpi, scaled down to fit the pixel cap (no Pillow). Fixed caps, not
   request-tunable (`OCR_LIMITS`): 40 MP per image or page, 20,000 px per side, 20 OCR pages per request (images plus
@@ -203,3 +203,6 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   runs with no shell, one thread and a fixed environment. A PDF page with no text layer and no OCR engine now fails
   closed (`needs_ocr`) even when other pages have text; slice 1a passed such a PDF with only its text pages.
   The image's unit tests run with `REGULAIT_REQUIRE_OCR=1`, so the OCR cases cannot be skipped.
+  On 2026-11-24 the pin moved from `5.5.0-1` to `5.5.0-1+b1`. Debian rebuilt the package as a binary-only update
+  (binNMU, same source), and trixie no longer serves `5.5.0-1`, so the exact pin failed the image build. The language
+  data is unchanged.

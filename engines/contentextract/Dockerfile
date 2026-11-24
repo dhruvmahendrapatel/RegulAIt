@@ -43,7 +43,7 @@ RUN python -m venv /opt/contentextract/venv \
 # ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
 # Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache \
  && tesseract --version
 COPY engines/contentextract/extract.py engines/contentextract/test_extract.py /opt/contentextract/
@@ -88,7 +88,7 @@ RUN apt-get update \
 # ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
 # Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache \
  && tesseract --version
 # no package installer at run time: the base image's pip goes too
