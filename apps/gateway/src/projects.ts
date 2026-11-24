@@ -41,6 +41,7 @@ import {
 import { afterCursorDesc, atTextSql } from "./pagination.js";
 import { databaseNow } from "./db-clock.js";
 import { expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
@@ -63,6 +64,7 @@ import {
   type PiiHit,
   MODALITIES,
   type Modality,
+  runContextId,
 } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -1926,6 +1928,16 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       isAdmin: req.authCtx.isAdmin,
     });
     if (!provenance.ok) return reply.status(provenance.status).send(provenance.body);
+    // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so it is held to the same
+    // content-trust floor as a write tool call. Its causal context is the producing run, and only once the check
+    // above has confirmed that run is the caller's, in this project. The floor is categorical, so it runs first.
+    const trust = await memoryTrustFloor(db, {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+      contextId: provenance.runId ? runContextId(provenance.runId) : null,
+      target: { kind: "shared_context", projectId, key: args.key },
+    });
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
     const memoryGate = await governMemoryWrite(db, {
       store: "project_context",
       text: `${args.key}\n${args.content}`,

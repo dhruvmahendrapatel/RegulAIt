@@ -31,6 +31,8 @@
  * stated reason when that human is gone. That asymmetry is deliberate: nothing
  * a timer does should be able to reach a model the initiating user could not.
  */
+import { edrJobDefinitions } from "./edr/routes.js";
+import { endpointUpdateJobDefinitions } from "./endpoint-update-delivery.js";
 import { runMrmAutoRetestSweep } from "./mrm-auto-retest.js";
 import type { Db } from "@regulait/db";
 import { runMrmExpirySweep } from "./mrm.js";
@@ -143,11 +145,20 @@ export const SCHEDULER_JOB_NAMES = {
   paidCallHoldSweeper: "paid-call-hold-sweeper",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0360 slice 2 (lane E41): EDR signal sync and isolation polling (edr/routes.ts)
+  edrSync: "edr-sync",
+  edrIsolationPoll: "edr-isolation-poll",
+  // ADR-0360 slice 1c (lane E41): expire unreported update attempts and undecided rollout starts or resumes
+  endpointUpdateExpiry: "endpoint-update-expiry",
   // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
   browserPromptCaptureRetentionSweep: "browser-prompt-capture-retention-sweep",
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
   agentRiskRecomputeSweep: "agent-risk-recompute-sweep",
   agentRiskDailyMark: "agent-risk-daily-mark",
+  // ADR-0361: reads enabled AI SaaS compliance exports (ai-saas-monitor.ts); off by default
+  aiSaasMonitorSweep: "ai-saas-monitor-sweep",
+  // ADR-0361: deletes AI SaaS interaction evidence past the cascade floor (ai-saas-monitor.ts)
+  aiSaasEvidenceRetentionSweep: "ai-saas-evidence-retention-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -889,6 +900,7 @@ import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js"
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
 import { robotRunJobDefinitions } from "./robot-runs.js";
+import { aiSaasMonitorJobDefinitions } from "./ai-saas-monitor.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -902,6 +914,8 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...engineJobDefinitions(), // ADR-0187: engine-run-sweep, engine-schedule-sweep
     ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
+    ...edrJobDefinitions({ dataKey: opts.dataKey }), // ADR-0360 slice 2: edr-sync, edr-isolation-poll
+    ...endpointUpdateJobDefinitions(), // ADR-0360 slice 1c: endpoint-update-expiry
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
@@ -917,6 +931,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...processAnalyticsJobDefinitions(), // ADR-0342: process-analytics-projector
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
     ...robotRunJobDefinitions(), // ADR-0364 S3: robot-run-stale-sweep
+    ...aiSaasMonitorJobDefinitions({ dataKey: opts.dataKey }), // ADR-0361: ai-saas-monitor-sweep, ai-saas-evidence-retention-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

@@ -10,11 +10,12 @@
  * STRICT DEFAULT (ADR-0180), at three levels:
  *   - the org switch `discovery_settings.vendor_agent_control_enabled` is off; turning it on is a `settings_relax`
  *     step-up through `PUT /v1/discovery/settings` (discovery-routes.ts);
- *   - a registry offers control only once its adapter declares a `control` member (`VendorAgentControl`). No adapter
- *     declares one in slice 1, so the control map is empty in production and every request answers
- *     `409 control_not_offered`. It is injectable only through buildApp's code-only test seam (`vendorAgentControl`);
- *   - the control credential (a `platform_write` `discovery_credentials` row, slice 1b) resolves to nothing in
- *     production, so a request answers `409 no_control_credential`.
+ *   - a registry offers control only once its adapter declares a `control` member (`VendorAgentControl`): slice 1b's
+ *     Copilot Studio quarantine (agent-platform-adapters.ts `AGENT_PLATFORM_CONTROLS`); any other registry answers
+ *     `409 control_not_offered`. The map is replaceable only through buildApp's code-only test seam;
+ *   - a source has no control credential (a `platform_write` `discovery_credentials` row) until an admin stores one
+ *     with a step-up (vendor-agent-control-credentials.ts), so a request answers `409 no_control_credential`. The
+ *     token is obtained BEFORE any state moves, outside any transaction, so a token failure changes nothing.
  *
  * The kill switch (ADR-0124, owner decision 2): `killSwitchNarrowingOnly` guards the `execute` event, so disable and
  * quarantine run under any dial and restore only under `normal`. `runExternalWrite` exempts only the
@@ -69,6 +70,14 @@ import {
 } from "@regulait/shared";
 import { loadApprovalPool, requestedAtOf } from "./approval-pool.js";
 import type { ControlContext, VendorAgentControl, VendorAgentRef } from "./vendor-agent-control-contract.js";
+import { AGENT_PLATFORM_CONTROLS } from "./agent-platform-adapters.js";
+import {
+  ControlTokenError,
+  controlCredentialResolver,
+  registerVendorControlCredentialRoutes,
+  type ControlCredentialLookup,
+  type ControlCredentialResolver,
+} from "./vendor-agent-control-credentials.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
 import { createGuardedFetch, type EgressResolver } from "./egress-guard.js";
@@ -102,16 +111,13 @@ export const OPEN_ACTION_STATES = ["requested", "approved", "executing", "unknow
 // Injected dependencies (code-only test seams; empty / null in production)
 // ---------------------------------------------------------------------------
 
-/** a live control credential: its row id (bound into the approval digest, so a replaced credential is refused) and token */
-export interface ControlCredential {
-  readonly id: string;
-  readonly token: string;
-}
 export interface VendorAgentControlDeps {
-  /** registry name → its adapter's control member; empty until an adapter declares one (slice 1b) */
+  /** registry name → its adapter's control member (default: the adapters', `AGENT_PLATFORM_CONTROLS`) */
   controls?: Readonly<Record<string, VendorAgentControl>>;
-  /** the source's live `platform_write` credential, or null; null in production until slice 1b */
-  credentialFor?: (db: Db, sourceId: string) => Promise<ControlCredential | null>;
+  /** the source's live `platform_write` credential (default: the production resolver over `discovery_credentials`) */
+  credentialFor?: ControlCredentialResolver;
+  /** the data key a stored control secret is encrypted with (buildApp's `dataKey`, never a test seam) */
+  dataKey?: string;
   /** TEST SEAMS for the guarded fetch (never set in production) */
   fetchImpl?: typeof fetch;
   resolve?: EgressResolver;
@@ -149,6 +155,8 @@ export interface ActionFacts {
   sourceId: string;
   registry: string;
   vendorId: string;
+  /** the vendor locator besides the id (Copilot Studio: the environment id), or null */
+  locator: string | null;
   action: "disable" | "quarantine" | "restore";
   reverses: string | null;
   credentialId: string;
@@ -158,6 +166,7 @@ const factsOfRow = (r: VendorAgentActionRow, credentialId: string): ActionFacts 
   sourceId: r.sourceId,
   registry: r.registry,
   vendorId: r.externalId,
+  locator: r.vendorLocator,
   action: r.direction === "reverse" ? "restore" : r.action,
   reverses: r.reversesActionId,
   credentialId,
@@ -185,7 +194,9 @@ export const vendorControlDecideStepUp = (approvalId: string, decision: "approve
 
 const opOf = (r: Pick<VendorAgentActionRow, "action" | "direction">): ControlOp => ({ action: r.action, direction: r.direction });
 const writeOperationOf = (op: ControlOp): ExternalWriteOperation => (op.direction === "apply" ? "vendor_agent_control.apply" : "vendor_agent_control.reverse");
-const refOf = (r: VendorAgentActionRow): VendorAgentRef => ({ recordId: r.recordId, sourceId: r.sourceId, registry: r.registry, externalId: r.externalId });
+const refOf = (r: VendorAgentActionRow): VendorAgentRef => ({ recordId: r.recordId, sourceId: r.sourceId, registry: r.registry, externalId: r.externalId, locator: r.vendorLocator });
+/** the locator a control reads from a record now (null for a vendor that needs none, or a record without one) */
+const locatorNow = (control: VendorAgentControl, attrs: Readonly<Record<string, unknown>>): string | null => (control.locatorOf ? control.locatorOf(attrs) : null);
 
 // ---------------------------------------------------------------------------
 // Views and lists (ADR-0226 list contract)
@@ -266,6 +277,7 @@ const fixedFields = (r: VendorAgentActionRow) => ({
   sourceId: r.sourceId,
   registry: r.registry,
   vendorId: r.externalId,
+  locator: r.vendorLocator,
   action: r.direction === "reverse" ? "restore" : r.action,
   reverses: r.reversesActionId,
   priorState: r.priorState,
@@ -319,8 +331,7 @@ export async function touchDue(t: Db, scope: SQL | undefined, audit: AuditFn): P
 // ---------------------------------------------------------------------------
 
 export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, deps: VendorAgentControlDeps = {}): void {
-  const controls = deps.controls ?? {};
-  const credentialFor = deps.credentialFor ?? (async () => null);
+  const controls = deps.controls ?? AGENT_PLATFORM_CONTROLS;
   const actorOf = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const badRequest = (reply: FastifyReply, err: z.ZodError) =>
     reply.status(400).send({ error: "invalid_request", detail: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
@@ -337,6 +348,31 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
     });
+  const credentialFor: ControlCredentialResolver = deps.credentialFor ?? controlCredentialResolver({ ...(deps.dataKey ? { dataKey: deps.dataKey } : {}), fetch: guardedFetch });
+  registerVendorControlCredentialRoutes(app, db, { controls, ...(deps.dataKey ? { dataKey: deps.dataKey } : {}) });
+  const lookupRefusal = (l: Extract<ControlCredentialLookup, { ok: false }>) => refusal(409, l.code, l.detail);
+  /**
+   * The token, obtained BEFORE the action moves and outside any transaction (a token failure changes nothing), for
+   * the credential the action's transaction then re-reads: a different credential id there refuses the action.
+   */
+  const tokenBefore = async (
+    userId: string,
+    actionId: string,
+    peek: Pick<VendorAgentActionRow, "sourceId" | "registry" | "action" | "direction">,
+  ): Promise<Refusal | { credentialId: string; token: string } | null> => {
+    const control = controlFor(peek.registry, opOf(peek));
+    if (!control) return null;
+    const look = await credentialFor(db, peek.sourceId, control);
+    if (!look.ok) return null;
+    try {
+      return { credentialId: look.credential.id, token: await look.credential.acquire(AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS)) };
+    } catch (e) {
+      const code = e instanceof ControlTokenError ? e.code : "control_token_failed";
+      const detail = e instanceof ControlTokenError ? e.message : "the control token could not be obtained";
+      await auditWith(userId)(db, actionId, "vendor-agent-control-token-failed", "deny", `a vendor agent control token could not be obtained (${code}); nothing moved and nothing was sent (ADR-0338)`, { actionId, code, mode: look.credential.mode });
+      return refusal(502, "control_token_failed", detail, { code });
+    }
+  };
   const readState = async (control: VendorAgentControl, r: VendorAgentActionRow, token: string, signal: AbortSignal): Promise<VendorAgentServiceState> => {
     try {
       const s = await control.readState({ fetch: await guardedFetch(), signal, token }, refOf(r));
@@ -399,9 +435,16 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
         if (restored) return refusal(409, "already_restored", "that action was already restored");
       }
       // the registry offers the action only once its adapter declares it, and only with a live control credential
-      if (!controlFor(record.registry, op)) return refusal(409, "control_not_offered", `the ${record.registry} registry offers no ${op.action} control`);
-      const credential = await credentialFor(t, record.sourceId);
-      if (!credential) return refusal(409, "no_control_credential", "the source has no live control credential (a separate platform_write credential, never the read credential)");
+      const control = controlFor(record.registry, op);
+      if (!control) return refusal(409, "control_not_offered", `the ${record.registry} registry offers no ${op.action} control`);
+      const look = await credentialFor(t, record.sourceId, control);
+      if (!look.ok) return lookupRefusal(look);
+      const credential = look.credential;
+      // the vendor locator comes from the discovered record, never from the admin (ADR-0338 §3)
+      const locator = locatorNow(control, record.vendorAttributes);
+      if (control.locatorOf && locator === null) {
+        return refusal(409, "vendor_locator_missing", "the discovered record does not carry the vendor locator this control needs (for Copilot Studio, the environment id): rescan the source");
+      }
       // the second person: an active admin in the approval pool (never the requester, nor anyone delegation-linked)
       if (approverUserId === userId) return refusal(422, "approver_is_requester", "a control action is approved by a second administrator, not the person who asks for it");
       const [approver] = await t.select({ id: users.id }).from(users).where(and(eq(users.id, approverUserId), eq(users.isAdmin, true), isNull(users.disabledAt)));
@@ -419,7 +462,7 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
         return { status: su.status, body: su.body };
       }
       const id = randomUUID();
-      const draft = { id, recordId, sourceId: record.sourceId, registry: record.registry, externalId: record.externalId, action: op.action, direction: op.direction, reversesActionId: reverses } as VendorAgentActionRow;
+      const draft = { id, recordId, sourceId: record.sourceId, registry: record.registry, externalId: record.externalId, vendorLocator: locator, action: op.action, direction: op.direction, reversesActionId: reverses } as VendorAgentActionRow;
       const facts = factsOfRow(draft, credential.id);
       const ttl = settings.ttl ?? VENDOR_CONTROL_DEFAULT_TTL_HOURS;
       const [approval] = await t
@@ -445,7 +488,7 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
         "vendor-agent-control-requested",
         "require_approval",
         `${b.action} of the ${record.registry} agent requested, awaiting a second administrator's approval (step-up ${su.method}) (ADR-0338)`,
-        { ...fixedFields(row!), reason: scrubAuditText(b.reason), approvalId: approval!.id, approverUserId, credentialId: credential.id, expiresAt: approval!.expiresAt?.toISOString() ?? null, stepUp: su.method },
+        { ...fixedFields(row!), reason: scrubAuditText(b.reason), approvalId: approval!.id, approverUserId, credentialId: credential.id, credentialMode: credential.mode, expiresAt: approval!.expiresAt?.toISOString() ?? null, stepUp: su.method },
       );
       return { row: row!, idempotent: false };
     });
@@ -504,7 +547,11 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     if (!userId) return reply.status(403).send({ error: "person_required", detail: "an action is executed by the administrator who requested it" });
     const audit = auditWith(userId);
     const id = p.data.id.toLowerCase();
-    const started = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; credential: ControlCredential }> => {
+    // the token first, only for an action this person may execute now; everything is re-checked in the transaction
+    const [peek] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
+    const pre = peek && peek.createdBy === userId && VENDOR_ACTION_MACHINE.can(peek.status, "execute") ? await tokenBefore(userId, id, peek) : null;
+    if (pre && isRefusal(pre)) return reply.status(pre.status).send(pre.body);
+    const started = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; token: string }> => {
       const t = tx as unknown as Db;
       await touchDue(t, eq(vendorAgentActions.id, id), audit);
       const [r] = await lockAction(t, id);
@@ -522,18 +569,23 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       if (!settings?.on) return refusal(403, "vendor_agent_control_disabled", "vendor agent control was turned off");
       const [record] = await t.select().from(agentRegistryRecords).where(eq(agentRegistryRecords.id, r.recordId)).for("share");
       const control = controlFor(r.registry, opOf(r));
-      const credential = record ? await credentialFor(t, record.sourceId) : null;
+      const look = record && control ? await credentialFor(t, record.sourceId, control) : null;
+      const credential = look?.ok ? look.credential : null;
       const [approval] = await t.select().from(approvals).where(eq(approvals.id, r.approvalId)).for("update");
       const moved =
         !record || record.absentSince || record.sourceId !== r.sourceId || record.registry !== r.registry || record.externalId !== r.externalId
           ? "record_changed"
           : !control
             ? "control_not_offered"
-            : !credential
-              ? "no_control_credential"
-              : !approval?.argumentsDigest || actionArgumentsDigest(factsOfRow(r, credential.id)) !== approval.argumentsDigest
-                ? "approval_payload_mismatch"
-                : null;
+            : locatorNow(control, record.vendorAttributes) !== r.vendorLocator
+              ? "record_changed"
+              : !credential
+                ? (look && !look.ok ? look.code : "no_control_credential")
+                : !pre || pre.credentialId !== credential.id
+                  ? "credential_changed"
+                  : !approval?.argumentsDigest || actionArgumentsDigest(factsOfRow(r, credential.id)) !== approval.argumentsDigest
+                    ? "approval_payload_mismatch"
+                    : null;
       if (moved) {
         await audit(t, r.id, "vendor-agent-control-execute-refused", "deny", `a vendor agent control action was not executed: ${moved} (ADR-0338)`, { ...fixedFields(r), why: moved });
         return refusal(409, "approval_payload_mismatch", `what was approved no longer matches (${moved}); ask again`, { why: moved });
@@ -549,17 +601,17 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
         .where(and(eq(vendorAgentActions.id, r.id), whereFrom(vendorAgentActions.status, VENDOR_ACTION_MACHINE, "execute")))
         .returning();
       await audit(t, r.id, "vendor-agent-control-executing", "allow", `a vendor agent control action is executing (step-up ${su.method}) (ADR-0338)`, { ...fixedFields(executing!), dial, stepUp: su.method });
-      return { row: executing!, control: control!, credential: credential! };
+      return { row: executing!, control: control!, token: pre!.token };
     });
     if (isRefusal(started)) return reply.status(started.status).send(started.body);
 
     // the vendor calls run outside any database transaction (ADR-0338 §4)
-    const { row, control, credential } = started;
+    const { row, control, token } = started;
     const op = opOf(row);
     const target = targetStateOf(op);
     // one deadline for the whole sequence (prior read, the call, the observed read), so it ends inside the lease
     const deadline = AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS);
-    const prior = await readState(control, row, credential.token, deadline);
+    const prior = await readState(control, row, token, deadline);
     // ADR-0338 §4 step 3: the prior state is recorded BEFORE the vendor call, so a crash after it still leaves the row
     // with what the agent was in (#1096 review 1); conditional on the row still executing
     await db
@@ -572,7 +624,7 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     let observed: VendorAgentServiceState | null = null;
     try {
       const fetchForCall = await guardedFetch();
-      const ctx: ControlContext = { fetch: fetchForCall, signal: deadline, token: credential.token };
+      const ctx: ControlContext = { fetch: fetchForCall, signal: deadline, token };
       const effect = { userId, objectType: "vendor_agent_control" as const, objectId: row.id, detail: { registry: row.registry, direction: op.direction }, summarize: (x: ControlResult) => ({ outcome: x.outcome, code: x.code, httpStatus: x.httpStatus ?? null }) };
       // one classified operation per contract method: `apply` narrows (the one dial exemption), `reverse` widens
       const result: ControlResult =
@@ -584,7 +636,7 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
       if (result.outcome === "already_in_state") event = "find_in_state";
       else if (result.outcome === "refused" || result.outcome === "failed") event = "fail";
       else {
-        observed = await readState(control, row, credential.token, deadline);
+        observed = await readState(control, row, token, deadline);
         event = observed === target ? "succeed" : "lose_track";
         if (event === "lose_track") code = "not_confirmed";
       }
@@ -633,24 +685,29 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     if (!eb.success) return badRequest(reply, eb.error);
     const audit = auditWith(actorOf(req));
     const id = p.data.id.toLowerCase();
-    const ready = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; credential: ControlCredential }> => {
+    const [peek] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
+    const pre = peek && peek.status === "unknown" ? await tokenBefore(actorOf(req), id, peek) : null;
+    if (pre && isRefusal(pre)) return reply.status(pre.status).send(pre.body);
+    const ready = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; token: string }> => {
       const t = tx as unknown as Db;
       await touchDue(t, eq(vendorAgentActions.id, id), audit);
       const [r] = await lockAction(t, id);
       if (!r) return refusal(404, "not_found", "no such action");
       if (r.status !== "unknown") return notOpen(r.status, "settleable");
       const control = controlFor(r.registry, opOf(r));
-      const credential = await credentialFor(t, r.sourceId);
-      if (!control || !credential) return refusal(409, control ? "no_control_credential" : "control_not_offered", "the state cannot be read without the control and its credential");
+      if (!control) return refusal(409, "control_not_offered", "the state cannot be read without the vendor's control");
+      const look = await credentialFor(t, r.sourceId, control);
+      if (!look.ok) return lookupRefusal(look);
+      if (!pre || pre.credentialId !== look.credential.id) return refusal(409, "credential_changed", "the control credential changed while the state was being read; try again");
       const su = await checkStepUp(t, req, vendorControlSettleStepUp(r.id), { spend: true });
       if (!su.ok) return { status: su.status, body: su.body };
       await audit(t, r.id, "vendor-agent-control-settle-started", "allow", `a vendor agent control action is being settled by a state read (step-up ${su.method}) (ADR-0338)`, fixedFields(r));
-      return { row: r, control, credential };
+      return { row: r, control, token: pre.token };
     });
     if (isRefusal(ready)) return reply.status(ready.status).send(ready.body);
-    const { row, control, credential } = ready;
+    const { row, control, token } = ready;
     // a read only, under any dial: never a second apply
-    const state = await readState(control, row, credential.token, AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS));
+    const state = await readState(control, row, token, AbortSignal.timeout(VENDOR_CONTROL_DEADLINE_MS));
     const target = targetStateOf(opOf(row));
     // decided from the direction, never only from a stored prior (#1096 review 1): the target state means the call took
     // effect; any other KNOWN state means it did not (`apply` left the agent in service, `reverse` left it out of

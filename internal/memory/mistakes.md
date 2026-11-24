@@ -2022,3 +2022,16 @@ before the push, because the change looked like prose only.
 Rule: any edit under `internal/`, `scripts/` or `.github/` that writes `ADR-` followed by four digits runs
 `pnpm exec vitest run --dir scripts adr-index` before the push. A reserved or unmerged ADR is written as "ADR number NNNN
 (reserved)" or by its PR, never as `ADR-NNNN`.
+
+### M-122 (2026-11-23) - Released a UI PR whose browser journeys never ran on the PR
+
+The master released #1227 (row semantics) with every PR check green. `spa-journeys`, the real-gateway Playwright
+journeys, was skipped on the PR, because ADR-0262 runs it only in the full suite (merge queue, push to main, nightly,
+manual), and this user-owned repository has no merge queue. The check first ran on main after the merge and failed on two
+specs, so main was red from about 10:05 to 15:50 and four other PRs went red with it. The fix PR #1230 was itself first
+approved with the check skipped. The master held it, dispatched `ci.yml` by hand on its branch, and released it only
+after `spa-journeys` passed. #1236 now runs the check on UI and gateway PRs.
+
+Rule: before releasing a PR, compare the checks that ran on it with the checks main runs. A check that main runs and the
+PR skipped blocks the release until it has passed on the PR's head, if necessary through a dispatched `ci.yml` run on the
+branch. "All checks green" includes checking that none of them was skipped.

@@ -172,6 +172,9 @@ export {
   externalScorerAvailabilityFor,
   externalScorerKindSchema,
   EXTERNAL_SCORER_CLAIMABLE_KINDS,
+  ROUTING_SCORER_KIND,
+  ROUTING_SCORER_KINDS,
+  routingClassifierProblem,
   createExternalScorerSchema,
   updateExternalScorerSchema,
   setExternalScorerEnabledSchema,
@@ -2483,6 +2486,8 @@ export const updateOrgSettingsSchema = z
     compactionFailureMode: compactionFailureModeSchema.optional(),
     summarizerSelection: summarizerSelectionSchema.optional(),
     summarizerAgentId: z.string().uuid().nullable().optional(),
+    /** ADR-0353 part 2: the routing classifier (an ADR-0088 scorer claiming `routing_complexity`); null = off */
+    routingClassifierScorerId: z.string().uuid().nullable().optional(),
     // governance / compliance defaults
     defaultPiiMode: orgPiiModeSchema.optional(),
     /** ADR-0117: WHICH international national-identifier jurisdictions this
@@ -5181,6 +5186,8 @@ export * from "./agent-identity.js";
 // ADR-0310 (G2): vendor-native managed settings compiled from effective MCP entitlements
 export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
+export * from "./endpoint-fleet.js";
+export * from "./edr.js";
 export * from "./endpoint-actions.js";
 
 // ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
@@ -5227,3 +5234,5 @@ export * from "./agent-credential.js";
 export * from "./content-inspection.js";
 // ADR-0363 slice 3: AI app risk attributes (curated, sourced, pinned)
 export * from "./ai-app-risk.js";
+// ADR-0361: monitoring sanctioned AI SaaS through vendor compliance APIs (catalogue, schemas, normaliser, run lifecycle)
+export * from "./ai-saas-monitor.js";
