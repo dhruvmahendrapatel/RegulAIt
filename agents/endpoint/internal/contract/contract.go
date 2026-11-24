@@ -9,6 +9,8 @@
 // the display names encrypted. A report never carries either, and never carries an absolute path.
 package contract
 
+import "encoding/json"
+
 // Route paths under the issuer. The gateway serves only these to an endpoint agent (`via: "endpoint-agent"`).
 const (
 	RouteEnrolmentTickets = "/v1/endpoint-agent/enrolment-tickets"
@@ -16,7 +18,16 @@ const (
 	RouteCredentials      = "/v1/endpoint-agent/credentials"
 	RouteConfig           = "/v1/endpoint-agent/config"
 	RouteReports          = "/v1/endpoint-agent/reports"
-	RouteToken            = "/oauth/token"
+	// RouteDecisions takes batches of hook decisions and managed-file observations (ADR-0310 addendum, lane E1).
+	RouteDecisions = "/v1/endpoint-agent/decisions"
+	// ADR-0331: signed add-on removal directives, and the agent's per-directive outcomes
+	RouteDirectives        = "/v1/endpoint-agent/directives"
+	RouteDirectiveOutcomes = "/v1/endpoint-agent/directive-outcomes"
+	// ADR-0360 §4 (slice 1c): the update offer, its binary, and the root updater's result as the per-user agent reports it
+	RouteUpdate        = "/v1/endpoint-agent/update"
+	RouteUpdateBinary  = "/v1/endpoint-agent/update/binary"
+	RouteUpdateResults = "/v1/endpoint-agent/update-results"
+	RouteToken         = "/oauth/token"
 	// ResourcePath is the RFC 8707 resource an agent's self token names (ADR-0188 S7 point 1).
 	ResourcePath = "/v1/endpoint-agent"
 )
@@ -26,6 +37,8 @@ const (
 	TypDPoP            = "dpop+jwt"
 	TypKeyRotation     = "regulait-key-rotation+jwt"
 	TypReportSignature = "regulait-endpoint-report+jwt"
+	// TypDecisionsSignature is the decision batch's signature (ADR-0310 addendum), the report signature's twin.
+	TypDecisionsSignature = "regulait-endpoint-decisions+jwt"
 	// JWKThumbprintURIPrefix makes the RFC 9278 client id from a key's RFC 7638 thumbprint, as S7 does.
 	JWKThumbprintURIPrefix = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:"
 	// RotateAfterMember is the non-standard token-response member (ADR-0188 decision 12), epoch seconds.
@@ -36,11 +49,14 @@ const (
 const (
 	HeaderContentDigest   = "Content-Digest"
 	HeaderReportSignature = "Regulait-Report-Signature"
+	// HeaderDecisionsSignature carries the decision batch's signature beside Content-Digest.
+	HeaderDecisionsSignature = "Regulait-Decisions-Signature"
 )
 
 // Schema identifiers. Every body and every file the agent reads names its schema; an unknown one is refused.
 const (
 	SchemaReport           = "regulait.endpoint-report/1"
+	SchemaDecisions        = "regulait.endpoint-decisions/1"
 	SchemaEnrolFile        = "regulait.endpoint-enrol/1"
 	SchemaTicketFile       = "regulait.endpoint-ticket/1"
 	SchemaConfigFile       = "regulait.endpoint-agent-config/1"
@@ -270,6 +286,10 @@ type KeyFound struct {
 	KeyName string `json:"keyName"`          // the field or variable name holding the key
 	RuleID  string `json:"ruleId,omitempty"` // the compiled `dlp.secret.*` rule that matched, if any
 	Present bool   `json:"present"`
+	// Fingerprint is the keyed HMAC of the value under the tenant's credential-reuse key, and FingerprintKeyID names
+	// that key (ADR-0350 §11). Both are empty when no key is configured; the value itself is never reported.
+	Fingerprint      string `json:"fingerprint,omitempty"`
+	FingerprintKeyID string `json:"fingerprintKeyId,omitempty"`
 }
 
 // Gap is something a collector could not observe, so posture tells the truth about coverage.
@@ -282,6 +302,132 @@ type Gap struct {
 type ReportResponse struct {
 	Accepted  bool `json:"accepted"`
 	Duplicate bool `json:"duplicate"`
+}
+
+// DecisionBatch is POST /v1/endpoint-agent/decisions (ADR-0310 addendum, lane E1): the hook decisions the device
+// spooled since the last batch, and what the agent saw of each vendor's managed hook file this cycle. Idempotent on
+// BatchID: a resend carries the same id and the same bytes. It never carries a tool's arguments, a command, a file
+// path, a prompt, a working directory or a vendor's session id.
+type DecisionBatch struct {
+	Schema       string `json:"schema"`
+	BatchID      string `json:"batchId"` // UUID v4
+	SentAt       string `json:"sentAt"`  // RFC 3339, UTC, whole seconds
+	AgentVersion string `json:"agentVersion"`
+	// DroppedEvents counts events the device could not keep (spool full, unreadable, refused by the guard) since the
+	// last accepted batch, so a gap is visible.
+	DroppedEvents int              `json:"droppedEvents"`
+	Events        []DecisionEvent  `json:"events"`    // at most MaxDecisionEvents
+	Integrity     []IntegrityEntry `json:"integrity"` // at most one per ManagedFiles entry
+}
+
+// MaxDecisionEvents bounds one batch.
+const MaxDecisionEvents = 500
+
+// Event kinds: a decision a rule set made, or the first sight of a coding-agent session in a permission mode.
+const (
+	EventDecision = "decision"
+	EventSession  = "session"
+)
+
+// DecisionEvent is one spooled event. Decision is set exactly when Kind is EventDecision.
+type DecisionEvent struct {
+	EventID    string `json:"eventId"`    // UUID v4
+	OccurredAt string `json:"occurredAt"` // RFC 3339, UTC, whole seconds
+	Kind       string `json:"kind"`
+	Agent      string `json:"agent"` // a hook adapter name
+	// SessionRef is the hex HMAC-SHA256 of the vendor's session id under a per-device salt that never leaves the
+	// device: it links one session's events, and nothing else. Null when the hook input carries no session id.
+	SessionRef *string `json:"sessionRef"`
+	// PermissionMode is the hook input's permission_mode, verbatim (Claude Code and Codex only); null otherwise.
+	PermissionMode *string       `json:"permissionMode"`
+	Decision       *HookDecision `json:"decision,omitempty"`
+}
+
+// HookDecision is what a rule set answered.
+type HookDecision struct {
+	// Emitter names the on-device rule set that decided (DecisionEmitter* values, or a later rule set's own name).
+	Emitter string `json:"emitter"`
+	Action  string `json:"action"`  // Action* values
+	Verdict string `json:"verdict"` // Verdict* values: what the coding agent was answered
+	// WouldDeny and WouldAsk are audit mode's "enforce mode would have"; never both.
+	WouldDeny bool    `json:"wouldDeny"`
+	WouldAsk  bool    `json:"wouldAsk"`
+	Mode      string  `json:"mode"`   // DecisionMode* values
+	RuleID    *string `json:"ruleId"` // the deciding rule, when it has an id
+}
+
+// Rule sets that emit decisions.
+const (
+	DecisionEmitterMCP       = "mcp-rules"
+	DecisionEmitterCommand   = "command-rules"
+	DecisionEmitterHookInput = "hook-input" // the hook could not read the call and blocked it
+)
+
+// Actions a decision is about.
+const (
+	ActionMCP       = "mcp"
+	ActionCommand   = "command"
+	ActionFileRead  = "file_read"
+	ActionFileWrite = "file_write"
+	ActionPackage   = "package"
+	ActionOther     = "other"
+)
+
+// Verdicts. VerdictNone is only ever an audit-mode would-deny or would-ask; a plain no-decision is not an event.
+const (
+	VerdictAllow = "allow"
+	VerdictDeny  = "deny"
+	VerdictAsk   = "ask"
+	VerdictNone  = "none"
+)
+
+// Decision modes: the policy's mode for the agent, or no_policy when none verified.
+const (
+	DecisionModeAudit    = "audit"
+	DecisionModeEnforce  = "enforce"
+	DecisionModeNoPolicy = "no_policy"
+)
+
+// IntegrityEntry is one vendor-managed hook file as the agent found it this cycle.
+type IntegrityEntry struct {
+	File   string  `json:"file"`   // ManagedFile* values
+	State  string  `json:"state"`  // FileState* values
+	SHA256 *string `json:"sha256"` // hex SHA-256 of the exact bytes; set exactly when State is FileStatePresent
+	// HookStatus is what the file says about the RegulAIt hook; set only when State is FileStatePresent.
+	HookStatus *string `json:"hookStatus"`
+}
+
+// The managed files, named by vendor rather than by path (paths differ per OS and never leave the device).
+const (
+	ManagedFileClaudeCode = "claude-code/managed-settings.json"
+	ManagedFileCursor     = "cursor/hooks.json"
+	ManagedFileCopilotCLI = "copilot-cli/policy.json"
+	ManagedFileCodex      = "openai-codex/requirements.toml"
+)
+
+// Managed-file states.
+const (
+	FileStatePresent        = "present"
+	FileStateMissing        = "missing"
+	FileStateUnreadable     = "unreadable"
+	FileStateNotSystemOwned = "not_system_owned"
+)
+
+// Hook statuses of a present managed file.
+const (
+	HookRegistered  = "registered"  // the RegulAIt hook, with the vendor's fail-closed / managed-only settings
+	HookWeakened    = "weakened"    // the RegulAIt hook, without them
+	HookAbsent      = "absent"      // the file parses but registers no RegulAIt hook
+	HookUnparseable = "unparseable" // the file does not parse
+)
+
+// DecisionsResponse is the 202 answer. A resend of an accepted batch is answered Duplicate. Audited and Refused
+// are informational.
+type DecisionsResponse struct {
+	Accepted  bool `json:"accepted"`
+	Duplicate bool `json:"duplicate"`
+	Audited   int  `json:"audited,omitempty"`
+	Refused   int  `json:"refused,omitempty"`
 }
 
 // ErrorBody is every refusal's body. Error is a stable code (e.g. `enrolment_cap_reached`).
@@ -298,4 +444,100 @@ const (
 	ErrTicketExhausted     = "ticket_exhausted"
 	ErrUseDPoPNonce        = "use_dpop_nonce"
 	ErrDeviceRevoked       = "device_revoked"
+)
+
+// ADR-0331: governed add-on removal. The directive itself is a signed envelope (enforce.Envelope) whose payload
+// internal/directive decodes; these are the transport bodies around it.
+
+// DirectivesResponse is GET RouteDirectives: at most MaxDirectivesPerSync signed envelopes.
+type DirectivesResponse struct {
+	Directives []json.RawMessage `json:"directives"`
+}
+
+// MaxDirectivesPerSync bounds one sync, on both sides.
+const MaxDirectivesPerSync = 20
+
+// Directive outcomes and their closed code vocabulary (ADR-0331 section 7).
+const (
+	OutcomeRemoved         = "removed"
+	OutcomeNothingToRemove = "nothing_to_remove"
+	OutcomeFailed          = "failed"
+)
+
+// OutcomeCodes maps each outcome to the codes it may carry.
+var OutcomeCodes = map[string][]string{
+	OutcomeRemoved:         {"removed"},
+	OutcomeNothingToRemove: {"not_present", "identity_differs"},
+	OutcomeFailed:          {"not_in_manifest", "path_refused", "unsupported_format", "parse_failed", "write_failed", "expired", "wrong_identity"},
+}
+
+// DirectiveOutcome is one directive's result on this device.
+type DirectiveOutcome struct {
+	DirectiveID string `json:"directiveId"`
+	Outcome     string `json:"outcome"`
+	Code        string `json:"code"`
+	Notified    bool   `json:"notified"`
+}
+
+// DirectiveOutcomesRequest is POST RouteDirectiveOutcomes.
+type DirectiveOutcomesRequest struct {
+	Outcomes []DirectiveOutcome `json:"outcomes"`
+}
+
+// ADR-0360 §4 (slice 1c): self-update delivery. The per-user agent carries the gateway's offer into the update spool
+// and the root updater's result back; it verifies no signature (the root updater does), so these bodies are transport.
+
+// UpdateResponse is GET RouteUpdate. Update is null when nothing is offered.
+type UpdateResponse struct {
+	Update *UpdateOffer `json:"update"`
+}
+
+// UpdateOffer is one update attempt: the signed directive and release manifest envelopes ({keyId, payload,
+// signature}, written to the spool byte for byte as received) and where to fetch the binary.
+type UpdateOffer struct {
+	AttemptID string          `json:"attemptId"` // UUID
+	Directive json.RawMessage `json:"directive"`
+	Manifest  json.RawMessage `json:"manifest"`
+	Binary    UpdateBinary    `json:"binary"`
+}
+
+// UpdateBinary names the binary to download: Path is exactly RouteUpdateBinary, OS and Arch the device's own, Length
+// in 1..update.MaxBinaryBytes and SHA256 lower-case hex. The answer to GET Path is application/octet-stream.
+type UpdateBinary struct {
+	Path   string `json:"path"`
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	Length int64  `json:"length"`
+	SHA256 string `json:"sha256"`
+}
+
+// UpdateResult is the root updater's outcome (schema regulait.endpoint-update-result/1), the spool's result file.
+type UpdateResult struct {
+	Schema      string `json:"schema"`
+	Outcome     string `json:"outcome"`
+	Code        string `json:"code,omitempty"`
+	RolloutID   string `json:"rolloutId,omitempty"`
+	FromVersion string `json:"fromVersion"`
+	ToVersion   string `json:"toVersion,omitempty"`
+	At          string `json:"at"`
+}
+
+// UpdateResultRequest is POST RouteUpdateResults: the result file and the attempt the agent last carried into the spool.
+type UpdateResultRequest struct {
+	AttemptID string       `json:"attemptId"`
+	Result    UpdateResult `json:"result"`
+}
+
+// UpdateResultResponse is the 200 answer. State is the attempt's state after the result was recorded.
+type UpdateResultResponse struct {
+	Recorded bool   `json:"recorded"`
+	State    string `json:"state"`
+	// RolloutHalted is true when this result took the rollout to its halt threshold (the gateway halted it).
+	RolloutHalted bool `json:"rolloutHalted,omitempty"`
+}
+
+// Update refusal codes the agent acts on.
+const (
+	ErrUpdateSignerUnavailable = "update_signer_unavailable" // 503 on RouteUpdate: no device-policy signer configured
+	ErrAlreadyReported         = "already_reported"          // 409 on RouteUpdateResults: the attempt has its result
 )

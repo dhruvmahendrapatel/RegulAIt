@@ -279,8 +279,9 @@ describe("settings endpoint — admin-only, partial update, audited", () => {
     // presence report: names + booleans only, never a value
     const env = r.json().envKeys;
     expect(Array.isArray(env)).toBe(true);
+    // ADR-0352: every vendor kind with an env-key convention (Bedrock and Vertex have none)
     expect(env.map((e: { provider: string }) => e.provider).sort()).toEqual(
-      ["anthropic", "google", "openai", "xai"],
+      ["anthropic", "cohere", "google", "mistral", "openai", "qwen", "xai"],
     );
     for (const e of env) expect(Object.keys(e).sort()).toEqual(["envVar", "present", "provider"]);
   });

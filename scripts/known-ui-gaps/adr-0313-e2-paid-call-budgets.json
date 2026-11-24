@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0313",
+  "lane": "E2",
+  "tracking": "ADR-0313 (lane E2, G9): API-only paid-call price and hold routes; the screens are posted on #453",
+  "gaps": {
+    "GET /v1/paid-call-prices": "lists paid-call prices (MCP tool, MCP server or connector): price, reserved maximum and hold TTL",
+    "POST /v1/paid-call-prices": "makes a tool, server or connector a paid call that must reserve against a budget (audited)",
+    "DELETE /v1/paid-call-prices/:priceId": "removes a paid-call price, a relaxation (settings_relax step-up, audited)",
+    "GET /v1/paid-call-holds": "pages paid-call holds: held, settled (with the usage row) or released, and why"
+  }
+}

@@ -73,7 +73,9 @@ async function open(page: Page, where: "redteam" | "evals", init?: Parameters<ty
   return state;
 }
 
-const runRow = (page: Page, id: string) => page.getByRole("link", { name: new RegExp(`^Engine run \\w+, .*, id ${id}$`) });
+// UIS-04: each run row carries a button named for the run in its first cell
+const runButton = (page: Page, id: string) => page.getByRole("button", { name: new RegExp(`^Engine run \\w+, .*, id ${id}$`) });
+const runRow = (page: Page, id: string) => page.getByRole("row").filter({ has: runButton(page, id) });
 const form = (page: Page) => page.getByTestId("engine-run-form");
 
 async function fillForm(page: Page, sets: string) {
@@ -142,7 +144,7 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
 
   test("run detail: provenance chip, items, the not-run list with reasons, and the ledger links", async ({ page }) => {
     await open(page, "redteam");
-    await runRow(page, RUNS.completedFail.id).click();
+    await runButton(page, RUNS.completedFail.id).click();
     const detail = page.getByTestId("engine-run-detail");
     const chip = detail.getByTestId("engine-provenance");
     await expect(chip).toContainText("engine: promptfoo 0.123.1");
@@ -166,7 +168,7 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
 
   test("a leased run shows its heartbeat and progress, and cancel posts the reason and ends it", async ({ page }) => {
     const state = await open(page, "redteam");
-    await runRow(page, RUNS.leased.id).click();
+    await runButton(page, RUNS.leased.id).click();
     const detail = page.getByTestId("engine-run-detail");
     const chip = detail.getByTestId("engine-provenance");
     // the runner that leased it is registered: its reported digest is the run's provenance
@@ -188,12 +190,12 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
 
   test("Evaluations: the Engine runs tab shows failed, timed-out and not-run runs as not a pass", async ({ page }) => {
     await open(page, "evals");
-    await runRow(page, RUNS.failedUnknown.id).click();
+    await runButton(page, RUNS.failedUnknown.id).click();
     let detail = page.getByTestId("engine-run-detail");
     await expect(detail.getByTestId("engine-run-status")).toHaveText("failed");
     await expect(detail.getByTestId("engine-verdict")).toHaveText("unknown (not a pass)");
     await expect(detail).toContainText("engine_crashed");
-    await runRow(page, RUNS.notRun.id).click();
+    await runButton(page, RUNS.notRun.id).click();
     detail = page.getByTestId("engine-run-detail");
     await expect(detail.getByTestId("engine-verdict")).toHaveText("not run (not a pass)");
     await expect(detail).toContainText("approval denied; nothing ran");
@@ -210,7 +212,7 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
         items: itemsOf(RUNS.completedFail.id).map((i: Json) => ({ ...i, output: markers[0], prompt: markers[1], response: markers[0], transcript: markers[1] })),
       }),
     );
-    await runRow(page, RUNS.completedFail.id).click();
+    await runButton(page, RUNS.completedFail.id).click();
     await expect(page.getByTestId("engine-not-run-list")).toContainText("Not run (2)");
     const text = await page.locator("body").innerText();
     for (const m of markers) expect(text).not.toContain(m);
@@ -231,7 +233,7 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
   test("B5W-02: a failed, timed-out or cancelled run with no items never claims every item ran", async ({ page }) => {
     await open(page, "redteam");
     for (const r of [RUNS.failedUnknown, RUNS.timeout, RUNS.cancelled]) {
-      await runRow(page, r.id).click();
+      await runButton(page, r.id).click();
       const coverage = page.getByTestId("engine-run-coverage");
       await expect(coverage).toHaveAttribute("data-coverage", "none");
       await expect(coverage).toContainText("No item measurements were recorded");
@@ -247,7 +249,7 @@ test.describe("Engine runs — Red-teaming and Evaluations (ADR-0187 X27)", () =
     await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail", { timeout: 30_000 });
     await page.reload();
     await expect(detail.getByTestId("engine-run-counts")).toContainText("1 pass · 1 fail", { timeout: 30_000 });
-    await runRow(page, RUNS.notRun.id).click();
+    await runButton(page, RUNS.notRun.id).click();
     await expect(detail.getByTestId("engine-run-status")).toHaveText("not run");
     expect(new URL(page.url()).searchParams.get("keep")).toBe("1");
     expect(new URL(page.url()).searchParams.get("run")).toBe(RUNS.notRun.id);

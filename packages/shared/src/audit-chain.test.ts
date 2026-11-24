@@ -19,6 +19,7 @@ import {
   AUDIT_PAYLOAD_VERSION,
   auditContentHash,
   auditRowHash,
+  auditRowSelfConsistent,
   canonicalAuditPayload,
   canonicalJson,
   sha256Hex,
@@ -398,5 +399,21 @@ describe("verifyChainBatch", () => {
     expect(verifyChainBatch(forged, start).break).toBeNull();
     // ...but the head moved, which is the divergence the anchor detects.
     expect(forged.at(-1)!.rowHash).not.toBe(clean.at(-1)!.rowHash);
+  });
+});
+
+describe("auditRowSelfConsistent (one row on its own, not linkage)", () => {
+  it("accepts an intact v1 row", () => {
+    expect(auditRowSelfConsistent(chainOf(3)[1]!, null)).toBe(true);
+  });
+  it("NEGATIVE: an edited field, a missing hash, a null seq, a wrong row hash or a v1 row with actor fields", () => {
+    const row = chainOf(3)[1]!;
+    expect(auditRowSelfConsistent({ ...row, reason: "edited" }, null)).toBe(false);
+    expect(auditRowSelfConsistent({ ...row, contentHash: null }, null)).toBe(false);
+    expect(auditRowSelfConsistent({ ...row, seq: null }, null)).toBe(false);
+    expect(auditRowSelfConsistent({ ...row, rowHash: "0".repeat(64) }, null)).toBe(false);
+    expect(auditRowSelfConsistent({ ...row, actorIdentityId: "x" }, null)).toBe(false);
+    // at or past a v2 boundary a row without chain version 2 is refused
+    expect(auditRowSelfConsistent(row, 1)).toBe(false);
   });
 });

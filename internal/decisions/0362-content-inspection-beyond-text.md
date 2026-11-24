@@ -69,8 +69,9 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
    The gateway awaits the run on the request path with a deadline; no answer by the deadline is a refusal of every
    file (`timeout`).
 3. **Type from bytes.** The type comes from magic numbers, not the name or declared media type. A declared type of a
-   different family is `type_mismatch`. An OOXML part that declares a DOCTYPE or ENTITY is `malformed`, which closes
-   entity-expansion and external-entity attacks whatever the expat version.
+   different family is `type_mismatch`. An OOXML part that declares a DOCTYPE or ENTITY is `malformed`, checked inside expat on the
+   decoded document so no encoding (UTF-16 included) can hide it; this closes entity expansion, external entities and
+   text injected through internal entities, whatever the expat version.
 4. **Limits.** The hard caps below are baked into the extractor; a request may only lower them. Every zip read stops
    one byte past its limit, whatever the header claims. The text cap (750,000 characters, lowered from 2,000,000 by the
    lane lead on 2026-11-17) keeps the result, as escaped JSON, under the engine contract's 3 MiB raw-report cap for
@@ -182,3 +183,5 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
   archived project is refused 409 `project_archived` (`refuseIfArchived`), as `PATCH /v1/projects/:projectId` and its
   classifications are. Not built: the redact case of decision 5 (no dispatch PII mode redacts today), per-file guardrail attribution,
   and the response-side files.
+- **Review round 1 on #967 (2026-11-21)**: the DOCTYPE/ENTITY refusal moved from a byte search (which a UTF-16 part
+  bypassed) into the parser (`refuse_dtd`, expat handlers on the decoded document); UTF-16 LE/BE and BOM tests added.
