@@ -9,7 +9,7 @@ import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
-import { ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE } from "./endpoint-fleet.js";
+import { ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE, ENDPOINT_UPDATE_ATTEMPT_MACHINE } from "./endpoint-fleet.js";
 import { EDR_ISOLATION_MACHINE } from "./edr.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
@@ -1142,6 +1142,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   // ADR-0360 §3 (lane E41): a staged endpoint agent update rollout and its stages
   [ENDPOINT_ROLLOUT_MACHINE.def.id]: ENDPOINT_ROLLOUT_MACHINE,
   [ENDPOINT_ROLLOUT_STAGE_MACHINE.def.id]: ENDPOINT_ROLLOUT_STAGE_MACHINE,
+  [ENDPOINT_UPDATE_ATTEMPT_MACHINE.def.id]: ENDPOINT_UPDATE_ATTEMPT_MACHINE,
   // ADR-0360 §6 (lane E41): a governed, two-person EDR isolation request
   [EDR_ISOLATION_MACHINE.def.id]: EDR_ISOLATION_MACHINE,
   [SHADOW_AI_FINDING_MACHINE.def.id]: SHADOW_AI_FINDING_MACHINE,

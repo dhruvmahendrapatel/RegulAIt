@@ -110,13 +110,27 @@ Rollout lifecycle (`endpoint_update_rollouts.state`, declared once as `ENDPOINT_
 
 | Event | From | To | By |
 |---|---|---|---|
-| `start` | `draft` | `running` (stage 1 becomes `active`) | admin; refused while self-update is off |
+| `request_start` | `draft` | `start_requested` | admin; refused while self-update is off (slice 1c) |
+| `approve_start` | `start_requested` | `running` (stage 1 becomes `active`) | a second admin, never the requester, with an `approval_decide` step-up bound to the rollout and the decision (slice 1c) |
+| `reject_start` | `start_requested` | `draft` | a second admin, as above (slice 1c) |
+| `expire_start` | `start_requested` | `draft` | system: undecided for 24 hours (slice 1c) |
 | `advance` | `running` | `running` (the active stage is `done`, the next is `active`) | admin |
 | `complete` | `running` (last stage active) | `completed` | admin |
 | `pause` | `running` | `paused` | admin |
-| `resume` | `paused`, `halted` | `running` | admin; refused while self-update is off |
+| `request_resume` | `paused`, `halted` | `resume_requested` | admin; refused while self-update is off (slice 1c) |
+| `approve_resume` | `resume_requested` | `running` | a second admin, never the requester, with an `approval_decide` step-up (slice 1c) |
+| `reject_resume` | `resume_requested` | `paused` | a second admin, as above (slice 1c) |
+| `expire_resume` | `resume_requested` | `paused` | system: undecided for 24 hours (slice 1c) |
 | `halt` | `running` | `halted` | system: failed installs or rollbacks reached the rollout's halt threshold (strict default 1: the first failure halts) |
-| `abort` | `draft`, `running`, `paused`, `halted` | `aborted` | admin |
+| `abort` | `draft`, `start_requested`, `running`, `paused`, `halted`, `resume_requested` | `aborted` | admin |
+
+**Two people for a start or resume (slice 1c, review lessons of #979).** Starting or resuming a rollout is the step that
+replaces the agent binary across a fleet, so one signed-in admin asks and a different signed-in admin decides. Every
+rollout action needs a person's session (the bootstrap credential and keys get 403 `user_required`). The rollout row
+records the requester and the decider (`approval_requested_by`, `approval_decided_by`; user FKs restrict), and CHECKs
+hold that a waiting rollout names its requester and that the decider is never the requester. `advance` stays a single
+admin's step: it moves through the stages the second admin already approved. Pause, abort and the system's halt only
+stop the offer.
 
 `completed` and `aborted` are terminal. Stage lifecycle (`endpoint_update_rollout_stages.state`): `pending → active →
 done`, `done` terminal. Every write is a guarded `UPDATE … WHERE state IN (sources of the event)`, so a concurrent or
@@ -171,6 +185,75 @@ Every state write is guarded with `whereFrom(column, machine, event)`, and the A
   that the offline release key signed. It cannot supply an unsigned or older binary, a key, or a release the release
   key never signed. The mitigations are the offline release key, the per-group switch (off by default, a step-up to
   turn on), staged rollouts, and the halt threshold (the first failed install by default, at most 10).
+
+### 4a. Delivery (slice 1c, as built)
+
+The update offer has its own device routes (the config route still answers 503 until the collection pack is signed):
+
+- `GET /v1/endpoint-agent/update` (the device's self token): `{update: null}`, or the device's offer: `attemptId`, the
+  directive, the release manifest, and `{path, os, arch, length, sha256}` of the binary. A device is offered the update
+  only while its source has a `running` rollout, the device is in the set the rollout's start or resume approval
+  captured (below) and still in its stage's group, that stage has been reached (`active` or `done`), the group's
+  self-update is still on (read at every offer), the device does not already run the
+  version, its attempt is not settled, the execution dial is `normal` (the signature is behind the ADR-0338 barrier,
+  `device_policy.sign_payload`) and the release verifies. The device's updater still refuses anything not newer than
+  what runs, so the gateway never orders versions itself.
+- `GET /v1/discovery/update-rollouts/:rolloutId/attempts` (admin): the rollout's per-device attempts, paged under the
+  list contract, each with its declared lifecycle and reported code, so an admin deciding a resume after a halt sees
+  which devices failed and why.
+- `GET /v1/endpoint-agent/update/binary`: the binary of the device's own open offer, nothing else (no parameters).
+- `POST /v1/endpoint-agent/update-results`: the root updater's one outcome. It settles the attempt (a repeat is 409
+  `already_reported`; another device's attempt is 404), and failed or rolled-back attempts reaching the halt threshold
+  halt the rollout in the same transaction.
+
+**The directive** is signed by the rotatable device-policy signer over its own domain
+(`regulait.endpoint-update-directive/1` and a NUL, then the payload: the #1033 rule), so it never verifies as a policy or
+an ADR-0331 directive. Slice 1b's updater verified the bare payload; slice 1c changes both ends to the domain. It lives
+at most 60 minutes and never past its attempt's expiry (the device refuses one longer than 24 hours).
+
+**The approval fixes the devices** (security review of #1248). When a second admin approves a start or resume, the
+gateway captures every unrevoked device then in the stage groups into `endpoint_update_rollout_devices`, each with the
+first stage (in ordinal order) whose group held it; the audit row of the approval records the count. The offer reads
+that set, not the live membership, so adding devices to a stage's group afterwards (one admin, or an enrolment token
+bound to the group) never widens what two people approved: those devices wait for the next resume approval, which
+re-captures the membership. Removing a device from its group, or turning the group's self-update off, still narrows
+the rollout at once.
+
+**Stopping a rollout.** Pause, abort and halt stop new offers at once: the offer route holds the rollout row `FOR SHARE`
+until the directive is signed, and each of those writes takes it `FOR UPDATE`, so no directive is signed for a rollout
+that has already stopped, and the binary route re-checks the offer. A device that already holds a signed directive and
+its binary can still install it until the directive's `notAfter`, at most 60 minutes later; that window is accepted
+(the device still checks the release signature and refuses anything not newer) and is the reason the lifetime is short.
+The halt count is cumulative over the rollout: a resume after a halt does not reset it, so with the strict threshold of
+one the next failure halts again, and an admin who wants more failures tolerated raises the threshold (a step-up).
+Rejecting or letting expire a resume request returns the rollout to `paused`, also when it was asked from `halted`; the
+halt itself stays on the record as its audit row (`endpoint-update-rollout-halt`) and in the failed attempts.
+
+**Releases** come from a read-only directory the operator deploys (`REGULAIT_AGENT_RELEASES_DIR`: `<version>/release.json`
+and `<version>/regulait-agent-<os>-<arch>`). It works air-gapped and adds no upload surface. The release public keys are
+`REGULAIT_AGENT_RELEASE_KEYS`, a JSON file of one or two `{keyId, x}`; they rotate by overlap (add the next key, publish
+releases signed with it, drop the old one), matching the at-most-two keys a device pins. Both are read at every offer.
+The gateway serves the manifest byte for byte, but first checks it against those keys and checks the binary's length
+and SHA-256; a release that does not verify is never offered, and the refusal is audited with a fixed code.
+
+**Attempt lifecycle** (`endpoint_update_attempts.state`, `ENDPOINT_UPDATE_ATTEMPT_MACHINE`): `directed` →
+`installed` | `current` | `refused` | `failed` | `rolled_back` (the device's report), `directed → expired` (no report
+within 24 hours, the `endpoint-update-expiry` job) and `expired → directed` (offered again while the rollout still
+offers it; a late report still settles an expired attempt). One attempt per device and rollout.
+
+**The per-user agent** fetches the offer each sync and writes the spool: the binary first (streamed to a temporary file,
+its length and SHA-256 checked, then renamed), then the manifest, the directive last, so the root updater never sees a
+directive without its binary. It reports `result.json` back with the attempt id, only if the file is root's (a local user
+cannot forge a failure to halt a rollout), and keeps it until the gateway records it. The update sync runs on every
+sync whether or not the collection half (the config route) succeeds, so delivery does not wait for the pack.
+
+**One outcome per directive** (review of #1248). The root updater runs hourly, the per-user agent syncs daily, so the
+root updater consumes the directive as soon as it reads it and never overwrites a result the agent has not reported:
+while `result.json` is pending it does nothing. The agent removes the result once the gateway records it (or refuses
+it for good: a 4xx other than 401, 403, 408 and 429), or, where the sticky spool stops it removing root's file, writes
+`result.ack` holding the result's SHA-256, which the root updater treats as reported. The first real outcome (an
+install, a failure, a rollback) is the one the gateway sees, so a rollback is never re-installed and a failure is never
+replaced by a later `directive_stale`. Every version is at most 32 characters, at both ends.
 
 ### 5. One-line enrolment
 
@@ -273,8 +356,9 @@ Queue screen is a UI follow-up on #453.
    enrolment tokens.
 2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the root updater: directive and manifest
    verification, the downgrade refusal, staging, health check and rollback.
-3. **1c (gateway and agent):** the signed directive and release manifest in the config response, the binary download
-   route, the per-user agent's spool writer, and the device's update-result route (which halts a rollout).
+3. **1c (gateway and agent):** the signed directive and release manifest on the device's update route (§4a), the binary
+   download route, the per-user agent's spool writer, the device's update-result route (which halts a rollout), and two
+   people for a rollout's start and resume (§3).
 4. **2 (gateway):** EDR adapters, signal ingest, verified webhooks and governed isolation.
 
 ## Owner questions (answered 2026-11-22, DecisionLog D-2026-11-22-04)
