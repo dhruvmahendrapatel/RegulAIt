@@ -30,7 +30,7 @@ COPY apps ./apps
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 COPY engines/robot-runner/licence-gate.mjs engines/robot-runner/licence-allow.json /gate/
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/robot-runner..." build \
  && pnpm --filter @regulait/robot-runner deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml \

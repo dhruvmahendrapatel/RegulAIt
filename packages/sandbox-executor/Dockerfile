@@ -24,7 +24,7 @@ WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
-RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/sandbox-executor..." build \
  && pnpm --filter @regulait/sandbox-executor deploy --prod --legacy /out
 
