@@ -78,6 +78,7 @@ import {
   DISCOVERY_SCHEDULE_MIN_SECONDS,
   DISCOVERY_SOURCE_KINDS,
   DISCOVERY_STEP_UP_KEYS,
+  SALESFORCE_ORG_TOKENS_TRADE_OFF,
   credentialTargetMatch,
   publicConfigProblem,
   defaultCredentialMode,
@@ -91,7 +92,7 @@ import {
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { DISCOVERY_SCANNERS, type ScannerRegistry } from "./discovery-scanners.js";
-import { directoryTokensProblem, directoryTokensRequested, discoveryPosture, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, directoryTokensRequested, discoveryPosture, loadDiscoverySettings, salesforceOrgTokensProblem } from "./discovery-posture.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -160,11 +161,16 @@ const settingsSchema = z
     endpointMcpConfig: z.boolean().optional(),
     // ADR-0337 §4: Google Workspace sources may use the Directory token listing; turning it on is a relaxation
     googleDirectoryTokens: z.boolean().optional(),
+    // ADR-0337 §4a (owner, 2026-11-22): Salesforce sources may read org-wide OAuth tokens (Customize Application on the
+    // integration user); turning it on is a relaxation, audited with its trade-off
+    salesforceOrgTokens: z.boolean().optional(),
     // ADR-0331: governed removal of flagged MCP servers from endpoints; turning it on is a relaxation
     endpointAddonRemoval: z.boolean().optional(),
     // ADR-0338: governed vendor agent control; turning it on is a relaxation, and so is a window longer than 24 hours
     vendorAgentControl: z.boolean().optional(),
     vendorAgentControlApprovalTtlHours: z.number().int().min(1).max(72).optional(),
+    // ADR-0338 §3a: a delegated (named admin) control credential may be used; turning it on is a relaxation
+    vendorAgentControlDelegated: z.boolean().optional(),
   })
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
@@ -400,7 +406,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       await t
         .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
         .from(discoveryCredentials)
-        .where(and(eq(discoveryCredentials.sourceId, sourceId), isNull(discoveryCredentials.revokedAt)))
+        // ADR-0338 §2: these routes manage the READ credential only; a source's control credential is never touched here
+        .where(and(eq(discoveryCredentials.sourceId, sourceId), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)))
     ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))[0];
 
   const versionConflict = (current: number) =>
@@ -434,7 +441,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           await db
             .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
             .from(discoveryCredentials)
-            .where(and(inArray(discoveryCredentials.sourceId, ids), isNull(discoveryCredentials.revokedAt)))
+            .where(and(inArray(discoveryCredentials.sourceId, ids), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)))
         ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))
       : [];
     const lastRuns = ids.length
@@ -468,6 +475,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     // ADR-0337 §4: the Directory token listing needs its own org switch first
     const createDirectory = directoryTokensProblem(body.kind, body.target, createSettings);
     if (createDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", createDirectory));
+    const createOrgTokens = salesforceOrgTokensProblem(body.kind, body.target, createSettings);
+    if (createOrgTokens) return send(reply, refusal(409, "salesforce_org_tokens_not_allowed", createOrgTokens));
     // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
     const createProblem = registry.get(body.kind)!.validateTarget?.(body.target, body.scope) ?? null;
     if (createProblem) return send(reply, refusal(400, "target_invalid", createProblem));
@@ -530,6 +539,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         // ADR-0337 §4: asking for the Directory token listing needs the org switch first
         const patchDirectory = body.target ? directoryTokensProblem(s.kind, body.target, await loadDiscoverySettings(t)) : null;
         if (patchDirectory) return refusal(409, "directory_tokens_not_allowed", patchDirectory);
+        const patchOrgTokens = body.target ? salesforceOrgTokensProblem(s.kind, body.target, await loadDiscoverySettings(t)) : null;
+        if (patchOrgTokens) return refusal(409, "salesforce_org_tokens_not_allowed", patchOrgTokens);
         // turning the Directory token listing OFF (and changing nothing else) narrows the read: no step-up for it
         const onlyNarrowsDirectory =
           body.target !== undefined &&
@@ -595,6 +606,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (enableFamilyOff) return refusal(409, "family_disabled", enableFamilyOff);
       const enableDirectory = directoryTokensProblem(s.kind, s.target, enableSettings);
       if (enableDirectory) return refusal(409, "directory_tokens_not_allowed", enableDirectory);
+      const enableOrgTokens = salesforceOrgTokensProblem(s.kind, s.target, enableSettings);
+      if (enableOrgTokens) return refusal(409, "salesforce_org_tokens_not_allowed", enableOrgTokens);
       const enableCred = await liveCredential(t, s.id);
       if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
@@ -790,6 +803,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (runFamilyOff) return send(reply, refusal(409, "family_disabled", runFamilyOff));
     const runDirectory = directoryTokensProblem(s.kind, s.target, runSettings);
     if (runDirectory) return send(reply, refusal(409, "directory_tokens_not_allowed", runDirectory));
+    const runOrgTokens = salesforceOrgTokensProblem(s.kind, s.target, runSettings);
+    if (runOrgTokens) return send(reply, refusal(409, "salesforce_org_tokens_not_allowed", runOrgTokens));
     const runCred = await liveCredential(db, s.id);
     if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
@@ -899,6 +914,11 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       // off until an admin turns it on with a step-up bound to exactly this switch; off is free
       const gdtAfter = body.googleDirectoryTokens ?? row.googleDirectoryTokensEnabled;
       if (gdtAfter && !row.googleDirectoryTokensEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.googleDirectoryTokens] = true;
+      // ADR-0337 §4a (owner, 2026-11-22): the Salesforce org-wide token read needs Customize Application, which can also
+      // change the org's setup; off until an admin turns it on with a step-up bound to exactly this switch; off is free
+      const sotAfter = body.salesforceOrgTokens ?? row.salesforceOrgTokensEnabled;
+      const sotTurnedOn = sotAfter && !row.salesforceOrgTokensEnabled;
+      if (sotTurnedOn) relaxed[DISCOVERY_STEP_UP_KEYS.salesforceOrgTokens] = true;
       // ADR-0331: removing flagged MCP servers from employee machines is off until an admin turns it on (step-up); off is free
       const removalAfter = body.endpointAddonRemoval ?? row.endpointAddonRemovalEnabled;
       if (removalAfter && !row.endpointAddonRemovalEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.endpointAddonRemoval] = true;
@@ -908,6 +928,10 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (vacAfter && !row.vendorAgentControlEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControl] = true;
       const ttlAfter = body.vendorAgentControlApprovalTtlHours ?? row.vendorAgentControlApprovalTtlHours;
       if (ttlAfter > row.vendorAgentControlApprovalTtlHours && ttlAfter > 24) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlTtl] = ttlAfter;
+      // ADR-0338 §3a: a delegated control credential acts with a named admin's authority; off until turned on (step-up),
+      // and off is free: every delegated control credential is refused `credential_mode_disabled` at once
+      const delegatedAfter = body.vendorAgentControlDelegated ?? row.vendorAgentControlDelegatedEnabled;
+      if (delegatedAfter && !row.vendorAgentControlDelegatedEnabled) relaxed[DISCOVERY_STEP_UP_KEYS.vendorAgentControlDelegated] = true;
       if (Object.keys(relaxed).length > 0) {
         const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: relaxed } }, null);
         if (r) return r;
@@ -923,19 +947,22 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
           agentRegistrySourcesEnabled: afterFamilies.agent_registry,
           endpointMcpConfigEnabled: mcpAfter,
           googleDirectoryTokensEnabled: gdtAfter,
+          salesforceOrgTokensEnabled: sotAfter,
           endpointAddonRemovalEnabled: removalAfter,
           vendorAgentControlEnabled: vacAfter,
           vendorAgentControlApprovalTtlHours: ttlAfter,
+          vendorAgentControlDelegatedEnabled: delegatedAfter,
           version: row.version + 1,
           updatedBy: actor(req),
           updatedAt: sql`now()`,
         })
         .where(eq(discoverySettings.id, 1));
       await audit(t, req, "discovery_settings", null, Object.keys(relaxed).length ? "discovery-settings-relaxed" : "discovery-settings-updated", "allow",
-        `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}`,
+        `discovery settings updated${Object.keys(relaxed).length ? " (relaxed, with a step-up)" : ""}${sotTurnedOn ? `; Salesforce org-wide token read allowed, accepting: ${SALESFORCE_ORG_TOKENS_TRADE_OFF}` : ""}`,
         {
-          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours },
-          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter },
+          before: { credentialWarningAgeDays: row.credentialWarningAgeDays, endpointRetentionDays: row.endpointRetentionDays, families: beforeFamilies, endpointMcpConfig: row.endpointMcpConfigEnabled, endpointAddonRemoval: row.endpointAddonRemovalEnabled, googleDirectoryTokens: row.googleDirectoryTokensEnabled, salesforceOrgTokens: row.salesforceOrgTokensEnabled, vendorAgentControl: row.vendorAgentControlEnabled, vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours, vendorAgentControlDelegated: row.vendorAgentControlDelegatedEnabled },
+          after: { credentialWarningAgeDays: body.credentialWarningAgeDays ?? row.credentialWarningAgeDays, endpointRetentionDays: body.endpointRetentionDays ?? row.endpointRetentionDays, families: afterFamilies, endpointMcpConfig: mcpAfter, endpointAddonRemoval: removalAfter, googleDirectoryTokens: gdtAfter, salesforceOrgTokens: sotAfter, vendorAgentControl: vacAfter, vendorAgentControlApprovalTtlHours: ttlAfter, vendorAgentControlDelegated: delegatedAfter },
+          ...(sotTurnedOn ? { salesforceOrgTokensTradeOff: SALESFORCE_ORG_TOKENS_TRADE_OFF } : {}),
         });
       return true;
     });

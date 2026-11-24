@@ -5,6 +5,7 @@
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { Table } from "./kit";
 import { DataList, type DataColumn } from "./DataList";
@@ -41,6 +42,8 @@ describe("DataList", () => {
     { key: "cap", header: "Budget cap", sortable: true, render: () => "—" },
   ];
   const html = renderToStaticMarkup(
+    // the list keeps its sort and page in the address (UIS-06), so it renders inside a router
+    <MemoryRouter>
     <QueryClientProvider client={new QueryClient()}>
       <DataList<Row>
         listId="runs"
@@ -53,7 +56,8 @@ describe("DataList", () => {
         defaultSort={{ key: "name", dir: "asc" }}
         rowKey={(r) => r.id}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
+    </MemoryRouter>,
   );
 
   it("names its icon buttons by a tip that is not hover-only markup", () => {

@@ -131,6 +131,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/approvals": "public-stable",
   "GET /v1/approvals/export.xlsx": "internal",
   "POST /v1/approvals/:approvalId/claim": "internal",
+  // ADR-0342 slice 2: a human task's priority and due date (admin)
+  "PUT /v1/approvals/:approvalId/schedule": "internal",
   "POST /v1/approvals/:approvalId/decide": "public-stable",
   "GET /v1/approvals/assignment-rules": "internal",
   "POST /v1/approvals/assignment-rules": "internal",
@@ -261,6 +263,24 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "internal", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "internal", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "internal", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "internal", // ADR-0361 (D-2026-11-22-06 guided setup)
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "internal", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "internal", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "internal", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -444,6 +464,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/decision-tables/:id/versions": "internal",
   "POST /v1/decision-tables/:id/switch": "internal",
   "POST /v1/decision-tables/:id/revert": "internal",
+  "GET /v1/repetitive-asks/settings": "internal",
+  "PUT /v1/repetitive-asks/settings": "internal",
+  "POST /v1/repetitive-asks/scan": "internal",
+  "GET /v1/repetitive-asks/clusters": "internal",
+  "POST /v1/repetitive-asks/clusters/:id/dismiss": "internal",
   "POST /v1/rule-steps/suggestions/:id/shadow": "internal",
   "POST /v1/rule-steps/suggestions/:id/shadow/stop": "internal",
   "POST /v1/rule-steps/suggestions/:id/switch": "internal",
@@ -560,6 +585,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/audit/anchors/:anchorId/timestamp": "internal",
   "GET /v1/audit/anchors/:anchorId/timestamp.tsr": "internal",
   "GET /v1/detection-content": "internal",
+  "GET /v1/detection-content/feed": "internal",
+  "POST /v1/detection-content/feed/import": "internal",
+  "PUT /v1/detection-content/feed/settings": "internal",
   // ADR-0187 (batch 5, §4.10) — internal while the engine slices land
   "GET /v1/engines": "internal",
   "GET /v1/engines/:engineId": "internal",
@@ -681,6 +709,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/reports/definitions": "internal",
   "POST /v1/reports/definitions": "internal",
   "DELETE /v1/reports/definitions/:id": "internal",
+  "POST /v1/reports/definitions/:id/archive": "internal",
   "GET /v1/reports/definitions/:id": "internal",
   "POST /v1/reports/definitions/:id/generate": "internal",
   "POST /v1/reports/definitions/:id/schedules": "internal",
@@ -727,6 +756,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/redteam/summary": "internal",
   // ADR-0081 — the AI risk register: new surface, internal until the shape settles
   "GET /v1/risks": "internal",
+  "GET /v1/risks/export.xlsx": "internal",
   "POST /v1/risks": "internal",
   "GET /v1/risks/library": "internal",
   "GET /v1/risks/scenarios": "internal",
@@ -829,6 +859,19 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/managed-settings/bundles": "internal",
   "GET /v1/managed-settings/bundles": "internal",
   "GET /v1/managed-settings/bundles/:id/archive": "internal",
+  // ADR-0357 (lane E38): governance configuration as code
+  "GET /v1/governance-config/schema": "internal",
+  "GET /v1/governance-config/export": "internal",
+  "POST /v1/governance-config/plan": "internal",
+  "GET /v1/business-units": "internal",
+  "POST /v1/business-units": "internal",
+  "PATCH /v1/business-units/:businessUnitId": "internal",
+  "PUT /v1/projects/:projectId/business-unit": "internal",
+  "GET /v1/governance-policy/layer": "internal",
+  "PUT /v1/governance-policy/layer": "internal",
+  "DELETE /v1/governance-policy/layer": "internal",
+  "GET /v1/governance-policy/effective": "internal",
+  "POST /v1/governance-config/apply": "internal",
   "GET /v1/managed-settings/drift": "internal",
   "GET /v1/endpoint-decisions/sessions": "internal",
   "GET /v1/endpoint-decisions/tamper": "internal",
@@ -1023,6 +1066,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/robots/:robotId/versions/:version/retire": "internal",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "internal",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "internal",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "internal",
+  "GET /v1/robots/:robotId/runs/:runId": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -1081,6 +1126,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/agent-registry/records/:recordId/import": "internal",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "internal",
   "GET /v1/discovery/entitlements/apps": "internal",
+  "GET /v1/discovery/entitlements/findings": "internal",
+  "GET /v1/discovery/entitlements/sources/:sourceId/read-setup": "internal",
+  "POST /v1/discovery/entitlements/findings/reviews": "internal",
+  "GET /v1/discovery/entitlements/findings/reviews": "internal",
+  "POST /v1/discovery/entitlements/findings/reviews/:reviewId/withdraw": "internal",
   "PUT /v1/discovery/entitlements/apps/:appId/agent-link": "internal",
   "DELETE /v1/discovery/entitlements/apps/:appId/agent-link": "internal",
   "GET /v1/discovery/agent-identifiers": "internal",
@@ -1120,6 +1170,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0331: the agent's signed add-on removal directives and their outcomes
   "GET /v1/endpoint-agent/directives": "internal",
   "POST /v1/endpoint-agent/directive-outcomes": "internal",
+  "GET /v1/endpoint-agent/update": "internal",
+  "GET /v1/endpoint-agent/update/binary": "internal",
+  "POST /v1/endpoint-agent/update-results": "internal",
   // ADR-0261 (P37): third-party security telemetry ingest. Internal: an admin surface plus an exporter-shaped route.
   "GET /v1/third-party-ingest/sources": "internal",
   "POST /v1/third-party-ingest/sources": "internal",
@@ -1151,6 +1204,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/siem/destinations/:destinationId/enabled": "internal",
   "POST /v1/siem/destinations/:destinationId/rotate-secret": "internal",
   "POST /v1/siem/destinations/:destinationId/recover": "internal",
+  // ADR-0359 (E40): behaviour baselines
+  "GET /v1/behaviour/settings": "internal",
+  "PUT /v1/behaviour/settings": "internal",
+  "GET /v1/behaviour/findings": "internal",
+  "GET /v1/behaviour/findings/:findingId": "internal",
+  "PUT /v1/behaviour/findings/:findingId/status": "internal",
+  "GET /v1/behaviour/baselines/:subjectKind/:subjectId": "internal",
   // ADR-0333 (E15): agent behaviour detection
   "GET /v1/detection/rule-pack": "internal",
   "PUT /v1/detection/rule-pack": "internal",
@@ -1160,6 +1220,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/detection/quarantines": "internal",
   "GET /v1/detection/quarantines/:quarantineId": "internal",
   "POST /v1/detection/quarantines/:quarantineId/release": "internal",
+  "POST /v1/detection/rule-pack/dry-run": "internal",
+  "GET /v1/detection/suppressions": "internal",
+  "POST /v1/detection/suppressions": "internal",
+  "POST /v1/detection/suppressions/:suppressionId/revoke": "internal",
   // ADR-0312: cost per outcome
   "GET /v1/cost-outcomes": "internal",
   "GET /v1/cost-outcomes/summary": "internal",
@@ -1168,6 +1232,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/users/:userId/spend-budget": "internal",
   "PUT /v1/users/:userId/spend-budget": "internal",
   "DELETE /v1/users/:userId/spend-budget": "internal",
+  // ADR-0313: paid-tool and agent-payment budgets
+  "GET /v1/paid-call-prices": "internal",
+  "POST /v1/paid-call-prices": "internal",
+  "DELETE /v1/paid-call-prices/:priceId": "internal",
+  "GET /v1/paid-call-holds": "internal",
   "POST /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens": "internal",
   "GET /v1/discovery/sources/:sourceId/enrolment-tokens/export.xlsx": "internal",
@@ -1175,6 +1244,26 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/sources/:sourceId/endpoint-devices": "internal",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "internal",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "internal",
+  "GET /v1/endpoint-device-groups/:groupId/fleet-settings": "internal",
+  "PUT /v1/endpoint-device-groups/:groupId/fleet-settings": "internal",
+  "GET /v1/discovery/sources/:sourceId/update-rollouts": "internal",
+  "POST /v1/discovery/sources/:sourceId/update-rollouts": "internal",
+  "GET /v1/discovery/update-rollouts/:rolloutId": "internal",
+  "GET /v1/discovery/update-rollouts/:rolloutId/attempts": "internal",
+  "POST /v1/discovery/update-rollouts/:rolloutId/:action": "internal",
+  "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "internal",
+  "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "internal",
+  "POST /v1/discovery/sources/:sourceId/edr-connections": "internal",
+  "GET /v1/discovery/sources/:sourceId/edr-connections": "internal",
+  "PUT /v1/edr-connections/:connectionId/settings": "internal",
+  "POST /v1/edr-connections/:connectionId/credential": "internal",
+  "POST /v1/edr-connections/:connectionId/webhook-secret/rotate": "internal",
+  "POST /v1/edr-connections/:connectionId/sync": "internal",
+  "GET /v1/discovery/sources/:sourceId/edr-signals": "internal",
+  "POST /v1/edr-connections/:connectionId/isolations": "internal",
+  "GET /v1/edr-isolations": "internal",
+  "POST /v1/edr-isolations/:requestId/:event": "internal",
+  "POST /v1/edr-webhooks/:connectionId": "internal",
   // ADR-0259 (P35): the MCP servers enrolled devices' host configs name, and the admin's links to approved servers
   "GET /v1/discovery/endpoint-mcp-servers": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links": "internal",
@@ -1191,6 +1280,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/vendor-agent-control/actions/:id/execute": "internal",
   "POST /v1/vendor-agent-control/actions/:id/settle": "internal",
   "POST /v1/vendor-agent-control/actions/:id/cancel": "internal",
+  "GET /v1/discovery/sources/:sourceId/control-credential": "internal",
+  "PUT /v1/discovery/sources/:sourceId/control-credential": "internal",
+  "DELETE /v1/discovery/sources/:sourceId/control-credential": "internal",
   // ADR-0332 (lane E14): the endpoint AI add-on inventory
   // ADR-0342 (lane E23): process analytics
   "GET /v1/process-analytics/templates": "internal",
@@ -1201,6 +1293,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/endpoint-addons/versions": "internal",
   "GET /v1/endpoint-addons/sightings": "internal",
   "GET /v1/endpoint-addons/flagged": "internal",
+  // ADR-0350 §11 (lane E31): credential reuse across endpoints, from fingerprints only
+  "GET /v1/endpoint-credential-reuse": "internal",
   // ADR-0350 (lane E31): endpoint device groups and time-limited per-device command-rule exceptions
   "POST /v1/endpoint-device-groups": "internal",
   "GET /v1/endpoint-device-groups": "internal",
@@ -1335,6 +1429,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/retention-holds/release": "internal",
   "PUT /v1/execution/mode": "internal",
   "POST /v1/agents/:agentId/halt": "internal",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "internal",
+  "GET /v1/containments/:id": "internal",
+  "POST /v1/containments/:id/release": "internal",
   "POST /v1/agents/:agentId/unhalt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "internal",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
@@ -1469,6 +1567,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/sensitivity-labels/settings": "internal",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "internal",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "internal",
+  "GET /v1/ai-app-risk": "internal",
+  "GET /v1/shadow-ai/risk": "internal",
   "GET /v1/org/settings/assurance-gate-mode": "internal",
   "PUT /v1/org/settings/assurance-gate-mode": "internal",
   // --- ADR-0211 (P17)
@@ -1484,6 +1584,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "internal",
   "PUT /v1/builder/agents/:id/autonomy": "internal",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "internal",
   // --- A10
   "GET /v1/risk-tolerances": "internal",
   "PUT /v1/risk-tolerances": "internal",
@@ -1761,6 +1862,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/approvals": "approvals",
   "GET /v1/approvals/export.xlsx": "approvals",
   "POST /v1/approvals/:approvalId/claim": "approvals",
+  "PUT /v1/approvals/:approvalId/schedule": "approvals",
   "POST /v1/approvals/:approvalId/decide": "approvals",
   "GET /v1/approvals/assignment-rules": "approvals",
   "POST /v1/approvals/assignment-rules": "approvals",
@@ -1784,6 +1886,12 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/siem/destinations/:destinationId/enabled": "audit",
   "POST /v1/siem/destinations/:destinationId/rotate-secret": "audit",
   "POST /v1/siem/destinations/:destinationId/recover": "audit",
+  "GET /v1/behaviour/settings": "audit",
+  "PUT /v1/behaviour/settings": "audit",
+  "GET /v1/behaviour/findings": "audit",
+  "GET /v1/behaviour/findings/:findingId": "audit",
+  "PUT /v1/behaviour/findings/:findingId/status": "audit",
+  "GET /v1/behaviour/baselines/:subjectKind/:subjectId": "audit",
   "GET /v1/detection/rule-pack": "audit",
   "PUT /v1/detection/rule-pack": "audit",
   "GET /v1/detection/incidents": "audit",
@@ -1792,6 +1900,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/detection/quarantines": "audit",
   "GET /v1/detection/quarantines/:quarantineId": "audit",
   "POST /v1/detection/quarantines/:quarantineId/release": "audit",
+  "POST /v1/detection/rule-pack/dry-run": "audit",
+  "GET /v1/detection/suppressions": "audit",
+  "POST /v1/detection/suppressions": "audit",
+  "POST /v1/detection/suppressions/:suppressionId/revoke": "audit",
   "GET /v1/audit/verify": "audit",
   "POST /v1/audit/anchor": "audit",
   "POST /v1/audit/anchors/flush": "audit",
@@ -1867,6 +1979,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/users/:userId/spend-budget": "cost-outcomes",
   "PUT /v1/users/:userId/spend-budget": "cost-outcomes",
   "DELETE /v1/users/:userId/spend-budget": "cost-outcomes",
+  "GET /v1/paid-call-prices": "paid-calls",
+  "POST /v1/paid-call-prices": "paid-calls",
+  "DELETE /v1/paid-call-prices/:priceId": "paid-calls",
+  "GET /v1/paid-call-holds": "paid-calls",
   "GET /v1/traces": "tracing",
   "GET /v1/traces/:traceId": "tracing",
   "GET /v1/sessions": "tracing",
@@ -1895,6 +2011,24 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "cost-imports", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "cost-imports", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "cost-imports", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "shadow-ai", // ADR-0361 (D-2026-11-22-06 guided setup)
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/remediation": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations": "shadow-ai", // ADR-0361 slice 3
+  "GET /v1/ai-saas-monitoring/remediations/:remediationId": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "shadow-ai", // ADR-0361 slice 3
+  "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "shadow-ai", // ADR-0361 slice 3
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",
@@ -2094,6 +2228,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/decision-tables/:id/versions": "cost-events",
   "POST /v1/decision-tables/:id/switch": "cost-events",
   "POST /v1/decision-tables/:id/revert": "cost-events",
+  "GET /v1/repetitive-asks/settings": "cost-events",
+  "PUT /v1/repetitive-asks/settings": "cost-events",
+  "POST /v1/repetitive-asks/scan": "cost-events",
+  "GET /v1/repetitive-asks/clusters": "cost-events",
+  "POST /v1/repetitive-asks/clusters/:id/dismiss": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/shadow": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/shadow/stop": "cost-events",
   "POST /v1/rule-steps/suggestions/:id/switch": "cost-events",
@@ -2141,6 +2280,18 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/org/posture": "org",
   "POST /v1/org/posture/harden": "org",
   "GET /v1/org/settings": "org",
+  "GET /v1/governance-config/schema": "org",
+  "GET /v1/governance-config/export": "org",
+  "POST /v1/governance-config/plan": "org",
+  "GET /v1/business-units": "org",
+  "POST /v1/business-units": "org",
+  "PATCH /v1/business-units/:businessUnitId": "org",
+  "PUT /v1/projects/:projectId/business-unit": "org",
+  "GET /v1/governance-policy/layer": "org",
+  "PUT /v1/governance-policy/layer": "org",
+  "DELETE /v1/governance-policy/layer": "org",
+  "GET /v1/governance-policy/effective": "org",
+  "POST /v1/governance-config/apply": "org",
   "PUT /v1/org/settings": "org",
   "GET /v1/pm/connections": "pm",
   "POST /v1/pm/connections": "pm",
@@ -2202,6 +2353,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/audit/anchors/:anchorId/timestamp": "audit",
   "GET /v1/audit/anchors/:anchorId/timestamp.tsr": "audit",
   "GET /v1/detection-content": "guardrails",
+  "GET /v1/detection-content/feed": "guardrails",
+  "POST /v1/detection-content/feed/import": "guardrails",
+  "PUT /v1/detection-content/feed/settings": "guardrails",
   // ADR-0187 (batch 5)
   "GET /v1/engines": "engines",
   "GET /v1/engines/:engineId": "engines",
@@ -2286,6 +2440,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/reports/definitions": "reports",
   "POST /v1/reports/definitions": "reports",
   "DELETE /v1/reports/definitions/:id": "reports",
+  "POST /v1/reports/definitions/:id/archive": "reports",
   "GET /v1/reports/definitions/:id": "reports",
   "POST /v1/reports/definitions/:id/generate": "reports",
   "POST /v1/reports/definitions/:id/schedules": "reports",
@@ -2327,6 +2482,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/redteam/runs/:id/evidence": "redteam",
   "GET /v1/redteam/summary": "redteam",
   "GET /v1/risks": "risks",
+  "GET /v1/risks/export.xlsx": "risks",
   "GET /v1/agent-risks": "risks",
   "GET /v1/agent-risks/proofs/:proofKey/results": "risks",
   "PUT /v1/agent-risks/proofs/:proofKey/settings": "risks",
@@ -2589,6 +2745,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/robots/:robotId/versions/:version/submit": "builder",
   "POST /v1/robots/:robotId/versions/:version/retire": "builder",
   "PUT /v1/robots/:robotId/secrets/:name/:scope": "builder",
+  "POST /v1/robots/:robotId/versions/:version/test-runs": "builder",
+  "GET /v1/robots/:robotId/runs/:runId": "builder",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope": "builder",
   "GET /v1/copilot/tools": "copilot",
   "POST /v1/copilot/ask": "copilot",
@@ -2649,6 +2807,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/agent-registry/records/:recordId/import": "shadow-ai",
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "shadow-ai",
   "GET /v1/discovery/entitlements/apps": "shadow-ai",
+  "GET /v1/discovery/entitlements/findings": "shadow-ai",
+  "GET /v1/discovery/entitlements/sources/:sourceId/read-setup": "shadow-ai",
+  "POST /v1/discovery/entitlements/findings/reviews": "shadow-ai",
+  "GET /v1/discovery/entitlements/findings/reviews": "shadow-ai",
+  "POST /v1/discovery/entitlements/findings/reviews/:reviewId/withdraw": "shadow-ai",
   "PUT /v1/discovery/entitlements/apps/:appId/agent-link": "shadow-ai",
   "DELETE /v1/discovery/entitlements/apps/:appId/agent-link": "shadow-ai",
   "GET /v1/discovery/agent-identifiers": "shadow-ai",
@@ -2672,6 +2835,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/endpoint-agent/decisions": "shadow-ai",
   "GET /v1/endpoint-agent/directives": "shadow-ai",
   "POST /v1/endpoint-agent/directive-outcomes": "shadow-ai",
+  "GET /v1/endpoint-agent/update": "shadow-ai",
+  "GET /v1/endpoint-agent/update/binary": "shadow-ai",
+  "POST /v1/endpoint-agent/update-results": "shadow-ai",
   "GET /v1/third-party-ingest/sources": "shadow-ai",
   "POST /v1/third-party-ingest/sources": "shadow-ai",
   "PUT /v1/third-party-ingest/sources/:sourceId/enabled": "shadow-ai",
@@ -2714,6 +2880,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/vendor-agent-control/actions/:id/execute": "shadow-ai",
   "POST /v1/vendor-agent-control/actions/:id/settle": "shadow-ai",
   "POST /v1/vendor-agent-control/actions/:id/cancel": "shadow-ai",
+  "GET /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
+  "PUT /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
+  "DELETE /v1/discovery/sources/:sourceId/control-credential": "shadow-ai",
   "GET /v1/process-analytics/templates": "reports",
   "GET /v1/process-analytics/stages": "reports",
   "GET /v1/process-analytics/heatmap": "reports",
@@ -2722,6 +2891,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/endpoint-addons/versions": "shadow-ai",
   "GET /v1/endpoint-addons/sightings": "shadow-ai",
   "GET /v1/endpoint-addons/flagged": "shadow-ai",
+  "GET /v1/endpoint-credential-reuse": "shadow-ai",
   "POST /v1/endpoint-device-groups": "shadow-ai",
   "GET /v1/endpoint-device-groups": "shadow-ai",
   "DELETE /v1/endpoint-device-groups/:groupId": "shadow-ai",
@@ -2743,6 +2913,26 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/adoption/policy": "adoption",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "shadow-ai",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "shadow-ai",
+  "GET /v1/endpoint-device-groups/:groupId/fleet-settings": "shadow-ai",
+  "PUT /v1/endpoint-device-groups/:groupId/fleet-settings": "shadow-ai",
+  "GET /v1/discovery/sources/:sourceId/update-rollouts": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/update-rollouts": "shadow-ai",
+  "GET /v1/discovery/update-rollouts/:rolloutId": "shadow-ai",
+  "GET /v1/discovery/update-rollouts/:rolloutId/attempts": "shadow-ai",
+  "POST /v1/discovery/update-rollouts/:rolloutId/:action": "shadow-ai",
+  "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/edr-connections": "shadow-ai",
+  "GET /v1/discovery/sources/:sourceId/edr-connections": "shadow-ai",
+  "PUT /v1/edr-connections/:connectionId/settings": "shadow-ai",
+  "POST /v1/edr-connections/:connectionId/credential": "shadow-ai",
+  "POST /v1/edr-connections/:connectionId/webhook-secret/rotate": "shadow-ai",
+  "POST /v1/edr-connections/:connectionId/sync": "shadow-ai",
+  "GET /v1/discovery/sources/:sourceId/edr-signals": "shadow-ai",
+  "POST /v1/edr-connections/:connectionId/isolations": "shadow-ai",
+  "GET /v1/edr-isolations": "shadow-ai",
+  "POST /v1/edr-isolations/:requestId/:event": "shadow-ai",
+  "POST /v1/edr-webhooks/:connectionId": "shadow-ai",
   "GET /v1/content-trust": "content-provenance",
   "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "content-provenance",
   "PUT /v1/content-trust/settings": "content-provenance",
@@ -2849,6 +3039,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/retention-holds/release": "automation",
   "PUT /v1/execution/mode": "org-settings",
   "POST /v1/agents/:agentId/halt": "agents",
+  // ADR-0366 (lane E52): rogue-agent containment
+  "GET /v1/containments": "agents",
+  "GET /v1/containments/:id": "agents",
+  "POST /v1/containments/:id/release": "agents",
   "POST /v1/agents/:agentId/unhalt": "agents",
   "POST /v1/servers/:serverId/tools/:toolName/halt": "servers",
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",
@@ -2973,6 +3167,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/sensitivity-labels/settings": "org",
   "PUT /v1/sensitivity-labels/:definitionId/rule": "org",
   "DELETE /v1/sensitivity-labels/:definitionId/rule": "org",
+  "GET /v1/ai-app-risk": "org",
+  "GET /v1/shadow-ai/risk": "org",
   "GET /v1/org/settings/assurance-gate-mode": "org",
   "PUT /v1/org/settings/assurance-gate-mode": "org",
   "GET /v1/org/settings/risk-treatments": "org",
@@ -2986,6 +3182,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   // --- A8
   "GET /v1/builder/agents/:id/autonomy": "builder",
   "PUT /v1/builder/agents/:id/autonomy": "builder",
+  "PUT /v1/builder/agents/:id/autonomy/enforcement": "builder",
   // --- A10
   "GET /v1/risk-tolerances": "risks",
   "PUT /v1/risk-tolerances": "risks",

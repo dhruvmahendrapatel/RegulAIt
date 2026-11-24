@@ -1,6 +1,6 @@
 ---
 phase: parallel-build-orchestrated
-last_updated: 2026-11-20
+last_updated: 2026-11-23
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -19,7 +19,67 @@ roadmap: ../product/ROADMAP.md
 > at the end of a long batch** — a session that ended unexpectedly during that window would have
 > handed its successor a file describing a project with "no workload to deploy".
 
-## Snapshot (2026-11-20, 15:30 UTC) - read this first
+## Snapshot (2026-11-23, 19:30 UTC) - read this first
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **Merged 2026-11-22 evening to 2026-11-23 (every merge audited against its released head):** CX Codex slices
+  #1216, #1217, #1219, #1221, #1223, #1227; UI-C E18 screens #1215, #1218, #1220; E38 #965, #974, #981, #984 (policy
+  inheritance); E23 #1001; E2 #1224 (budget `warn_only`); E45 #1226 (robot port filter, cross-replica cancel, MPL
+  exception); CI and repo hygiene #1230 (e2e fix for #1227), #1234 (assign-at-merge: 84 migrations numbered 0327-0410
+  and 226 fragments folded), #1235 (assign-at-merge can open its own PR), #1236 (`spa-journeys` runs on UI and gateway
+  PRs), #1237 (migration context in two migrations, flagged by the ADR-0234 RLS guard once numbered), #976 (E42 M365
+  Copilot connector), #1238 (endpoint-agent flaky test), #875 (Node digest refresh across all engine Dockerfiles).
+- **Main was red on `spa-journeys` from about 10:05 to 15:50 on 2026-11-23.** #1227 changed row semantics and the check
+  never ran on its PR (ADR-0262 runs it only in the full suite, and this user-owned repo has no merge queue). #1230
+  fixed the specs and #1236 makes the check run on UI and gateway PRs. M-122 records the process mistake.
+- **Owner decisions 2026-11-23:** D-2026-11-23-01 to -04 in `internal/process/orchestration/DecisionLog.md` (Codex
+  follow-ups, runtime enforcement of inherited policy as the governed-core lane's next slice, a lane for the ChatGPT
+  review #1180, and the stale-PR triage).
+- **Sessions (10 workers):** builders CX (Codex slices 19-27), L1 (slice 4c, then inherited-policy enforcement), E41
+  (#962, #968, #979), E42 (#985, #991), E50 (#1133), GX (#1180 response); reviewers R2, R3 (code), S3, S4 (security).
+  The 50 stale PRs are revived through rotation, security first (#956 E34 first).
+- **Owner actions open:** add the `ASSIGN_AT_MERGE_TOKEN` repo secret (fine-grained, this repo only, Contents and Pull
+  requests write); approve the engine-image republish after #875; E41's push-permission prompt if it recurs; L4's
+  engine-images release approval; the Atlassian Guard key as a GitHub secret.
+- **Open CI follow-ups:** #1239 (seventh gateway shard, ADR-0234 guard over `pending/`); the assign-at-merge PR for
+  `pending/ai_saas_monitoring.sql` (from #976).
+
+## Snapshot (2026-11-21, 19:45 UTC) - superseded by the 2026-11-23 snapshot above
+
+- **Nothing is in production.** There is no production account, tag or deployment, and the standing guardrail holds.
+- **Merged on 2026-11-21 (23 PRs, every merge audited against its released head):**
+  - Governance and security: #905 governed agent memory writes (ADR-0347), #1144 per-row link visibility and RLS on
+    decisions, #1142 browser origin pinning, #1130 plaintext-credential findings, #818 approval-rule and rate-limit
+    admin routes, #810 A2A role grants and revocations, #967 sandbox-only content extractor (ADR-0362), #923
+    remaining state machines and `GET /v1/state-machines`, #1002 scanner fixtures.
+  - Platform: #1145 MCP 2026-07-28 beside v1, #955 native Bedrock/Vertex/Mistral/Cohere/Qwen providers, #891 stage
+    deadlines with SLA escalation, #925 workflow replay check, #1122 published decision tables, #1131 repetitive-ask
+    detector, #1141 syslog over TLS, #1079 agent-risk register APIs, #963 AI adoption analytics API.
+  - Records: #1132, #1138, #1152 (D-2026-11-21-01 to -06), #1139, #1140.
+- **Sessions (owner, 2026-11-21):** the 50-session push ran until about 14:00 UTC; the owner then asked to wind down
+  and, at 18:50 UTC, to keep at most 10 worker sessions at a time. Running: builders E16 (#1028 disabled-user fix),
+  UI-C (first-load JS gate, ADR-0344), L1 (ABAC v5 session facts), E50 (memory trust floor, #1133), E51 (oversight
+  enforcement, #1135), E52 (rogue-agent containment, #1134); reviewers R2, R3 (code), S3, S4 (security). Every other
+  lane is archived with its PRs left open as drafts (about 78 open PRs); a lane is woken, nearest-to-merge first,
+  when a kept builder finishes.
+- **Stalls on 2026-11-21:** worker restarts (07:22-11:27 and 14:45-18:15 UTC) stopped the merge loop, and many builders
+  hit the account's weekly usage limit in the afternoon.
+- **Merge settings (owner, 2026-11-21):** branch ruleset `main-protection` is active on `main`: block force pushes,
+  restrict deletions, PR required (0 approvals, merge commits only), five required checks (`build-and-test`,
+  `ui enterprise / all`, `Dependency audit (pnpm)`, `Secret scan (gitleaks)`, `Scope and engine images`) from GitHub
+  Actions. Squash and rebase merging are off. **GitHub's merge queue is not available** because the repository is
+  user-owned, so the master's merge loop stays the merge path. Open consequence: the `assign-at-merge` fragment fold
+  (ADR-0252) was waiting on the merge queue and needs another trigger; 170+ fragments are still unfolded.
+- **Owner questions open (from parked lanes):** E26 content-trust floor on the shared-context write route (#1054);
+  E29 approvals/infra DB-check migration batch next?; E47 `privacyOpsEnabled` default (off per 2026-10-30, or on per
+  ADR-0180); E41 configurable halt threshold, self-update per source or per device group; L4 ATR 4.3.0 rule pack and
+  the pending engine-images release run; L6 Forge assign app, re-assign after PM workflow ends, Atlassian Guard key;
+  L2 close #1174 or keep; E20/E13 bundle ceiling 1,170 to 1,180 kB or wait for UI-C's first-load gate.
+- **AWS:** the owner asked to undeploy AWS to zero cost. This session has no valid AWS credentials, so nothing was
+  changed; the owner runs `internal/product/DEMO_TEARDOWN.md` T6, T7 (demo-sandbox account closure) and, if applied,
+  the demo-host stacks.
+
+## Snapshot (2026-11-20, 15:30 UTC) - superseded by the 2026-11-21 snapshot above
 
 > The recap below stopped at 2026-11-07 because recap entries now arrive as fragments (ADR-0252). 170 fragments are
 > waiting in `internal/fragments/` and fold into this file when an `assign-at-merge/<sha>` pull request merges. Those
@@ -55,6 +115,721 @@ roadmap: ../product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
+
+**2026-11-17 - E42 slice 1: monitoring sanctioned AI SaaS through vendor compliance APIs ([ADR-0361](../decisions/0361-sanctioned-ai-saas-compliance-monitoring.md), migration `pending/ai_saas_monitoring.sql`, numbered at merge).**
+- Forcepoint gap 1. An admin registers a read-only connector to a Microsoft 365 Copilot tenant (Graph
+  `getAllEnterpriseInteractions`, `AiEnterpriseInteraction.Read.All`); a run records each interaction as append-only
+  evidence, scans it in memory with the ADR-0042 guardrails and ADR-0140 PII detector, and writes counts-only findings
+  plus an audit row per match. Text is not stored unless redacted capture is turned on (step-up).
+- Off three ways (org policy, connector, egress allow-list), refused when air-gapped; a token with any write role is
+  refused and never used again. Retention is the audit floor extended by the connector's compliance tags.
+- Ten admin routes, API only (KNOWN_UI_GAPS on #453). Next: ChatGPT Enterprise and Claude Enterprise connectors
+  (slice 2), optional remediation on lane E19's transition-table pattern (slice 3).
+
+**2026-11-21, S7 RLS PM follow-on (ADR-0234).** Pending migration `rls_pm_tables_followon` layers on
+`rls_pm_tables`. Under `pm_sync`, a non-admin now reaches only the links of objects
+`regulait_rls_pm_object_visible` admits: the initiator, a pending approver (read only), a decision's maker, and an
+alert's owner (read only). `decisions` is ENABLED and FORCED: maker or object-visible reads, and inserts only in the
+principal's own name. The app role updates only the sync-state columns of `pm_links`, and can no longer rewrite
+`pm_sync_events` or `decisions`; an admin's connection delete still cascades. No new reason. The webhook stays on
+`approval_maintenance`, and `pm_inbound` is deferred. `zz-adr0234-rls-pm-followon.test.ts` (19) proves no
+cross-principal read or write.
+
+**2026-11-21 - P-01c item 2, slice 4b: ABAC v5 session facts and actor chain ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "Slice 4b", lane L1; no migration).** Model, connector and A2A calls now evaluate v5 policies with the request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) and the stored delegation chain. Each actor is evaluated as `Agent`. A missing fact reads as its strict value, so a forbid on it fires (fail closed). Only `context.rateLimitUsagePct` stays unsupplied and refused at write time.
+
+**2026-11-21 - lane E52, rogue-agent containment (OWASP ASI10), slice 1 ([ADR-0366](../decisions/0366-rogue-agent-containment.md)).**
+- **Chosen:** build on ADR-0124's halt and the one Approvals Queue, adopting the trigger model of Falco Talon
+  (Apache-2.0) and Wazuh active response (GPL-2.0, pattern only): a severity threshold selects the automatic response,
+  everything below it is a notification plus a proposal. Wazuh's automatic timeout revert is not adopted: only an
+  admin releases a containment.
+- **Built:** a `ContainmentSignal` interface (monitor findings now; lane E40's baselines later); automatic halt at or
+  above `org_settings.containment_auto_severity` ('critical' by default; 'off' is a step-up); proposals routed to an
+  admin-named approver; an admin-only release with a step-up, refused while the dial is not normal, that lifts only a
+  containment's own halt; builder agents gain their own halt, enforced on every turn. Migration
+  `pending/rogue_agent_containment.sql` (numbered at merge), `agent_containments` under forced RLS. Three API-only
+  routes are known UI gaps.
+- **Owner decision 2026-11-21 (ADR-0366 addendum):** the automatic halt runs on its own fail-closed, audited path
+  (every open unfiled signal is retried each monitor pass); a release is a request a different admin approves with an
+  MFA step-up, falling back to the tenant's admins when no approver is named.
+
+**2026-11-21 - E51: autonomy floors enforced at dispatch (ADR-0180 addendum, lane E51).** A `delegated` or
+`autonomous` builder agent whose autonomy floors are not all in place is now refused before any model call
+(403 `autonomy_floor_unmet`, audited, fail closed with 503 `autonomy_floor_unverifiable`). Assist and supervised
+agents are unchanged. An admin may relax the gate per agent (step-up, reason, audited, `AUTONOMY_ENFORCEMENT_MACHINE`)
+through `PUT /v1/builder/agents/:id/autonomy/enforcement`; the UI control is a KNOWN_UI_GAPS entry on #453. Closes the
+"oversight levels enforced at runtime" item of the 2026-11-20 agentic-governance fragment.
+
+**2026-11-21 - E12: repetitive-ask detector ([ADR-0328](../decisions/0328-repetitive-ask-to-smaller-model.md), builder lane E12).**
+`findRepetitiveAsks` in `@regulait/optimizer-kernel` finds clusters of near-duplicate prompts. It masks numeric tokens
+and fingerprints each prompt with SimHash over the shared tokenizer. Candidate pairs come from banding, and each pair
+is confirmed on both Hamming distance and TF-IDF cosine. The strict defaults are 3 bits, 0.9 cosine and 20 asks.
+It runs locally and returns only ids, fingerprints and counts. Pure and read-only: no route, no migration.
+Next slices: scan and suggestion with savings, the eval gate and shadow period, and the approval switch and revert.
+
+**2026-11-21 - E12: repetitive-ask detection at the gateway ([ADR-0328](../decisions/0328-repetitive-ask-to-smaller-model.md) slice 2, builder lane E12).**
+Detection is off by default, and turning it on or relaxing it needs a step-up.
+- **Scan:** an admin-only scan of captured previews, run on a worker thread, stores clusters of near-duplicate prompts.
+  It keeps fingerprints, counts, measured cost and up to 50 member span ids per cluster, never prompt text.
+- **Suggestion:** for each cluster, the cheaper agent that right-sized routing (`routeModel`) would pick, with a
+  projected monthly saving.
+- **Lifecycle:** clusters can be dismissed, which is final.
+- **Scope:** read-only. Nothing changes routing yet.
+
+Next: the eval gate and shadow period (slice 3), then the approval switch, serving and revert (slice 4).
+
+**2026-11-21 - MCP 2026-07-28 stateless protocol, slice 1 ([ADR-0311](../decisions/0311-mcp-2026-07-28-conformance.md) decision 4, accepted by the owner 2026-11-21; lane E1, branch `builder/e1-mcp-2026-07-28`).**
+`POST /mcp/:serverId` now serves the 2026-07-28 protocol beside the unchanged 2025-era path, using the official v2 SDK
+`@modelcontextprotocol/server` 2.4.0 (Apache-2.0, pinned exactly):
+- every refusal the route had (Origin, batch, auth, attribution, disabled server, stdio entitlement, admission,
+  egress, breaker) still runs first for both generations; the SDK's own classifier then picks the path;
+- `tools/list` and `tools/call` are the same two governed functions on both paths, so entitlements, approvals,
+  scans, cost and audit cannot differ;
+- the new path answers `server/discover` without contacting the upstream, validates the envelope and headers
+  (`-32020`, `-32022`), returns `resultType` with `ttlMs: 0` / `cacheScope: private`, and sorts tools by name;
+- every other method, and `subscriptions/listen`, answers `-32601` with an `mcp-method-unsupported` audit row.
+
+**2026-11-20 - ADR-0322 slice 4a: AWS Bedrock spend from CUR 2.0 for the vendor usage pull (builder lane E7).**
+A new `aws_cur` connector reads a Data Exports (CUR 2.0) gzip-CSV export from S3, read-only, through the guarded
+fetch, keeps Bedrock lines (unblended cost, every line type) and sums them per day, account and IAM principal.
+Credentials are the federated role (RegulAIt's federation token, refused while federation is off) or a static key
+with its own acknowledgement; both need the unverified-scope attestation. Each pull replaces the months it re-reads,
+withdrawing lines AWS removed. Principals resolve through admin aliases only. Owner decisions 2026-11-20 in the ADR;
+no route, migration or dependency added. Codex analytics is slice 4b.
+
+**2026-11-20 - lane E49 slice 1: pipeline step catalogue and governed runs ([ADR-0232](../decisions/0232-agent-pipeline-builder.md) "As built: lane E49 slice 1", migration `workflow_template_pipeline_runs` (pending, numbered at merge)).** A pipeline run is one run of one published workflow-template version (ADR-0341), started through the workflow engine's one start path with the explicit-template cascade, bound to the live version's content hash under the template lock. `PIPELINE_RUN_MACHINE` (ADR-0348) settles from the instance's terminal status; `pipeline_run_steps` records the plan append-only with each step's catalogue class. Admin-only API (`/v1/pipelines/catalogue`, `/v1/pipeline-runs`), KNOWN_UI_GAPS for #453. Manual trigger only; other triggers are slice 6.
+
+**2026-11-20 - ADR-0239 slice 2b: the decision core's approval rules (model, connector, A2A) are matched on Cedar ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane E48; no migration).** One batched Cedar request per governed call, shared by the gateway's consent binding and the kernel's composition (`perCallResourceApprovalRuleEvaluator`, required on `ResourceRestrictions`). An engine error refuses the call (`approval-rule-engine-error`). A fast-check differential holds it to the hand-written predicate, which stays as the kernel's default for one release. With rules, p50 rises about 0.4 ms. With no rules, nothing changes.
+
+**2026-11-20 - E47: the ADR-0224 processing limit now covers connector and MCP calls ([ADR-0224](../decisions/0224-privacy-operations-consent-limits.md) addendum 2026-11-20, builder lane E47, branch `builder/e47-privacy-ops-tools`).** One check path, `governedProcessingLimit` in the ADR-0251 governed core, serves model dispatch, connector calls, MCP `tools/call` and the other MCP methods. The Organization page gains a Privacy operations card for `privacyOpsEnabled` and `dsrSlaDays` (audited settings route, step-up on relaxation). The limit still ships off (owner rule, 2026-10-30). No migration, no new route.
+
+**2026-11-20 - lane E46, the live synced context graph, slice 1 ([ADR-0365](../decisions/0365-live-synced-context-graph.md), PENDING P2).**
+- **Chosen:** graph in Postgres (node, edge and node-scope tables, recursive CTE) over Apache AGE (no Amazon RDS
+  support), graphology (in memory, kept for later algorithms over an already-filtered subgraph) and a separate graph
+  database (GPL/BSL or a second user model). Comparison recorded in the ADR.
+- **Built:** migration `pending/shared_context_graph.sql` (numbered at merge), four 3NF tables under forced row-level
+  security; an incremental, idempotent sync from PM imported work items (keyset cursor with a 10-minute overlap); an
+  admin binding of a PM connection to one project (`settings_relax` step-up, audited); three read routes for any
+  signed-in principal that return only nodes whose every scope project the caller belongs to (a hidden node is a 404).
+  One new read-only RLS reason, `context_graph_read`. Eight API-only routes are known UI gaps.
+- **Boundary with ADR-0316:** the graph stores references, never content, and never writes the context store;
+  distillation never writes the graph.
+
+**2026-11-20 — lane E19, ADR-0338 slice 1 (governed vendor agent control, framework).** `VENDOR_ACTION_MACHINE` and the
+generic `killSwitchNarrowingOnly` guard in `@regulait/shared` (exported for lane E15), the `vendor_agent_actions`
+table (pending migration `vendor_agent_control`, RLS forced), the org switch and approval window on
+`discovery_settings` (off and 24 hours by default), the `vendor_agent_control` approval kind with its named-approver
+precheck and `approval_decide` step-up, six admin routes, and one declared dial exemption
+(`NARROWING_WRITE_OPERATIONS`) pinned by the external-effects barrier matrix. No vendor is controllable until slice 1b.
+
+**2026-11-19 - ADR-0322 slice 3: GitHub Copilot and Cursor connectors for the vendor usage pull (builder lane E7).**
+Two more vendors on the slice 2 engine, with no new route and no migration (the vendor CHECK already allowed both).
+GitHub Copilot reads the enhanced billing usage report (organisation or enterprise, one request per day, Copilot
+lines only; the token's scope cannot be verified, so it is stored as `unverified`). Cursor reads the Admin API's
+filtered usage events (Basic auth with an `admin:*` key, so `write_capable` with the acknowledgement) and sums
+charged cents per day, user email or service account, model, kind and product; users resolve by email. The gateway
+meters neither vendor, so neither has a metered-overlap exclusion. Fake-vendor tests only; live keys wait for lane E11.
+
+**2026-11-19 - lane E45 S2: Robots backend ([ADR-0364](../decisions/0364-governed-rpa-robots.md) "As built: S2", migration `robots` (pending, numbered at merge)).** Robots, versions (frozen once submitted), allowed sites and secret bindings (3NF, composite foreign keys), encrypted robot secrets and a minimal run table, with row-level security on all six. Ten API-only routes (`/v1/robots…`, KNOWN_UI_GAPS → #453). A version is submitted for review in the one approvals queue, bound to its content digest and gated on a passing test run of that digest; the author can never decide it. On approval it becomes one write tool, `robot_<slug>_v<N>`, on the first-party in-process RegulAIt Robots MCP server, with its definition pin approved by the same decision, and the builder toolbox offers it tagged as a robot. Retiring halts the tool. In S2 a call is re-checked and refused (the runner is S3).
+
+**2026-11-19 - lane E26, agent-risk proofs, slice 3a ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+The register now has APIs, all admin-only:
+- read the catalogue, with each proof's schedule and its latest result labelled as evidence;
+- page one proof's result history;
+- change a proof's settings. Turning a proof off, or slowing it past its default, needs a `settings_relax` step-up
+  bound to the exact values. Every change is audited.
+
+The view is a `KNOWN_UI_GAPS` entry for the design builder on #453. No new tables or migrations.
+
+**2026-11-19 - lane E26, agent-risk proofs, slice 2c part 1 ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+Five of the eight gateway probes now run, each through the enforcing code the live path calls:
+- a hidden instruction in a returned document, against the org guardrail policy;
+- an out-of-scope tool argument and a halted dispatch, against the policy kernel;
+- a drifted MCP definition, against the pin gate, using a sandbox server created in a transaction that always rolls back;
+- an untrusted-context write, against the content-trust floor.
+
+Relaxing a tenant control (guardrail mode, pin mode) makes its probe fail. Catalogue v2 rewords the memory proof's
+assertion to what the floor enforces. No new tables, migrations or routes.
+
+**2026-11-19 - lane E26, agent-risk proofs, slice 2c part 2 ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+All eight gateway probes now run. The last three are:
+- replaying a spent approval and presenting an expired one, through the live consume path, on sandbox records in a
+  transaction that always rolls back;
+- the worker loop cap, through `workerTurnCap`, now the single function that bounds the dispatch loop.
+
+A deployment with fewer than two active admins records the approval probes as `not_run` rather than fake a
+self-approval. No new tables, migrations or routes.
+
+**2026-11-19, lane E20 addendum: capability-combination exposure findings ([ADR-0339](../decisions/0339-agent-risk-score-and-identity.md)).**
+The agent risk score (method `adr0339-v3`) now builds each agent's capabilities one row at a time: a builder agent's
+tool and connector bindings, inbound channels and computer use, or a registry agent's workload identity grants. It
+finds the lethal trifecta (private data + untrusted content + external communication) and untrusted content + an
+unconfirmed destructive action. Each finding names every leg's members and ranks the ways to break it: fewest changes
+first, then Ask-first, then the smallest blast radius. The classification fails closed (MCP annotation defaults,
+unclassified source = untrusted, ADR-0193), and the combination points are weighted by the ADR-0059 reach band. A
+trigger-only migration, `pending/risk_score_capability_marks.sql`, keeps the score current. No new table or route.
+
+**2026-11-19 - MCP 2026-07-28 conformance check (G10, [ADR-0311](../decisions/0311-mcp-2026-07-28-conformance.md), lane E1, branch `builder/e1-mcp-conformance`).**
+The 2026-07-28 revision is a breaking, stateless protocol: no `initialize`, `_meta`-carried version and capabilities,
+`server/discover`, `Mcp-Method`/`Mcp-Name` headers, and `InputRequiredResult` in place of server-to-client requests.
+Only the v2 SDK packages implement it, so the gateway does not conform yet. ADR-0311 records the gap matrix. This slice
+fixes the transport MUSTs that hold in every revision the gateway serves:
+- `/mcp/:serverId` refuses a browser `Origin` other than the public URL's (403 `mcp_origin_refused`);
+- it refuses JSON-RPC batches from protocol 2025-06-18 on;
+- it answers DELETE with 405.
+The staged move to SDK v2, serving both protocol generations, is proposed for an owner decision.
+
+**2026-11-19 - The known-UI-gap count is computed ([ADR-0252](../decisions/0252-merge-queue-and-merge-time-numbering.md) addendum, owner "Computed counter", branch `builder/hotfix-computed-ui-census`).**
+`KNOWN_UI_GAPS_MAX` and its test pin are removed. The route census's known gaps are one JSON file per ADR and lane in
+`scripts/known-ui-gaps/`, each naming its owner lane and tracking issue or ADR. The count is the number of entries, so
+two PRs that add API-only routes no longer conflict (M-118, superseded). A route with no screen and no entry still
+fails, and an entry whose route now has a screen fails as "stale entry: delete it".
+
+**2026-11-18 - lane E45 S1: governed RPA ("Robots") designed ([ADR-0364](../decisions/0364-governed-rpa-robots.md)).** An approved, versioned browser script becomes one pinned MCP tool per version on a first-party RegulAIt Robots MCP server, so the ADR-0251 core governs every robot call with no new decision path (default-deny grant, Ask first, approvals, rate limits, budget and cost, definition pins, audit). Runs execute in the sandbox as a new `robot_browser` workload (gVisor L2, a per-run egress allow-list, evidence redacted under the compliance tag's PII mode). Free-form browser control (`@playwright/mcp`) is a separate high-risk server, off by default. Docs only; S2 (backend, `pending/robots.sql`), S3 (runner), S4 (authoring) follow, S5 (desktop engine) later.
+
+**2026-11-18 - lane E26, agent-risk proofs, slice 2a ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+The proofs now run. An hourly scheduler job (`agent-risk-proof-sweep`) runs each enabled proof once its interval has
+elapsed. It reuses the existing engines:
+- the ADR-0180 assurance metrics;
+- ADR-0060 audit-chain verification;
+- an ADR-0081 register-hygiene read.
+
+Each result is append-only evidence. It is written in the same transaction as its hash-chained audit row, which
+carries the same hash, and it is Ed25519-signed when the ADR-0116 export key is set. Anything but a pass raises one
+governance alert and one acknowledgement item per proof, and a pass resolves the alert. The gateway probes record
+`not_run` until slice 2b builds their harness. No new tables or routes.
+
+**2026-11-18 - lane E26, agent-risk proofs, slice 2b ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+Proof results are now read as evidence.
+- Each result is labelled `verified`, `unsigned` or `unverifiable`, checked against its hash, its chained audit row
+  and its Ed25519 signature. Only a passing result that is not `unverifiable` counts.
+- A new compliance-pack collector, `agent_risk_proofs`, counts those results for the OWASP controls a proof's risk
+  cites. No pack names it yet; that is an owner question.
+- The posture document shows the proofs as inputs to the adversarial objective, without changing the score.
+
+No new tables, migrations or routes.
+
+**2026-11-18 - Endpoint decision audit and tamper reporting ([ADR-0310](../decisions/0310-vendor-native-managed-settings.md) addendum, lane E1, branch `builder/e1-endpoint-decision-audit`).**
+The endpoint hook's decisions now reach the gateway's hash-chained audit. The hook spools each decision locally. The
+agent's run loop uploads signed, replay-protected batches to `POST /v1/endpoint-agent/decisions`, and each decision is
+one `audit_log` row (allow, deny, ask, or an audit-mode would-deny or would-ask). There is one neutral decision-event
+interface (`decisionlog.Event` / `Emitter`) that lane E31's command, file and package rules emit through.
+`GET /v1/endpoint-decisions/sessions` flags permission-bypass sessions (`--dangerously-skip-permissions`, `--yolo`)
+from the hook's `permission_mode`, and says which agents report no mode (Cursor, Copilot CLI).
+`GET /v1/endpoint-decisions/tamper` shows a changed managed file, a missing or weakened hook, and whether the bytes
+match an exported bundle. The pending migration is `endpoint_decision_audit` (5 tables, RLS forced, the two ledgers write-once). Both views are
+API-only gaps on #453 (`KNOWN_UI_GAPS_MAX` 75). Restore of a changed file is a later step that needs admin approval.
+
+**2026-11-17 - the scanner fixtures were re-recorded, and mcpscanner was measured on the vulnerable MCP fixtures ([ADR-0242 L4.6](../decisions/0242-mcp-and-skill-scanner-engines.md)).** Both scanner images were built locally and passed their offline smoke scans. The seven report fixtures were re-recorded from those images, and they now carry the driver's real input echo. mcpscanner holds the tool-poisoning and tool-shadowing fixtures at high. The other six attack classes are caught by other controls: definition pinning, the output data-leak and prompt-injection detectors, write default-deny, the high-risk policy, and the in-process scanner's exfiltration rule. The nine measured reports are committed, with a test that ties each one to today's fixture bytes.
+
+**2026-11-17 - the admission-scan images are publishable, but not yet published ([ADR-0242 §6.3, L4.5](../decisions/0242-mcp-and-skill-scanner-engines.md)).** mcpscanner and skillscanner are wired into the engine image pipeline the same way spikee is. They are in the lock's engine list with all-null entries, so the publish gate plans their first publish on the next engine-images run on main. The manifest reads their digests and generation from the lock. Each has a digest-pinned runner service and a build-only image service in compose. Both engines still have no digest, so neither can be enabled until CI's signed publish is recorded and its lock branch is merged. Still to do: that first publish, the sandbox-limit proof (§6.4), re-recording the fixtures, and adding the two engines (with spikee) to the air-gapped bundle.
+
+**2026-11-17 - lane E44 slice 1: customer sensitivity labels at the gateway ([ADR-0363](../decisions/0363-classification-interop-and-ai-app-risk.md), migration `sensitivity_labels` (pending, numbered at merge)).**
+Purview labels are read from attached files (OOXML LabelInfo/custom properties, PDF metadata, the email header) without
+the MIP SDK, and the label list is read read-only by the `idp_entra` scan when the app holds
+`InformationProtectionPolicy.Read.All`. One gate in `dispatchAttempt` allows, redacts or blocks each file before any
+provider work; unmapped, foreign-tenant, encrypted and unreadable files block by default (relaxing is a step-up). A label
+mapped to a compliance profile pulls that profile's PII mode and guardrail floor into the call. Four admin routes are
+API-only (#453). Slices 2 (customer classifiers) and 3 (AI app risk attributes) follow.
+
+**2026-11-17 - lane E44 slice 2: customer classifiers inside the guardrail pipeline ([ADR-0363](../decisions/0363-classification-interop-and-ai-app-risk.md), migration `custom_classifiers` (pending, numbered at merge)).**
+Admins define regex (RE2), keyword, dictionary and exact-data-match classifiers. EDM values are normalised and
+HMAC-SHA256'd under a random deployment key (enveloped under the data key) on the write request; only digests are
+stored. A version publishes only when a named reviewer who is not its author approves it in the one approvals queue
+(`custom_classifier`); the lifecycle is one declared table (`CLASSIFIER_VERSION_TRANSITIONS`). Published classifiers run
+in `evaluateGuardrails` at every guardrail site with their own mode; an EDM classifier without its key fails closed.
+Retiring is a step-up. Six admin routes are API-only (#453).
+
+**2026-11-17 - lane E44 slice 3: risk attributes for AI apps ([ADR-0363](../decisions/0363-classification-interop-and-ai-app-risk.md), no migration).**
+A curated, frozen and hash-pinned dataset (v1, 10 providers) records training on customer data, retention, hosting
+regions, certifications, SSO and the sub-processor list, each value with the vendor page it was read from and the date
+(2026-11-17); every value not stated on the vendor's own page is `unknown`, and `unknown` scores as risk. The score is
+the sum of its shown factors. `GET /v1/shadow-ai/risk` ranks the inventory and suggests (never applies) a site rule;
+`GET /v1/ai-app-risk` serves the dataset with its canonical digest for Codex lane C2's signed feed. API-only (#453).
+
+**2026-11-17 - lane E39 slice 1: AI adoption analytics ([ADR-0358](../decisions/0358-ai-adoption-analytics-and-cmdb-sync.md), migration `pending/adoption_analytics_policy.sql`, numbered at merge).**
+Six admin-only, paginated `/v1/adoption/*` routes read the existing ledgers at call time: metered active users per
+tool (agent, connector, MCP server, A2A agent) per day/week/month and team or project, the top tools (metered and,
+separately, imported vendors), and seat utilisation from applied, unsuperseded imported lines. Metered and imported
+are never added. Privacy defaults: per-person ranking off (turning it on is a step-up relaxation with a reason, and
+each read is audited) and counts of people below 5 suppressed. API-only; the screen is on #453. Slice 2 (CMDB sync,
+ServiceNow first) follows.
+
+**2026-11-17 - lane E38 slice 2: tighten-only policy inheritance ([ADR-0357](../decisions/0357-governance-config-as-code-and-policy-inheritance.md) §4, branch `builder/e38-policy-inheritance`).**
+- **New:** `business_units` (and `projects.business_unit_id`) plus `governance_policy_layers`, one layer per org,
+  business unit, project or use case (the pending `governance_policy_layers` migration, admin-only RLS).
+- **Merge table:** declared once in `@regulait/shared` (`POLICY_RULES`) and tested row by row: allow-lists intersect,
+  deny-lists unite, ceilings take the minimum, floors the maximum, required flags OR, and ordered levels take the
+  stricter end.
+- **Tighten-only:** a child layer that would widen its parent is refused with `400 policy_widens_parent`, which names
+  each rule.
+- **Relaxation step-up:** a `settings_relax` step-up is needed to loosen a layer against its own previous self, to
+  remove a layer, or to move a project to a looser parent.
+- **Effective view:** `GET /v1/governance-policy/effective` returns each rule's value and `setBy`, in a stable shape.
+- **Not yet enforced at call time:** the decision core does not read the effective policy yet; that is a PENDING item.
+
+**2026-11-17 - lane E38 slice 1a: governance configuration as code, export and dry-run plan ([ADR-0357](../decisions/0357-governance-config-as-code-and-policy-inheritance.md), branch `builder/e38-governance-config-as-code`).**
+- **Built:** one versioned document (`apiVersion: regulait.io/governance/v1`, `kind: GovernanceConfig`) holding roles
+  and their grants, role/team/fleet rate limits, MCP bundles, workflow templates and project budgets, by name, never a
+  secret. The strict schema, normal form and the plan's widens/narrows/neutral classification are in
+  `@regulait/shared` (`governance-config.ts`); `GET /v1/governance-config/schema`, `GET …/export` (YAML or JSON) and
+  `POST …/plan` (the dry run: resolve names, diff, classify, `planHash`; writes nothing; YAML anchors refused) are in
+  `apps/gateway/src/governance-config.ts`. Audited under the new `governance_config` object type. No migration.
+- **Next:** slice 1b (apply: all-or-nothing, bound to the `planHash`, one `settings_relax` step-up
+  bound to the plan and its widenings); slice 2 (business units, tighten-only policy layers, the merge table, the effective-policy view).
+
+**2026-11-17 - lane E38 slice 1b: governance config apply ([ADR-0357](../decisions/0357-governance-config-as-code-and-policy-inheritance.md), branch `builder/e38-governance-apply`).**
+`POST /v1/governance-config/apply` re-plans the document, refuses a `planHash` that is not this plan (409
+`plan_stale`), asks a `settings_relax` step-up bound to `{op, planHash, widenings}`, then writes roles, rate limits and
+budgets in one transaction under an advisory lock, re-planning inside it (409 `changed_concurrently` if anything
+moved). It reuses the UI's writers: the role lock and SoD mint check, `applyRuleEdit` / `deleteRuleArtifact` for
+versioned rate limits (read as enforced), and `applyProjectPatch`. A held role, or one whose deletion moves approvers,
+is a plan issue. MCP bundles and workflow templates follow in slice 1c. No migration.
+
+**2026-11-17 - lane E38 slice 1c: governance config apply for MCP bundles and workflow templates ([ADR-0357](../decisions/0357-governance-config-as-code-and-policy-inheritance.md), branch `builder/e38-governance-apply-bundles-templates`).**
+Apply now writes every section. Bundles go through their own versioned store: a change of tools is a new
+`mcp_bundle_versions` row, the ADR-0091 bundle SoD gate runs for added tools and new holders, and a bundle missing from
+the file is archived. Templates use the create path's validation, and a definition change records a new
+`workflow_template_versions` row with origin `governance_apply` (pending migration
+`workflow_template_version_origin_apply`). A missing template is retired through `retireWorkflowTemplateLocked`, the
+core now shared with the retire route. Bundles while off, un-archive, un-retire, intake templates and a dangerous tier
+with no approver are plan issues.
+
+**E35 (2026-11-17) - graduated, agent-steering responses, slice 1 ([ADR-0354](../decisions/0354-graduated-agent-steering-responses.md), migration `pending/abac_agent_responses.sql`, numbered at merge).**
+One declared response table (`packages/policy-kernel/src/agent-response.ts`): allow, advise, ask, correct, deny,
+block_session, disable, each mapped onto one existing effect, mirrored in the Go endpoint agent and pinned by one
+golden file read by both test suites. Cedar policy modes (ADR-0040) now name the responses; strictest wins. Advise and
+correct carry static, admin-written guidance validated by `parseAgentGuidance` (plain text, no markup or placeholders,
+the shared admission scan) and repeated as DB CHECKs. The MCP path returns correct's alternative in the refusal and
+advise's guidance in `_meta` plus a labelled text item; every decision row records `detail.agentResponse`. Relaxing a
+live policy's response is a `settings_relax` step-up. Block_session and disable are declared but refused at write time
+until slice 2.
+
+**E33 slice 1 (2026-11-17) - native Bedrock, Vertex, Mistral, Cohere and Qwen adapters ([ADR-0352](../decisions/0352-gateway-parity-provider-breadth-semantic-cache-streaming.md)).**
+Five new provider kinds on each vendor's `@ai-sdk/*` implementation, through the ADR-0253 bridge and the one governed
+dispatch core (entitlement, budget, cost attribution and audit unchanged; an end-to-end test against a fake Bedrock
+endpoint proves it). Bedrock signs with the AWS SDK's signer (`@smithy/signature-v4`) or uses a Bedrock API key; Vertex
+takes a service-account key (token minted through the guarded fetch) or an express-mode key. Credentials live in the
+existing encrypted, rotatable, audited store and are shape-checked when typed; no SDK ever reads an ambient credential.
+Bedrock and Vertex service accounts require an explicit, allow-listed baseUrl (ADR-0062). Mistral, Cohere and Qwen join
+the env fallback (still off by default; the new kinds are not in the default allowed list). No migration, no new route.
+
+**2026-11-17 - lane E32 slice 1: syslog over TLS for SIEM delivery ([ADR-0351](../decisions/0351-evidence-extras-syslog-deployer-register-endpoint-benchmark.md), migration `pending/siem_syslog_tls.sql`, numbered at merge).** A `syslog_tls` SIEM destination sends the same scrubbed `regulait.siem.audit.v1` events as ADR-0303's webhook, one RFC 5424 message each, octet-counted over verified TLS (RFC 5425), through the same cursor, backoff, dead-letter and egress allow-list (pinned address). There is no UDP, plain-TCP or skip-verify mode. A private CA can be stored per destination. API only; UI on #453. Slices 2 (EU AI Act deployer register) and 3 (endpoint benchmark pack) follow.
+
+**2026-11-17 - lane E29, declared state machines slice 1 ([ADR-0348](../decisions/0348-declared-state-machines.md)).**
+The app-wide inventory is [STATE_MACHINES.md](../product/STATE_MACHINES.md): about 95 lifecycle columns, the workflow
+and orchestration kernels already explicit, 16 machines to convert ranked by F×S, 3 follow-ups in other lanes' files,
+7 `triage-low` issues (#912–#918). Built: `defineMachine` and the `STATE_MACHINES` registry in `@regulait/shared`
+(no dependency; XState v5, @xstate/store, robot3 and javascript-state-machine compared), `whereFrom` for guarded
+lifecycle UPDATEs, and a read-only `lifecycle` view (state, next steps, allowed or not and why) on
+`GET /v1/llm/jobs/:id` and `GET /v1/mcp/admission`. Converted: training jobs (a cancel can no longer be overwritten by a
+start or a poll) and MCP admission (a scan no longer overwrites a concurrent admin clear or engine hold). Next: slice 2
+(incidents, eval runs, scheduler lease release, orchestration budget gate). No migration.
+
+**2026-11-17 - lane E29, declared state machines slice 3 ([ADR-0348](../decisions/0348-declared-state-machines.md)).**
+Eight lifecycles are declared in `@regulait/shared` (`STATE_MACHINES`) and readable by agents at
+`GET /v1/state-machines`. This slice guarded use cases (return, retire, review re-open), approvals (review-round
+supersede), red-team library publish, shadow-AI dispositions, the four infra proposals, the skill re-scan and the
+billing close; each race it closes has a test that fails on the old code. Every machine with F×S ≥ 5 in
+[STATE_MACHINES.md](../product/STATE_MACHINES.md) is now done; the follow-ups wait on other lanes' files or on a CHECK
+migration batch. No migration.
+
+**2026-11-17 - lane E29, declared state machines slice 2 ([ADR-0348](../decisions/0348-declared-state-machines.md)).**
+Incidents: edits, close, containment and corrective actions re-read the incident under a row lock; a stale edit is a
+409 `incident_changed` instead of a silent overwrite, a close re-checks its blockers under the lock, and a containment
+never re-opens a resolved or closed incident; the detail carries `lifecycle`. Eval runs record `error` when the runner
+throws instead of staying `running`. The orchestration overage approval no longer erases concurrent measured spend.
+The scheduler releases a lease only while it holds it. No migration.
+
+**2026-11-17 - lane E28, governed agent memory writes slice 1 ([ADR-0347](../decisions/0347-governed-agent-memory-writes.md)).**
+Every write to shared project context and builder agent memory now passes one check before it is stored
+(`memory-governance.ts`): the ADR-0042 injection, jailbreak and secret detectors at `block` plus the ADR-0140 PII
+detector (flagged = refused by default, `agent_memory_scan_mode`), a mandatory expiry from the database clock (org
+`agent_memory_ttl_hours` 24, shortened by `compliance_profiles.memory_ttl_hours`), and the producing run checked as the
+caller's own in the same project, with the agent read from the run's event. Reads drop expired heads and supply memory
+as quoted data with provenance. Migration `pending/agent_memory_governance.sql`. Next: slice 2 (quarantine and
+findings, admin inspect/expire/purge, the expiry sweep, the false-instruction proof test).
+
+**2026-11-17 - E27 slice 1: fairness evaluation through the governed gateway, ADR and schema ([ADR-0346](../decisions/0346-fairness-evaluation-through-the-gateway.md), builder lane E27; extends ADR-0222).**
+RegulAIt will run a model card's model on a customer's model-input dataset through the gateway, in a new `fairlearn`
+sidecar engine (fairlearn 0.15.0, MIT; AIF360 rejected for no release in 12 months), cross-check fairlearn's metrics
+with ADR-0222's `computeFairness`, sign every run as evidence on the card and in the compliance packs, open an
+approvals-queue item on a breach (time-boxed risk acceptance, at most 90 days) and, where an org opts in or a compliance
+tag requires it, gate the card's sign-off on a fresh passing run. Slice 1 is the schema only: migration
+`pending/fairness_evaluation.sql` (numbered at merge) and the pure module `packages/shared/src/fairness-evaluation.ts`.
+Slices 2 (engine, metrics, evidence) and 3 (gate and APIs; UI via #453) follow.
+
+**2026-11-17 - lane E26, agent risk / control / proof registry, slice 1 ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md)).**
+Ten agent risks are a code catalogue (`AGENT_RISKS`, `@regulait/shared`), each mapped to the ADR-0243 OWASP pack
+controls and the ASI names, its controls (real setting columns, policy tables or named behaviours, each checked
+against the database), and proofs built on the ADR-0180 continuous-assurance contract (`assurance_metric` specs
+measured by `measureAssuranceMetric`, outcomes in `MEASUREMENT_STATES`), plus sandboxed gateway probes and read-only
+ledger checks. A test pins that no risk lacks a control or a proof and that every reference resolves. Schema:
+`agent_risk_proof_settings`, append-only `agent_risk_proof_results` (hash, optional Ed25519 signature, linked audit row)
+and `agent_risk_proof_followups`. All three are under forced RLS; evidence is inserted only by a system task, never by
+an admin (migration
+`pending/agent_risk_proofs.sql`, numbered at merge). Next: slice 2 (scheduled runs, evidence, alerts and approvals),
+slice 3 (APIs; UI is a known gap on #453).
+
+**2026-11-17 - lane E26, geography in risk tiering ([ADR-0345](../decisions/0345-agent-risk-control-proof-registry.md) §9, owner, gap audit C5).**
+The jurisdictions a use case is deployed or used in are data (`jurisdictions`, `jurisdiction_obligations`,
+`ai_use_case_jurisdictions`, seeded from the ADR-0158 regulatory feed, migration
+`pending/agent_risk_proofs_jurisdictions.sql`). `resolveGeography` brings in each jurisdiction's parents and the global
+ones, maps them to the feed instruments and the agent risks whose controls and proofs answer them, and applies the
+strictest tier floor; a use case with no jurisdiction declared is in scope of all of them. Review routing still reads
+the screened tier (owner question).
+
+**2026-11-17 - lane E23 slice 2: human-task priority and due dates built ([ADR-0342](../decisions/0342-process-analytics-and-human-task-slas.md) §8, migration `pending/approval_task_priority.sql`, numbered at merge).** Approval assignments gain a priority (the queue sorts on it) and a due source. One setter, `scheduleApprovalTask`, serves an admin (`PUT /v1/approvals/:approvalId/schedule`) and lane E21's stage timers (`scheduleStageApprovals`). Tightening is audited; loosening needs a `settings_relax` step-up and a stage timer can never loosen. The ADR-0046 SLA sweep stays the one escalation path, and the SLA state lifecycle is declared once with the ADR-0348 `defineMachine` (`APPROVAL_SLA_MACHINE`, registered in `STATE_MACHINES`). API-only: one KNOWN_UI_GAPS entry on #453.
+
+**2026-11-17 - G2 slice 2: managed-settings drift ([ADR-0310](../decisions/0310-vendor-native-managed-settings.md) decision 8, lane E1, branch `builder/e1-managed-settings`).**
+`GET /v1/managed-settings/drift` (admin-only, keyset-paginated) reads ADR-0259's endpoint MCP inventory and lists every
+enabled server in a managed vendor's MCP config (Claude Code, Copilot, Codex, Cursor) whose identity is not this
+gateway's host, per pseudonymous device. Refused (409) with no public URL or before any bundle is exported. No new
+table or migration. The route is an API-only gap on #453 (`KNOWN_UI_GAPS_MAX` 67). G10 (MCP conformance) is slice 3.
+
+**2026-11-16 - the admission-scan runner shim is built, but the images are not yet published ([ADR-0242 §6.1, L4.4](../decisions/0242-mcp-and-skill-scanner-engines.md)).** The new `@regulait/engine-admission-scan` package is the runner and the task for both the mcpscanner and skillscanner images. The runner leases a subject run and starts its task with only the gateway's subject file as input. The task runs our Python driver on that file inside the executor's sandbox and sends the report back as frames. Each engine's manifest `taskEntry` is now that Node task, because the old Python entry could not run under ADR-0190 I5. `@regulait/engine-runner` now handles subject tasks (`task-subject.ts`, `runSandboxTask` `subjectFiles`). Both engines still have no digest, so neither can be enabled. Still to do: publishing and locking the images (§6.3), the sandbox-limit proof (§6.4) and re-recording the fixtures.
+
+**E25 (2026-11-16) - deepmerge and braces removed from the promptfoo engine lockfile, not accepted.** Owner decision
+2026-11-16: the engines/promptfoo acceptance (ADR-0187 decisions 177 and 225, to 2026-11-16) ends and is not extended.
+deepmerge GHSA-gcqx-w48m-w2h4 (via promptfoo's optional peer `puppeteer-extra-plugin-stealth`) and braces
+GHSA-vfj7-8cjw-p6xm (via nunjucks' optional peer chokidar 3) had no fixed release and came only through unused optional
+peers. Both peers now resolve, through `overrides` `$` references, to `engines/promptfoo/absent-optional-peer`, an empty
+manifest that `npm ci --omit=optional` never installs. Both chains are gone from `package-lock.json` (36 optional entries).
+node-forge, the third entry, was already fixed (1.4.2). `npm audit --package-lock-only` reports 0, with and without
+`--omit=optional`. The installed closure is byte-identical (355 packages, the same SBOM), and `image.test.ts` pins the
+result. Closes the E6 pending item (2026-11-15). Not in scope and still open: the garak acceptance in
+`engines/garak/THIRD_PARTY.md`, which also runs to 2026-11-16.
+
+**2026-11-16 - lane E24, control-plane HA slice 3: the failover suite ([ADR-0343](../decisions/0343-control-plane-high-availability.md)).**
+`deploy/ha-test/failover-suite.mjs` (native Postgres binaries, or Docker Compose) boots two gateway replicas together,
+drives governed decisions, kills a replica, then crashes the primary behind a synchronous standby, promotes it and
+restarts the replica. It asserts that no acknowledged decision or audit row is lost or duplicated and that the chain
+verifies. Measured locally: 919 decisions, 0 lost, 85 ms after a replica kill and 328 ms after a primary crash. The
+`--async` negative control loses 81 acknowledged decisions and fails, as it must. CI: `ha-failover.yml`.
+
+**2026-11-16 - lane E24, control-plane HA slice 1 ([ADR-0343](../decisions/0343-control-plane-high-availability.md)).**
+RPO/RTO targets per deployment mode, the failure model and the scope are recorded. The gateway is safe at N replicas:
+boot migrations take one cluster lock (`withSessionAdvisoryLock`, which polls, because a blocking waiter deadlocked the
+holder's `CREATE INDEX CONCURRENTLY`); the audit anchor, audit auto-prune and backup-verify timers run on one leader
+(`ClusterLeader`, a Postgres advisory-lock lease); `GET /ready` answers 503 `draining` once a shutdown starts
+(`REGULAIT_DRAIN_DELAY_MS`); OTLP carries `service.instance.id`. Next: slice 2 (Postgres HA modules and the
+CloudNativePG/Helm replica story), slice 3 (the failover suite). No migration.
+
+**2026-11-16 - lane E23 slice 1: process analytics built ([ADR-0342](../decisions/0342-process-analytics-and-human-task-slas.md), migration `pending/process_analytics.sql`, numbered at merge).** A measured read model replayed from `workflow_events` through the workflow kernel (accepted only when the replay reproduces the stored state; otherwise excluded and counted), rebuilt per changed instance by the `process-analytics-projector` job (system_task, every five minutes) and an audited admin refresh. Four `/v1/process-analytics/*` reads (templates, stages ranked by wait, heatmap, throughput) scoped by the ADR-0047 entitlement decision, row-level security forced on all three tables. Measured four times faster than replaying per request. API-only: five KNOWN_UI_GAPS entries on #453. Slices 2 (task priority and due date over the ADR-0046 SLA sweep, the one escalation path lane E21 drives) and 3 (value join with #848) follow.
+
+**2026-11-16 - E22 slice 1: the visual pipeline builder's server side ([ADR-0341](../decisions/0341-visual-pipeline-builder-over-workflow-templates.md), builder lane E22; accepts ADR-0232's canvas design over the existing workflow templates).**
+Admin routes under `/v1/workflows/builder/` open one draft per template (the live definition is recorded as version 1
+the first time), save it with compare-and-set, validate it on every save (kernel schema, unknown fields, the forced
+plan gate, the governed deploy tail, the create path's reference checks), diff it (RFC 6902 plus a stage summary and
+the relaxations it makes), and publish it under a `settings_relax` step-up bound to the content hash, as the next
+append-only version that replaces the live definition. Migration `pending/workflow_template_builder.sql` (numbered at
+merge). The web canvas model (`pipelineCanvasModel.ts`) round-trips a definition byte for byte; the screens follow in
+slices 2 and 3.
+
+**2026-11-16 - E21 slice 2: stage deadlines with SLA escalation ([ADR-0340](../decisions/0340-workflow-process-reliability.md) decisions 8-12, lane E21, migration `pending/workflow_stage_queue_deadline.sql` numbered at merge).** A template stage may carry `sla` (a reminder before the breach, the breach after one minute to 90 days, and `onBreach` `notify` or `fail`). A sign-off stage takes only `onBreach: "fail"`: its reminders and escalation are the approvals queue's SLA (ADR-0342), not a second path. Entering the stage sends pg-boss timers on the new `workflow-stage-deadline` queue in the same transaction, keyed by the stage execution; a timer acts only if the instance still rests at that entry, as the system actor `workflow-sla`, with its marker and audit row in one transaction. `fail` cancels the instance, which compensates it (slice 1); a deadline never approves or denies a sign-off. The marker's phases are one declared table (`STAGE_DEADLINE_LIFECYCLE`). Notices go to ChatOps workspaces opted into alerts, and resend mails the instance's initiator. The worker runs beside the retry worker under `REGULAIT_WORKFLOW_RETRY_WORKER`.
+
+**2026-11-16 - E21 slice 1: compensation (saga) stages for pillar 2's runner ([ADR-0340](../decisions/0340-workflow-process-reliability.md), lane E21, Camunda gap analysis row 2; no migration).** A stage may name the forward stage it undoes (`compensates`): `delete_branch` undoes `create_branch`, `close_pr` undoes `open_pr`, a `rollback` undoes a `deployment`, and an `automated_build` (a nested run or a manual task) undoes any git, deploy or build stage, a merge included. A cancel (`/abort`) or a denied sign-off runs the compensations of the stages that ran in reverse order through the ordinary executors (claim, governance at claim and commit, the external-effect barrier, the audit row in the transition's transaction), then ends `aborted` or `denied`. Ending a compensation early is admin-only and audited. New git adapter calls `deleteBranch` and `closePullRequest` on all five providers (classified `git.delete_branch`, `git.close_pull_request`). Slices 2 (stage deadlines and SLA escalation) and 3 (version pinning, governed in-flight migration, canary) follow under the same ADR.
+
+**2026-11-16, lane E20 slice 1: the agent risk score ([ADR-0339](../decisions/0339-agent-risk-score-and-identity.md)).**
+Every registry and builder agent gets a deterministic, rules-only risk score mapped to OWASP LLM 2026 and Agentic ids
+(ids only), weighted by reach (people and dependents) plus toxic combinations (an ADR-0091 rule the agent alone holds;
+untrusted input with data access and unconfirmed actions), with fixes ranked by the counterfactual. Database triggers
+mark the agent on every write path in the change's own transaction; the `agent-risk-recompute-sweep` appends an
+append-only assessment with its audit row in one transaction. Four API-only routes under `/v1/agent-risk` (KNOWN_UI_GAPS
+on #453). Migration `pending/agent_risk_scores.sql`. Next: slice 2, author vs runner, NHI links and orphan findings.
+
+**2026-11-16, lane E20 slice 2: author vs runner and non-human identities ([ADR-0339](../decisions/0339-agent-risk-score-and-identity.md)).**
+Every agent's author is recorded by an insert trigger in the creating transaction (the request principal, or the
+builder agent's owner; older agents `unknown`, never guessed). The runner is computed on read (workload identity,
+invokers in 30 days, connection format). Cloud service accounts, vendor agent identities and OAuth clients are linked
+as `staged` and confirmed only by a second named admin with an `identity_manage` step-up, audited in the same
+transaction; a link calls nothing and grants nothing. The owner flag gains `inactive` (90 days), which feeds the risk
+score (method `adr0339-v2`) and an admin ownership-findings list. Four API-only routes under `/v1/agent-identity`
+(#453). Migration `pending/agent_identity_links.sql`.
+
+**2026-11-16 - lane E18 slice 1: SaaS entitlement graph ([ADR-0337](../decisions/0337-saas-entitlement-graph.md), migration `saas_entitlement_graph` (pending, numbered at merge)).**
+- **Built:** four read-only discovery source kinds in the identity family (`entitlement_m365`, `entitlement_google_workspace` with readers; `entitlement_salesforce`, `entitlement_slack` listed "not built yet"). The M365 reader reads delegated grants (with consenting users as pseudonyms) and application permissions on Graph, Exchange and SharePoint; the Google reader reads Reports `token` events with only the read-only Reports scope.
+- **Graph:** four 3NF tables with forced RLS (apps, scope dictionary, grants, grant principals), stored in the run's fenced transaction with a `saas-entitlements-recorded` audit row. Only a complete read removes what it did not see; Google reads are always partial. Frozen V1 scope classifier in `@regulait/shared`.
+- **Owner decisions 2026-11-17 (built):** the Google Directory token listing is an admin opt-in (off by default, enable step-up, audited; every call GET-only, revoke refused in the transport); a vendor app is auto-linked to an agent on an exact identifier match (audited), an admin links partial matches and unlinks (declared ADR-0348 machine `saas_app_agent_link`; 6 admin routes, KNOWN_UI_GAPS on #453).
+- **Next:** slice 2 (Salesforce, Slack), slice 3 (usage comparison; unused-grant, excessive-scope, oversharing and public-exposure recommendations through the approvals queue; screens via #453).
+
+**2026-11-16 - lane E18 slice 2: Salesforce and Slack entitlement readers ([ADR-0337](../decisions/0337-saas-entitlement-graph.md) §4a).** Slack: approved apps and their user and bot scopes (`admin.apps.approved.list`), a token with any non-`:read` scope refused first. Salesforce: connected apps, self-authorisation and admin pre-authorisations through the JWT bearer flow (`jose`), an integration user holding any org-changing system permission refused first; OAuth scopes and per-user tokens are not read because every API that returns them needs a permission that can change the org (owner question 3). No migration.
+
+**2026-11-15, S7 RLS batch 7b review round (ADR-0234).** Both reviews' findings closed on PR #841. The runtime-login
+check now also refuses CREATEROLE and MEMBERSHIP (direct or indirect) in a superuser, BYPASSRLS, CREATEROLE or
+RLS-table-owner role, for the login and for `regulait_app` itself; the RLS tables come from `pg_class.relrowsecurity`.
+The login is per database (`regulait_runtime_<database>`), provisioned first (advisory lock, every other membership
+revoked, password sent as a client-side SCRAM-SHA-256 verifier) and only then written to its 0600 file by rename. The
+dev privileged-login opt-in is refused under a deploy signal. `audit_log_delete` is scoped `TO` the table owner; the
+ADR records that system reasons are a convention, not a privilege boundary. Next: batches 3-6.
+
+**2026-11-15 - Gap G11: AIUC-1 pack ([ADR-0319](../decisions/0319-aiuc-1-pack.md), builder lane L8).**
+`aiuc-1@1` maps all 50 live requirements of the AIUC-1 15 October 2026 release, cited by identifier only (the
+standard's text is all rights reserved). 24 are evidenced by existing collectors, and only B007 and E015 are claimed as
+enforced. 26 are attestation-required: 10 partly supported, and 16 not addressed. The 16 include the five third-party
+testing requirements, which the platform's own runs never stand in for. Retired requirements are not mapped. No
+migration.
+
+**2026-11-15 - ADR-0242 owner decisions recorded and Q2 built ([ADR-0242 "Owner decisions (2026-11-15)"](../decisions/0242-mcp-and-skill-scanner-engines.md)).** Each engine `fail` recorded after an admin cleared (MCP) or admitted (skill) the current digest now re-holds that digest, even when the admin had already reviewed the same flag. The re-hold raises a `admission-engine-clearance-revoked` governance alert, and the admin's existing clear and admit routes are the audited override. The licence answers Q1, Q3 and Q4 are recorded in both scanner images' `THIRD_PARTY.md`. Q5 keeps the hold line at `medium` and moves rule tuning on the anthropics/skills corpus, measured before and after, to the image slice. No-project scans keep the `confidential` placement.
+
+**2026-11-15 - an admission scan's verdict is bound to the bytes the gateway placed ([ADR-0242 L4.3](../decisions/0242-mcp-and-skill-scanner-engines.md)).** This closes the follow-up the #843 security review left open. Each scanner driver now reports `inputs`, the path and sha256 of every file it was given. Task start records the sha256 of the one file it placed (`engine_runs.target_subject_input_sha256`, pending migration `admission_scan_subject_target_input_sha`). The run's end records a verdict only when the report names exactly that file; anything else is `unknown`, which holds. The recorded report fixtures predate the echo and will be re-recorded with the image publish.
+
+**2026-11-15 - E9: release-key ceremony prepared ([ADR-0324](../decisions/0324-release-key-ceremony-and-release-verification.md), PENDING S3, owner "Prepare the runbook now").** Offline 2-of-3 root keys sign a canonical keyring statement (signing keys, builder workflow, revocations, serial); `scripts/verify-release.sh` verifies root chain, bundle signature, CycloneDX SBOM and SLSA v1 provenance offline; `scripts/release-ceremony.sh dry-run` proves 28 pass/refuse cases with throwaway keys (run in the scripts tests); `release.yml` builds only unsigned candidates and verifies published releases. Runbook: `docs/ops/RELEASE_KEY_CEREMONY.md`. The real ceremony is owner-gated; the dev key stays until it runs. No migration.
+
+**2026-11-15, E8 CI per-PR selection ([ADR-0323](../decisions/0323-ci-per-pr-path-selection.md), owner "Trim CI per PR instead").**
+A web-only PR runs one gateway runner with only the tests that read `apps/web` sources (computed from the sources)
+instead of five DB shards and the coverage check, about 43 runner-minutes saved. A dependency, workflow,
+schema/migration or security-config change is now a full run on the PR. `client-compat.yml` cancels superseded PR runs
+only. `node scripts/ci-plan.mjs` is a dry run of the job selection, pinned by tests for docs-only, UI-only,
+gateway-only and lockfile changes. No migration. Found in review of its own green run: the
+composite action had not declared the new `gateway` output, which read as empty and let the coverage check skip on a
+full run; the action now declares it and both aggregates fail on any output other than `true`/`false`. Rule for
+the master's ledger: a new composite-action output is declared in `action.yml` and pinned by a test, and an aggregate
+never treats "not true" as "skip allowed". The agent-builder journey's TOTP step-up tests got the 120 s budget their
+siblings have (the `spa-journeys` failure on #851).
+
+**2026-11-15 - ADR-0322 slice 2: vendor usage/cost pull foundation, Anthropic and OpenAI (builder lane E7).**
+Off by default (org policy singleton, step-up to turn on, refused when air-gapped); connectors start disabled;
+credentials are encrypted, write-capable keys need an acknowledgement, never returned. Anthropic cost report (guarded
+fetch) and OpenAI costs (official SDK) pull into imported lines (`origin = 'pull'`), upserted per vendor fact; lines
+billed to the gateway's own workspace, key or project are excluded from the consolidated imported side and disclosed.
+Migration `pending/vendor_usage_pull.sql` (numbered at merge). Nine API-only routes, known UI gaps on #453.
+
+**2026-11-15 - G1: opt-in, per-tenant read-only vendor usage/cost pull ([ADR-0322](../decisions/0322-opt-in-vendor-usage-cost-pull.md), builder lane E7).**
+Owner decision: a tenant admin may add a read-only vendor usage/cost credential; off by default; file import stays.
+ADR-0322 amends ADR-0069 and ADR-0076. Pulled lines are `basis = 'imported'`, never blended with metered spend; lines
+billed to a key the gateway itself holds are marked `overlaps_metered` and excluded, with the exclusion disclosed.
+Air-gapped installs keep file import only. Connectors (Anthropic, OpenAI, Copilot, Cursor, Codex, AWS CUR 2.0) follow
+in three slices. This slice is documentation only.
+
+**2026-11-15, lane E5 slice 1: cloud coding agents as governed workers ([ADR-0320](../decisions/0320-cloud-coding-agents-as-governed-workers.md), gap G5).**
+Owner decision: third-party cloud coding agents run as pillar-7 workers under the initiating user's limits, default off,
+fake servers until live accounts are approved. Slice 1 is the pure kernel module
+`packages/orchestration-kernel/src/cloud-worker.ts`: task schema with a pinned repository, base branch and branch
+prefix; request builders and fail-closed reply parsers for Cursor Cloud Agents v1 and Devin v1 (Copilot coding agent and
+Codex are `contract_unverified` and refused); the dispatch envelope (org flag, provider row and kill switch, execution
+dial, plan sign-off, grant, lead ceiling, repository entitlement, node and run budget); the captured-PR scope check; the
+Devin ACU limit and cost settlement. No migration, no route. Slices 2–4 (paused by the master on 2026-11-15, pilot first): tables and the gateway choke point, the
+build-stage wiring and PR capture, then Copilot and Codex.
+
+**2026-11-15 - lane E4, gap G8: session distillation into the Shared Project context store, designed and paused ([ADR-0316](../decisions/0316-session-distillation-shared-context.md)).** A person distils their own project-attributed conversation into a revision of the existing store, through the one context write path and one governed, billed dispatch. Off by default per project; readers see a distilled revision only while they could read its inputs. Implementation is paused (owner direction, pilot focus); a working first slice is parked unmerged on `builder/e4-session-distillation`.
+
+**2026-11-15 - G6 built on `builder/e3-agent-registry-import` ([ADR-0314](../decisions/0314-vendor-agent-registry-import.md), lane E3; migration `agent_registry_records`, numbered at merge).**
+Vendor agent registries (Entra Agent ID and Agent 365, Gemini Enterprise, Bedrock AgentCore) are a new discovery
+family, off by default. Their scanners stage agents with provenance in `agent_registry_records`. An admin imports one
+at a time, with a step-up, into `agents`: disabled, `proposed`, with no grant (default-deny). The tests use fake
+vendor endpoints; live tenants are owner-gated. API only, with three routes as known UI gaps on #453.
+
+**2026-11-15 - G7 slice 1a on `builder/e3-agent-credential` ([ADR-0315](../decisions/0315-portable-agent-credential.md), lane E3; migration `agent_credential_audiences`, numbered at merge).**
+The portable agent credential has:
+- an issuer at `<public URL>/agent-credentials`, with a discovery document and a JWKS;
+- a default-deny audience registry, where registering an audience is a step-up and the scope map uses foreign keys;
+- `mintAgentCredential`, which issues a signed projection of one live delegation grant onto one registered audience:
+  RFC 9068 `at+jwt`, an RFC 8693 `act` chain of SPIFFE IDs, the mapped scope only, the run budget and DPoP `cnf`;
+- the offline reference verifier `verifyAgentCredential`.
+
+Every refusal is audited, and the token is never stored. Still to come: the token-endpoint branch (1b), and the
+status list and revocation (2).
+
+**2026-11-15 - E2 slice 2: paid-tool and agent-payment budgets built ([ADR-0313](../decisions/0313-paid-call-budgets.md), migration `pending/paid_call_budgets.sql`, numbered at merge; market-analysis gap G9).** A `paid_call_prices` row makes an MCP tool, server or connector a paid call. Each call reserves its `max_settle_usd` against the project budget and run cap under advisory locks before the upstream is contacted. With no budget a paid call is denied by default, and an overage is routed to the approvals queue. The call settles with its usage row at the upstream-reported charge (never above the hold) or the quoted price, and its hold is released on failure or by the `paid-call-hold-sweeper`. x402's reference implementation is Apache-2.0 but needs a facilitator and a blockchain, so it was not adopted. Four API-only routes are tracked on #453.
+
+**2026-11-15 - E2 slice 1: cost per outcome built ([ADR-0312](../decisions/0312-cost-per-outcome.md), migration `pending/cost_outcomes.sql`, numbered at merge; market-analysis gap G3).** `cost_outcomes` is an append-only, RLS-protected outcome ledger (merged PR, workflow run, accepted change, completed PM work item), recorded by the `cost-outcome-recorder` job; spend is joined at read time from `usage_events` through each outcome's orchestration runs, never copied, and imported spend stays beside it, never combined. Three API-only routes (`/v1/cost-outcomes`, `/summary` by project or cost centre, `/refresh`), tracked on #453.
+ Pilot addendum (owner, 2026-11-15):
+- each outcome shows its PR and work items (Azure DevOps Repos and Boards, or any adapter), joined at read time;
+- project and person budget alerts are governance-monitor rules (`project_budget_threshold`, `user_budget_threshold`, and `user_imported_budget_threshold` as a separate alert on imported spend, owner decision)
+  that fire through the existing alert path, with a five-minute `spend-budget-alerts` pass;
+- `user_spend_budgets` (migration `pending/user_spend_budgets.sql`) gives each person an alert-only budget;
+- only outcomes RegulAIt completed count; PM "done" is shown, not counted (owner).
+
+**2026-11-15 - managed browser extension, surface (a) ([ADR-0334](../decisions/0334-managed-browser-extension-governance.md), builder lane E16, migration `browser_governance` (numbered at merge)).**
+- **Built:** `agents/browser/` (MV3, Chromium, force-installed by the customer's browser management only; host
+  permissions exactly the governed site catalogue) and the gateway's `/v1/browser-extension/*` channel and
+  `/v1/browser-governance/*` admin routes. Off by default; turning it on, audit mode, allowing a site and prompt
+  capture are each a `settings_relax` step-up, audited.
+- **Fail closed:** a static ruleset blocks every governed site until a signed (EdDSA), unexpired, per-user policy
+  verifies against keys pinned in managed storage. DLP on the shared `dlp.secret.*` rules in RE2 at send time;
+  account rules from the profile identity; breach events tied to user, device and a keyed conversation ref.
+- **Left:** the admin screens (11 KNOWN_UI_GAPS on #453), retention, inventory feed. Surface (b)
+  (browser-driving agents) is superseded by ADR-0364, lane E45 (owner decision 2026-11-21).
+
+**2026-11-15 - lane E14: endpoint AI add-on inventory built ([ADR-0332](../decisions/0332-endpoint-ai-addon-inventory.md), migration `pending/endpoint_addon_inventory.sql`, numbered at merge).**
+- **What:** one admin-only view of every coding agent, MCP server, skill and plugin, per version and per endpoint.
+- **How it reads:** at call time from the ADR-0195/0259 evidence, so nothing is copied and nothing needs a refresh. Skills and plugins live in RLS-guarded direct-record tables keyed to the enrolled device.
+- **Scans:** each version is joined to the ADR-0242 scan of its exact content digest and decided by the gate's `engineAdmissionHold`. No digest, no scan or a disabled scanner reads "not yet scanned", never clear.
+- **API:** three read-only `/v1/endpoint-addons/*` routes, including the "flagged at or above severity X" contract for the removal directive and the detections (not-yet-scanned included by default). They are API-only, with three KNOWN_UI_GAPS entries on #453.
+- **Owner decisions:** I1, visibility narrows to a security-admin role once one exists. I2, the endpoint agent's device-scoped read is lane E13's narrow, audited read.
+
+**2026-11-15 - E12 slice 2: rule-like step scan and suggestions ([ADR-0327](../decisions/0327-rule-like-ai-step-to-deterministic-rule.md), builder lane E12, migration `rule_step_detection` (numbered at merge)).**
+Off by default; enabling or lowering a threshold is a step-up. `POST /v1/rule-steps/scan` reads recent model spans per
+step, keeps JSON-object inputs with complete outputs, and stores suggestions with a readable rule, history test cases
+and a projected monthly saving; nothing changes routing. Five admin routes are known UI gaps for UI-D. Next: shadow
+mode, then the approval switch and one-action revert.
+
+**2026-11-15 - E12 slice 1: rule-like AI step detector ([ADR-0327](../decisions/0327-rule-like-ai-step-to-deterministic-rule.md), builder lane E12).**
+`induceStepRule` in `@regulait/optimizer-kernel` finds the smallest set of input fields whose exact-match table
+reproduces an AI step's enumerated output, with agreement measured on held-out folds and strict, org-tightenable
+thresholds (200 runs, 0.99 agreement, 0.9 coverage; floors 50, 0.95, 0.5). Pure and read-only: no route, no migration.
+Next slices: suggestion with savings, shadow mode, approval switch and one-action revert.
+
+**2026-11-15 - lane E11: pilot readiness audit and live harness ([ADR-0326](../decisions/0326-pilot-readiness-audit-and-live-harness.md)).** `internal/product/PILOT_READINESS.md` traces the four pilot criteria through `main`: criterion 1 (block in all four tools) and 3 (one ADO work item end to end) are not met, 2 (spend and budget alert) is partly met (no Bedrock, Vertex or tool-side spend, no pushed alert), 4 (BYOC) is met on Compose only. A live harness (`apps/gateway/live/`, `live-tests.yml`, dispatch and nightly, `live-tests` environment) runs against test tenants. Fixed: direct Entra OIDC login (`xms_edov` from the tenant's own issuer), audit rows for `model_not_mapped`/`agent_not_resolvable`, the INSTALL.md IdP route. No migration.
+
+**2026-11-15, lane E10 PR 3: the BYOC install runbook and the rehearsal workflow (ADR-0325).** The customer runbook
+`docs/deployment/BYOC_AWS_INSTALL.md` takes under a day: preflight, one `terraform apply`, the chart, Entra ID OIDC, a
+smoke test, upgrade, rollback, uninstall and a support bundle. `byoc-rehearsal.yml` (manual, `rehearsal` environment)
+assumes the OIDC role without a stored key, applies the customer root into regulait-dev and smoke-tests it, then
+always destroys and reports leftovers. Known gaps, all in the chart (ADR-0304): `ingressFrom` has no `ipBlock` for
+the ALB, there are no S3 anchor env values, and egress to the Pod Identity agent may be blocked.
+
+**2026-11-15, lane E10 PR 1: the BYOC rehearsal role (ADR-0325).** `infra/modules/github-oidc-role` gains environment
+roles (trust pinned by `StringEquals` to one repository and one GitHub environment); the new
+`infra/modules/aws-byoc-deployer-policy` gives a deployer boundary (IAM only under `<prefix>-*`, new roles only with
+the workload boundary, no trust edits or keys), a workload boundary for every role it creates (no IAM writes, nothing
+in a federated session), and a deployer policy that limits data and mutation to the stack's own resources (by name,
+or by the `purpose=rehearsal` tag) and makes every create carry the tag (revised after the #854 reviews);
+`infra/environments/regulait-dev-rehearsal-role` composes them for regulait-dev. Not applied: the owner applies it once
+(`docs/ops/BYOC_REHEARSAL_ROLE.md`). New CI `infra-terraform.yml` (fmt, validate, offline `terraform test`). Next: PR 2,
+the BYOC AWS module.
+
+**2026-11-15, lane E10 PR 2: the BYOC AWS module (ADR-0325).** `infra/modules/byoc-aws` builds a VPC with a strict
+egress allow-list (AWS Network Firewall; Entra ID sign-in only by default) and VPC endpoints for AWS APIs; EKS with a
+private API, KMS-encrypted secrets and NetworkPolicy enforcement on; RDS PostgreSQL 16 (TLS, Multi-AZ, PITR, deletion
+protection); one KMS key; the COMPLIANCE audit-anchor bucket; a Bedrock-scoped gateway Pod Identity role; and private
+ECR. The customer applies `infra/environments/byoc-aws`, and the rehearsal applies the same root. A read-only
+preflight sits next to the module. Nothing is applied yet. Next: PR 3, the install runbook and the `byoc-rehearsal`
+workflow.
+
+**2026-11-15 - G2 slice 1: vendor-native managed settings ([ADR-0310](../decisions/0310-vendor-native-managed-settings.md), lane E1, branch `builder/e1-managed-settings`).**
+A user's or role's effective MCP entitlements (kernel `visibleTools`) compile to Claude Code and GitHub Copilot
+`managed-settings.json`, an OpenAI Codex `requirements.toml` and a Cursor dashboard worksheet. Each server is named by
+its gateway URL, and nothing entitled means an explicit deny-all. Bundles are signed with Ed25519 and versioned, and the
+export is refused without a signing key or public URL. Migration `pending/managed_settings_bundles.sql`. The three
+admin routes are API-only gaps on #453. Drift against ADR-0259 is slice 2.
+
+**2026-11-14, S7 RLS batch 7b (ADR-0234).** The runtime login cut-over: requests are served on `regulait_runtime`
+(created at first boot through the owner connection when `REGULAIT_INSTALL_SECRETS_DIR` is set, or
+`REGULAIT_RUNTIME_DATABASE_URL`), a member of `regulait_app` that is not a superuser, BYPASSRLS or table owner. Boot
+refuses an unfit login unless `REGULAIT_DEV_PRIVILEGED_DB_LOGIN=1` (banner, audit row, posture line). The owner keeps
+the migrations and the ledger prune (`audit_retention`, pending migration `rls_batch7b_runtime_cutover`). The demo job's
+journeys run on the runtime login. Next: batches 3-6.
+
+**2026-11-14, S7 RLS batch 7a (ADR-0234).** Every path that ran with no RLS scope now runs under a named reason:
+`system_task` (scheduler jobs, boot tasks, timers, background work; never a request path), `credential_request`
+(engine runner, enrolment, PDP and endpoint-agent requests; users read and audit append only), `public_ingest`
+(unauthenticated portal, ingest and webhook routes; users read and audit append only) and `bootstrap_admin` (the
+bootstrap token, admitted where an admin is; not a caller reason, entered only by the scope hook). Pending migration
+`rls_batch7a_system_scopes`. Channel turns and resumed builder steps run as their person; the audit prune leaves the
+scope (the app role has no DELETE on the ledger). Next: 7b, the runtime login cut-over.
+
+**2026-11-14 - P18 B6: SR 11-7 and NYC Local Law 144 packs ([ADR-0297](../decisions/0297-sector-packs-and-owasp-2026-ids.md), builder lane L8).**
+`sr-11-7@1`, labelled a historical mapping (SR 11-7 was superseded on 17 April 2026 by SR 26-2, which excludes
+generative and agentic AI), on the model risk registry (annual review partial: recertification follows `validUntil`),
+and `nyc-ll144@1` on documented fairness assessments and ADR-0222 selection rates (the independent audit within the
+year before use is attested). No migration.
+
+**2026-11-14 - P18 B2 part 2: privacy-law presets and packs ([ADR-0296](../decisions/0296-privacy-and-cyber-incident-clocks-and-presets.md), builder lane L8).**
+GDPR, CCPA/CPRA, DPDP and LGPD presets on the ADR-0224 machinery (request period, PII identifiers, processing limit;
+`privacyPresetPatch` only tightens, applied through the existing settings route) and `gdpr@1`, `ccpa@1`, `dpdp@1`,
+`lgpd@1` packs on the privacy audit evidence the gateway writes. No migration, no new route.
+
+**2026-11-14 - P24 closed: the evaluator catalog on OWASP LLM 2026 numbering ([ADR-0297](../decisions/0297-sector-packs-and-owasp-2026-ids.md) part 2, builder lane L8).**
+The catalog cites `owasp:llm:2026:NN`; 2025 ids (`owasp:llm:NN`) remain aliases of the same risk wherever an id is
+read (required-test policies, the strict defaults, decision-regression goldens, pack controls), so nothing stored
+changes meaning. No migration.
+
+**2026-11-14 - P18 A3, A4, B5: NIST AI 600-1 and the AI RMF Playbook ([ADR-0294](../decisions/0294-nist-ai-600-1-and-playbook.md), builder lane L8).**
+`nist-ai-600-1` import source (212 suggested actions parsed from NIST's public-domain PDF, pinned by sha256), the
+Playbook's suggested actions as descriptions on the `nist-ai-rmf-oscal` source (recorded as a source supplement), and a
+seeded `nist-ai-600-1@1` pack of the twelve GAI risks on existing collectors. No migration.
+
+**2026-11-14 - P18 B4: ISO/IEC ID-only packs ([ADR-0295](../decisions/0295-iso-id-only-packs.md), builder lane L8).**
+`iso-42001@2` (every clause 4 to 10 and all 38 Annex A controls, v1 untouched; v1's mis-numbered impact-assessment
+ref 8.3 becomes 8.4 in v2), `iso-23894@1` and `iso-42005@1`, cited by clause number in our own words on existing
+collectors. No migration.
+
+**2026-11-14 - P18 B2/B3 part 1: GDPR, NIS2, DORA and CRA incident clocks ([ADR-0296](../decisions/0296-privacy-and-cyber-incident-clocks-and-presets.md), builder lane L8).**
+Fourteen verbatim-quoted clocks under four new regimes, started by five new criteria that never make an incident
+serious under the EU AI Act; new `hours` and `months` due kinds; every regime on by default and added to existing orgs
+(migration `pending/incident_clock_regimes_gdpr_nis2_dora_cra.sql`, numbered at merge). Privacy presets follow in part 2.
+
+**2026-11-14 - P18 A1: MITRE ATLAS tactics and techniques ([ADR-0293](../decisions/0293-mitre-atlas-techniques-import.md), builder lane L8).**
+A second ATLAS import source, `mitre-atlas-techniques` (16 tactics, 221 techniques, Apache-2.0, the same pinned
+2026.10 release as the mitigations), and our own map of the ten red-team attack classes onto technique ids, cited by
+the evaluator catalog as `refs.mitreAtlas`. `bias` maps to nothing (ATLAS has no fairness technique). No migration.
+
+**2026-11-14 - lane L7 slice 1: per-project model risk management through the compliance cascade ([ADR-0045 amendment](../decisions/0045-model-risk-management.md)).** A compliance profile can require MRM (`mrm_required`, migration `pending/compliance_profile_mrm_required.sql`, numbered at merge); a dispatch on a project so classified goes through the full ADR-0045 gate even where the org toggle was relaxed, audited with `enforcedBy: compliance_cascade`. Pack presets can carry it, red-team preset fields are validated against the closed vocabulary, and red-team runs now read the profile's active version. Owner question open: should a profile require MRM by default (built as no opinion).
+
+**2026-11-14 - lane L7 slice 3: model-file lineage (P14 and P16 remainders; [ADR-0216](../decisions/0216-model-signatures-supply-chain-block.md) and ADR-0217 amendments).** A derived model file records how it was made from its parent file(s), whether repackaged, converted, fine-tuned, quantized or merged. Each derivation is recorded once, audited with every sha256, and never edited (migration `pending/model_artifact_lineage.sql`, numbered at merge). A fine-tune, merge or quantization of a file a certified card cites now counts as model-version drift, so recertification and the ADR-0217 automatic re-test follow. The two lineage routes are API-only known UI gaps on #453.
+
+**2026-11-14 - lane L7 slice 2: the copilot is enrolled in red-teaming with a promotion gate ([ADR-0056 amendment](../decisions/0056-ai-governance-copilot.md)).** A model may narrate a copilot answer only while its latest run on THE copilot red-team library (one an admin designates by audited step-up; none by default, so every narrator is refused) resisted every probe the model itself answered in prompt injection, indirect injection, data exfiltration and PII leak, over at least 3 trials, against the model and system prompt it serves now, within 30 days. Platform-held probes are not counted as the narrator resisting. A later regression blocks it again (409 `copilot_narrator_redteam_required`, audited). Strict by default; relaxing is a step-up. Migration `pending/copilot_redteam_gate.sql` (numbered at merge); two API-only settings routes are known UI gaps on #453.
+
+**2026-11-14 - P33 follow-up: governed, stateless `POST /v1/responses` ([ADR-0287](../decisions/0287-responses-api-compat-shim.md), builder lane L6).** A translation shim over the one compat dispatch core (entitlement, routing, PII, cost attribution, audit on `compat_openai_responses`), on the OpenAI-compatible switch. Stateless: `previous_response_id` and `store: true` are 400s naming the field; output items round-trip as input, so laravel/ai (`store => false`) and the OpenAI SDK run tool loops with no server state. Two new ADR-0257 harness lanes. No migration.
+
+**2026-11-14 - S-03 follow-up (a): the outbound generic PM webhook signs `<ts>.<body>` ([ADR-0010 amendment](../decisions/0010-pm-inbound-sync-webhooks-plus-read-through.md), builder lane L6).** `GenericWebhookProvider` sends `x-regulait-timestamp` and an HMAC over `"<timestamp>.<body>"`, the same contract as inbound, from one shared dependency-free signer (`generic-signature.ts`), so receivers can apply the 300 s window. The body-only signature is removed (no grandfathering). No migration. S-03(b) still waits on #605.
+
+**2026-11-14 - ADR-0054 §3: the PM project / work-item importer, slice 4a ([ADR-0289](../decisions/0289-pm-work-item-importer.md), builder lane L6, migration `pm_work_item_import` (pending, numbered at merge)).** `POST /v1/onboarding/imports/pm` previews by default; apply must carry the preview's `planSha256` (recomputed under a per-connection lock, 409 on change). Linkage only (id, url, type) in `pm_imported_work_items`, the project mapped onto an Initiative; re-runs reconcile and mark vanished items missing, never delete; over-large or malformed listings are refused whole. Mock and generic webhook list today; the five vendor adapters are slice 4b. API-only, screen on #453 (UI-gap cap +2). Review round 1 (#828): every PM table is now under forced row-level security (owner decision 2026-11-15; ADR-0234 PM amendment, migration `rls_pm_tables`, new `pm_sync` reason), and the importer's audit rows commit with their state change.
+
+**2026-11-14 - P33 follow-up: provider-shaped 401s on the compat surfaces ([ADR-0288](../decisions/0288-provider-shaped-compat-401s.md), builder lane L6).** A 401 on `/v1/chat/completions`, `/v1/responses`, `/v1/messages` or `/v1/models` is re-enveloped in the client's dialect in `onSend`; the shared auth hook is unchanged, the RegulAIt code survives as `regulait_code`, and MCP and native routes keep RegulAIt's body. The ADR-0257 harness now asserts the provider shape instead of special-casing 401s. No migration.
+
+**2026-11-14 - P30 durable workflow stages, lane L5 (ADR-0282 to ADR-0286).** pg-boss 12.38.2 (MIT) is the queue under the existing stage runner (ADR-0282; graphile-worker not adopted), installed in our own schema `regulait_queue` by migration `pending/workflow_stage_queue.sql` with `migrate: false`. Automatic retry with backoff is a per-stage template opt-in (ADR-0283), scheduled in the failure's own transaction and audited beside it; the stage execution key `<instance>:<stage>:<round>:<entry>` keeps one retry chain per execution and supersedes stale jobs (ADR-0284); wait-for-token maps onto the existing sign-off pause. An automated_check stage's eval-bound checks fan out (`checkConcurrency`, default 4) and still commit as one transition (ADR-0285); retries are limited per process (2) and per project (1), fan-out per stage (4) and per process (8) (ADR-0286). The plan-gate partial index `workflow_instances_project_open_idx` is built CONCURRENTLY. Retry worker on unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. Owner decision (2026-11-15): git stages do not retry by default (a failure stops and asks); an admin may enable capped retries per template, and enabling it is audited (`workflow:template-stage-retry-enabled`).
+
+**2026-11-14 - lane L4 slice 2: the `subject` engine target, admission-scan queueing and result recording ([ADR-0242 amendment L4.3](../decisions/0242-mcp-and-skill-scanner-engines.md), pending migration `admission_scan_subject_target`).** The gateway now queues an mcpscanner or skillscanner run (only with the engine on; it is off and unpublished by default) at every skill save, every MCP manifest scan and the skill re-scan sweep. A person cannot start one. The lease names the input file the gateway builds itself, and the result is recorded on the subject in the run's own transaction. The MCP manifest snapshot is encrypted and cleared at the run's end. Next L4 slices: the runner shim with the sandbox-limit proof, publish and lock, and ATR 4.3.0 with offline OSV.
+
+**2026-11-14 - lane L4 slice 1: SKILL.md frontmatter validation at import, and a later engine fail revokes an earlier clearance ([ADR-0242 amendment](../decisions/0242-mcp-and-skill-scanner-engines.md)).** The SKILL.md import is now strict (YAML frontmatter ≤ 8 KiB, the format's fields only, a 500-line body, references inside the skill). With the secure default for owner question 2, an engine `fail` the admin had not seen re-holds a `cleared` server or `admitted` skill (audited `admission-engine-clearance-revoked`). No migration. Next L4 slices: the runner stage and `subject` target, publish and lock, ATR 4.3.0 and offline OSV.
+
+**2026-11-14 - P19 Lane L3, first PR: SAP business MCP servers are approve-first ([ADR-0230 amendment](../decisions/0230-sap-business-agents-over-mcp.md), migration `sap_business_servers` (pending, numbered at merge)).** `mcp_servers.system_class = 'sap_business'` is set by `POST /v1/servers/:serverId/system-class`, which seeds a write-only quorum-2 fleet approval rule and a write-only fleet rate limit (10 per hour, new `rate_limits.write_only`) in one audited transaction; every SAP write needs a live budgeted project (`sap-write-needs-project`). Unmarking is a settings_relax step-up. API only (three routes, #453). Identity release and subject tokens wait for slice A0; the HMAC idempotency key and A3 audit detail are the lane's second PR. Owner decision 2026-11-15: the quorum (default 2, min 1, requester never counts), the write rate (default 10/h), unattributed writes (default refused) and approve-first reads (default off) are org settings; relaxing one is a settings_relax step-up, audited.
+
+**2026-11-14 - P19 Lane L3, second PR: the SAP idempotency key and business audit detail ([ADR-0230 amendment](../decisions/0230-sap-business-agents-over-mcp.md), no migration).** An SAP business write must carry a UUID `idempotencyKey`; the gateway replaces it with HMAC(per-server secret, deployment, pairwise sub, caller key), forces the approval to bind the exact arguments (one approval, one order), refuses a key reused with other fields, and records service, entity set, stored key, approval, document number and `replayed` on the decision, usage and a new `sap-business-outcome` row. Replays are not charged.
+
+**2026-11-14 - Lane L2, P10 follow-up: A2A role grants and per-person revocations ([ADR-0219 amendment](../decisions/0219-a2a-governance.md), migration `pending/a2a_role_grants`, numbered at merge).**
+A role can be granted a remote agent, as a whole or for one skill. Everyone holding the role may then call it. A per-person
+revocation removes that role-derived access without touching a direct grant, and lifting a revocation is a step-up. Six admin
+routes are API-only; they are known UI gaps on #453. After review, the A2A grant mints (role and direct) pass the shared
+SoD gate, the `grant_mint` step-up and the role-row lock. Assigning a role that holds remote-agent grants is stepped up.
+Revocations take the person lock, use the shared lift step-up and carry a reason. Both lists are on the ADR-0226 contract
+with Excel exports; the two exports raise the known UI gaps by two.
+
+**2026-11-14 - Lane L2, P10 follow-up: A2A guardrails on the message, PII and guardrails on the reply ([ADR-0219 amendment](../decisions/0219-a2a-governance.md)).**
+A remote agent's message now passes the ADR-0042 guardrails before it leaves. Its reply passes the project's PII mode and the
+guardrails before anyone sees it. A block on the reply withholds it behind a counts-only marker, and the call is still charged
+(bill-and-withhold). No migration.
+
+**2026-11-14 - Lane L2, P20 slice B1: the A2A HTTP+JSON binding and legacy 0.3 cards ([ADR-0231 amendment](../decisions/0231-sap-joule-agents-over-a2a.md)).**
+The gateway now calls remote agents over JSON-RPC or HTTP+JSON, in A2A 1.x or 0.3.x (SAP Agent Gateway's wire). The pinned
+`@a2a-js/sdk` 1.3.0 does the conversion and the transports through its `legacyCompat` option; we wrote no transport. Unsupported
+or empty protocol versions are refused. No migration. Next in the lane: reply-side PII and guardrail checks, role grants, then B3
+(gateway connections and ARD import).
+
+**2026-11-14 - L11 slice 3: SIEM delivery built ([ADR-0303](../decisions/0303-siem-delivery-of-the-audit-chain.md), migration `pending/siem_delivery.sql`, numbered at merge; P18 C6).** ADR-0135's delivery contract: `siem_destinations` is a cursor over `audit_log.seq` that moves only on a 2xx; batches are Standard Webhooks-signed `regulait.siem.audit.v1` envelopes carrying the allow-listed fields only (no detail, reason or actor), sent through the egress guard by the `siem-delivery-sweep` job with backoff, dead-letter after 12 failures and admin recovery. Off by default; enabling is a step-up. Five admin routes are API-only (KNOWN_UI_GAPS, #453). The outbound secret gate in ADR-0135 stays proposed.
+
+**2026-11-14 - L11 slice 2b: P37 OTLP intake ([ADR-0302](../decisions/0302-p37-evidence-retention-and-otlp-intake.md) decision 2, no migration).** `POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs` takes a DefenseClaw OTLP/HTTP logs export (protobuf via `protobufjs` 8.8.1 over the vendored `opentelemetry-proto` v1.9.0 files, or OTLP/JSON), turns each log record into a JSONL line (the body is never read) and runs the existing ingest pipeline unchanged, answering an `ExportLogsServiceResponse` with partial success. gRPC is not offered; the check against a real captured export stays open.
+
+**2026-11-14 - L11 slice 2a: P37 evidence retention ([ADR-0302](../decisions/0302-p37-evidence-retention-and-otlp-intake.md), migration `pending/third_party_evidence_retention.sql`, numbered at merge).** The daily `third-party-evidence-retention-sweep` deletes DefenseClaw evidence received before the compliance-cascade audit floor (the longest per-mode override extends it; no floor, nothing deleted). The append-only guard now admits a DELETE only under a transaction-local cutoff that is in the past by the database clock; UPDATE and TRUNCATE stay refused. One audit row per deleting batch.
+
+**2026-11-14 - L11 slice 1: OTLP metrics push ([ADR-0301](../decisions/0301-otlp-metrics-push.md), no migration).** The ADR-0185 meter gains a second reader; `REGULAIT_METRICS_OTLP_ENDPOINT` (off by default) pushes the same series as OTLP/JSON (official `@opentelemetry/otlp-transformer` serializer) through the egress-guarded fetch every 10 to 3600 s, counted in `regulait_metrics_otlp_pushes_total{outcome}`. Ambient `OTEL_*` variables are not read.
+
+**2026-11-14 - L11 slice 4: certification-campaign deadline notices ([ADR-0090 amendment](../decisions/0090-grant-certification-campaigns.md), migration `pending/chatops_campaign_deadline_notify.sql`, numbered at merge).** The hourly `certification-deadline-notify-sweep` sends a due-soon reminder (48 h) and an expiry notice, once each per campaign, through ChatOps workspaces opted in with `notify_campaign_deadlines` (off by default, audited). Resend mails each named reviewer their own count; other providers post one channel notice. No campaign name or labels in the message; it decides nothing.
+
+**2026-11-14 - P-01 remainder, slice 2: admin routes for the governed core's resource rules ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1; no migration).** `GET/POST /v1/rules/resource/approval-rules` and `/v1/rules/resource/rate-limits`, plus PATCH and DELETE on each: admin only, a `settings_relax` step-up for every removal or loosening, audited old and new in the same transaction. API-first: eight known UI gaps on #453 for the design builder.
+
+**2026-11-14 - ADR-0239 decision 4 executed: the hand-written rate-limit evaluator is removed ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane L1; no migration).** Cedar is the only rate-limit engine; with no engine the kernel refuses, and `REGULAIT_RATE_LIMIT_EVALUATOR=legacy` refuses the boot. The differential test keeps the old predicate as its oracle.
+
+**2026-11-14 - P-01 remainder, slice 1: model calls are queued for approval and replayed ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1, migration `model_call_approvals` (pending, numbered at merge)).** A model call matched by a model approval rule is no longer refused: it is held as a `model_call` approval (202 `approval_pending`; 403 on the OpenAI/Anthropic-shaped surfaces), bound to the exact request and policy context, signed like any tool-call approval, and the identical re-submitted call runs once after every named approver signs. Remaining in the lane: admin routes for `resource_approval_rules`/`resource_rate_limits`, hard rate-limit windows, ABAC v5 actions, approval-rule matching on Cedar and the removal of `legacyRateLimitEvaluator`.
+
+**2026-11-14 - P-01 remainder, slice 3: hard rate-limit windows for connector and A2A calls ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1, migration `resource_rate_reservations` (pending, numbered at merge)).** A call a limit binds is decided and takes its slot in one transaction under a per-(user, resource type) advisory lock, so concurrent calls cannot overshoot; calls with no limit pay nothing. Also fixed: an executed connector call spent two slots (its egress row was counted).
+
+**2026-11-14 - ADR-0239 slice 2: MCP approval rules are matched on Cedar ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane L1; no migration).** The gateway injects one Cedar evaluator into the kernel and its own matched-rule reads (consent scope, queue quorum); an engine error refuses the call. A fast-check differential holds it to the hand-written predicate, which stays as the kernel's default for one release.
+
+**2026-11-14 - P-01 remainder, slice 4a: ABAC v5 actions ([ADR-0251](../decisions/0251-one-governed-decision-core.md) "As built", lane L1; no migration).** Cedar schema v5 adds `ModelInvoke`, `ConnectorCall` and `A2aMessage` on `Model`, `Connector` and `RemoteAgent`, evaluated by the governed core; v1–v4 policies never apply to those calls. v5 is opt-in until the editor's action picker lands (#453). An ABAC approval hold on these call types refuses for now.
+
+**2026-11-08 - P36 built (builder lane): review workflow patterns ([ADR-0260](../decisions/0260-review-workflow-patterns.md), builder, branch `builder/p36-review-workflow-patterns`).**
+- **Our process:** reviewers follow `internal/process/REVIEW_CHECKLISTS.md` (two loops; numbered findings with a
+  severity; READY lists each finding with its fixing commit; verdicts start `APPROVE at <sha>` / `SECURITY APPROVE at
+  <sha>`; post without asking; delta reviews cover non-merge commits since the last verdict); the `regulait-review`
+  skill loads it. Adapted from OneRedOak/claude-code-workflows (MIT, credited in apps/gateway/THIRD_PARTY.md).
+- **Product:** a review-bound check (`reviews` on an `automated_check` stage: code, OWASP Top 10 security, design/UI)
+  runs as a governed dispatch as the instance initiator and returns numbered structured findings; any finding above a
+  nit fails by default; four gallery shapes, off unless assigned. No migration.
+- **Open (PENDING §2i P36):** a PR diff read on the git providers, a governed Playwright step for the design review,
+  and the UI (posted to #453).
 
 **2026-11-07 - P30 spike: `vercel/workflow` rejected for pillar 2 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)).**
 The existing stage runner stays the engine. Retry/backoff and in-stage fan-out are follow-ups over graphile-worker or
@@ -5845,6 +6620,219 @@ The existing runner stays; retry/backoff and in-stage fan-out go to it over grap
 ADR. trigger.dev is rejected too (owner input, 2026-11-07); its wait-for-token, idempotency-key and per-queue
 concurrency patterns are borrowed. Prototype `spikes/workflow-p30/` behind `REGULAIT_WORKFLOW_DURABLE_P30` (default
 off). No migration; reserved 0309 released. PENDING P30.
+
+**ADR-0253 (builder, 2026-11-07, Accepted; owner backlog P29): the AI SDK provider packages under the model adapters.**
+- **What:** `@ai-sdk/provider` 4.0.35 and `@ai-sdk/google` 4.0.109 (Apache-2.0, exact pins). `ai` and `@ai-sdk/gateway`
+  are not installed, so no bare-string model id can reach Vercel's gateway. One bridge (`ai-sdk-bridge.ts`) maps the
+  dispatch contract onto LanguageModelV4.
+- **Google:** the hand-written raw-fetch adapter (about 410 lines) is replaced by `google-ai-sdk.ts`, after both paths
+  ran the suite behind a switch. Usage, refusals, `modelVersion` and tool-call ids come from the raw response, so
+  pillar 5/6 and audit see the same numbers.
+- **Kept:** Anthropic, OpenAI, xAI and custom stay on their official vendor SDKs (not hand-written), with re-check
+  triggers in the ADR. Shared runtime helpers moved to `src/core.ts` (no import cycle).
+- **Guards:** `ai-sdk-guard.test.ts` fails on `ai` or `@ai-sdk/gateway`, a bare-string model id, a default provider
+  instance, or a Vercel host. Its egress test proves the configured host is the only one reached, through the
+  injected fetch, with no ambient-key fallback.
+- **Open:** the Gemini thought and tool-use token counts for pillar 5 (P21, #453), and P21's `usageSource` field for
+  the new Gemini adapter (whichever PR merges second).
+
+**ADR-0256 (builder, 2026-11-07, Proposed): seed the MCP catalogue (backlog P32).** On top of ADR-0101, unchanged:
+admin-only presets (the official MCP Registry, data CC0 1.0; `awesome-mcp-servers`, MIT) create a source disabled
+through the egress check. Sources gain `listing_kind` (community = unvetted) and `delivery` (pull, or a signed offline
+bundle for air-gapped installs: Ed25519 over the exact bytes, public keyring in `REGULAIT_MCP_CATALOGUE_BUNDLE_KEYS`,
+none = every bundle refused, rollback-protected, never dialled). Each refresh writes an append-only
+`mcp_catalogue_snapshots` row; `mcp_catalogue_items` dedupes by GitHub repository, else by name, with one source row
+each; paid and x402 entries are flagged. Every entry stays "available, not admitted" until ADR-0101's import and the
+admission scan (P23, P27). Migration `mcp_catalogue_seed` (numbered at merge). The UI is on #453.
+
+**ADR-0250 (builder, 2026-11-07, Accepted): grant mints need a step-up; the plan-only gate is forced at project level (whole-build review S-04, P-02; PENDING S8 closed).** The eight grant-mint POSTs take a `settings_relax` step-up bound to `{op: "grant_mint", grant}` (`grantMintStepUp`), so an admin API key can no longer mint; DELETE is unchanged; no new kind, no migration. `guardProjectPlanOnly` (plan-only.ts) refuses a mutating call 409 `plan_only_stage` while any live instance of the attributed project rests in planning, on invoke, runs, compat and MCP write tools, audited on that instance's trail; the engine's own work for another instance (nested build-stage run, engine-run key) is the one audited exception. The demo seed mints its grants before Ada enrols; the admin UI's grant buttons go through `withStepUp`. Limits (ADR-0250): a call naming no project is not plan-gated; an instance without a project is gated only when named. Follow-up: a partial index on `workflow_instances(project_id)` for live statuses if the table grows.
+
+**ADR-0240 (builder, 2026-11-07): one second factor for the external portals (supplier ADR-0221, auditor ADR-0225).**
+A spent single-use link opens a 10-minute challenge (cookie scoped to the portal's `…/session/mfa` path), not a
+session. The first use of a grant enrols TOTP through the existing `totp.ts` (`otpauth`), and later links only verify.
+A wrong or replayed code counts; 5 consecutive failures lock the factor (audited). Recovery is only the inviting
+admin's reset (`identity_manage` step-up, audited), which ends live sessions; the next link enrols again. Required by
+default: `supplier_portal_mfa_required` (relaxed via `PUT /v1/supplier-portal/settings`) and
+`trust_auditor_mfa_required` (via `PUT /v1/org/settings`), each a `settings_relax` step-up when turned off. With no data
+key, a link is refused before it is spent. Pending migration `external_portal_mfa` (`external_mfa_factors`, `external_mfa_challenges`). Open:
+the portal screens (Governed Designer, #453), a passkey option, and trust on first use of the first link.
+
+**ADR-0255 (builder, 2026-11-07, Accepted; backlog P31): a governed connector catalogue from Activepieces community
+pieces, as a clean-room adapter.** No Activepieces code runs. Five curated pieces (Slack, Jira Cloud, GitHub, Google
+Sheets, Gmail) are re-implemented in `packages/connector-provider/src/pieces.ts` with the upstream action vocabulary,
+read from pinned `packages/pieces/community/*` tarballs (MIT through the root licence, since the npm `license` field is
+missing; THIRD_PARTY.md records the reasoning). Each is a `piece_*` connector kind behind `executeGovernedConnectorCall`,
+so default-deny grants (`allowedObjects` lists actions), cost, approvals, PII and audit are unchanged, and every request
+takes the ADR-0167 guarded-fetch branch. A piece is refused air-gapped, with a `baseUrl`, or until an admin enables it
+(`POST /v1/connector-catalogue/:pieceKey/enablement`, step-up, audited; pending migration `connector_catalogue`, table `connector_piece_enablements`).
+`GET /v1/connector-catalogue` also lists 728 community pieces "available, not enabled" (names, versions and upstream paths, each verified against the upstream `packages/pieces/community/` tree, generated by
+`scripts/connector-catalogue-refresh.mjs`). `scripts/activepieces-ee-guard.mjs` fails CI on any Activepieces EE path,
+import or lockfile entry. Open: the catalogue screen (Governed Designer, requested on #453); until it lands the two
+routes are KNOWN_UI_GAPS and raise the cap by 2 (13 to 15 on 2026-11-08), flagged for an owner decision on #753.
+
+**ADR-0260 (builder, 2026-11-07, Accepted): review patterns from OneRedOak/claude-code-workflows (backlog P36).**
+- **Process:** `internal/process/REVIEW_CHECKLISTS.md` and `.claude/skills/regulait-review/SKILL.md`; the security review
+  keeps rate limiting, audit logging and hardening in scope (the source excludes them).
+- **Product:** `reviews: [{check, agent, profile, failOn?, maxTokens?}]` on an `automated_check` stage, a third
+  machine-decided check kind beside evals (ADR-0044) and engines (ADR-0187); the shared eval decider, the `evals`
+  model feature, project cost, the dispatch audit; evidence in a delimited untrusted block; zod-validated findings
+  numbered F1…; fails closed; cannot be reported; unknown reviewer refused at template creation; `reviewerAgent`
+  required when creating a review gallery shape. Gallery: `code-review-check`, `security-review-check`,
+  `design-review-check`, `build-and-review`. No migration.
+
+**ADR-0304 (builder lane L12, 2026-11-14, Accepted; PENDING P22 and the Helm row): Kubernetes self-install.**
+- **What:** a controller-runtime operator (`deploy/operator/`, CRD `RegulaitInstallation`, `deploy.regulait.ai/v1alpha1`)
+  that rolls out only a version whose signed update-bundle manifest verifies (ADR-0041), migrates by Job before the
+  image changes, corrects drift and reports it; and a Helm chart (`deploy/helm/regulait/`) with a migration hook Job.
+- **Defaults:** non-root, read-only root filesystem, capabilities dropped, NetworkPolicy default-deny, images by digest
+  only, Secret names only, a namespaced Role with no direct Secret permission, the release keyring compiled into
+  the operator (an extra ConfigMap keyring is an evented opt-in), one replica until P2, air-gapped refuses public egress.
+- **Open (owner):** image digests in the bundle (schema /2), the API group domain, the backup target, distribution.
+
+**ADR-0331 (builder lane E13, 2026-11-15, Proposed; PENDING P1): governed removal of flagged add-ons.**
+- **What:** an admin, with an `endpoint_remediation` step-up, removes one MCP server identity (optionally one version)
+  from one device, a selected set, or every device that reported it in the last N days. The endpoint agent applies a
+  signed, identity-bound, replay-protected directive at its next sync, removing one entry from one manifest-located
+  plain-JSON config and keeping every other byte. It notifies the developer and reports per-endpoint outcomes, each
+  written to the audit trail in the same transaction.
+- **Defaults:** the org switch is off, and turning it on is a `settings_relax` step-up. Nothing is automatic.
+  `blockReinstall` defaults to on. Directives are signed by the shared ADR-0334 device-policy key (slice 3), under
+  their own signature domain, and an agent applies one only under a key its admin pinned. This is a recorded narrow relaxation of ADR-0195 decision 19.
+- **Not covered:** skills and plugins (no discovery kind yet), JSONC and TOML configs (reported as unsupported), and
+  on-device enforcement of the reinstall block (waits for SD4 policy delivery). The admin screens are known UI gaps on
+  #453.
+- **Review of #871 (2026-11-18):** a removal is now sent to no device until a second administrator approves it
+  (ADR-0186, `approval_decide` step-up bound to the approval's arguments digest, which covers the resolved target set);
+  signing a directive is the external write `device_policy.sign_payload` behind the execution-mode barrier; the three
+  tables are under forced RLS; both lifecycles are ADR-0348 machines; cancel stops only undelivered targets.
+- **Slice 3 (2026-11-20):** directives are signed by the shared device-policy key (owner decision B4), resolved per
+  read; each signature carries the directive domain, so it never passes as a policy; the removal request accepts an
+  `Idempotency-Key` (#1033).
+
+**ADR-0330 (builder lane E13, 2026-11-15, Proposed; PENDING P1): hook adapters for Cursor, Copilot CLI and Codex.**
+- **What:** `regulait-agent hook cursor|copilot-cli|codex`, three parsers and renderers over ADR-0298's single
+  `Decide` and the same signed policy. The policy gains an optional `agentModes` map (audit or enforce per agent).
+- **Long-term shape (owner direction, 2026-11-15):** every agent is one `Adapter` value, made of contract data and a
+  capability-matrix row, plus thin parse and render functions. Its fixtures are versioned per contract under
+  `testdata/hooks/<agent>/<version>/`, and old versions are never edited. `regulait-agent hook-capabilities` prints the
+  matrix.
+- **Honest coverage:** none of the three reports where an MCP server was defined, so each one's calls carry an
+  unattested source that a policy must accept explicitly. Cursor names the server and fails closed with `failClosed`.
+  Copilot CLI cannot identify MCP servers, so its non-built-in tools are denied in enforce mode, and its timeouts
+  always fail open. Codex takes the server only from the tool name, and its hook errors fail open.
+- **Default:** off (nothing registers a hook; the keyring stays empty until SD4). The admin UI for per-agent modes and
+  coverage is a known UI gap on #453.
+- **Owner decisions (2026-11-15, ADR-0330 §8):**
+  - Copilot CLI: audit mode plus GitHub's MCP registry allow-list.
+  - Codex: audit-grade, paired with `requirements.toml`.
+  - Cursor: allows answered "allow". Whether that skips Cursor's own run confirmation is not documented, and is a
+    manual check.
+  - Signing: one rotatable device-policy signer, shared with the browser lane. The agent verifies its pinned
+    `devicePolicyKeys`, two at most.
+
+**ADR-0333 (builder lane E15, 2026-11-15, Proposed; owner direction 2026-11-15): rule-based detection of risky agent behaviour.**
+- **What:** a deterministic engine (`apps/gateway/src/detection/`) reads committed audit-chain rows behind one leased
+  cursor (`agent-detection-sweep`, every 15 s), groups them per delegation tree or sponsor, and evaluates a signed,
+  versioned rule pack (`regulait.detection-pack.v1`, Sigma correlation vocabulary: `single`, `temporal_ordered`,
+  `event_count`). Five default rules: secret read then egress, data-scoped call then a write elsewhere, a call to a
+  High/Critical add-on (MCP server or builder skill, owner D1), delegation escalation, a burst of denied calls. On first
+  run the retained history is replayed behind its own checkpoint, after live batches; replay incidents are marked
+  historical and alert-only (owner D2).
+- **Evidence and SIEM:** each incident has its evidence rows (join table) and one chained audit row, so ADR-0303 delivers
+  it to the SIEM. Never AI, never in the decision path. A stored pack that does not verify falls back to the built-in
+  pack (audited once). A relaxing pack change needs a `settings_relax` step-up.
+- **Responses (slice 2):** `suspend_grant` (revoke the delegation tree), `revoke_credential` (the identity's live
+  tokens) and `require_approval` (an approval rule for the sponsor), each behind a `settings_relax` step-up. Migration `pending/agent_detection.sql`. API only:
+  five routes are known UI gaps on #453.
+
+Owner decision (2026-11-15): ADR-0322 (opt-in, per-tenant read-only vendor usage/cost pull) is accepted. It amends
+ADR-0069 and ADR-0076: an admin may store a read-only vendor usage/cost credential (MFA step-up, audited, encrypted with
+the data key, rotatable, never returned or logged); a scheduled pull through the guarded fetch writes imported lines
+only; the feature is off by default and refused under `air_gapped`; file import is unchanged.
+
+**ADR-0305 (builder lane L12, 2026-11-15, Accepted; owner decisions): chart distribution and S3 backups.**
+- **Chart:** published as a cosign-signed OCI artifact (`oci://ghcr.io/<owner>/charts/regulait`, manual `main`-only
+  publish; keyless CI signing until lane E9's release-key ceremony), and shipped in the signed update bundle
+  (`deploy/helm`, `deploy/operator/config`) for air-gapped sites.
+- **Backups:** `spec.backup.s3` uploads `pg_dump` output to a bucket in the customer's AWS account with SSE-KMS under
+  their key and a bucket-owner check; credentials from IRSA or EKS Pod Identity on a dedicated `<name>-backup`
+  ServiceAccount; the role needs only `s3:PutObject` and `kms:GenerateDataKey`; retention is the bucket's lifecycle
+  (lane E10's Terraform).
+- **Open (owner):** Object Lock on the pilot bucket; an automated restore rehearsal.
+
+**ADR-0342 (lane E23, 2026-11-16, Accepted; slice 1 built): process analytics from the workflow history.** The read
+model is replayed from `workflow_events` through the pure kernel and accepted only when it reproduces the stored state.
+Stage time splits into wait (the instance needs a person or an outside party) and work (the engine executing or queued).
+Reads are versioned, bounded (366-day window, 400 periods, 200 rows a page) and scoped by `evaluateReportAccess`: org
+is admin-only and a team or project read is narrowed to the caller's projects. Row-level security is forced. Human-task
+escalation stays the one ADR-0046 SLA sweep, which lane E21's timers drive.
+
+ADR-0348 (lane E29 brief, 2026-11-17): every lifecycle column gets one typed transition table in
+`packages/shared/src/state-machines.ts`; every writer guards its UPDATE on the event's source states; API responses carry
+a read-only `lifecycle` view that the UI and agents read instead of re-deriving rules. A plain table, not XState, for
+server lifecycles; the UI uses the same machine through the API with no client library.
+
+**ADR-0349 (lane E30, 2026-11-17, Accepted; slice 1 built): five durable-execution ideas from Temporal, inside our own
+runner.** Temporal is not adopted (ADR-0254 stands). Slice 1 adds a CI check on ADR-0342's replayer (`replayHistory`): recorded
+`workflow_events` histories in `packages/workflow-kernel/replay-fixtures/` must still reach their recorded state, and a
+fixture is never re-recorded to make CI pass. Slices 2–5 follow: one open instance per template + target + work item
+(409 by default, `use_existing` an audited step-up relaxation), a renewed short claim lease with a schedule-to-close
+limit, workflow schedules on the ADR-0064 scheduler, and typed instance search with a pending-work view.
+
+**ADR-0350 (builder lane E31, 2026-11-17, Proposed; slice 1 built, default off): on-device command, file and package rules.**
+- **What:** the hook adapters gain a neutral `Command` decision for built-in shell commands, file reads and writes and
+  package installs. A closed rule list (argv globs over a bash parse by `mvdan.cc/sh`, path globs, ecosystem and name)
+  returns allow, ask or deny; the strictest wins; anything unparsable is ask or deny. Ask uses each agent's own prompt,
+  or is a deny where the agent has none. Policy schema 2 makes the `commands` section required.
+- **Honest matrix:** Claude Code sees shell, reads and writes; Cursor shell and reads (no pre-write hook); Copilot CLI
+  shell only; Codex shell and `apply_patch` writes, deny only. A guardrail, not containment.
+- **Next slices:** the compiler from the gateway's own entitlements, signed by the B4 signer (#867); device groups that
+  only narrow, and step-up-approved, expiring per-device exceptions with a declared lifecycle.
+
+**ADR-0359 (builder lane E40, 2026-11-17, Accepted; owner decision 2026-11-17, competitor gap audit Obsidian row 9 and DarkControl row 20): learned behaviour baselines.**
+- **What (slice 1):** a sweep (`behaviour-baseline-sweep`, every 60 s) rolls the install's own audit chain up into
+  per-day counts per user and per agent (workload identity), and compares each complete UTC day with the 28 days
+  before it: model-call and data-scoped-call volume by robust z-score (Iglewicz–Hoaglin, MAD; 3x-median fallback when
+  flat), and tools, destinations and hour of day by share of history (below 2% fires). Statistics from
+  `simple-statistics` (ISC, already pinned); no network, no model, no cross-customer pool, air-gapped.
+- **Shadow mode** is the default and the only mode built: findings only, never enforcement. Each finding stores its
+  baseline and deviation and writes one chained audit row (SIEM export through ADR-0303). Turning it off is a
+  `settings_relax` step-up. Finding status is a declared table (open → acknowledged | dismissed → terminal).
+- Migration `pending/behaviour_baselines.sql`. API only: six routes are known UI gaps on #453. Slice 2 (rule
+  suggestions in lane E15's pack format, backtested, approved with step-up) follows.
+
+**ADR-0362 (lane E43, 2026-11-17, Proposed; Forcepoint gap 2): content inspection beyond text.**
+- **What:** files and attachments in gateway requests and responses (PDF, DOCX, XLSX, PPTX, CSV, zip, images) are
+  turned into text by `engines/contentextract/extract.py`, which runs only in the engine sandbox (ADR-0190 I5); the
+  existing PII, processing-limit and guardrail checks then run on that text with their usual outcomes.
+- **Chosen:** pypdfium2 5.15.2 (Apache-2.0 OR BSD-3-Clause) for PDF, the Python standard library for OOXML, CSV and
+  zip; Tesseract for OCR in slice 2. Tika, unstructured, docling, markitdown and kreuzberg compared and rejected
+  (reasons in the ADR); openpyxl, python-pptx and defusedxml fail ADR-0176.
+- **Defaults:** hard caps baked in the extractor (16 MiB a file, 200 pages, 256 entries, depth 2, ratio 100:1, 20 s);
+  an unknown type or a cap fails closed; off by default per project (owner brief, cost), forced on when the project's
+  cascade PII mode is `block`.
+- **Built so far:** slice 1a (extractor, image, shared vocabulary). Slices 1b (engine registration and gateway wiring),
+  2 (OCR) and 3 (cost) follow.
+
+ADR-0364 (lane E45 brief, 2026-11-18): Robots are governed as MCP tools. One tool per approved robot version on a first-party server (`first_party` transport, in-process MCP SDK server), toolbox entries stay `kind: "mcp_tool"`, review goes through the one approvals queue (`robot_version`), and runs are a `robot_browser` sandbox workload. Playwright 1.65.x for robots; `@playwright/mcp` in its own image for free-form (high-risk, off by default). Every robot run is an external write under ADR-0139. Before approval, test runs get test-scoped secrets only. Each run's only route out is its own Smokescreen proxy (MIT). Rejected versions are terminal. The inert `computerUse` switch is not wired to RPA.
+
+**ADR-0047 addendum (2026-11-22, owner decision; lane CX, card CXR-REV-002): a report definition is archived, never
+deleted.** Deleting one used to cascade its schedules and its generated runs away. Archiving (`POST
+/v1/reports/definitions/:id/archive`, admin-only; `DELETE` now does the same) moves `report_definitions.status` from
+active to archived under the declared `REPORT_DEFINITION_MACHINE`, disables its schedules in the same transaction, and
+writes one audit row. The sweep skips schedules of archived definitions, new generations and schedules are refused,
+and every run stays readable. Archived is final (no unarchive). Migration `report_definition_archive`.
+
+**ADR-0025 addendum (lane CX, 2026-11-22; owner chose the cost): scrypt N=2^17, async, rehash on sign-in (Codex
+review S-08).**
+- **Cost:** new password hashes use N=2^17, r=8, p=1 (128 MiB). The previous N=2^14, p=1 was below OWASP.
+- **No event-loop blocking:** hashing runs on asynchronous `crypto.scrypt`, at most four derivations at once by default
+  (`p-limit` 7.3.3, MIT; `REGULAIT_PASSWORD_HASH_CONCURRENCY` 1–8; `UV_THREADPOOL_SIZE=8`). Load test: 410 ms per
+  sign-in and about 12 per second per replica, with a 712 MiB peak RSS.
+- **Old hashes:** they keep verifying and are re-hashed on the next successful sign-in. Out-of-range stored parameters
+  are refused at the same cost as a missing hash.
+- **S-10, same PR:** `runDueReportSchedules` takes an explicit `isAdmin` (no `?? true` default). The three `sql.raw`
+  uuid arrays in compliance-packs, copilot and reporting are now bound parameters.
 
 <!-- fold:state-decisions -->
 

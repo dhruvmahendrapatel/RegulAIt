@@ -61,7 +61,7 @@ test.describe("I-2 rollout F: regulAIt-LLM as a stepper", () => {
     // the data step: the upload form and the datasets
     await step("Training data").click();
     await expect(page.getByRole("button", { name: "Scan & create" })).toBeVisible();
-    await expect(page.getByRole("link", { name: /^tickets v1/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^tickets v1/ })).toBeVisible();
     await expect(page.getByText("Training backends, and what each one cannot do")).toHaveCount(0);
 
     // the jobs step: the jobs list, its status always shown

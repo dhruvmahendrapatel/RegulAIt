@@ -82,6 +82,7 @@ import {
   canonicalExecutionProfile,
   createExecutionProfileSchema,
   engineWorkerProfileProblem,
+  robotBrowserProfileProblem,
   EXECUTION_PROFILE_NAME_RE,
   EXECUTION_PROFILE_TARGET_KINDS,
   executionPlacementsQuerySchema,
@@ -241,6 +242,12 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     if (body.name === "engine-worker") {
       const problem = engineWorkerProfileProblem(body);
       if (problem) return reply.status(400).send({ error: "engine_worker_profile_shape", detail: problem });
+    }
+    // ADR-0364 S3: robot-browser is versioned the same way (an L1 robot run is an audited minClass relaxation) and must
+    // keep the shape every robot run needs
+    if (body.name === "robot-browser") {
+      const problem = robotBrowserProfileProblem(body);
+      if (problem) return reply.status(400).send({ error: "robot_browser_profile_shape", detail: problem });
     }
     if (latest?.retiredAt) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
     // the version in force is the newest version (`latest`); its controls, without a revert marker

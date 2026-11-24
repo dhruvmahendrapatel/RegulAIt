@@ -10,15 +10,17 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AdminProject, Initiative, UnattributedCosts } from "../../../api/adminTypes";
 import type { ProjectCosts } from "../../../api/types";
-import { fmtUsd } from "../../../api/format";
+import { errorText, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Meter, Table, Tabs, tabIds } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Meter, Table, Tabs, tabIds } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import {
   BarChart,
+  NotAvailableToYou,
   RemoveButton,
   Stat,
   downloadCsv,
+  isRefusal,
   useAction,
   useNameMaps,
   useProjects,
@@ -26,7 +28,7 @@ import {
 import { EnergyEstimatePanel, EnergyFactorsCard } from "./EnergyEstimate";
 import { EditInitiativeButton } from "../editForms";
 import { InitiativeDetail } from "./InitiativeDetail";
-import { ProjectCreateForm, ProjectEditForm } from "../../projects/projectForms";
+import { OverageBadge, OverageHistory, ProjectCreateForm, ProjectEditForm } from "../../projects/projectForms";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -216,6 +218,18 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
       }
     >
       {q.isLoading && <span className={v.dim}>Loading rollup…</span>}
+      {/* CXR-CST-001: a failed rollup read says so. A 403 is this account being refused (no Retry can fix it); anything
+          else is a load failure with a Retry. */}
+      {q.isError &&
+        (isRefusal(q.error) ? (
+          <NotAvailableToYou what="This project's cost rollup" />
+        ) : (
+          <ErrorState
+            title="Couldn't load this project's cost rollup"
+            message={errorText(q.error)}
+            onRetry={() => void q.refetch()}
+          />
+        ))}
       {c && (
         <div className={v.stack}>
           <div className={v.grid4}>
@@ -244,11 +258,7 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
                   of {fmtUsd(b.budgetUsd)}
                   {b.period === "monthly" ? " this month" : ""}
                 </span>
-                {over && (
-                  <Badge tone={b.overageApproved ? "warn" : "danger"}>
-                    {b.overageApproved ? "overage approved" : "over budget"}
-                  </Badge>
-                )}
+                {over && <OverageBadge budget={b} />}
                 {crossed && <Badge tone="warn">{b.alertThresholdPct}% threshold crossed</Badge>}
               </div>
               <Meter
@@ -259,6 +269,7 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
                 markPct={b.alertThresholdPct}
                 label="project budget"
               />
+              <OverageHistory budget={b} />
               <span className={v.faint}>
                 budget window:{" "}
                 {b.period === "monthly" ? `this calendar month (${b.periodKey ?? ""})` : "lifetime"} · alert

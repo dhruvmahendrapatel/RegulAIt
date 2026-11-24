@@ -423,9 +423,10 @@ function PolicyDetail(props: { policyId: string; currentSchema: string | null })
                     disabled={x.id === activeVersionId || act.busy}
                     onClick={() =>
                       void act.run(async () => {
-                        await api.post(`/v1/abac/policies/${props.policyId}/activate`, {
-                          version: x.version,
-                        });
+                        // ADR-0354: activating a version that relaxes the live one is a settings_relax step-up
+                        await withStepUp((h) =>
+                          stepUpApi.post(`/v1/abac/policies/${props.policyId}/activate`, { version: x.version }, h),
+                        );
                         await detail.refetch();
                       }, `v${x.version} activated`)
                     }
