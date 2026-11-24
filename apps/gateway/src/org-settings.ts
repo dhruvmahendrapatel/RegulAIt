@@ -44,7 +44,6 @@ import {
   sql,
   traceRetentionHolds,
   traces,
-  externalScorers,
   users,
   type Db,
   type OrgSettingsRow,
