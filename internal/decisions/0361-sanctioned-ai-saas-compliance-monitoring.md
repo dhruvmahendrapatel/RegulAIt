@@ -284,3 +284,55 @@ Verified against the vendors' own documentation on 2026-11-17: OpenAI's Admin AP
 - **Open source** (ADR-0176): no maintained, permissively licensed client exists for either API (an Anthropic Python
   SDK is GPL-3.0; another client has no licence; OpenAI ships only Bash and PowerShell scripts), so both are thin
   guarded-fetch clients against the vendor spec.
+
+## As built (slice 3): optional remediation
+
+- **One action: delete.** Both ChatGPT Enterprise (`DELETE …/users/{user_id}/conversations/{conversation_id}`, the
+  workspace-wide route only when a record names no user) and Claude Enterprise (`DELETE /v1/compliance/apps/chats/{id}`)
+  document a delete. No vendor documents a quarantine, so none is offered, and the Microsoft Graph export has no
+  delete (`remediation: "none"` on the catalogue). Nothing here can restore, share or widen access: narrowing only.
+- **Off twice.** `ai_saas_monitor_policy.remediation_enabled` (default off; on is a `settings_relax` step-up, refused
+  air-gapped), and a separate `remediate` credential per connector (`ai_saas_monitor_credentials.purpose`), as both
+  vendors recommend, so the monitoring key stays read-only.
+- **The lifecycle is declared once**, on lane E29's `defineMachine` (ADR-0348), which landed on main while this lane was
+  in flight; lane E19's design (#881) says to use it when it lands. `AI_SAAS_REMEDIATION_MACHINE`:
+  `requested → approved | denied | cancelled`, `approved → executing | cancelled`, `executing → succeeded | failed |
+  unknown`, `unknown → succeeded | failed`. Every write is a conditional UPDATE on `sourcesOf(event)` with its audit row
+  in the same transaction, and every read returns `describe(state)`. The slice 1 run lifecycle moved onto the same
+  helper (`AI_SAAS_MONITOR_RUN_MACHINE`). Neither machine is added to E29's `STATE_MACHINES` registry (E29 owns it).
+- **The flow, following lane E19's design (#881, §4):**
+  1. **Request.** This needs a step-up bound to the interaction and action. The request names an approver: an active
+     admin other than the requester, or the org's default approver. The action row, a pending `ai_saas_remediation`
+     approval (digest and preview of what will be deleted, expiring after `approvalTtlHours`, 24 by default) and an
+     audit row are written in one transaction. There is one open action per connector and conversation, and an
+     identical request is idempotent. A stored conversation or user id that may have been truncated on ingest (at its
+     stored length), or that is not one plain path segment (letters, digits, `_ - : . @`, never `.` or `..`), is refused
+     (`conversation_ref_unusable`), and the connector re-checks it before building the URL.
+  2. **Approve** in the existing decide path. A new per-kind precheck (`precheckAiSaasRemediationDecision`) refuses the
+     requester by name. At decision time the decider must be an active admin in the approval's pool (the named
+     approver, or their delegate only where the delegate is also an admin), with no admin override
+     (`not_an_eligible_approver`), as for ADR-0338's control actions. A fresh `approval_decide` step-up bound to
+     `{approvalId, decision, argumentsDigest}` is checked there and spent inside the decision's transaction
+     (`applyAiSaasRemediationDecision`), so an API key, a chat tap or a bulk decide cannot decide this kind.
+  3. **Execute.** Only the requester can execute, with a fresh step-up. Every switch, the delete key and the digest are
+     re-read, including the connector being enabled. The approval is consumed once and the action moves
+     `approved → executing` under a lease, in one transaction that rolls back together if either write loses a race. The vendor call
+     then runs outside any transaction through `runExternalWrite` (new operation `vendor.delete_conversation`; ADR-0124
+     refuses it outside `normal` mode).
+  4. **Settle.** A timeout or crash leaves the action `unknown`; a lease in the past moves it the next time it is
+     touched. Settling reads the conversation where the vendor documents a read (Claude: a 404 on its messages means it
+     is gone). Otherwise settling repeats the same idempotent delete, where a 404 means it is gone. It never runs a
+     different action. Settling re-reads every switch first, as execute does; one now off leaves the action `unknown`
+     and sends nothing. A first delete the vendor answers with a 404 ends `failed` (`not_found_at_vendor`), not a
+     success, and a delete the kill switch refuses ends `failed` (`execution_mode_blocked`): nothing was sent.
+  5. The approval's state is folded in lazily, with nothing on a timer.
+- **Outcomes** are fixed codes (`deleted`, `already_absent`, `verified_absent`, `not_found_at_vendor`,
+  `execution_mode_blocked`, `unusable_vendor_ref`, `not_applied`, `vendor_forbidden`,
+  `outcome_unknown`, `lease_expired`, `approval_expired`, `withdrawn`, …) plus the HTTP status, never vendor text.
+- **Migration** `pending/ai_saas_remediation.sql`: the policy column, the credential `purpose` with a per-purpose live
+  index, and `ai_saas_remediations`, which has RLS (admin and system only). Its `conversation_ref`/`actor_ref` are a
+  point-in-time copy, so the record survives the evidence's retention (ADR-0200 exception). `request_reason` is on the
+  ADR-0102 prose scrub.
+- **Shared-file edits** (small, raised for review): the approval kind and its label (`approval-binding.ts`), the
+  kill-switch operation (`external-effects.ts`) with its contract (`ai-saas-remediation-contract.ts`) and barrier-matrix
+  row, and the precheck and in-transaction decision blocks in the decide path (`app.ts`).

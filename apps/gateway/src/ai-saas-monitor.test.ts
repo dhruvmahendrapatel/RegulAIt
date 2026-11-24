@@ -9,6 +9,7 @@ import {
   AI_SAAS_MONITOR_MAX_WINDOW_MS,
   AI_SAAS_MONITOR_MIN_WINDOW_MS,
   AI_SAAS_MONITOR_RUN_MACHINE,
+  AI_SAAS_REMEDIATION_MACHINE,
   STATE_MACHINES,
   htmlToScanText,
   normalizeGraphInteraction,
@@ -248,6 +249,16 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
     for (const t of ["succeeded", "failed", "refused"] as const) expect(m.isTerminal(t)).toBe(true);
   });
 
+  it("declares the remediation lifecycle: approve before execute, unknown settles by a read, terminals stay terminal", () => {
+    const m = AI_SAAS_REMEDIATION_MACHINE;
+    expect(m.can("requested", "execute")).toBe(false);
+    expect(m.next("approved", "execute")).toBe("executing");
+    expect(m.sourcesOf("succeed")).toEqual(["executing", "unknown"]);
+    expect(m.can("unknown", "execute")).toBe(false);
+    for (const t of ["succeeded", "failed", "denied", "cancelled"] as const) expect(m.isTerminal(t)).toBe(true);
+    expect(() => m.next("succeeded", "execute")).toThrow();
+  });
+
   it("halves the window after each bounded failure since the last success, down to the floor (review R7 [1])", () => {
     expect(windowSpanMs(0)).toBe(AI_SAAS_MONITOR_MAX_WINDOW_MS);
     expect(windowSpanMs(1)).toBe(AI_SAAS_MONITOR_MAX_WINDOW_MS / 2);
@@ -351,5 +362,19 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
   it("every registered connector declares its own widening check and only ChatGPT gets the redirect-returning fetch", () => {
     for (const c of AI_SAAS_CONNECTORS.values()) expect(typeof c.configWidens).toBe("function");
     expect([...AI_SAAS_CONNECTORS.values()].filter((c) => c.signedRedirectDownload).map((c) => c.vendor)).toEqual(["chatgpt_enterprise"]);
+  });
+});
+
+describe("#991 S3 [3]: a stored vendor id is sent only as one exact path segment", () => {
+  it("refuses an id at the stored length (it may be truncated), a path-collapsing id and odd characters", async () => {
+    const { isUsableVendorRef, REMEDIATION_REF_MAX } = await import("./ai-saas-remediation-contract.js");
+    expect(isUsableVendorRef("claude_chat_01abc", "conversation")).toBe(true);
+    expect(isUsableVendorRef("user-1@example.test", "actor")).toBe(true);
+    expect(isUsableVendorRef(null, "actor")).toBe(true);
+    expect(isUsableVendorRef(null, "conversation")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.conversation), "conversation")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.actor), "actor")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.conversation - 1), "conversation")).toBe(true);
+    for (const bad of ["..", ".", "", "a/b", "a%2Fb", "a b", "a?b", "a#b", "\\x"]) expect(isUsableVendorRef(bad, "conversation"), bad).toBe(false);
   });
 });

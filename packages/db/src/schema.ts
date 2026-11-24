@@ -2060,6 +2060,7 @@ export const auditLog = pgTable(
         "ai_saas_monitor_credential",
         "ai_saas_monitor_run",
         "ai_saas_interaction",
+        "ai_saas_remediation",
         // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
         // text column — no DDL.
         "siem_destination",
@@ -21081,6 +21082,8 @@ export const aiSaasMonitorPolicy = pgTable(
     id: text("id").primaryKey().default("singleton"),
     enabled: boolean("enabled").notNull().default(false),
     contentCapture: text("content_capture", { enum: ["none", "redacted"] }).notNull().default("none"),
+    /** ADR-0361 slice 3: deleting a conversation through the vendor API; off (migration ai_saas_remediation) */
+    remediationEnabled: boolean("remediation_enabled").notNull().default(false),
     updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -21143,6 +21146,8 @@ export const aiSaasMonitorCredentials = pgTable(
     secretCiphertext: text("secret_ciphertext"),
     /** what the last token check found; `refused` is never used again */
     scopePosture: text("scope_posture", { enum: ["unverified", "read_only", "refused"] }).notNull().default("unverified"),
+    /** ADR-0361 slice 3: `read` (monitoring) or `remediate` (a separate, delete-capable key) */
+    purpose: text("purpose", { enum: ["read", "remediate"] }).notNull().default("read"),
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -21153,7 +21158,8 @@ export const aiSaasMonitorCredentials = pgTable(
     check("ai_saas_monitor_credentials_scope_check", sql`${t.scopePosture} IN ('unverified', 'read_only', 'refused')`),
     check("ai_saas_monitor_credentials_live_secret_check", sql`${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL`),
     check("ai_saas_monitor_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
-    uniqueIndex("ai_saas_monitor_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+    check("ai_saas_monitor_credentials_purpose_check", sql`${t.purpose} IN ('read', 'remediate')`),
+    uniqueIndex("ai_saas_monitor_credentials_live_purpose_uq").on(t.connectorId, t.purpose).where(sql`${t.revokedAt} IS NULL`),
   ],
 );
 
@@ -21249,6 +21255,58 @@ export const aiSaasInteractionFindings = pgTable(
     index("ai_saas_interaction_findings_detector_idx").on(t.detector, t.category),
   ],
 );
+/**
+ * ADR-0361 slice 3: one requested remediation (deleting a conversation through the vendor API). The lifecycle is
+ * `AI_SAAS_REMEDIATION_MACHINE` in @regulait/shared. `conversation_ref`/`actor_ref` are a point-in-time copy of the
+ * interaction's (ADR-0200 exception: retention may remove the evidence row while this record must still say what was
+ * deleted).
+ */
+export const aiSaasRemediations = pgTable(
+  "ai_saas_remediations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => aiSaasMonitorConnectors.id, { onDelete: "restrict" }),
+    interactionId: uuid("interaction_id").references(() => aiSaasInteractions.id, { onDelete: "set null" }),
+    action: text("action", { enum: ["delete_conversation"] }).notNull(),
+    /** point-in-time copy (see the table comment) */
+    conversationRef: text("conversation_ref").notNull(),
+    /** point-in-time copy (see the table comment) */
+    actorRef: text("actor_ref"),
+    status: text("status", { enum: ["requested", "approved", "executing", "unknown", "succeeded", "failed", "denied", "cancelled"] })
+      .notNull()
+      .default("requested"),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    argumentsDigest: text("arguments_digest").notNull(),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    requestReason: text("request_reason").notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    outcomeCode: text("outcome_code"),
+    vendorStatus: integer("vendor_status"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("ai_saas_remediations_action_check", sql`${t.action} IN ('delete_conversation')`),
+    check(
+      "ai_saas_remediations_status_check",
+      sql`${t.status} IN ('requested', 'approved', 'executing', 'unknown', 'succeeded', 'failed', 'denied', 'cancelled')`,
+    ),
+    check("ai_saas_remediations_digest_check", sql`${t.argumentsDigest} ~ '^[0-9a-f]{64}$'`),
+    check("ai_saas_remediations_lease_check", sql`(${t.status} = 'executing') = (${t.leaseExpiresAt} IS NOT NULL)`),
+    uniqueIndex("ai_saas_remediations_open_uq")
+      .on(t.connectorId, t.conversationRef)
+      .where(sql`${t.status} IN ('requested', 'approved', 'executing', 'unknown')`),
+    index("ai_saas_remediations_created_idx").on(t.createdAt.desc(), t.id.desc()),
+    index("ai_saas_remediations_interaction_idx").on(t.interactionId),
+    index("ai_saas_remediations_approval_idx").on(t.approvalId),
+  ],
+);
+export type AiSaasRemediationRow = typeof aiSaasRemediations.$inferSelect;
 // ===== end ADR-0361 block ========================================================================================
 
 // ===== ADR-0360 slice 2 (lane E41): EDR integration =====

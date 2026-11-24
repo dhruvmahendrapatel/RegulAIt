@@ -13,6 +13,13 @@
     "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "runs one compliance-export read now for a connector",
     "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "lists a connector's runs, 50 at a time",
     "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "lists a connector's recorded interactions and their counts-only findings, 100 at a time",
-    "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "the Microsoft 365 Copilot guided setup checklist: each admin step, its state read from what RegulAIt sees, and the admin consent link (owner decision D-2026-11-22-06; the checklist screen is posted on #453)"
+    "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "the Microsoft 365 Copilot guided setup checklist: each admin step, its state read from what RegulAIt sees, and the admin consent link (owner decision D-2026-11-22-06; the checklist screen is posted on #453)",
+    "PUT /v1/ai-saas-monitoring/remediation": "turns AI SaaS conversation deletion on (settings_relax step-up, refused when air-gapped) or off",
+    "POST /v1/ai-saas-monitoring/remediations": "requests the deletion of a monitored conversation (step-up); queues an approval for an admin other than the requester",
+    "GET /v1/ai-saas-monitoring/remediations": "lists conversation-deletion actions with their declared lifecycle, 50 at a time",
+    "GET /v1/ai-saas-monitoring/remediations/:remediationId": "reads one conversation-deletion action and what may happen next",
+    "POST /v1/ai-saas-monitoring/remediations/:remediationId/execute": "runs an approved deletion once (requester, step-up, kill switch re-read)",
+    "POST /v1/ai-saas-monitoring/remediations/:remediationId/settle": "settles a deletion whose outcome is unknown by reading the vendor (step-up)",
+    "POST /v1/ai-saas-monitoring/remediations/:remediationId/cancel": "withdraws a deletion before it runs (no step-up)"
   }
 }

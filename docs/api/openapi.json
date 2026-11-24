@@ -1144,7 +1144,8 @@
                 "endpoint_addon_removal",
                 "vendor_agent_control",
                 "saas_finding_review",
-                "agent_containment"
+                "agent_containment",
+                "ai_saas_remediation"
               ]
             }
           },

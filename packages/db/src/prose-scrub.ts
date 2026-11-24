@@ -122,6 +122,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.automationRules, ["pausedReason"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
+  // ADR-0361 slice 3: the requester's reason for deleting a monitored AI SaaS conversation
+  [s.aiSaasRemediations, ["requestReason"]],
   [s.approvalDelegations, ["reason"]],
   // ADR-0350 (lane E31) — why a per-device command-rule exception is asked for, and the approver's note
   [s.endpointCommandExceptions, ["reason", "decisionReason"]],

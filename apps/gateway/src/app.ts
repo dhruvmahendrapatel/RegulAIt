@@ -716,6 +716,7 @@ import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
+import { applyAiSaasRemediationDecision, precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -5355,6 +5356,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0361 slice 3 — `cannot_approve_own_ai_saas_remediation` (keyed on the DECIDER, so the requester cannot reach
+    // their own deletion through delegation or the admin override above) and a fresh `approval_decide` step-up on
+    // every decision, so an API key, a chat tap or a bulk decide cannot decide a conversation deletion.
+    if (row.objectType === "ai_saas_remediation") {
+      const refusal = await precheckAiSaasRemediationDecision(db, row, deciderUserId, binaryDecision, input.req, input.channel);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0363 slice 2 — `cannot_approve_own_classifier`, keyed on the DECIDER like the profile check above.
     if (row.objectType === "custom_classifier") {
       const refusal = await precheckCustomClassifierDecision(db, row, deciderUserId);
@@ -5756,6 +5764,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
       if (updated.objectType === "agent_containment") {
         await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0361 slice 3 (#991 S3 [1]): the approver's digest-bound step-up is spent here, with the decision; the
+      // deletion itself follows the approval when its requester next executes it
+      if (updated.objectType === "ai_saas_remediation") {
+        await applyAiSaasRemediationDecision(tx as unknown as Db, updated, binaryDecision, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6538,6 +6551,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
   // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
   registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
+    },
+  });
+  registerAiSaasRemediationRoutes(app, db, {
     dataKey: opts.dataKey,
     deps: {
       ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),

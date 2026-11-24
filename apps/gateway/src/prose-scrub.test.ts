@@ -501,6 +501,8 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0361 slice 3: a conversation-deletion request's reason
+    "ai_saas_remediations.request_reason",
     // ADR-0187: engine item text and runner revocation
     "engine_run_items.reason",
     "engine_run_items.verdict_note",
