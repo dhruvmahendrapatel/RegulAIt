@@ -252,6 +252,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   minPreprocessTokens: exempt(OPTIMISATION),
   summarizerSelection: exempt(OPTIMISATION),
   summarizerAgentId: exempt(OPTIMISATION),
+  // ADR-0353 part 2: a routing classifier sends prompt text to the scorer it names, so naming one is a relaxation
+  routingClassifierScorerId: notEqual(null),
   // ADR-0181: the semantic cache stores prompts and answers — off by default
   semanticCachePolicy: notEqual("off"),
   // ADR-0181: a failed compaction refuses the call rather than sending the full context on

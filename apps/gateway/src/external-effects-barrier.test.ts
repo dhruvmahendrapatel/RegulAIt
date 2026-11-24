@@ -38,7 +38,9 @@
  * read of an approved removal, the counting fake being the device-policy signer); vendor_agent_control.reverse (ADR-0338: a
  * restore's execute, the counting fake being the in-memory vendor's control member). vendor_agent_control.apply is the
  * one declared exemption (NARROWING_WRITE_OPERATIONS, owner decision 2): its row proves the opposite, that a disable
- * or quarantine flipped into every non-normal dial at the barrier still reaches the vendor exactly once.
+ * or quarantine flipped into every non-normal dial at the barrier still reaches the vendor exactly once;
+ * vendor.delete_conversation (ADR-0361 slice 3: an approved remediation's execute, the counting fake being the remediation
+ * member of the sanctioned AI SaaS connector, over a fake compliance API).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
@@ -59,6 +61,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { EXTERNAL_WRITE_OPERATIONS, type ExternalWriteOperation } from "./external-effects.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // the probe — hoisted so the mock factories below can see it
@@ -191,6 +194,28 @@ let anaId: string;
 let workerAgentId: string;
 let vendorFake: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeVendorControl>;
 let vendorCreds: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeCredentials>;
+
+// ADR-0361 slice 3: a fake compliance API for one sanctioned AI SaaS tenant; the remediation member is the counting fake
+const saasAllowed = trackEgressAllowHosts();
+const SAAS_HOST = "api.anthropic.com";
+const SAAS_CHATS = ["halted", "read_only", "require_approval", "normal"].map((m) => `bm_chat_${m}_${RUN}`);
+const saasJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const saasRecent = () => new Date(Date.now() - 2 * 86_400_000 + 3600_000).toISOString();
+const saasFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = new URL(String(input instanceof Request ? input.url : input));
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (url.hostname !== SAAS_HOST) return saasJson({ error: "unexpected" }, 599);
+  if (url.pathname === "/v1/compliance/apps/chats" && method === "GET") {
+    if (url.searchParams.get("limit") === "1") return saasJson({ data: [], has_more: false, last_id: null });
+    return saasJson({ data: SAAS_CHATS.map((id) => ({ id, updated_at: saasRecent(), user: { id: "user_bm" } })), has_more: false, last_id: "c" });
+  }
+  const m = /^\/v1\/compliance\/apps\/chats\/([^/]+)(\/messages)?$/.exec(url.pathname);
+  if (m && method === "GET" && m[2]) {
+    return saasJson({ id: m[1], user: { id: "user_bm" }, chat_messages: [{ id: `${m[1]}-m1`, role: "user", created_at: saasRecent(), content: [{ type: "text", text: "hello" }] }], has_more: false, last_id: null });
+  }
+  if (m && method === "DELETE" && !m[2]) return saasJson({ id: m[1], type: "claude_chat_deleted" });
+  return saasJson({ error: "unexpected" }, 599);
+}) as typeof fetch;
 
 /** which (operation, mode) cells the matrix actually exercised */
 const covered = new Map<string, Set<string>>();
@@ -361,7 +386,14 @@ beforeAll(async () => {
   vendorFake = fakeVendorControl();
   vendorCreds = fakeCredentials();
   const control = probe.counting(vendorFake.control, { apply: "vendor_agent_control.apply", reverse: "vendor_agent_control.reverse" });
+  // ADR-0361 slice 3: the real connectors, with the remediation member of the one used here counted
+  const { AI_SAAS_CONNECTORS } = await import("./ai-saas-connectors.js");
+  const saasConnectors = new Map([...AI_SAAS_CONNECTORS].map(([vendor, c]) =>
+    [vendor, vendor === "claude_enterprise" && c.remediation ? { ...c, remediation: probe.counting(c.remediation, { deleteConversation: "vendor.delete_conversation" }) } : c] as const));
   app = buildApp(db, {
+    aiSaasMonitorFetch: saasFetch,
+    aiSaasMonitorResolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    aiSaasMonitorConnectors: saasConnectors,
     bootstrapToken: BOOT,
     dataKey: DATA_KEY,
     directiveSigner,
@@ -384,6 +416,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setMode("normal");
+  (await saasAllowed.removeAll(app, AUTH)).assertRemoved();
   await app.close();
 });
 
@@ -849,6 +882,75 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
           if (rows.length) await db.delete(approvals).where(inArray(approvals.id, rows.map((r) => r.approvalId)));
         }
         await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
+      }
+      for (const r of restores.reverse()) await r();
+    }
+  });
+
+  it("vendor.delete_conversation (ADR-0361 slice 3: an approved remediation's execute)", async () => {
+    const { aiSaasMonitorConnectors, aiSaasMonitorPolicy, users } = await import("@regulait/db");
+    const { grantStepUpForTest, stepUpRequest } = await import("./testing/step-up-grant.js");
+    const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
+    const { relaxStepUpAround } = await import("./testing/step-up-posture.js");
+    type Facts = Parameters<typeof grantStepUpForTest>[2];
+    const relax = async (who: string, facts: Record<string, unknown>) => stepUpRequest(await grantStepUpForTest(db, who, { kind: "settings_relax", facts } as Facts));
+    const restores: Array<() => Promise<unknown>> = [];
+    let connectorId: string | undefined;
+    const BASE = "/v1/ai-saas-monitoring";
+    try {
+      restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+      const [p0] = await db.select().from(users).where(eq(users.id, piaId));
+      const [a0] = await db.select().from(users).where(eq(users.id, anaId));
+      restores.push(() => db.update(users).set({ isAdmin: p0!.isAdmin }).where(eq(users.id, piaId)));
+      restores.push(() => db.update(users).set({ isAdmin: a0!.isAdmin }).where(eq(users.id, anaId)));
+      // the routes are admin-only; the bootstrap credential keeps flipping the dial
+      await db.update(users).set({ isAdmin: true }).where(inArray(users.id, [piaId, anaId]));
+      // egress-allow-cleanup: afterAll
+      const host = await relaxStepUpAround(db, () =>
+        post("/v1/egress-allow-hosts", { host: saasAllowed.trackHost(SAAS_HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `barrier ${RUN}` }));
+      expect([201, 409], host.body).toContain(host.statusCode);
+      await db.insert(aiSaasMonitorPolicy).values({ id: "singleton", enabled: true }).onConflictDoUpdate({ target: aiSaasMonitorPolicy.id, set: { enabled: true, remediationEnabled: false } });
+      const created = await post(`${BASE}/connectors`, { vendor: "claude_enterprise", name: `bm-saas-${RUN}`, config: { backfillDays: 2 }, reason: "barrier" }, piaAuth);
+      expect(created.statusCode, created.body).toBe(201);
+      const cid = created.json().connector.id as string;
+      connectorId = cid;
+      const put = async (url: string, facts: Record<string, unknown>, payload: object) =>
+        app.inject({ method: "PUT", url, ...(await relax(piaId, facts)), payload });
+      expect((await put(`${BASE}/connectors/${cid}/credential`, { aiSaasConnector: cid, values: { credential: "store" } }, { secret: `read-${RUN}`, replacesCredentialId: null, attestReadOnly: true, reason: "read key" })).statusCode).toBe(201);
+      expect((await put(`${BASE}/connectors/${cid}/enabled`, { aiSaasConnector: cid, values: { enabled: true } }, { enabled: true, reason: "barrier" })).statusCode).toBe(200);
+      const run = await post(`${BASE}/connectors/${cid}/runs`, {}, piaAuth);
+      expect(run.json().run, run.body).toMatchObject({ status: "succeeded", interactionsNew: SAAS_CHATS.length });
+      expect((await put(`${BASE}/remediation`, { aiSaasRemediation: true, values: { enabled: true } }, { enabled: true, reason: "barrier" })).statusCode).toBe(200);
+      expect((await put(`${BASE}/connectors/${cid}/credential`, { aiSaasConnector: cid, values: { credential: "store", purpose: "remediate" } }, { secret: `del-${RUN}`, replacesCredentialId: null, purpose: "remediate", reason: "delete key" })).statusCode).toBe(201);
+
+      /** request, four-eyes approve, and return a drive that executes it */
+      const approved = async (chat: string) => {
+        const found = await db.execute<{ id: string }>(sql`SELECT id FROM ai_saas_interactions WHERE conversation_ref = ${chat} LIMIT 1`);
+        const interactionId = (Array.isArray(found) ? found : (found as { rows: Array<{ id: string }> }).rows)[0]!.id;
+        const body = { interactionId, action: "delete_conversation", approverUserId: anaId, reason: `barrier ${RUN}` };
+        const asked = await app.inject({ method: "POST", url: `${BASE}/remediations`, ...(await relax(piaId, { op: "ai_saas_remediation", interactionId, action: "delete_conversation" })), payload: body });
+        expect(asked.statusCode, asked.body).toBe(202);
+        const { id, approvalId } = asked.json().remediation as { id: string; approvalId: string };
+        const [ap] = await db.select({ d: approvals.argumentsDigest }).from(approvals).where(eq(approvals.id, approvalId));
+        const decideReq = stepUpRequest(await grantStepUpForTest(db, anaId, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved", argumentsDigest: ap!.d } } as Facts));
+        const decided = await app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, ...decideReq, payload: { decision: "approved", reason: "barrier" } });
+        expect(decided.statusCode, decided.body).toBe(200);
+        return async () => app.inject({ method: "POST", url: `${BASE}/remediations/${id}/execute`, ...(await relax(piaId, { op: "ai_saas_remediation_execute", remediationId: id })) });
+      };
+
+      for (const [i, mode] of MODES.entries()) {
+        const execute = await approved(SAAS_CHATS[i]!);
+        const res = await refusedAtBarrier("vendor.delete_conversation", mode, execute);
+        // the barrier refused before the vendor call: the action failed, it is not an unknown outcome to settle
+        expect(res.json().remediation, res.body).toMatchObject({ status: "failed", outcomeCode: "execution_mode_blocked" });
+      }
+      const control = await approved(SAAS_CHATS[3]!);
+      const ok = await admitted("vendor.delete_conversation", control);
+      expect(ok.json().remediation, ok.body).toMatchObject({ status: "succeeded", outcomeCode: "deleted" });
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false, remediationEnabled: false });
+      if (connectorId) {
+        await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, connectorId));
       }
       for (const r of restores.reverse()) await r();
     }

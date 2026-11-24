@@ -828,6 +828,10 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0360 slice 2 (lane E41): EDR signal sync, and isolation polling with the webhook replay-table prune
+        SCHEDULER_JOB_NAMES.edrSync,
+        SCHEDULER_JOB_NAMES.edrIsolationPoll,
+        SCHEDULER_JOB_NAMES.endpointUpdateExpiry,
         // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
         // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
         SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,
@@ -845,6 +849,10 @@ describe("every sweep is registered", () => {
         AGENT_RISK_PROOF_JOB_NAME,
         // ADR-0364 S3 (lane E45): ends robot runs no gateway still holds; driven in zz-adr0364-robots-s3.test.ts
         ROBOT_RUN_STALE_SWEEP_JOB_NAME,
+        // ADR-0361: AI SaaS compliance-export reads (nothing while the org policy is off, the default) and their
+        // evidence retention (nothing with no floor); driven end to end in zz-adr0361-ai-saas-monitoring.test.ts
+        SCHEDULER_JOB_NAMES.aiSaasMonitorSweep,
+        SCHEDULER_JOB_NAMES.aiSaasEvidenceRetentionSweep,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

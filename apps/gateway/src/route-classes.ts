@@ -55,6 +55,8 @@ const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER
 
 export const AUTH_EXEMPT_ROUTES = new Set([
   "/v1/pm/webhooks/:connectionName",
+  // ADR-0360 slice 2: the EDR vendor webhook, authenticated in-route (HMAC or shared token, freshness, replay table)
+  "/v1/edr-webhooks/:connectionId",
   // ADR-0061 — the ChatOps interaction callback. Slack/Teams hold no RegulAIt
   // credential, so this route cannot require one: it authenticates IN-ROUTE on
   // the workspace's signing secret over the exact raw body, with a replay
@@ -674,6 +676,7 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/decisions",
   "GET /v1/decisions",
   "POST /v1/pm/webhooks/:connectionName",
+  "POST /v1/edr-webhooks/:connectionId",
   "GET /admin",
   "GET /app",
   "GET /",

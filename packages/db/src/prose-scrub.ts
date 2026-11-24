@@ -122,9 +122,13 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.automationRules, ["pausedReason"]],
   // --- governance decisions and overrides (pillar 1) ---
   [s.approvals, ["decisionReason"]],
+  // ADR-0361 slice 3: the requester's reason for deleting a monitored AI SaaS conversation
+  [s.aiSaasRemediations, ["requestReason"]],
   [s.approvalDelegations, ["reason"]],
   // ADR-0350 (lane E31) — why a per-device command-rule exception is asked for, and the approver's note
   [s.endpointCommandExceptions, ["reason", "decisionReason"]],
+  // ADR-0333 §5b — the admin's reason for a per-rule detection suppression
+  [s.detectionSuppressions, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
   // ADR-0219 follow-up (PR #810 review): why a person's role-derived access to a remote agent was revoked
@@ -320,6 +324,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.endpointAddonRemovals, ["reason"]],
   // ADR-0338: the admin's reason for a vendor agent control action
   [s.vendorAgentActions, ["reason"]],
+  // ADR-0360 slice 2 (lane E41): the admin's reason for asking an EDR to isolate a device (shown to the approver)
+  [s.edrIsolationRequests, ["reason"]],
   // ADR-0313: the admin's note on a paid-call price (free text, shown in the price list)
   [s.paidCallPrices, ["note"]],
   // ADR-0337 §5 slice 3b: the admin's reason for raising a SaaS finding, and the rationale rendered from vendor-read

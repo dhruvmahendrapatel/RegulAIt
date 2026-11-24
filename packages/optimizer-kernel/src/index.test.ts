@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyComplexity,
+  complexityFromScore,
   compactionSavings,
   COMPACTION_RECENT_WINDOW_MESSAGES,
   DEFAULT_COMPACTION_THRESHOLD_TOKENS,
@@ -119,6 +120,23 @@ describe("planRequestBatching", () => {
     const plan = planRequestBatching({ models: ["a", "b", "c"], routingMode: "automatic" });
     expect(plan.batchable).toBe(false);
     expect(plan.estimatedTokensSaved).toBe(0);
+  });
+});
+
+describe("complexityFromScore (ADR-0353 part 2)", () => {
+  it("maps a score in [0, 1] to thirds", () => {
+    expect(complexityFromScore(0)).toBe("low");
+    expect(complexityFromScore(0.33)).toBe("low");
+    expect(complexityFromScore(1 / 3)).toBe("medium");
+    expect(complexityFromScore(0.66)).toBe("medium");
+    expect(complexityFromScore(2 / 3)).toBe("high");
+    expect(complexityFromScore(1)).toBe("high");
+  });
+
+  it("refuses anything that is not a finite score in [0, 1] (the caller falls back, never guesses)", () => {
+    for (const bad of [-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, "0.5", null, undefined]) {
+      expect(complexityFromScore(bad)).toBeNull();
+    }
   });
 });
 

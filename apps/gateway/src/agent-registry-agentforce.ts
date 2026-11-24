@@ -21,6 +21,11 @@
  * tests); `Description`, `Scope`, `AgentGraph`, `ProgressIndicatorMessage`, `Metadata` and `FullName` are never
  * selected. The run-as user is staged only as a pseudonym.
  *
+ * Plaintext credentials (decision 4, slice 5): the planner, topic and action `Description` and the topic `Scope` are
+ * read by separate pinned queries (`AGENTFORCE_SCAN_QUERIES`), passed in memory through the vendored secret matcher
+ * and dropped; a hit is reported as `agent_config` evidence by its path (`planners/<id>/Description`, …) and rule id
+ * only. The kept queries (`AGENTFORCE_QUERIES`) still select no free-text column.
+ *
  * Every call goes through `allowListedFetch` (AGENTFORCE_ENDPOINTS: the token POST, and GET on the REST and Tooling
  * `query` paths, nothing else) on top of the guarded fetch. Paging takes the query locator from `nextRecordsUrl` and
  * builds the next URL itself on the same path; a `nextRecordsUrl` is never fetched as given.
@@ -34,7 +39,7 @@
 import type { AgentRegistry, DiscoveryReadOutcome } from "@regulait/shared";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { REGISTRY_COMPONENTS_PER_RECORD_MAX } from "./agent-registry-records.js";
-import { attrs, finishRegistry, fullyRead } from "./agent-registry-scanners.js";
+import { ConfigSecretCollector, attrs, finishRegistry, fullyRead, type ConfigField } from "./agent-registry-scanners.js";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { ITEM_CAP, ReadFailure, WIDER_MAX_ITEMS, WiderSourceConfigError, atPath, getJson, readListing, str } from "./discovery-wider-scanners.js";
 import { salesforceJwtToken, type SalesforceEnvironment } from "./salesforce-jwt.js";
@@ -69,6 +74,16 @@ export const AGENTFORCE_QUERIES = Object.freeze({
   planners: "SELECT Id, DeveloperName, MasterLabel, PlannerType, LinkedBotVersionId FROM GenAiPlannerDefinition",
   topics: "SELECT Id, DeveloperName, MasterLabel, PlannerId FROM GenAiPluginDefinition",
   actions: "SELECT Id, DeveloperName, MasterLabel, PlannerId, PluginId, InvocationTargetType FROM GenAiFunctionDefinition",
+} as const);
+
+/**
+ * Slice 5: the free-text columns scanned in memory for plaintext credentials and then dropped, in queries of their own
+ * so the kept queries above stay free of text. Planners are read through Tooling, as above.
+ */
+export const AGENTFORCE_SCAN_QUERIES = Object.freeze({
+  planners: "SELECT Id, Description FROM GenAiPlannerDefinition",
+  topics: "SELECT Id, PlannerId, Description, Scope FROM GenAiPluginDefinition",
+  actions: "SELECT Id, PlannerId, PluginId, Description FROM GenAiFunctionDefinition",
 } as const);
 
 export interface AgentforceTarget {
@@ -258,6 +273,28 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   });
 
   const componentsComplete = versionsComplete && plannersComplete && topicsComplete && actionsComplete;
+
+  // 7. slice 5: the free text, scanned in memory for plaintext credentials and dropped (never kept)
+  const secrets = new ConfigSecretCollector();
+  const text = (row: unknown, field: string): unknown => (row && typeof row === "object" && Object.hasOwn(row, field) ? (row as Record<string, unknown>)[field] : undefined);
+  const scanRow = (bot: Bot | undefined, kind: string, id: string | null, fields: readonly string[], row: unknown) => {
+    if (!bot || !id || !SF_ID.test(id)) return;
+    const list: ConfigField[] = fields.map((f) => ({ path: `${kind}/${id}/${f}`, text: text(row, f) }));
+    secrets.scan(bot.rec.externalId, list);
+  };
+  await listing(`agent planner text in ${host}`, AGENTFORCE_SCAN_QUERIES.planners, true, (p) => {
+    const id = str(atPath(p, "Id"), 18);
+    scanRow(botOfPlanner.get(id15(id ?? "")), "planners", id, ["Description"], p);
+  });
+  await listing(`agent topic text in ${host}`, AGENTFORCE_SCAN_QUERIES.topics, false, (tp) => {
+    scanRow(botOfPlanner.get(id15(str(atPath(tp, "PlannerId"), 18) ?? "")), "topics", str(atPath(tp, "Id"), 18), ["Description", "Scope"], tp);
+  });
+  await listing(`agent action text in ${host}`, AGENTFORCE_SCAN_QUERIES.actions, false, (a) => {
+    const planner = id15(str(atPath(a, "PlannerId"), 18) ?? "") || plannerOfTopic.get(id15(str(atPath(a, "PluginId"), 18) ?? "")) || "";
+    scanRow(botOfPlanner.get(planner), "actions", str(atPath(a, "Id"), 18), ["Description"], a);
+  });
+  const capped = secrets.outcome(`plaintext credentials in agent configurations in ${host}`);
+  if (capped) outcomes.push(capped);
   const records: RegistryAgentRecord[] = [];
   let unlinked = 0;
   let overCap = 0;
@@ -276,7 +313,7 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   if (overCap > 0) outcomes.push({ read: `agent components in ${host}`, status: "read", detail: `${overCap} agent(s) use more than ${REGISTRY_COMPONENTS_PER_RECORD_MAX} actions: their components were not staged, so the stored set is kept` });
   const registries: AgentRegistry[] = botsComplete ? ["agentforce"] : [];
   // read_only: no write system permission on the session, and no object-level write on any assigned permission set
-  return finishRegistry(records, outcomes, registries, "read_only");
+  return finishRegistry(records, outcomes, registries, "read_only", secrets.observations);
 }
 
 export const AGENTFORCE_SCANNER: Scanner = Object.freeze({
