@@ -267,7 +267,8 @@ let restorePiiFloor: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS = "0";
-  k = await builderKit("p2bl-chat");
+  // ADR-0180 addendum (E51): channel and schedule agents are autonomous; this suite is not about oversight
+  k = await builderKit("p2bl-chat", { relaxAutonomyGate: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, connectorAttributionRequired: false });
   // ADR-0181: the strict PII floor withholds a model output that carries an
   // identifier, tool calls included. This file pins the Ask-first pause and

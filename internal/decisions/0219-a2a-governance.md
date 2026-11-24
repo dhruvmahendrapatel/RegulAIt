@@ -155,3 +155,44 @@ the entry-bundled `admin.module.css`.
 - **The response.** The route adds `withheld`, plus `pii` and `guardrails` when they found anything.
 - Redact mode still refuses before sending, as before: no A2A redaction path exists.
 - Tests: `zz-adr0231-a2a-bindings.test.ts`, the "P10 follow-up" block.
+
+## Amendment 2026-11-14: role grants and per-person revocations (lane L2)
+
+- **Two new tables** (migration `pending/a2a_role_grants`, numbered at merge):
+  - `a2a_agent_role_grants` gives a role access to a remote agent. It has the same shape as a direct grant (the whole
+    agent, or one skill), so a role grant can never reach further than a direct grant could.
+  - `a2a_agent_revocations` takes one person's role-derived access to one agent away without unassigning the role
+    (ADR-0019).
+- **At call time** `a2aGrantsFor` builds the grant list the kernel's `evaluateA2a` reads:
+  - direct grants come first;
+  - then grants to roles the person currently holds (direct or IdP-group origin, ADR-0038), unless that person has a
+    revocation on the agent.
+  - A revocation never subtracts a direct grant. The kernel is unchanged.
+  - The call's audit row now records `grantSource` (`direct` or `role`).
+- **Admin routes**, admin-only and audited with the write:
+  - `GET`, `POST` and `DELETE /v1/a2a/agents/:agentId/role-grants[/:grantId]`;
+  - `GET`, `POST` and `DELETE /v1/a2a/agents/:agentId/revocations[/:userId]`.
+  - Lifting a revocation widens access, so it is a `settings_relax` step-up.
+  - The routes are known UI gaps on #453.
+- Grants to an agent identity (as opposed to a person or a role) remain out of scope.
+- **Review of PR #810 (code and security): the A2A writes reuse the gateway's grant and revocation machinery** instead
+  of their own:
+  - **Minting a grant.** Both the role-grant `POST` and the direct `POST /v1/a2a/agents/:agentId/grants` (which
+    predates this amendment) go through the gates of `POST /v1/roles/:roleId/grants/agents`:
+    - `refuseSodMint` (ADR-0091), with the new mint kinds `a2a` and `role_a2a`;
+    - the ADR-0250 `grant_mint` step-up (`grantMintStepUp`), so an admin API key can no longer widen access to a remote
+      agent;
+    - for a role grant, `insertRoleGrantLocked`, which locks the role's row, serialized with the workload-identity
+      steward check.
+  - **SoD is inert for A2A for now.** An SoD rule side cannot name a remote agent yet: its selector kinds are `agent`,
+    `connector`, `mcp_tool` and `mcp_server`. So an A2A mint confers no capability that a rule can match. When a selector
+    kind for remote agents is added, only `mintFootprint` changes. Recorded as a follow-up fragment.
+  - **Assigning a role.** `rolesHoldingGrants` now counts `a2a_agent_role_grants`. Assigning a role that holds only
+    remote-agent grants, or mapping a group to it, needs the step-up like any other granting role.
+  - **Revocations.**
+    - Creating one takes `lockPersonForRevocation` first (ADR-0188 S4+S5, review L5).
+    - Lifting one uses `revocationLiftStepUp("a2a", …)`.
+    - The table carries a `reason` (1 to 500 characters), as `agent_revocations` does. It is scrubbed operator prose
+      (ADR-0102): it is listed in the `prose-scrub` registry and its test.
+  - **Lists.** The role-grant and revocation lists answer through the ADR-0226 list contract (`answerListPage`), and
+    each has an `export.xlsx` (`answerListExport`). Both are known UI gaps on #453.

@@ -76,6 +76,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
   [s.initiatives, ["name"]],
+  // ADR-0357 §4 (lane E38): the business-unit level of the policy hierarchy
+  [s.businessUnits, ["name", "description"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
   // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
@@ -115,6 +117,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
+  // ADR-0360 slice 2 (lane E41): an EDR connection an admin names
+  [s.edrConnections, ["name"]],
   // ADR-0261 (P37): a third-party ingest source an admin names
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
@@ -125,6 +129,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.customClassifiers, ["name"]],
   // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
   [s.vendorUsageConnectors, ["name"]],
+  // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
+  [s.aiSaasMonitorConnectors, ["name"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -205,6 +211,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
   "mcp_bundle_version_items.tool_name": "tool_reference",
+  "paid_call_holds.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",
@@ -217,6 +224,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "billing_statements.rate_card_name": "platform_copy",
   "builder_agent_skills.snapshot_name": "platform_copy",
   "engine_runs.workflow_check_name": "platform_copy",
+  "endpoint_update_rollout_stages.group_name": "platform_copy",
   "eval_runs.agent_name": "platform_copy",
   "eval_runs.workflow_check_name": "platform_copy",
   "mcp_servers.registry_entry_name": "platform_copy",

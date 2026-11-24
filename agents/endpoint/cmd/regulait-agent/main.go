@@ -41,7 +41,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | credential-reuse-key | version")
+	fmt.Fprintln(os.Stderr, "usage: regulait-agent redeem-ticket [-ticket-gid N] | enrol [-ticket-gid N] (token on stdin) | update | health | register | run-once | run | preview -manifest FILE | hook claude-code|cursor|copilot-cli|codex -policy FILE | hook-capabilities | credential-reuse-key | version")
 	os.Exit(2)
 }
 
@@ -83,6 +83,43 @@ func main() {
 		// never fails an MDM install or upgrade (R15 §3.2): the outcome is in the status file and the log
 		agent.Redeem(ctx, opts)
 		os.Exit(0)
+	case "enrol":
+		// ADR-0360 §5: the one-line enrolment, as root. The token is read from standard input only: an argument would be
+		// in every user's process list. A failure exits non-zero (unlike the MDM install step).
+		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+		gid := fs.Int("ticket-gid", agent.PackageGroupID(), "group id the ticket file is given (default: the package's regulait-agent group)")
+		_ = fs.Parse(args)
+		if fs.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "enrol takes the token on standard input, never as an argument")
+			os.Exit(2)
+		}
+		opts.TicketGID = *gid
+		st := agent.Enrol(ctx, opts, os.Stdin)
+		fmt.Printf("enrolment: %s %s\n", st.Outcome, st.Code)
+		if st.Outcome != agent.OutcomeRedeemed && st.Outcome != agent.OutcomeTicketValid {
+			os.Exit(1)
+		}
+	case "update":
+		// ADR-0360 §4: the root updater, run by the package's system timer. Off unless the config pins the device-policy
+		// and release keys and the spool holds a directive signed for this device.
+		exe, err := os.Executable()
+		if err != nil {
+			fail(log, err)
+		}
+		if exe, err = filepath.EvalSymlinks(exe); err != nil {
+			fail(log, err)
+		}
+		r := agent.SelfUpdate(ctx, opts, exe)
+		if r.Outcome == agent.UpdateFailed {
+			os.Exit(1)
+		}
+	case "health":
+		h := agent.Health(opts)
+		out, _ := json.Marshal(h)
+		fmt.Println(string(out))
+		if !h.OK {
+			os.Exit(1)
+		}
 	case "register":
 		if _, err := agent.Register(ctx, opts); err != nil {
 			fail(log, err)

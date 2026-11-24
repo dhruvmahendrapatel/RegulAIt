@@ -195,7 +195,7 @@ test("seeded credit-assistant journey: discover, register, assess, approve, moni
   const alertList = page.locator('[data-list="governance-alerts"]');
   await alertList.getByLabel("Rows per page").selectOption("50");
   await expect(alertList.getByTestId("list-status")).toHaveText(/^1–\d+ of \d+$/);
-  const alert = page.getByRole("link", { name: /which is unowned/ }).first();
+  const alert = page.getByRole("button", { name: /which is unowned/ }).first();
   await expect(alert).toBeVisible();
   await alert.click();
   await page.getByLabel("Acknowledgement note — required and audited").fill("Ada owns the response and is escalating the evidence-backed remediation.");

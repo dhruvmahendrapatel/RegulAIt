@@ -178,7 +178,7 @@ test("a campaign review is reassigned through the page — and NEVER to the gran
   await page.getByLabel("Grant holder").selectOption({ label: "zzz ops cert holder" });
   await page.getByLabel("Due date").fill("2030-01-01T12:00");
   await page.getByRole("button", { name: "Open campaign" }).click();
-  await page.getByRole("cell", { name: "zzz-ops-campaign", exact: true }).click();
+  await page.getByRole("button", { name: "Open campaign zzz-ops-campaign" }).click();
   await expect(page.getByText("Campaign: zzz-ops-campaign")).toBeVisible();
 
   // --- the HOLDER bar, rendered verbatim -----------------------------------

@@ -57,6 +57,7 @@ import {
   KV,
   OutcomePanel,
   QueryGate,
+  ReasonModal,
   RefusalList,
   Stat,
   downloadCsv,
@@ -291,10 +292,38 @@ const CONSOLIDATION_TABS = ["import", "mapping", "consolidated", "reconciliation
 type ConsolidationTab = (typeof CONSOLIDATION_TABS)[number];
 const REFUSED = { status: "refused" };
 
+interface RemovalTarget {
+  kind: "alias" | "rule";
+  id: string;
+  label: string;
+}
+interface RemovalImpact {
+  noun: string;
+  label: string;
+  changed: number;
+  scanned: number;
+}
+
 const subjectKey = (x: Subject) => `${x.subjectKind}:${x.subjectId ?? "null"}`;
 
 function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * CXR-CST-004 (owner, 2026-11-22): the From and To inputs are INCLUSIVE calendar days in UTC. The API's window stays
+ * half-open (`from <= at < to`), so the To day is sent as the NEXT day's 00:00 UTC. An empty or malformed input sends
+ * no bound.
+ */
+function consolidationWindow(from: string, to: string): { fromIso: string | null; toExclusiveIso: string | null } {
+  const start = from ? new Date(`${from}T00:00:00.000Z`) : null;
+  const endDay = to ? new Date(`${to}T00:00:00.000Z`) : null;
+  return {
+    fromIso: start && !Number.isNaN(start.getTime()) ? start.toISOString() : null,
+    toExclusiveIso: endDay && !Number.isNaN(endDay.getTime()) ? new Date(endDay.getTime() + DAY_MS).toISOString() : null,
+  };
 }
 
 /**
@@ -364,13 +393,15 @@ export default function CostConsolidationPage() {
 
   // ---- consolidated view ----
   const [by, setBy] = useState<"user" | "cost_center">("user");
-  const [from, setFrom] = useState(isoDay(new Date(Date.now() - 30 * 24 * 3600 * 1000)));
-  const [to, setTo] = useState(isoDay(new Date(Date.now() + 24 * 3600 * 1000)));
+  const [from, setFrom] = useState(isoDay(new Date(Date.now() - 30 * DAY_MS)));
+  // the To day is inclusive (CXR-CST-004), so today's spend is in the window by default
+  const [to, setTo] = useState(isoDay(new Date()));
 
   const consolidatedQs = useMemo(() => {
     const qs = new URLSearchParams({ by });
-    if (from) qs.set("from", new Date(from).toISOString());
-    if (to) qs.set("to", new Date(to).toISOString());
+    const w = consolidationWindow(from, to);
+    if (w.fromIso) qs.set("from", w.fromIso);
+    if (w.toExclusiveIso) qs.set("to", w.toExclusiveIso);
     return qs.toString();
   }, [by, from, to]);
 
@@ -389,6 +420,22 @@ export default function CostConsolidationPage() {
   const [ruleTo, setRuleTo] = useState("");
   const [ruleReason, setRuleReason] = useState("");
   const [ccUser, setCcUser] = useState("");
+  // CXR-CST-005: removing an alias or a domain rule takes an audited reason, and reports what it re-attributed
+  const [removing, setRemoving] = useState<RemovalTarget | null>(null);
+  const [removed, setRemoved] = useState<RemovalImpact | null>(null);
+  const removeRule = async (target: RemovalTarget, reason: string) => {
+    const path = target.kind === "alias" ? `/v1/cost-imports/mappings/${target.id}` : `/v1/cost-imports/domain-rules/${target.id}`;
+    const noun = target.kind === "alias" ? "Alias" : "Domain rule";
+    const res = await act.run(
+      () => api.del<{ reresolved: { changed: number; scanned: number } }>(path, { reason }),
+      `${noun} removed — stored lines were re-resolved without it.`,
+    );
+    // a refused removal keeps the dialog, and the reason typed into it, open
+    if (res === null) return;
+    setRemoving(null);
+    setRemoved({ noun, label: target.label, changed: res.reresolved.changed, scanned: res.reresolved.scanned });
+    refreshAll();
+  };
   const [ccValue, setCcValue] = useState("");
 
   // ---- ADR-0076: roster upload form ----
@@ -870,7 +917,9 @@ export default function CostConsolidationPage() {
                                   }),
                                 "Alias saved — every stored line was re-resolved against it.",
                               )
-                              .then(() => {
+                              .then((saved) => {
+                                // CXR-CST-003: a refused write keeps what the admin typed
+                                if (saved === null) return;
                                 setAliasAccount("");
                                 setAliasReason("");
                                 refreshAll();
@@ -903,14 +952,8 @@ export default function CostConsolidationPage() {
                                 size="sm"
                                 variant="danger"
                                 disabled={act.busy}
-                                onClick={() =>
-                                  void act
-                                    .run(
-                                      () => api.del(`/v1/cost-imports/mappings/${r.id}`),
-                                      "Alias removed — stored lines were re-resolved without it.",
-                                    )
-                                    .then(refreshAll)
-                                }
+                                aria-label={`Remove the alias for ${r.accountKey}`}
+                                onClick={() => setRemoving({ kind: "alias", id: r.id, label: r.accountKey })}
                               >
                                 Remove
                               </Button>
@@ -957,7 +1000,8 @@ export default function CostConsolidationPage() {
                                   }),
                                 "Domain rule saved — every stored line was re-resolved against it.",
                               )
-                              .then(() => {
+                              .then((saved) => {
+                                if (saved === null) return;
                                 setRuleFrom("");
                                 setRuleTo("");
                                 setRuleReason("");
@@ -987,14 +1031,8 @@ export default function CostConsolidationPage() {
                                 size="sm"
                                 variant="danger"
                                 disabled={act.busy}
-                                onClick={() =>
-                                  void act
-                                    .run(
-                                      () => api.del(`/v1/cost-imports/domain-rules/${r.id}`),
-                                      "Domain rule removed — stored lines were re-resolved without it.",
-                                    )
-                                    .then(refreshAll)
-                                }
+                                aria-label={`Remove the domain rule ${r.fromDomain} to ${r.toDomain}`}
+                                onClick={() => setRemoving({ kind: "rule", id: r.id, label: `${r.fromDomain} → ${r.toDomain}` })}
                               >
                                 Remove
                               </Button>
@@ -1007,6 +1045,36 @@ export default function CostConsolidationPage() {
                         <strong>nobody</strong>. Ambiguity is never broken by guessing, and an unmatched account is
                         never spread pro-rata across the people who did resolve.
                       </p>
+                      {removed && (
+                        <p className={v.hint} role="status" data-testid="rm-impact">
+                          {removed.noun} <span className={v.mono}>{removed.label}</span> removed:{" "}
+                          {removed.changed.toLocaleString("en-GB")} of {removed.scanned.toLocaleString("en-GB")} stored
+                          line(s) re-attributed.
+                        </p>
+                      )}
+                      <ReasonModal
+                        open={removing !== null}
+                        title={
+                          removing
+                            ? removing.kind === "alias"
+                              ? `Remove the alias for ${removing.label}?`
+                              : `Remove the domain rule ${removing.label}?`
+                            : ""
+                        }
+                        danger
+                        confirmLabel="Remove"
+                        placeholder="why this is being removed (required, audited)"
+                        body={
+                          <p data-testid="rm-consequence">
+                            Removing it re-attributes stored lines that matched this rule: they resolve again by the
+                            remaining rules, or become unattributed. Your reason goes on the audit record.
+                          </p>
+                        }
+                        onConfirm={(reason) => {
+                          if (removing) void removeRule(removing, reason);
+                        }}
+                        onCancel={() => setRemoving(null)}
+                      />
 
                       <div className={v.sectionTitle}>Cost centre for a person</div>
                       <p className={v.faint}>
@@ -1211,10 +1279,14 @@ export default function CostConsolidationPage() {
                       <Field label="From">
                         <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} data-testid="cc-from" />
                       </Field>
-                      <Field label="To">
+                      <Field label="To (inclusive)">
                         <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} data-testid="cc-to" />
                       </Field>
                     </div>
+                    <p className={v.faint} data-testid="cc-window">
+                      Window (UTC): {from ? `${from} 00:00` : "the first recorded spend"} to{" "}
+                      {to ? `${to} 23:59:59` : "now"}, both days included.
+                    </p>
 
                     <QueryGate
                       query={consolidated}

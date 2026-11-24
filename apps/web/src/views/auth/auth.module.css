@@ -74,6 +74,17 @@
   font-size: var(--text-sm);
 }
 
+/* CXR-ACC-005: the sign-in options could not be read; the email form below still works */
+.degraded {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-soft-text);
+}
+
 .divider {
   display: flex;
   align-items: center;

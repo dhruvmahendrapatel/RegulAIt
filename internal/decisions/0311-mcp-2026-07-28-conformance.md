@@ -1,6 +1,6 @@
 # ADR-0311: MCP 2026-07-28 conformance check, the transport fixes it found, and the staged move to the stateless protocol
 
-- **Status**: Accepted for the check and the fixes (lane E1 brief, gap G10 of `internal/product/MARKET_ANALYSIS_2026-11.md` §3). The migration in decision 4 is **Proposed**: the owner or master decides whether and when it is scheduled.
+- **Status**: Accepted for the check and the fixes (lane E1 brief, gap G10 of `internal/product/MARKET_ANALYSIS_2026-11.md` §3). Decision 4 (the staged move to the stateless protocol) is **Accepted** (owner, 2026-11-21); slice 1, the 2026-07-28 server side for `tools/*`, is built.
 - **Date**: 2026-11-19
 - **Index**: **MCP 2026-07-28 conformance (G10).** The 2026-07-28 revision is a breaking, stateless protocol, not a hardening pass, so the gateway does not conform yet. This ADR records the gap matrix for the server and client sides and fixes now the transport MUSTs that hold in every revision the gateway serves: browser `Origin` validation, no JSON-RPC batches from 2025-06-18 on, and DELETE answered 405. It proposes a staged move to SDK v2 that serves both protocol generations.
 - **Built in**: lane E1 (slice 3).
@@ -65,11 +65,11 @@ It found the following:
    | `MCP-Protocol-Version` header, unsupported version refused | 2025-06-18 | S/C | done by the SDK (400) | none |
    | RFC 9728 metadata, `WWW-Authenticate resource_metadata`, RFC 8707 audience | 2025-06-18, kept | S | done (ADR-0097, ADR-0188) | none |
    | `insufficient_scope` step-up challenge | SHOULD | S | not sent (403 carries no challenge, by design) | recorded; scopes are not the gateway's authorization model (pillar 1 per-tool entitlements) |
-   | No `initialize`; `_meta` protocolVersion/clientCapabilities; `server/discover` | 2026-07-28 | S/C | v1 handshake | decision 4 |
-   | `Mcp-Method`/`Mcp-Name` headers, `HeaderMismatchError` | 2026-07-28 | S/C | absent | decision 4 |
-   | `resultType`, `ttlMs`/`cacheScope`, renumbered errors | 2026-07-28 | S | absent | decision 4 |
+   | No `initialize`; `_meta` protocolVersion/clientCapabilities; `server/discover` | 2026-07-28 | S/C | v1 handshake | **slice 1** (S); the client side is (d) |
+   | `Mcp-Method`/`Mcp-Name` headers, `HeaderMismatchError` | 2026-07-28 | S/C | absent | **slice 1** (S, by the SDK's validation ladder); `Mcp-Param-*` deferred; the client side is (d) |
+   | `resultType`, `ttlMs`/`cacheScope`, renumbered errors | 2026-07-28 | S | absent | **slice 1** (`ttlMs: 0`, `cacheScope: private`, the SDK defaults) |
    | `InputRequiredResult` instead of server-to-client requests | 2026-07-28 | S/C | sampling, elicitation and roots already refused (ADR-0185 G3) | decision 4; nothing to unwind |
-   | Deterministic `tools/list` order | 2026-07-28, SHOULD | S | upstream order, filtered | decision 4 |
+   | Deterministic `tools/list` order | 2026-07-28, SHOULD | S | upstream order, filtered | **slice 1** on the 2026-07-28 path (code-point order by name); the 2025-era path keeps upstream order |
    | `outputSchema` kept for stdio servers with a stored manifest | 2025-06-18 | S | dropped on that path (only `readOnlyHint` rebuilt) | follow-up (PENDING); not a MUST violation, as no `structuredContent` is promised |
    | Authorization `iss` check, issuer-bound credentials | 2026-07-28 | C | the gateway uses no authorization-code flow upstream (static credentials, assertions, RFC 8693 exchange) | none today; applies if an OAuth client flow is ever added |
    | DCR deprecated, CIMD preferred | 2026-07-28 | S (as AS) | the gateway's token endpoint has DCR and CIMD off | none |
@@ -90,8 +90,8 @@ It found the following:
      -32600 error.
    - A client that sends no header (the 2025-03-26 default), or 2025-03-26, keeps the old behaviour, because that
      revision defined batching. This holds until those versions are dropped (decision 4).
-4. **Proposed: a staged move to the stateless protocol on SDK v2.** It needs an owner or master decision, because it
-   is a migration, not a check, and it touches the proxy's busiest files.
+4. **Accepted (owner, 2026-11-21): a staged move to the stateless protocol on SDK v2.** It is a migration, not a check,
+   and it touches the proxy's busiest files, so it is built in slices.
    - (a) Pin `@modelcontextprotocol/server` and `/client` 2.4.x beside the v1 SDK.
    - (b) Serve both generations on `/mcp/:serverId`. A request with `_meta` `io.modelcontextprotocol/protocolVersion`
      and the `Mcp-Method` header takes the 2026-07-28 path; an `initialize` request takes the v1 path. The
@@ -104,10 +104,34 @@ It found the following:
 
    The deprecation windows (no removal before 2027-07-28) leave room to do this in slices.
 
+   **Slice 1 (built, 2026-11-21).** (a), (b) and (c) for the server side, `tools/*` only.
+   - `@modelcontextprotocol/server` 2.4.0 is pinned exactly beside the v1 SDK (`@modelcontextprotocol/client` 2.4.0 is
+     a test-only devDependency). Both are Apache-2.0; `apps/gateway/THIRD_PARTY.md` lists them and what they bundle.
+   - `POST /mcp/:serverId` runs every refusal it ran before (Origin, batch, API key, unknown or disabled server,
+     project attribution, the stdio entitlement check, admission and egress preflight, the breaker, the manifest
+     connect) for both generations. Then the SDK's own classifier (`isLegacyRequest`) picks the path. A 2025-era
+     request (`initialize` and everything without the envelope) takes the v1 path unchanged. A 2026-07-28 request is
+     served by `createMcpHandler(…, { legacy: 'reject' })` (`apps/gateway/src/mcp-modern.ts`).
+   - `tools/list` and `tools/call` on both paths are the same two functions (`listToolsForCaller`,
+     `callToolForCaller` in `mcp-proxy.ts`), moved out of the v1 handlers unchanged, so entitlements, approvals,
+     scans, cost and audit cannot differ between generations.
+   - The SDK answers `server/discover` (no upstream is contacted: the route connects only for `tools/list`), the
+     envelope and header ladder (`-32020` header mismatch, `-32022` unsupported revision), `resultType`, and the
+     `ttlMs: 0` / `cacheScope: private` defaults. The new path sorts `tools/list` by name.
+   - Every other method on the new path answers `-32601` with an `mcp-method-unsupported` audit row
+     (`detail.protocolRevision`). `subscriptions/listen`, which the SDK would serve itself, is refused the same way
+     before the handler runs.
+
+   Deferred to later slices: resources, prompts, completions and logging on the new path (the v1 path keeps the
+   ADR-0185 G3 surface); subscriptions; `InputRequiredResult`; `Mcp-Param-*` header validation (the SDK checks it
+   only for its high-level `McpServer`); the upstream client side (d); MCP Apps `ui://` governance (e); dropping the
+   oldest versions (f).
+
 ## Consequences
 
 - The gateway enforces the transport rules every served revision requires, and a refusal never reaches an upstream.
 - The gateway does not yet speak 2026-07-28. A client that speaks only 2026-07-28 cannot use it, and this is now
-  written down instead of assumed done.
+  written down instead of assumed done. (Superseded in part by slice 1: such a client can discover, list and call
+  tools; the other methods are deferred.)
 - The `/mcp` route gains `DELETE` (405) in the route classes, the census (protocol plumbing) and OpenAPI. No
   migration, table or UI is added.

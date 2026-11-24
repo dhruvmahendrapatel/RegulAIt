@@ -158,7 +158,8 @@ async function colleague(label: string, tools: ToolName[]) {
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
 beforeAll(async () => {
-  k = await builderKit("bld-pause");
+  // ADR-0180 addendum (E51): channel and schedule agents are autonomous; this suite is not about oversight
+  k = await builderKit("bld-pause", { relaxAutonomyGate: true });
   restoreApprovalSigning = await relaxApprovalSigningForTest(k.db);
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   restoreStrictAdmission = await relaxStrictAdmissionForTest(k.db);

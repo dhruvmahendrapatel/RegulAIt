@@ -68,6 +68,7 @@ import {
   discoverySources,
   endpointAgentIdentities,
   endpointAgentReports,
+  endpointDeviceGroupMembers,
   endpointDevices,
   endpointEnrolmentTokens,
   eq,
@@ -471,6 +472,9 @@ function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
     revokedAt: t.revokedAt?.toISOString() ?? null,
     /** ADR-0197 Q13: true when an admin relaxed the 30-day expiry for this token (step-up, audited) */
     expiryRelaxed: t.expiryRelaxationStepUp !== null,
+    /** ADR-0360 §5: a one-line enrolment token (one device, at most 60 minutes) and the group it places its device in */
+    singleUse: t.singleUse,
+    deviceGroupId: t.deviceGroupId,
   };
 }
 
@@ -599,6 +603,11 @@ export function registerEndpointAgentRoutes(
             identityCap: ENDPOINT_TICKET_IDENTITY_CAP,
           })
           .returning();
+        // ADR-0360 §5: a one-line token places its device in the token's ADR-0350 group (only narrows its policy; the
+        // INSERT policy admits exactly this row: a live device whose single-use token names the group)
+        if (locked.row.deviceGroupId) {
+          await t.insert(endpointDeviceGroupMembers).values({ deviceId: row!.id, groupId: locked.row.deviceGroupId, addedBy: locked.row.createdBy }).onConflictDoNothing();
+        }
         await recordPseudonyms(t, dataKey, [device]);
         await audit(t, NIL_UUID, "discovery_source", source.id, "endpoint-enrolment-ticket-issued", "allow", `an endpoint agent device ticket was issued under enrolment token ${token.id} (ADR-0195 SD4b)`, {
           tokenId: token.id,
@@ -608,6 +617,7 @@ export function registerEndpointAgentRoutes(
           arch: body.arch,
           devicesEnrolled: enrolled,
           deviceCap: locked.row.deviceCap,
+          ...(locked.row.singleUse ? { singleUse: true, deviceGroupId: locked.row.deviceGroupId } : {}),
         });
         // R15 cap alerting: crossing 80 % and reaching 100 % of the cap each write their own row
         for (const f of ENDPOINT_CAP_ALERT_FRACTIONS) {
