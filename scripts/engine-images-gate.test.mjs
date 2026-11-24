@@ -9,6 +9,8 @@ import { ENGINE_IDS } from "./engine-images-lock.mjs";
 import { inputPathspecs as specsFor, REPRO_ENGINE_IDS, UNPUBLISHED_ENGINE_IDS } from "./engine-images-gate.mjs";
 
 const repoGit = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
+/** the directory of an engine's shim package (`@regulait/engine-<id>`, or the shared admission-scan shim) */
+const packageDir = (id) => `packages/${enginePackage(id).slice("@regulait/".length)}`;
 
 describe("ENG-IMG publish gate: the input set of the real repository", () => {
   const pkgs = readWorkspace();
@@ -17,6 +19,8 @@ describe("ENG-IMG publish gate: the input set of the real repository", () => {
     // ADR-0242 §6.1: the two admission-scan images share one shim package
     const pkgDir = (id) => (["mcpscanner", "skillscanner"].includes(id) ? "packages/engine-admission-scan" : `packages/engine-${id}`);
     for (const id of ENGINE_IDS) expect(workspaceClosure(id, pkgs)).toEqual([pkgDir(id), "packages/engine-runner", "packages/shared"].sort());
+    // ADR-0362: the content extractor builds the same admission-scan shim (one runner and task for every subject engine)
+    expect(enginePackage("contentextract")).toBe("@regulait/engine-admission-scan");
   });
 
   it("an engine's inputs never include another engine's directory, the lock, the signatures or the generated module", () => {
@@ -234,7 +238,8 @@ describe("ADR-0242 the admission-scan engines (L4.5: publishable, as spikee)", (
 
 describe("ADR-0364 S3 the robot images (unpublished: built twice and compared, never planned for publish)", () => {
   it("are repro-only, with their own inputs, and never in the lock's ENGINE_IDS", () => {
-    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["robot-runner", "robot-egress"]);
+    // ADR-0362: contentextract is held unpublished too (owner question 1); its own checks are in the next block
+    expect(UNPUBLISHED_ENGINE_IDS).toEqual(["robot-runner", "robot-egress", "contentextract"]);
     const pkgs = readWorkspace();
     for (const id of UNPUBLISHED_ENGINE_IDS) {
       expect(ENGINE_IDS).not.toContain(id);
@@ -252,5 +257,21 @@ describe("ADR-0364 S3 the robot images (unpublished: built twice and compared, n
     expect(workspaceClosure("robot-runner", pkgs)).toEqual(["packages/engine-runner", "packages/robot-runner", "packages/shared"]);
     expect(enginePackage("robot-egress")).toBeNull();
     expect(workspaceClosure("robot-egress", pkgs)).toEqual([]);
+  });
+});
+
+describe("ADR-0362 the content-extraction engine (held unpublished, owner question 1)", () => {
+  it("has image inputs (its own directory and the shared admission-scan shim), is built and compared, and is never planned for publish", () => {
+    const pkgs = readWorkspace();
+    const id = "contentextract";
+    const specs = specsFor(id);
+    expect(specs).toContain(`engines/${id}`);
+    expect(workspaceClosure(id, pkgs)).toEqual(["packages/engine-admission-scan", "packages/engine-runner", "packages/shared"]);
+    for (const d of workspaceClosure(id, pkgs)) expect(specs).toContain(d);
+    expect(ENGINE_IDS).not.toContain(id);
+    expect(REPRO_ENGINE_IDS).toContain(id);
+    // never another engine's directory
+    const files = repoGit(["ls-files", "--", ...specs]).split("\n").filter(Boolean);
+    for (const other of REPRO_ENGINE_IDS.filter((o) => o !== id)) expect(files.filter((f) => f.startsWith(`engines/${other}/`))).toEqual([]);
   });
 });

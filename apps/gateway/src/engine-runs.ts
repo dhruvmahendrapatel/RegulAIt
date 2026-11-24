@@ -118,6 +118,7 @@ import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPl
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { admissionReportOf, recordSubjectRunEndTx, setAdmissionScanRuntime, subjectInputTx } from "./admission-scan-runs.js";
+import { CONTENTEXTRACT_ENGINE_ID, recordContentExtractRunEndTx, setContentInspectionRuntime } from "./content-inspection-runs.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -145,6 +146,8 @@ export function setEngineRuntime(opts: EngineOptions): void {
   runtime = opts;
   // ADR-0242 L4.3: the admission-scan runs encrypt their MCP manifest snapshot under the same data key
   setAdmissionScanRuntime({ dataKey: opts.dataKey });
+  // ADR-0362: the content-extraction runs encrypt their bundle and result under it too, and cancel a run nobody awaits
+  setContentInspectionRuntime({ dataKey: opts.dataKey, cancelRun: cancelEngineRunAsSystem });
 }
 export function engineRuntime(): EngineOptions {
   return runtime;
@@ -342,6 +345,15 @@ export async function validateEngineRunRequest(
       status: 422,
       error: "engine_target_mismatch",
       detail: "this engine scans an admission subject; only the gateway's admission gate starts its runs",
+    };
+  }
+  // ADR-0362: the content extractor runs only on a request's own file bundle, queued by the gateway's content inspection
+  if (manifest.kind === "content_extract") {
+    return {
+      ok: false,
+      status: 422,
+      error: "engine_target_mismatch",
+      detail: "this engine extracts the files of a gateway request; only the gateway's content inspection starts its runs",
     };
   }
   // PR #205 review round 4 [66]: an engine-specific shape check (a promptfoo strategy rewrites a
@@ -708,6 +720,17 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       .set({ summary: { ...summary, verdict: admission.verdict === "pass" ? "pass" : admission.verdict === "fail" ? "fail" : "unknown", admission } })
       .where(eq(engineRuns.id, runId));
   }
+  // ADR-0362: a content-extraction run's result waits, encrypted, for the request that queued it (only a run an engine
+  // ran, completed and nobody cancelled; anything else stores nothing, and the request fails closed). The summary says
+  // only whether a result was stored, never what it holds.
+  if (locked.engineId === CONTENTEXTRACT_ENGINE_ID) {
+    const stored = await recordContentExtractRunEndTx(tx, locked, {
+      status: args.status,
+      placed: !unplaced && locked.taskPlacementId !== null,
+      report: args.admissionReport ?? null,
+    });
+    await tx.update(engineRuns).set({ summary: { ...summary, contentInspection: { resultStored: stored } } }).where(eq(engineRuns.id, runId));
+  }
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
   if (args.status === "completed") {
     const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
@@ -787,6 +810,21 @@ export async function cancelEngineRunsOfInstance(
     }
   }
   return live.length;
+}
+
+/**
+ * ADR-0362: end one live run `cancelled` on the gateway's own behalf (no person): the cancel marker, the terminal
+ * transition and the key's revocation in one transaction, as the cancel route. A run already ended is left as it is.
+ * Used by content inspection when the request that queued a run stops waiting for it.
+ */
+export async function cancelEngineRunAsSystem(db: Db, runId: string, cause: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+    if (!locked || !["awaiting_approval", "queued", "leased"].includes(locked.status)) return;
+    const now = await databaseWallNow(tx);
+    await tx.update(engineRuns).set({ cancelRequestedAt: locked.cancelRequestedAt ?? now }).where(eq(engineRuns.id, runId));
+    await endLockedRun(tx, { ...locked, cancelRequestedAt: locked.cancelRequestedAt ?? now }, { status: "cancelled", errorCode: "cancelled", normalised: noResult("cancelled"), cause, actorUserId: NO_IDENTITY }, now);
+  });
 }
 
 /** an empty normalisation (no result): every reading is unknown or not run */
@@ -2278,7 +2316,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         }
         if (!problem) {
           const org = await loadOrgSettings(db);
-          const store = r.contentBase64 !== undefined && opts.dataKey;
+          // ADR-0362: a content-extraction report IS the text of a person's files: it is never kept on the run for the
+          // raw-report retention window (only its sha256 and size); its one copy is content_inspection_results'
+          const store = r.contentBase64 !== undefined && opts.dataKey && run.engineId !== CONTENTEXTRACT_ENGINE_ID;
           rawReport = {
             sha256: r.sha256,
             bytes: r.bytes,

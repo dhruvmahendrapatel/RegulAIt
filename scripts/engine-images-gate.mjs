@@ -48,7 +48,8 @@ import { ENGINE_IDS } from "./engine-images-lock.mjs";
  * Smokescreen egress proxy (robot_browser sandbox images, not scan engines) are built and compared here until a later
  * slice publishes them; they are not in ENGINE_IDS, the lock, its generated module or the compose defaults.
  */
-export const UNPUBLISHED_ENGINE_IDS = ["robot-runner", "robot-egress"];
+// ADR-0364 S3: the robot images; ADR-0362: contentextract until the owner decides its libpdfium licences (owner question 1)
+export const UNPUBLISHED_ENGINE_IDS = ["robot-runner", "robot-egress", "contentextract"];
 /**
  * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
  * admission-scan images share one runner and task shim. ADR-0364 S3: the robot runner builds `@regulait/robot-runner`;
@@ -59,6 +60,8 @@ export const ENGINE_PACKAGES = {
   skillscanner: "@regulait/engine-admission-scan",
   "robot-runner": "@regulait/robot-runner",
   "robot-egress": null,
+  // ADR-0362: the content extractor is the admission-scan shim's third subject engine
+  contentextract: "@regulait/engine-admission-scan",
 };
 export const enginePackage = (engine) => (Object.prototype.hasOwnProperty.call(ENGINE_PACKAGES, engine) ? ENGINE_PACKAGES[engine] : `@regulait/engine-${engine}`);
 /** every engine the reproducible-build check covers */
