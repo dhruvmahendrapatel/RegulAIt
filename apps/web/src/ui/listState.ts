@@ -212,3 +212,55 @@ export function loadedText(loaded: number, total: number | null, estimate: boole
   const of = totalText(total, estimate);
   return `Loaded ${n(loaded)}${of ? ` of ${of}` : ""}`;
 }
+
+/**
+ * Where the reader is in the list, kept in the page's address (UIS-06), so opening a row and coming Back lands on the
+ * same sort and page. Every key carries the list's id (`runs.sort`, `runs.dir`, `runs.offset`, `runs.cursor`), so a
+ * page that hosts more than one list, or keeps its own filters in the address, is never overwritten. Only what differs
+ * from the first page under the default sort is written. The page size stays this browser's choice (ADR-0226).
+ */
+export interface ListPlace {
+  sort: ListSort;
+  /** the first row on screen */
+  offset: number;
+  /** the keyset cursor that read this page, when it was read by cursor */
+  cursor: string | null;
+}
+
+const placeKeys = (listId: string) => ({
+  sort: `${listId}.sort`,
+  dir: `${listId}.dir`,
+  offset: `${listId}.offset`,
+  cursor: `${listId}.cursor`,
+});
+
+/** a cursor the gateway could have issued (base64url, at most 200 characters, the route's own bound) */
+const CURSOR_SHAPE = /^[A-Za-z0-9_-]{1,200}$/;
+/** the gateway's deepest offset (LIST_MAX_OFFSET) */
+const MAX_OFFSET = 1_000_000;
+
+/** the place in the address, or the defaults where it is missing or malformed; an unknown sort column is ignored */
+export function readPlace(params: URLSearchParams, listId: string, sortable: ReadonlySet<string>, defaultSort: ListSort): ListPlace {
+  const k = placeKeys(listId);
+  const key = params.get(k.sort);
+  const dir = params.get(k.dir);
+  const sort: ListSort = key && sortable.has(key) ? { key, dir: dir === "desc" ? "desc" : "asc" } : { ...defaultSort };
+  const rawOffset = params.get(k.offset) ?? "";
+  const offset = /^\d{1,7}$/.test(rawOffset) && Number(rawOffset) <= MAX_OFFSET ? Number(rawOffset) : 0;
+  const rawCursor = params.get(k.cursor) ?? "";
+  const cursor = offset > 0 && CURSOR_SHAPE.test(rawCursor) ? rawCursor : null;
+  return { sort, offset, cursor };
+}
+
+/** the address with this list's place written in and every other parameter kept; null when nothing changes */
+export function writePlace(params: URLSearchParams, listId: string, place: ListPlace, defaultSort: ListSort): URLSearchParams | null {
+  const k = placeKeys(listId);
+  const next = new URLSearchParams(params);
+  const isDefault = place.sort.key === defaultSort.key && place.sort.dir === defaultSort.dir;
+  const put = (name: string, value: string | null) => (value === null ? next.delete(name) : next.set(name, value));
+  put(k.sort, isDefault ? null : place.sort.key);
+  put(k.dir, isDefault ? null : place.sort.dir);
+  put(k.offset, place.offset > 0 ? String(place.offset) : null);
+  put(k.cursor, place.offset > 0 && place.cursor ? place.cursor : null);
+  return next.toString() === params.toString() ? null : next;
+}

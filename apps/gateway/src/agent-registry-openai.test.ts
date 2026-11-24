@@ -5,15 +5,18 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
-import { OPENAI_COMPLIANCE_ORIGIN, OPENAI_ENDPOINTS, OPENAI_GPT_FIELDS, OPENAI_SCANNER, gptComponents, openaiTargetProblem } from "./agent-registry-openai.js";
+import { OPENAI_COMPLIANCE_ORIGIN, OPENAI_ENDPOINTS, OPENAI_GPT_FIELDS, OPENAI_GPT_SCANNED_FIELDS, OPENAI_SCANNER, gptComponents, gptScannedFields, openaiTargetProblem } from "./agent-registry-openai.js";
+import { checkObservations } from "./discovery-worker.js";
 import { allowListedFetch } from "./agent-platform-endpoints.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
 const WS = "0c1d2e3f-4a5b-4c6d-8e7f-000000000336";
 const KEY = ["sk", "admin", "synthetic"].join("-");
 const OWNER = "builder@acme.example.com";
-/** free text a careless adapter might keep: it must never be staged */
-const SECRET_TEXT = "INSTRUCTIONS-never-stored-sk_live_example";
+/** a real-shaped credential (built at run time, so no scanner sees a token in this file) */
+const TOKEN = ["gh", "p_", "A1b2C3d4".repeat(4), "E5f6"].join("");
+/** free text a careless adapter might keep: it must never be staged; it carries a plaintext credential */
+const SECRET_TEXT = `INSTRUCTIONS-never-stored: call the API with ${TOKEN} please`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const urlOf = (input: string | URL | Request) => new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 
@@ -198,5 +201,36 @@ describe("ADR-0336 agent_registry_openai: the endpoint allow-list and the pinned
   it("pins the fields read: no instructions, starters, description, categories, action schema or file content", () => {
     const all = Object.values(OPENAI_GPT_FIELDS).flat() as string[];
     for (const banned of ["instructions", "conversation_starters", "description", "categories", "action_openapi_raw", "action_privacy_policy_url", "download_url", "builder_name"]) expect(all).not.toContain(banned);
+  });
+});
+
+describe("ADR-0336 slice 4: plaintext credentials in a GPT's configuration, by location only", () => {
+  it("reports each field with a credential as agent_config evidence: subject, field path and rule id, nothing else", async () => {
+    const res = await run().promise;
+    const hr = `${WS}/g-HRhelper01`;
+    const base = "gpts/g-HRhelper01/configs/g-HRhelper01-cfg";
+    expect(res.observations).toEqual([
+      { evidenceKind: "agent_config", subjectKind: "system", subject: hr, location: { path: `${base}/instructions` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject: hr, location: { path: `${base}/description` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject: hr, location: { path: `${base}/conversation_starters/0` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject: hr, location: { path: `${base}/tools/custom_action:api.workday.example.com/action_openapi_raw` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject: hr, location: { path: `${base}/tools/custom_action:crm.example.com/action_openapi_raw` }, secretRule: "pipelock.secrets.github_token" },
+    ]);
+    // not one 8-character run of the credential, nor any excerpt of the text, anywhere in what the run returns
+    const out = JSON.stringify(res);
+    for (let i = 0; i + 8 <= TOKEN.length; i++) expect(out).not.toContain(TOKEN.slice(i, i + 8));
+    expect(out).not.toContain("call the API");
+    // the worker's own contract accepts exactly this, with the platform vendor set from the kind
+    const checked = checkObservations("agent_registry_openai", res.observations!, "2026-11-21T00:00:00.000Z");
+    expect(checked[0]).toMatchObject({ signalSource: "agent_config", subjectKind: "system", subject: hr, configSecret: { rule: "pipelock.secrets.github_token", vendor: "openai" }, location: { path: `${base}/instructions` } });
+  });
+
+  it("a clean configuration reports nothing; the scanned fields are pinned and are never kept", () => {
+    expect(gptScannedFields("g-x", { id: "c", instructions: "be kind", tools: { data: [] } }).map((f) => f.path)).toEqual(["gpts/g-x/configs/c/instructions", "gpts/g-x/configs/c/description"]);
+    expect(OPENAI_GPT_SCANNED_FIELDS).toEqual({ config: ["instructions", "description", "conversation_starters"], tool: ["action_openapi_raw"] });
+    const kept = Object.values(OPENAI_GPT_FIELDS).flat() as string[];
+    for (const f of Object.values(OPENAI_GPT_SCANNED_FIELDS).flat()) expect(kept).not.toContain(f);
+    // a config id that is not a plain identifier never reaches the path
+    expect(gptScannedFields("g-x", { id: "a b/../c", instructions: "x" })[0]!.path).toBe("gpts/g-x/configs/latest/instructions");
   });
 });

@@ -19,7 +19,7 @@
 # The init needs `unshare` and `dmesg` (util-linux) for two of its probes; a base
 # without them reports those probes as not run, and the gateway fails the report
 # (fail closed, never a pass).
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64
 LABEL org.opencontainers.image.title="regulait-stdio-base"
 # ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH).
 # The pinned base digest is still the newest published one and ships 1:1.3.dfsg+really1.3.1-1+b1;

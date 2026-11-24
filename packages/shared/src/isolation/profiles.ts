@@ -105,12 +105,43 @@ const ENGINE_WORKER: ExecutionProfileBody = {
   secrets: "task_scoped",
 };
 
+/**
+ * ADR-0364 S3: one robot run (the first-party robot runner image, Playwright and its Chromium baked in). It differs
+ * from `restricted` where a browser must, each a named relaxation: robot_browser only; a per-run egress proxy as the
+ * sandbox's only peer (`egress_proxy`: the hosts arrive on the offer, never in the body); a larger tmpfs work
+ * directory (the browser's profile, cache and downloads, all gone with the sandbox); more threads, CPU and memory for
+ * Chromium; a wall clock of the run limit (5 minutes) plus 2 minutes for start-up and evidence upload; and
+ * `task_scoped` secrets (decision 5: only on the release line, then fd 3). Root stays read-only, nothing persists.
+ */
+const ROBOT_BROWSER: ExecutionProfileBody = {
+  ...structuredClone(RESTRICTED),
+  name: "robot-browser",
+  workloadKinds: ["robot_browser"],
+  filesystem: { rootReadOnly: true, workDir: { path: "/work", tmpfsMiB: 1024 }, inputs: [] },
+  network: { mode: "egress_proxy" },
+  process: {
+    ...structuredClone(RESTRICTED.process),
+    // Chromium's renderer, GPU-less compositor and network service are thread-heavy (RLIMIT_NPROC counts threads)
+    pids: { workloadNproc: 512, hostCgroupPidsMax: 1024 },
+  },
+  resources: {
+    cpuMillis: 2000,
+    memoryMiB: 2048,
+    wallClockSecondsPerCall: 420,
+    wallClockSecondsPerSession: 420,
+    // screenshots (2 MiB each), downloads (10 MiB each) and the trace, base64 on the stdio bridge, inside 64 items
+    outputBytes: 128 * 1024 * 1024,
+  },
+  secrets: "task_scoped",
+};
+
 /** the shipped profiles, by name (frozen; parse-checked at module load) */
-export const SHIPPED_EXECUTION_PROFILES: Readonly<Record<"restricted" | "restricted-microvm" | "engine-worker", ExecutionProfileBody>> =
+export const SHIPPED_EXECUTION_PROFILES: Readonly<Record<"restricted" | "restricted-microvm" | "engine-worker" | "robot-browser", ExecutionProfileBody>> =
   deepFreeze({
     restricted: executionProfileBodySchema.parse(RESTRICTED),
     "restricted-microvm": executionProfileBodySchema.parse(RESTRICTED_MICROVM),
     "engine-worker": executionProfileBodySchema.parse(ENGINE_WORKER),
+    "robot-browser": executionProfileBodySchema.parse(ROBOT_BROWSER),
   });
 export type ShippedExecutionProfileName = keyof typeof SHIPPED_EXECUTION_PROFILES;
 
@@ -121,7 +152,7 @@ export const RESTRICTED_EXECUTION_PROFILE = SHIPPED_EXECUTION_PROFILES.restricte
 export const MOST_RESTRICTIVE_EXECUTION_PROFILE: ShippedExecutionProfileName = "restricted-microvm";
 
 /** the shipped profiles an admin may version (never retire): their shipped body is version 1 and their strict reference */
-export const VERSIONABLE_SHIPPED_EXECUTION_PROFILES: readonly ShippedExecutionProfileName[] = Object.freeze(["engine-worker"] as const);
+export const VERSIONABLE_SHIPPED_EXECUTION_PROFILES: readonly ShippedExecutionProfileName[] = Object.freeze(["engine-worker", "robot-browser"] as const);
 
 const isShippedName = (name: string): name is ShippedExecutionProfileName => Object.hasOwn(SHIPPED_EXECUTION_PROFILES, name);
 
@@ -152,5 +183,18 @@ export function engineWorkerProfileProblem(body: ExecutionProfileBody): string |
   if (inputs.length !== 1 || inputs[0]!.name !== want.name || inputs[0]!.mountPath !== want.mountPath) {
     return `filesystem.inputs must be exactly the one ${want.name} input at ${want.mountPath}`;
   }
+  return null;
+}
+
+/**
+ * ADR-0364 S3: why a body cannot be a version of the `robot-browser` profile, or null. Robot runs are placed only under
+ * it (`defaultProfileFor`), so a version must stay robot_browser-only, keep the per-run egress proxy and take no input.
+ * A lower `minClass` (an L1 robot run) is an ordinary audited relaxation of the version flow, never a shape error.
+ */
+export function robotBrowserProfileProblem(body: ExecutionProfileBody): string | null {
+  if (body.name !== "robot-browser") return "the body names another profile";
+  if (body.workloadKinds.length !== 1 || body.workloadKinds[0] !== "robot_browser") return "workloadKinds must be exactly [robot_browser]";
+  if (body.network.mode !== "egress_proxy") return "network.mode must be egress_proxy (the run's only peer is its own egress proxy)";
+  if (body.filesystem.inputs.length !== 0) return "a robot run takes no read-only input";
   return null;
 }

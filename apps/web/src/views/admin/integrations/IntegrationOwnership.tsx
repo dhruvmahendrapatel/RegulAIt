@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Button, Card, Field, Select } from "../../../ui/kit";
 import type { AdminUser } from "../../../api/adminTypes";
 import { adminKeys, optionEls, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight, useUserPicker, userOpts, type UserPickerPage } from "../adminKit";
@@ -60,7 +60,8 @@ function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIn
     if (busy || !flight.enter()) return;
     void (async () => {
       try {
-        if (await act.run(() => api.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: owner || null }), "Owner updated")) await baseline.settle();
+        // an owner change is an owner_change step-up on the server (ownership.ts); withStepUp opens the proof and resends it
+        if (await act.run(() => withStepUp((h) => stepUpApi.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: owner || null }, h)), "Owner updated")) await baseline.settle();
       } finally {
         flight.leave();
       }

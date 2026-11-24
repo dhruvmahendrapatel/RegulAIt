@@ -355,7 +355,8 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
-  const row = (page: Page, name: string) => page.getByRole("link", { name: `Show tools on ${name}`, exact: true });
+  // UIS-04: the row that holds the server's button (the button sits in the name cell)
+  const row = (page: Page, name: string) => page.getByRole("row").filter({ has: page.getByRole("button", { name: `Show tools on ${name}`, exact: true }) });
   /** the identity cell's content, by its stable hook (never a column position) */
   const identityCell = (page: Page, name: string) => row(page, name).locator("[data-identity-propagation]");
 
@@ -731,7 +732,7 @@ test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
     // I-2: the datasets live on the stepper's Training data step, the jobs on its Training jobs step
     const steps = page.getByRole("list", { name: "Custom-model steps" });
     await steps.getByRole("button", { name: /^\d?Training data/ }).click({ timeout: 30_000 });
-    await page.getByRole("cell", { name: "faq", exact: true }).click({ timeout: 30_000 });
+    await page.getByRole("button", { name: "faq v1", exact: true }).click({ timeout: 30_000 });
     const add = page.getByRole("form", { name: "Add rows to faq v1" });
     await add.getByLabel("Rows to add (JSON Lines)").fill('{"input":"ok"}\n{"output":"no input"}');
     await add.getByRole("button", { name: "Scan and add rows" }).click();

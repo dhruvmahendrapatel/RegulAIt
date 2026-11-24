@@ -369,3 +369,64 @@ the build departs from it and why.
     lease (deadline + 60 s).
   - A settle reads the state. The target state means `succeeded`. Any other known state means `failed / not_applied`,
     so an agent is never left unactionable when the prior state is missing. Only an unreadable state stays `unknown`.
+
+## As built (slice 1b) — 2026-11-20
+
+Slice 1b adds the control credential and the first vendor member, Copilot Studio quarantine. The decision text above is
+unchanged; this section records where the build departs from it or fills in what it left open.
+
+- **The delegated connect flow is slice 1c.** The table accepts `delegated` rows (CHECK: `platform_write` only, an
+  `expires_at` at most 90 days after the row was stored, a stored secret), the opt-in
+  `discovery_settings.vendor_agent_control_delegated_enabled` is off by default with its `settings_relax` step-up key
+  (`DISCOVERY_STEP_UP_KEYS.vendorAgentControlDelegated`), and the resolver refuses `credential_mode_disabled` and
+  `credential_expired`. Connecting one, the authorization-code flow with PKCE through `@azure/msal-node`, and the
+  refresh-token rotation on use are not built: the store route refuses `delegated` with
+  `409 delegated_connect_not_available`, and a delegated row's token request fails with the same code. A federated
+  service principal or a stored client secret is what slice 1b stores.
+- **The control token has its own federation subject.** A federated control credential is asserted for
+  `regulait:vendor-agent-control:<sourceId>` (`vendorAgentControlSubject`), never the read subject
+  `regulait:discovery-source:<sourceId>`. The customer's write app trusts only the control subject, so an assertion
+  minted for a scan cannot be exchanged for the write app.
+- **The write app is a different app, in the source's tenant.** Storing refuses `write_app_is_read_app` when the
+  control credential names the live read credential's app, and `credential_target_mismatch` for another tenant.
+- **The guard trigger permits three updates.** `discovery_credentials_guard` fixes id, source, purpose, mode, public
+  config, expiry and creator. An update may revoke a row, record the scanner's write-scope verdict, or replace the
+  ciphertext (data-key rotation now; the delegated refresh token's rotation in slice 1c). A revoked row stays revoked.
+  The table also refuses TRUNCATE, so the 0185 rules hold.
+- **The Copilot Studio locator.** The quarantine API addresses an agent by Power Platform environment id and bot id.
+  E17's read path now also reads `RetrieveCurrentOrganization` (a GET, on its endpoint allow-list) and stages each
+  agent with an `environmentId` vendor attribute. An environment whose id cannot be read still stages its agents,
+  without the attribute, so they cannot be controlled. The control contract gains an optional `locatorOf`. A request
+  for an agent without a locator answers `409 vendor_locator_missing`. The locator is snapshotted on the action
+  (`vendor_agent_actions.vendor_locator`, a commented 3NF exception), bound into the approval digest, and re-checked
+  at execute.
+- **The contract gains `acceptedModes` and `token`.** `token` is `{ provider: "entra", scope }`. Copilot Studio's scope
+  is `https://api.powerplatform.com/.default`, and its `acceptedModes` are federated, static and delegated.
+  Slice 2 adds token providers for Agentforce, OpenAI and n8n.
+- **The token is obtained before anything moves.** Execute and settle request the token outside any transaction,
+  before the action's transition. A token failure answers `502 control_token_failed`, keeps only Entra's AADSTS code,
+  is audited, and leaves the action and its approval as they were. The transaction re-reads the credential, and a
+  different row id refuses `credential_changed`.
+- **Vendor answers.** A 2xx means `applied`, then confirmed by the observed read. 401 and 403 mean `refused /
+  vendor_refused_credential`. 404 means `vendor_agent_not_found`. 405 (a classic chatbot) means
+  `vendor_action_unsupported`. Any other 4xx means `failed / vendor_rejected`. A 5xx or a 429 may have acted, so the
+  action goes to `unknown` and is settled by a read, never retried. Every call passes `allowListedFetch`, with three
+  (method, path) pairs on `https://api.powerplatform.com`, inside the guarded fetch. Both ids are checked as GUIDs
+  before anything is sent and are path-encoded. A contract test feeds every registered control hostile ids.
+- **Routes.** `GET`, `PUT` and `DELETE /v1/discovery/sources/:sourceId/control-credential` are admin-only and
+  API-only, with KNOWN_UI_GAPS entries against #453. Storing is the `settings_relax` step-up bound to
+  `{op: "vendor_control_credential", sourceId, mode, tenantId, clientId, replacesCredentialId}`. Revoking is free.
+  Both are audited in the same transaction. The read-credential routes, the discovery list and the scanner select
+  `purpose = 'discovery_read'` only, and a test pins that with a negative control.
+- **Posture.** `delegatedControlCredentials` lists every source whose control credential is delegated, as a finding,
+  and says whether it is usable. Control rows are never counted as read credentials.
+- **Open source (ADR-0176).** The token uses `@azure/identity` through `@regulait/cloud-discovery`'s `azureCredential`,
+  which is already the discovery Entra client and already sends its requests through the guarded fetch. Two options
+  were compared for the delegated refresh in slice 1c:
+  - `@azure/msal-node` (MIT, maintained by Microsoft, in the lockfile through `@azure/identity`) handles the
+    authorization-code flow with PKCE, refresh and rotation.
+  - `oauth4webapi` (MIT, already pinned in the gateway) is a lower-level, spec-exact OAuth client with a custom-fetch
+    hook.
+
+  msal-node stays the choice, as section 3a decided, because it is Entra's own client. No new dependency is added in
+  slice 1b.

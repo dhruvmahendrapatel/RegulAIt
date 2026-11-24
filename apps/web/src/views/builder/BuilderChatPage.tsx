@@ -126,7 +126,7 @@ export default function BuilderChatPage() {
                   placeholder={thread.data?.pending ? "Answer the tool request above first" : `Reply to ${t?.agentName ?? "the agent"}…`}
                   busy={send.isPending}
                   disabled={!!thread.data?.pending}
-                  onSend={(m) => send.mutate(m)}
+                  onSend={(m) => send.mutateAsync(m)}
                 />
               </div>
             </div>
@@ -175,7 +175,7 @@ export default function BuilderChatPage() {
               busy={send.isPending}
               disabled={!agentId}
               leading={picker}
-              onSend={(m) => send.mutate(m)}
+              onSend={(m) => send.mutateAsync(m)}
               autoFocus
             />
             {pending && (

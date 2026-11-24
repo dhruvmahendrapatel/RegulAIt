@@ -186,7 +186,7 @@ test.describe("Evaluations — catalog, compare, judge panels and calibration", 
   test("the run form sends a weighted judge panel, and run detail shows the panel, the interval and the calibration card", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/evals");
-    await page.getByRole("link", { name: /^golden v1 3 2 llm_as_judge/ }).click();
+    await page.locator('[data-list="eval-datasets"]').getByRole("button", { name: "golden v1", exact: true }).click();
     await page.getByLabel("Agent under test").selectOption(SUBJECT);
     const panel = page.getByTestId("judge-panel");
     await panel.getByLabel(/Score the judged cases with a weighted panel/).check();
@@ -203,7 +203,7 @@ test.describe("Evaluations — catalog, compare, judge panels and calibration", 
       .toMatchObject({ datasetId: DS, agentId: SUBJECT, repetitions: 1, judgePanel: [{ agentId: JUDGE_A, weight: 3 }, { agentId: JUDGE_B, weight: 1 }] });
     expect(calls.find((c) => c.method === "POST" && c.path === "/v1/evals/runs")?.body.judgeAgentId).toBeUndefined();
 
-    await page.getByRole("link", { name: /panel-subject/ }).click();
+    await page.getByRole("row", { name: /panel-subject/ }).getByRole("button").first().click();
     const summary = page.getByTestId("run-panel-summary");
     await expect(summary).toContainText("judge-a ×3");
     await expect(summary).toContainText("0.550 – 0.850");

@@ -147,7 +147,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
     // the Created header carries the server sort's arrow (ADR-0226)
     await expect(table.locator("thead th")).toHaveText(["Name", "Status", "Tier", "Owner", /^Created/, "Valid until", "Open conditions", ""]);
     // nothing on the registry creates a use case: no form, no propose button
-    await expect(page.getByRole("button", { name: /Propose/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Propose/ })).toHaveCount(0);
     await expect(page.getByRole("main").locator("form")).toHaveCount(0);
 
     // headline tiles
@@ -158,49 +158,51 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await expect(lifecycle.locator("[aria-hidden=true] > span").first()).toHaveAttribute("style", "width: 20%;");
     await expect(lifecycle.getByRole("button", { name: "Proposed" })).toHaveCount(0);
     // valid until: a date after approval, an expired approval called out, a dash before; open conditions counted
-    const approved = table.getByRole("link", { name: /^Support ticket summarizer, Approved/ });
+    // the row's button sits in its name cell (UIS-04); the other values are in the row around it
+    const approvedButton = table.getByRole("button", { name: /^Support ticket summarizer, Approved/ });
+    const approved = table.getByRole("row").filter({ has: page.getByRole("button", { name: /^Support ticket summarizer, Approved/ }) });
     await expect(approved).toContainText("20 Aug 2027");
     await expect(approved.getByRole("cell").nth(6)).toHaveText("2");
-    await expect(table.getByRole("link", { name: /^Fraud scoring model/ })).toContainText("Expired 1 Sept 2026");
-    await expect(table.getByRole("link", { name: /^Meeting notes drafter/ }).getByRole("cell").nth(5)).toHaveText("—");
+    await expect(table.getByRole("row").filter({ has: page.getByRole("button", { name: /^Fraud scoring model/ }) })).toContainText("Expired 1 Sept 2026");
+    await expect(table.getByRole("row").filter({ has: page.getByRole("button", { name: /^Meeting notes drafter/ }) }).getByRole("cell").nth(5)).toHaveText("—");
     await checkScreen(page, "Registry", "registry");
 
     // a tile filters; pressing it again clears
     const reviewTile = tiles.getByRole("button", { name: "In review 3", exact: true });
     await reviewTile.focus();
     await page.keyboard.press("Space");
-    await expect(table.getByRole("link")).toHaveCount(3);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(3);
     await expect(reviewTile).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByLabel("Status", { exact: true })).toHaveValue("in_review");
     await page.keyboard.press("Space");
-    await expect(table.getByRole("link")).toHaveCount(5);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(5);
     await expect(reviewTile).toHaveAttribute("aria-pressed", "false");
     // Status, tier, owner and search narrow together; "Clear all" resets
     await page.getByLabel("Status", { exact: true }).selectOption("approved");
-    await expect(table.getByRole("link")).toHaveCount(2);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(2);
     await page.getByLabel("Tier").selectOption("high");
-    await expect(table.getByRole("link")).toHaveCount(1);
-    await expect(table.getByRole("link")).toContainText("Fraud scoring model");
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(1);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toContainText("Fraud scoring model");
     await page.getByRole("button", { name: "Clear all" }).click();
     await page.getByLabel("Owner").selectOption({ label: "Riley Reviewer" });
-    await expect(table.getByRole("link")).toHaveCount(2);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(2);
     await page.getByRole("button", { name: "Clear all" }).click();
     await page.getByLabel("Search use cases").fill("chatbot");
-    await expect(table.getByRole("link")).toHaveCount(1);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(1);
     await page.getByLabel("Search use cases").fill("nothing like this");
     await expect(page.getByText("No use cases match these filters")).toBeVisible();
     await page.getByRole("button", { name: "Clear all" }).first().click();
-    await expect(table.getByRole("link")).toHaveCount(5);
+    await expect(table.getByRole("button", { name: /— open preview$/ })).toHaveCount(5);
     const sorted = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === "/v1/use-cases" && url.searchParams.get("sort") === "name" && url.searchParams.get("dir") === "asc";
     });
     await table.getByRole("button", { name: "Name", exact: true }).click();
     await sorted;
-    await expect(table.getByRole("link").first()).toHaveAccessibleName(/^Credit-limit-increase assistant/);
+    await expect(table.getByRole("button", { name: /— open preview$/ }).first()).toHaveAccessibleName(/^Credit-limit-increase assistant/);
 
     // a row opens the right-hand preview; its primary action opens the record
-    await approved.focus();
+    await approvedButton.focus();
     await page.keyboard.press("Enter");
     const drawer = page.getByRole("dialog", { name: "Support ticket summarizer" });
     await expect(drawer).toBeVisible();
@@ -216,10 +218,10 @@ test.describe("ADR-0168: one registry, one way in", () => {
     // Escape closes and hands focus back to the row
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
-    await expect(approved).toBeFocused();
+    await expect(approvedButton).toBeFocused();
 
     // a use case under review: its intended agents are shown, locked — no edit is offered
-    await table.getByRole("link", { name: /^Credit-limit-increase assistant,/ }).click();
+    await table.getByRole("button", { name: /^Credit-limit-increase assistant,/ }).click();
     const reviewing = page.getByRole("dialog", { name: "Credit-limit-increase assistant" });
     await expect(reviewing).toBeVisible();
     await expect(reviewing.getByText(/1 intended agent recorded\. Locked while the use case is with its reviewers/)).toBeVisible();
@@ -235,7 +237,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
       await page.setViewportSize({ width, height: 950 });
       await mockApi(page);
       await page.goto("/ui/admin/use-cases");
-      await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
       await expect(page.getByRole("button", { name: "Download Excel" })).toBeVisible();
       const retire = page.getByRole("button", { name: "Retire Support ticket summarizer" });
       const retireBox = await retire.boundingBox();
@@ -251,9 +253,9 @@ test.describe("ADR-0168: one registry, one way in", () => {
   test("export uses the current filters and retirement requires an audit reason", async ({ page }) => {
     const { retired } = await mockApi(page);
     await page.goto("/ui/admin/use-cases");
-    await expect(page.getByRole("link", { name: /^Credit-limit-increase assistant,/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Credit-limit-increase assistant,/ })).toBeVisible();
     await page.getByLabel("Tier", { exact: true }).selectOption("high");
-    await expect(page.getByRole("table").getByRole("link")).toHaveCount(2);
+    await expect(page.getByRole("table").getByRole("button", { name: /— open preview$/ })).toHaveCount(2);
     const exported = page.waitForRequest((request) => new URL(request.url()).pathname === "/v1/use-cases/export.xlsx");
     await page.getByRole("button", { name: "Download Excel" }).click();
     const query = new URL((await exported).url()).searchParams;
@@ -269,7 +271,7 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await confirm.click();
     await expect(dialog).toHaveCount(0);
     expect(retired).toEqual([{ reason: "Superseded by a narrower use case" }]);
-    await expect(page.getByRole("link", { name: /^Credit-limit-increase assistant, Retired/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Credit-limit-increase assistant, Retired/ })).toBeVisible();
   });
 
   test("headline counts wait for the registry and an empty response offers registration", async ({ page }) => {
@@ -304,11 +306,11 @@ test.describe("ADR-0168: one registry, one way in", () => {
     await expect(failed).toBeVisible();
     failure = null;
     await failed.getByRole("button", { name: "Retry" }).click();
-    await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Support ticket summarizer, Approved/ })).toBeVisible();
     failure = 403;
     await page.reload();
     await expect(page.getByRole("alert").filter({ hasText: "You don't have access to this view" })).toBeVisible();
-    await expect(page.getByRole("link", { name: /^Support ticket summarizer, Approved/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Support ticket summarizer, Approved/ })).toHaveCount(0);
   });
 
   test("the admin boundary prevents registry reads from a non-admin session", async ({ page }) => {
