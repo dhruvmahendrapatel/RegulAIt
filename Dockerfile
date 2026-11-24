@@ -59,8 +59,11 @@ COPY apps ./apps
 # tests) stays in the build context, because every workspace install must resolve it (a context without it fails
 # with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND), and is deleted here, after the production install, so it never reaches the
 # runtime image. Engine images take only `pnpm deploy --prod` of their own package and never contain it.
-RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm install --frozen-lockfile \
- && NODE_OPTIONS=--max-old-space-size=4096 pnpm -r build \
+#
+# The gateway type-check needs about 5 GB, so the build stage gets the same 6 GB heap the CI jobs that build the
+# gateway use (055f7fe6). Build stage only; the runtime image's heap is set where it runs.
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
+ && NODE_OPTIONS=--max-old-space-size=6144 pnpm -r build \
  && rm -rf node_modules apps/*/node_modules packages/*/node_modules \
  && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..." \
  && rm -rf packages/mcp-vuln-fixtures
