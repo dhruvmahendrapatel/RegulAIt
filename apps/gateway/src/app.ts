@@ -697,8 +697,15 @@ import {
   precheckVendorAgentControlDecision,
   registerVendorAgentControlRoutes,
   vendorAgentControlApprovalLabels,
+  VendorAgentControlDecideError,
   type VendorAgentControlDeps,
 } from "./vendor-agent-control.js";
+import {
+  applyVendorControlDelegatedDecision,
+  precheckVendorControlDelegatedDecision,
+  vendorControlDelegatedApprovalLabels,
+  VendorControlDelegatedDecideError,
+} from "./vendor-agent-control-delegated.js";
 import {
   applyContainmentDecision,
   containmentApprovalLabels,
@@ -4736,6 +4743,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
     );
+    const vendorControlDelegatedLabel = await vendorControlDelegatedApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "vendor_control_delegated").map((r) => r.stageId),
+    );
     // ADR-0366: what a rogue-agent containment proposal asks the approver to approve
     const containmentLabel = await containmentApprovalLabels(
       db,
@@ -4823,6 +4834,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "vendor_control_delegated" && r.stageId ? (vendorControlDelegatedLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "saas_finding_review" && r.stageId ? (saasFindingReviewLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
@@ -5333,6 +5345,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0338 slice 1c — a delegated vendor control credential: the same four-eyes rule (never the admin who signed
+    // in, only an admin in the pool, no override, an `approval_decide` step-up bound to the digest)
+    if (row.objectType === "vendor_control_delegated") {
+      const refusal = await precheckVendorControlDelegatedDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0337 §5 slice 3b — a SaaS entitlement finding review: never its requester, only an admin in the pool (no
     // override), and the approval must still bind the review as raised. Nothing executes on either decision.
     if (row.objectType === "saas_finding_review") {
@@ -5757,6 +5775,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approver's step-up is spent here, with the move.
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0338 slice 1c: approved = the held refresh token becomes the source's delegated control credential;
+      // denied = the held token is destroyed. The approver's step-up is spent here, with the writes.
+      if (updated.objectType === "vendor_control_delegated") {
+        await applyVendorControlDelegatedDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
       // ADR-0337 §5 slice 3b: approved = remediate in the vendor's console, denied = risk accepted; nothing is sent
       if (updated.objectType === "saas_finding_review") {
@@ -7112,6 +7135,10 @@ export function handleGatewayError(err: unknown, req: FastifyRequest, reply: Fas
     return reply.status(err.status).send(err.body);
   }
   if (err instanceof ExternalEffectBlockedError) {
+    return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+  }
+  // ADR-0338: a vendor control decision refused inside its transaction (the whole decision rolled back)
+  if (err instanceof VendorAgentControlDecideError || err instanceof VendorControlDelegatedDecideError) {
     return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
   }
   // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be

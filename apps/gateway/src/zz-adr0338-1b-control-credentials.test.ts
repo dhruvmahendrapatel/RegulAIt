@@ -9,7 +9,7 @@
  *  - THE PURPOSES NEVER CROSS: the scanner and the read-credential routes see only the read row; the control resolver
  *    sees only the `platform_write` row.
  *  - THE ROUTES: storing needs a `settings_relax` step-up bound to source, mode, app and the row replaced; the write
- *    app must be in the source's tenant and must not be the read app; delegated is not connectable yet; revoke is free.
+ *    app must be in the source's tenant and must not be the read app; delegated is connected by sign-in (1c); revoke is free.
  *  - THE RESOLVER: the delegated opt-in (off by default, a step-up) and the expiry; a federated token is asserted for
  *    the CONTROL subject only, through the guarded fetch.
  *  - END TO END: request (needs the record's environment id), approve, execute: the token is obtained before anything
@@ -384,7 +384,7 @@ describe("ADR-0338 slice 1b: storing, reading and revoking a control credential"
       expect(res.statusCode, res.body).toBe(status);
       expect(res.json().error).toBe(error);
     };
-    await refusedWith({ mode: "delegated" }, 409, "delegated_connect_not_available");
+    await refusedWith({ mode: "delegated" }, 409, "delegated_needs_sign_in");
     await refusedWith({ publicConfig: { tenantId: "00000000-0000-4000-8000-00000000ffff", clientId: WRITE_APP } }, 400, "credential_target_mismatch");
     await refusedWith({ publicConfig: { tenantId: TENANT, clientId: READ_APP } }, 400, "write_app_is_read_app");
     await refusedWith({ mode: "federated" }, 400, "federated_has_no_secret");
@@ -404,7 +404,7 @@ describe("ADR-0338 slice 1b: storing, reading and revoking a control credential"
 
 // ---------------------------------------------------------------------------------------------------------------------
 describe("ADR-0338 slice 1b: the resolver", () => {
-  it("delegated: off by default (a step-up to turn on, free to turn off), refused once expired, and not usable for a token yet", async () => {
+  it("delegated: off by default (a step-up to turn on, free to turn off), refused once expired, and a row without its account gives no token", async () => {
     const { sourceId } = await seedCopilot();
     const resolver = controlCredentialResolver({ dataKey: DATA_KEY, fetch: async () => fakeFetch });
     const [row] = await insertCred({ sourceId, purpose: "platform_write", credentialMode: "delegated", publicConfig: { tenantId: TENANT, clientId: WRITE_APP }, secretCiphertext: encryptSecret(DATA_KEY, "refresh"), expiresAt: new Date(Date.now() + 86_400_000) });
@@ -419,7 +419,8 @@ describe("ADR-0338 slice 1b: the resolver", () => {
     expect(on.res.json().vendorAgentControlDelegated).toBe(true);
     const ok = await resolver(db, sourceId, COPILOT_STUDIO_CONTROL);
     expect(ok.ok).toBe(true);
-    if (ok.ok) await expect(ok.credential.acquire(AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "delegated_connect_not_available" });
+    // slice 1c: a delegated row is used through its named account; one that names none gives no token
+    if (ok.ok) await expect(ok.credential.acquire(AbortSignal.timeout(5000))).rejects.toMatchObject({ code: "credential_incomplete" });
     // the posture lists it as a finding, and never as a read credential
     const posture = await discoveryPosture(db);
     expect(posture.delegatedControlCredentials).toContainEqual(expect.objectContaining({ sourceId, usable: true }));

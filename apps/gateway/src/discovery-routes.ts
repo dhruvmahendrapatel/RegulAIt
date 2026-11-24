@@ -717,6 +717,17 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (targetMatch === "mismatch") {
         return refusal(400, "credential_target_mismatch", "the credential names a different account or tenant than the source's target");
       }
+      // ADR-0338 §2 (review of #1120): the read app is never the source's write app, whichever is stored first
+      const readClientId = String(body.publicConfig.clientId ?? "").toLowerCase();
+      if (readClientId) {
+        const [control] = await t
+          .select({ publicConfig: discoveryCredentials.publicConfig })
+          .from(discoveryCredentials)
+          .where(and(eq(discoveryCredentials.sourceId, s.id), eq(discoveryCredentials.purpose, "platform_write"), isNull(discoveryCredentials.revokedAt)));
+        if (control && String(control.publicConfig.clientId ?? "").toLowerCase() === readClientId) {
+          return refusal(400, "read_app_is_write_app", "the read-only discovery credential must be a separate app from the source's vendor control credential");
+        }
+      }
       const live = await liveCredential(t, s.id);
       if ((live?.id ?? null) !== body.replacesCredentialId) {
         return refusal(409, "credential_conflict", live
