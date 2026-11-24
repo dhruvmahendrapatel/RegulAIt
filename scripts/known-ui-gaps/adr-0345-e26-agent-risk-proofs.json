@@ -1,0 +1,10 @@
+{
+  "adr": "ADR-0345",
+  "lane": "E26",
+  "tracking": "ADR-0345 slice 3: the agent-risk register's read and settings APIs; the register view belongs to a design builder and is posted on #453",
+  "gaps": {
+    "GET /v1/agent-risks": "lists every agent risk with its OWASP references, controls and proofs, each proof's schedule and its latest result labelled as evidence",
+    "GET /v1/agent-risks/proofs/:proofKey/results": "pages one proof's results, newest first, each with its evidence label",
+    "PUT /v1/agent-risks/proofs/:proofKey/settings": "turns a proof on or off or changes its interval; a relaxation needs a settings_relax step-up and is audited"
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "fixture": 1,
+  "name": "deploy-verify-failed-rolled-back",
+  "note": "post-deploy verify fails, routes to rollback, terminal rolled_back",
+  "definition": {
+    "workflow": "governed-deploy",
+    "costSensitivity": "quality-sensitive",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "deploy",
+        "type": "deployment",
+        "connection": "prod-target",
+        "environment": "staging",
+        "condition": {
+          "field": "environment",
+          "equals": "staging"
+        }
+      },
+      {
+        "id": "verify",
+        "type": "automated_check",
+        "checks": [
+          "smoke"
+        ],
+        "onFailure": "rollback",
+        "rollbackStageId": "rollback"
+      },
+      {
+        "id": "rollback",
+        "type": "rollback",
+        "connection": "prod-target"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    },
+    {
+      "kind": "approval_granted",
+      "stageId": "signoff"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "deploy"
+    },
+    {
+      "kind": "check_failed",
+      "stageId": "verify",
+      "failures": [
+        "smoke"
+      ]
+    },
+    {
+      "kind": "rolled_back",
+      "stageId": "rollback"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "rolled_back",
+      "currentStageIndex": 5,
+      "stageStatuses": [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "artifactVersions": {
+        "requirements": 1
+      }
+    },
+    "statuses": [
+      "blocked_on_artifact",
+      "blocked_on_approval",
+      "awaiting_execution",
+      "awaiting_execution",
+      "awaiting_execution",
+      "rolled_back"
+    ]
+  }
+}

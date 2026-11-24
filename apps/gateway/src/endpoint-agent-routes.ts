@@ -15,6 +15,8 @@
  *   POST /v1/endpoint-agent/credentials         the agent's self token; key rotation (ADR-0188 S7 point 4)
  *   GET  /v1/endpoint-agent/config              the agent's self token; 503 until a signed collection pack exists
  *   POST /v1/endpoint-agent/reports             the agent's self token + Content-Digest + report signature
+ *   GET  /v1/endpoint-agent/directives          the agent's self token; ADR-0331 signed removal directives (503 unsigned)
+ *   POST /v1/endpoint-agent/directive-outcomes  the agent's self token; ADR-0331 outcomes, one per directive
  *
  *   POST /v1/discovery/sources/:sourceId/enrolment-tokens     admin: issue (capped, 30 days at most; up to 90 only
  *                                                             with a `settings_relax` step-up, ADR-0197 Q13; shown once)
@@ -65,6 +67,7 @@ import {
   discoverySources,
   endpointAgentIdentities,
   endpointAgentReports,
+  endpointDeviceGroupMembers,
   endpointDevices,
   endpointEnrolmentTokens,
   eq,
@@ -99,6 +102,7 @@ import {
   ENDPOINT_ENROL_FILE_SCHEMA,
   ENDPOINT_REPORT_MAX_BYTES,
   ENDPOINT_REPORT_SIGNATURE_HEADER,
+  ENDPOINT_REPORT_SIGNATURE_TYP,
   ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS,
   ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS,
   ENDPOINT_REPORTS_PER_RUN,
@@ -125,16 +129,41 @@ import { bindPreparedCredentialTx, IdentityAdminError, revokeWorkloadIdentity } 
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { MCP_CONFIG_KIND, recordMcpServers } from "./endpoint-mcp-config.js";
+import { registerEndpointDirectiveRoutes, type DirectiveSigner } from "./endpoint-addon-removal.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
+import { decisionBatchSchema, ENDPOINT_DECISIONS_MAX_BYTES, ENDPOINT_DECISIONS_SIGNATURE_HEADER, ENDPOINT_DECISIONS_SIGNATURE_TYP, ingestDecisionBatch } from "./endpoint-decisions.js";
 import { hashToken } from "./token-hash.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 /** a request body for the two enrolment routes is small */
 const ENROL_BODY_LIMIT = 16 * 1024;
+
+/** what differs between the agent's two signed body routes (the check itself is `signedUpload`, one copy) */
+type SignedUploadKind = {
+  header: string;
+  typ: string;
+  idClaim: "snapshotId" | "batchId";
+  replayPrefix: string;
+  codes: Partial<Record<"invalid_report_signature" | "report_signature_stale" | "content_digest_mismatch", string>> & { replayed: string };
+};
+const SIGNED_REPORT: SignedUploadKind = {
+  header: ENDPOINT_REPORT_SIGNATURE_HEADER,
+  typ: ENDPOINT_REPORT_SIGNATURE_TYP,
+  idClaim: "snapshotId",
+  replayPrefix: "endpoint-report",
+  codes: { replayed: "report_replayed" },
+};
+const SIGNED_DECISIONS: SignedUploadKind = {
+  header: ENDPOINT_DECISIONS_SIGNATURE_HEADER,
+  typ: ENDPOINT_DECISIONS_SIGNATURE_TYP,
+  idClaim: "batchId",
+  replayPrefix: "endpoint-decisions",
+  codes: { invalid_report_signature: "invalid_decisions_signature", report_signature_stale: "decisions_signature_stale", replayed: "decisions_replayed" },
+};
 export const ENDPOINT_AGENT_INGEST_JOB_NAME = "endpoint-agent-ingest";
 const DEVICES_LISTED = 500;
 
-type AuditObject = "discovery_source" | "discovery_run" | "workload_identity";
+type AuditObject = "discovery_source" | "discovery_run" | "workload_identity" | "endpoint_device";
 
 async function audit(db: Db, actor: string, objectType: AuditObject, objectId: string | null, ruleId: string, effect: "allow" | "deny", reason: string, detail: Record<string, unknown>) {
   await db.insert(auditLog).values({
@@ -442,6 +471,9 @@ function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
     revokedAt: t.revokedAt?.toISOString() ?? null,
     /** ADR-0197 Q13: true when an admin relaxed the 30-day expiry for this token (step-up, audited) */
     expiryRelaxed: t.expiryRelaxationStepUp !== null,
+    /** ADR-0360 §5: a one-line enrolment token (one device, at most 60 minutes) and the group it places its device in */
+    singleUse: t.singleUse,
+    deviceGroupId: t.deviceGroupId,
   };
 }
 
@@ -479,7 +511,11 @@ async function revokeDeviceTx(t: Db, deviceId: string, actorId: string, revokedB
   return { device, identitiesRevoked, tokensRevoked };
 }
 
-export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; registry?: ScannerRegistry } = {}): void {
+export function registerEndpointAgentRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string | undefined; registry?: ScannerRegistry; directiveSigner?: DirectiveSigner | null | undefined } = {},
+): void {
   const registry = opts.registry ?? DISCOVERY_SCANNERS;
 
   // ---- the agent's routes: raw bodies (the report digest covers the exact bytes) -------------------------------
@@ -566,6 +602,11 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
             identityCap: ENDPOINT_TICKET_IDENTITY_CAP,
           })
           .returning();
+        // ADR-0360 §5: a one-line token places its device in the token's ADR-0350 group (only narrows its policy; the
+        // INSERT policy admits exactly this row: a live device whose single-use token names the group)
+        if (locked.row.deviceGroupId) {
+          await t.insert(endpointDeviceGroupMembers).values({ deviceId: row!.id, groupId: locked.row.deviceGroupId, addedBy: locked.row.createdBy }).onConflictDoNothing();
+        }
         await recordPseudonyms(t, dataKey, [device]);
         await audit(t, NIL_UUID, "discovery_source", source.id, "endpoint-enrolment-ticket-issued", "allow", `an endpoint agent device ticket was issued under enrolment token ${token.id} (ADR-0195 SD4b)`, {
           tokenId: token.id,
@@ -575,6 +616,7 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
           arch: body.arch,
           devicesEnrolled: enrolled,
           deviceCap: locked.row.deviceCap,
+          ...(locked.row.singleUse ? { singleUse: true, deviceGroupId: locked.row.deviceGroupId } : {}),
         });
         // R15 cap alerting: crossing 80 % and reaching 100 % of the cap each write their own row
         for (const f of ENDPOINT_CAP_ALERT_FRACTIONS) {
@@ -700,6 +742,43 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
       return reply.status(201).send({ identityId, clientId });
     });
 
+    /**
+     * The one signed-upload check of the agent's body routes (reports, decision batches): the caller's bound device
+     * key, the RFC 9530 digest and the route's own JWS (typ, audience, id claim) checked against the database clock,
+     * then one use per signature in the replay store under the route's prefix. Refusals keep each route's fixed codes.
+     */
+    const signedUpload = async (
+      req: FastifyRequest,
+      agent: EndpointAgentContext,
+      raw: Buffer,
+      o: { path: string; issuer: string; id: string } & SignedUploadKind,
+    ): Promise<{ ok: true; now: Date } | { ok: false; status: number; code: string }> => {
+      const [cred] = await db
+        .select({ publicJwk: workloadCredentials.publicJwk, jwkThumbprint: workloadCredentials.jwkThumbprint })
+        .from(workloadCredentials)
+        .where(and(eq(workloadCredentials.id, req.authCtx.workloadCredentialId!), eq(workloadCredentials.identityId, agent.identityId)));
+      if (!cred?.publicJwk || !cred.jwkThumbprint || (cred.publicJwk as Record<string, string>).kty !== "EC") return { ok: false, status: 401, code: "invalid_token" };
+      const now = await databaseNow(db);
+      const header = (name: string) => (typeof req.headers[name] === "string" ? (req.headers[name] as string) : undefined);
+      const sig = await verifyReportSignature({
+        signature: header(o.header),
+        contentDigestHeader: header(CONTENT_DIGEST_HEADER),
+        rawBody: raw,
+        publicJwk: cred.publicJwk as Record<string, string>,
+        thumbprint: cred.jwkThumbprint,
+        audience: `${o.issuer}${o.path}`,
+        snapshotId: o.id,
+        now,
+        typ: o.typ,
+        idClaim: o.idClaim,
+      });
+      if (!sig.ok) return { ok: false, status: 400, code: o.codes[sig.code] ?? sig.code };
+      // one use per signature (decision 14's replay store, keyed apart from client assertions by its prefix)
+      const expires = new Date((sig.iat + ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS + ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS) * 1000);
+      if (!(await claimReplay(db, "client_assertion", `${o.replayPrefix}:${cred.jwkThumbprint}:${sig.jti}`, expires))) return { ok: false, status: 400, code: o.codes.replayed };
+      return { ok: true, now };
+    };
+
     // the device of a token route's caller, or the reply already sent
     const agentOf = async (req: FastifyRequest, reply: FastifyReply): Promise<EndpointAgentContext | null> => {
       const identityId = req.authCtx.workloadIdentityId;
@@ -727,6 +806,15 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
       // the collection pack is signed under its own key (ADR-0195 SD4 decisions); that key and the signing stage do
       // not exist yet, and an unsigned pack is never served (the agent refuses one anyway)
       return refuse(reply, 503, "collection_pack_unavailable");
+    });
+
+    // -- ADR-0331: signed add-on removal directives and their outcomes (endpoint-addon-removal.ts) ----------------
+    registerEndpointDirectiveRoutes(scope, db, {
+      agentOf,
+      audit: (t, sourceId, ruleId, effect, reason, detail) => audit(t, NIL_UUID, "discovery_source", sourceId, ruleId, effect, reason, { adr: "0331", ...detail }),
+      refuse,
+      jsonOf,
+      signer: opts.directiveSigner,
     });
 
     // -- key rotation (ADR-0188 S7 point 4) -----------------------------------------------------------------------
@@ -780,26 +868,9 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
       if (!parsed.success || !isUuidV4(parsed.data.snapshotId)) return refusedWith(400, "invalid_body");
       const report = parsed.data;
       if (report.os !== agent.os || report.arch !== agent.arch) return refusedWith(409, "device_mismatch");
-      const [cred] = await db
-        .select({ publicJwk: workloadCredentials.publicJwk, jwkThumbprint: workloadCredentials.jwkThumbprint })
-        .from(workloadCredentials)
-        .where(and(eq(workloadCredentials.id, req.authCtx.workloadCredentialId!), eq(workloadCredentials.identityId, agent.identityId)));
-      if (!cred?.publicJwk || !cred.jwkThumbprint || (cred.publicJwk as Record<string, string>).kty !== "EC") return refusedWith(401, "invalid_token");
-      const now = await databaseNow(db);
-      const sig = await verifyReportSignature({
-        signature: typeof req.headers[ENDPOINT_REPORT_SIGNATURE_HEADER] === "string" ? (req.headers[ENDPOINT_REPORT_SIGNATURE_HEADER] as string) : undefined,
-        contentDigestHeader: typeof req.headers[CONTENT_DIGEST_HEADER] === "string" ? (req.headers[CONTENT_DIGEST_HEADER] as string) : undefined,
-        rawBody: raw,
-        publicJwk: cred.publicJwk as Record<string, string>,
-        thumbprint: cred.jwkThumbprint,
-        audience: `${issuer}${ENDPOINT_AGENT_PATHS.reports}`,
-        snapshotId: report.snapshotId,
-        now,
-      });
-      if (!sig.ok) return refusedWith(400, sig.code);
-      // one use per signature (decision 14's replay store, keyed apart from client assertions by its prefix)
-      const expires = new Date((sig.iat + ENDPOINT_REPORT_SIGNATURE_MAX_AGE_SECONDS + ENDPOINT_REPORT_SIGNATURE_MAX_FUTURE_SECONDS) * 1000);
-      if (!(await claimReplay(db, "client_assertion", `endpoint-report:${cred.jwkThumbprint}:${sig.jti}`, expires))) return refusedWith(400, "report_replayed");
+      const checked = await signedUpload(req, agent, raw, { path: ENDPOINT_AGENT_PATHS.reports, issuer, id: report.snapshotId, ...SIGNED_REPORT });
+      if (!checked.ok) return refusedWith(checked.status, checked.code);
+      const now = checked.now;
       if (!reportFresh(report.collectedAt, now)) return refusedWith(422, "report_stale");
       // ADR-0259: mcp_config facts count only while the org switch is on; otherwise they are refused, never stored
       const mcpConfigEnabled = (await loadDiscoverySettings(db)).endpointMcpConfig;
@@ -856,6 +927,34 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         await commitPendingEndpointReports(db, source).catch((e: unknown) => req.log.warn({ code: (e as { code?: string }).code ?? "ingest_error" }, "endpoint report merge deferred to the ingest job"));
       }
       return reply.status(202).send({ accepted: true, duplicate: false });
+    });
+
+    // -- hook decisions and managed-file observations (ADR-0310 addendum, lane E1) --------------------------------
+    scope.post(ENDPOINT_AGENT_PATHS.decisions, { bodyLimit: ENDPOINT_DECISIONS_MAX_BYTES }, async (req, reply) => {
+      const agent = await agentOf(req, reply);
+      if (!agent) return reply;
+      const issuer = identityIssuer();
+      if (!issuer) return refuse(reply, 503, "issuer_not_configured");
+      const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      const bodySha256 = createHash("sha256").update(raw).digest("hex");
+      const refusedWith = async (status: number, code: string) => {
+        await audit(db, NIL_UUID, "endpoint_device", agent.deviceId, "endpoint-decision-batch-refused", "deny", `an endpoint decision batch was refused: ${code} (ADR-0310 addendum)`, {
+          code,
+          identityId: agent.identityId,
+          bodySha256,
+        });
+        return refuse(reply, status, code);
+      };
+      const parsed = decisionBatchSchema.safeParse(jsonOf(req.body));
+      if (!parsed.success || !isUuidV4(parsed.data.batchId)) return refusedWith(400, "invalid_body");
+      const batch = parsed.data;
+      const checked = await signedUpload(req, agent, raw, { path: ENDPOINT_AGENT_PATHS.decisions, issuer, id: batch.batchId, ...SIGNED_DECISIONS });
+      if (!checked.ok) return refusedWith(checked.status, checked.code);
+      const out = await ingestDecisionBatch(db, agent, batch, bodySha256, checked.now);
+      // the same batch id with other bytes is not a resend: refused, audited (#1044 review)
+      if (out.outcome === "conflict") return refusedWith(409, "batch_id_conflict");
+      if (out.outcome === "duplicate") return reply.status(202).send({ accepted: true, duplicate: true });
+      return reply.status(202).send({ accepted: true, duplicate: false, audited: out.audited, stale: out.stale, duplicateEvents: out.duplicateEvents });
     });
   });
 

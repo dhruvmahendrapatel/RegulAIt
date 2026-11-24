@@ -96,6 +96,11 @@ export const AI_SAAS_MONITOR_MAX_PAGES_PER_USER = 50;
  * off for weeks) catches up over successive hourly runs instead of failing one oversized window over and over.
  */
 export const AI_SAAS_MONITOR_MAX_WINDOW_MS = 24 * 3600 * 1000;
+/** the narrowest window a run halves down to after runs that hit a per-run bound (review R7 [1]); a window this narrow
+ * that still overflows fails with that bound's code and a sentence saying the floor was reached */
+export const AI_SAAS_MONITOR_MIN_WINDOW_MS = 15 * 60 * 1000;
+/** the run error codes that mean "the window held too much": the next run asks for half as long */
+export const AI_SAAS_MONITOR_WINDOW_LIMIT_CODES = ["interaction_limit", "page_limit"] as const;
 export const AI_SAAS_MONITOR_MAX_INTERACTIONS_PER_RUN = 50_000;
 /** text scanned per interaction; longer text is truncated and the evidence row says so */
 export const AI_SAAS_MONITOR_MAX_TEXT_CHARS = 64 * 1024;
@@ -467,6 +472,8 @@ function claudeBlocksText(blocks: readonly ClaudeBlock[] | null | undefined, dep
   const out: string[] = [];
   if (!blocks || depth > 3) return out;
   for (const b of blocks) {
+    // nested `content` is not schema-checked, so a null or a non-object element is skipped, never dereferenced
+    if (!b || typeof b !== "object") continue;
     if (typeof b.text === "string" && b.text) out.push(b.text);
     if (Array.isArray(b.content)) out.push(...claudeBlocksText(b.content as ClaudeBlock[], depth + 1));
   }
@@ -492,33 +499,8 @@ export function normalizeClaudeMessages(chat: ClaudeChatMessages): MonitoredInte
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// Runs: a declared lifecycle (owner rule 12, 2026-11-17)
+// Runs: the lifecycle is AI_SAAS_MONITOR_RUN_MACHINE in state-machines.ts (ADR-0348, in the STATE_MACHINES registry)
 // --------------------------------------------------------------------------------------------------------------------
-
-export const AI_SAAS_MONITOR_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
-export type AiSaasMonitorRunStatus = (typeof AI_SAAS_MONITOR_RUN_STATUSES)[number];
-
-/** `ai_saas_monitor_runs.status`, declared on the ADR-0348 helper: a run opens `running` and closes once */
-export const AI_SAAS_MONITOR_RUN_MACHINE = defineMachine({
-  id: "ai_saas_monitor_run",
-  stored: "ai_saas_monitor_runs.status",
-  states: AI_SAAS_MONITOR_RUN_STATUSES,
-  initial: ["running", "refused"],
-  terminal: ["succeeded", "failed", "refused"],
-  transitions: {
-    succeed: { from: ["running"], to: "succeeded", by: ["system"], summary: "The window was read and every new interaction recorded; the connector's cursor moved to the window's end." },
-    fail: { from: ["running"], to: "failed", by: ["system"], summary: "The vendor or a bound stopped the run; pages already stored stay, and the cursor did not move." },
-    refuse: { from: ["running"], to: "refused", by: ["system"], summary: "A switch was off or a precondition missing, so nothing was read." },
-  },
-});
-
-/** the event that closes a run in `to` */
-const RUN_CLOSE_EVENT = { succeeded: "succeed", failed: "fail", refused: "refuse" } as const;
-
-/** the states a run may move to `to` from, read off the machine (the finish step's compare-and-set guard) */
-export function aiSaasMonitorRunSources(to: Exclude<AiSaasMonitorRunStatus, "running">): AiSaasMonitorRunStatus[] {
-  return [...AI_SAAS_MONITOR_RUN_MACHINE.sourcesOf(RUN_CLOSE_EVENT[to])];
-}
 
 // --------------------------------------------------------------------------------------------------------------------
 // Remediation (ADR-0361 slice 3): delete a conversation through the vendor API, off by default, approved, audited

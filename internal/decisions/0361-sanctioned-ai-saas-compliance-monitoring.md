@@ -207,7 +207,8 @@ posture read instead of pretending.
 ## As built (slice 1)
 
 - **Files.** `packages/shared/src/ai-saas-monitor.ts` (catalogue, per-vendor config schemas, the Graph response schema,
-  the normaliser, linear text extraction, the run transition table); `apps/gateway/src/ai-saas-connectors.ts` (the
+  the normaliser, linear text extraction); `AI_SAAS_MONITOR_RUN_MACHINE` in `state-machines.ts` (ADR-0348, registered in
+  `STATE_MACHINES`; initial `running` or `refused`); `apps/gateway/src/ai-saas-connectors.ts` (the
   connector contract and the Microsoft 365 Copilot connector); `apps/gateway/src/ai-saas-monitor.ts` (the run, the two
   scheduler jobs, retention, ten admin routes); migration `pending/ai_saas_monitoring.sql`.
 - **Reused, not copied:** `azureCredential` (`@regulait/cloud-discovery`), `entraWriteScope`, `scannerFetch` and
@@ -218,12 +219,27 @@ posture read instead of pretending.
   profiles, else the org default (`block` by default, ADR-0181). It sets the finding's action; `redact` counts as `warn`.
 - **Step-ups** (`settings_relax`): turning the policy on, turning content capture to `redacted` (separately), storing or
   rotating a credential, enabling a connector, and widening an enabled connector's configuration (more users, every
-  user, fewer app-class filters, more backfill). Revoking a credential and every narrowing need none.
+  user, fewer app-class filters, more backfill), and on any connector a tag change that shortens the tags' retention or
+  makes the PII action less strict (both values are audited). Revoking a credential and every narrowing need none.
 - **Data-key rotation.** Both ciphertext columns are in `CIPHERTEXT_COLUMNS`. The evidence guard lets the re-encryption
   walk rewrite `content_ciphertext` alone (the 0142 `regulait.secret_reencrypt` flag, every other column unchanged).
 - **Window.** A run resumes exactly where the last success ended and spans at most one day (cap 50,000 interactions),
   so a large tenant, a 30-day backfill or a connector that was off for months catches up over successive hourly runs
-  and never skips a gap. A run that still hits the cap fails without advancing, as §7 says.
+  and never skips a gap. A run that still hits a per-run bound (the interaction cap, or the per-user page cap) fails
+  without advancing, as §7 says, and records the window it asked for; each such failure since the last success halves
+  the next window, down to a 15-minute floor, and a success resets it. A window that overflows even at the floor fails
+  with that bound's code and says so.
+- **Reads of captured text** are audited: one row per page that returned any redacted text (who, which connector,
+  which interaction ids, never the text). Manual runs are limited to six a minute per admin (`SharedRateLimitStore`,
+  503 when the limit cannot be checked).
+- **Guided setup** (owner decision D-2026-11-22-06, in the orchestration DecisionLog): `GET …/connectors/:id/setup`
+  returns the Microsoft 365 Copilot checklist as data for the UI. It covers the app registration, read-only Graph
+  permissions, the redirect URI, tenant-wide admin consent (the Microsoft identity platform v2.0 `adminconsent` link
+  with the Graph `.default` scope, returning to the deployment's public URL), the client secret, the two egress hosts,
+  the two switches, and whether interactions arrive. Each step's state is read from what RegulAIt sees: the token's
+  roles on the last run, the stored credential, the allow-list and the last finished run. Nothing is fetched from the
+  vendor for it, and a step RegulAIt cannot check is `unknown`, never `done`. The checklist screen is a KNOWN_UI_GAPS
+  entry for #453.
 - **Not built in slice 1:** the ADR-0220 trained detectors on monitored text; a federated (client-assertion) Entra
   credential (the secret path only, the same `azureCredential` supports both); ChatGPT Enterprise and Claude Enterprise
   (slice 2); remediation (slice 3).
@@ -240,20 +256,31 @@ Verified against the vendors' own documentation on 2026-11-17: OpenAI's Admin AP
 - **ChatGPT Enterprise.** `GET …/logs?event_type=CONVERSATION_MESSAGE&after=&before=&limit=100`, paged by
   `last_end_time` while `has_more`; each file `GET …/logs/{id}` answers 307 to a short-lived signed URL. The guarded
   fetch gained one opt-in, `returnRedirects` (default off for every other caller): it hands the 307 back with only its
-  `Location`, never following it. The connector checks the target is plain https, registers the signed URL as a
-  secret, and re-requests it through the same guard **without our key**. OpenAI does not document the storage host, so
-  a run that meets an unlisted one fails `egress_refused` naming that host for the admin to allow-list. The file's
-  listed SHA-256 is checked before any record is written. Only `CONVERSATION_MESSAGE` records are kept; the idempotency
-  key is `event_id` (delivery is at least once). Spacing 700 ms (100 requests a minute per route).
+  `Location`, never following it. Only this download uses it: a connector that declares `signedRedirectDownload` gets a
+  second guarded fetch with the opt-in, and every other request of every connector, the M365 token request included,
+  still refuses a redirect (review #985 R2 [1]). The connector checks the target is plain https, registers the signed
+  URL as a secret, and re-requests it through the same guard **without our key**. OpenAI does not document the storage
+  host, so a run that meets an unlisted one fails `egress_refused` naming that host for the admin to allow-list. A file
+  is read whole, up to 128 MiB (its listed size is checked first, and a larger one fails `response_too_large` saying a
+  shorter window cannot split it); its listed SHA-256 is checked over the bytes before any record is written. Only
+  `CONVERSATION_MESSAGE` records are kept; the idempotency key is `event_id` (delivery is at least once). Spacing 700 ms
+  (100 requests a minute per route).
 - **Claude Enterprise.** Org-wide polling as Anthropic documents it: `order_by=updated_at`, `updated_at.gte/lt` on the
   window, `after_id` paging, optional `organization_ids[]` (a user filter is rejected with `updated_at` windows). Each
-  chat's messages are read with `after_id` paging; text blocks and the text inside tool results are scanned; a message
-  created after the window waits for the next run. The actor is the chat's user (Anthropic records it on the chat).
+  chat's messages are read with `after_id` paging; text blocks and the text inside tool results are scanned. Only
+  messages inside the window (less five minutes of settling slack) are kept: one created after it waits for the next
+  run, and one before it was read by an earlier run. Pages wholly outside the window have their own, higher cap, so a
+  long-lived chat cannot exhaust the in-window cap on every run (review #985 R2 [3]). The actor is the chat's user (Anthropic records it on the chat).
   Spacing 150 ms (600 a minute per parent organization, shared by every key).
 - **Read-only attestation.** Neither vendor offers a probe of a key's scopes, so the catalogue marks them
   `scopeVerifiable: false` and storing such a credential needs `attestReadOnly: true` (the admin attests the key holds
   only the read scope named in the catalogue, not `compliance_export` delete or `delete:compliance_user_data`), audited
   with the credential row. The posture stays `unverified`.
+- **Scope widening is per connector.** Each connector declares `configWidens` (required by the contract, so a new one
+  cannot forget its scope fields). ChatGPT: any change of `principal` or `principalId`. Claude: a non-empty
+  `organizationIds` becoming empty (org-wide) or gaining an organization. M365: every user, an added user, a dropped
+  app-class filter. All three: a longer backfill. On an enabled connector a widening needs a `settings_relax` step-up
+  and is audited `widened: true` (review #985 S4 [1]).
 - **Open source** (ADR-0176): no maintained, permissively licensed client exists for either API (an Anthropic Python
   SDK is GPL-3.0; another client has no licence; OpenAI ships only Bash and PowerShell scripts), so both are thin
   guarded-fetch clients against the vendor spec.

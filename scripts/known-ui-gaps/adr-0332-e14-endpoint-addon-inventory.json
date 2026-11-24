@@ -1,0 +1,10 @@
+{
+  "adr": "ADR-0332",
+  "lane": "E14",
+  "tracking": "ADR-0332 (lane E14): master brief for lane E14 (2026-11-15): the inventory is API-only and the UI builder builds its screen; KNOWN_UI_GAPS entries point at #453 (screen brief in PR #866)",
+  "gaps": {
+    "GET /v1/endpoint-addons/versions": "lists each AI add-on version seen on endpoints with its admission-scan verdict for that exact content digest (not yet scanned is never clear)",
+    "GET /v1/endpoint-addons/sightings": "lists each add-on version per endpoint and detection source, with first/last seen, risk flags and secret types (never a value)",
+    "GET /v1/endpoint-addons/flagged": "lists the endpoint add-on sightings flagged at or above a severity (the removal-directive and detection contract)"
+  }
+}

@@ -15,6 +15,7 @@ import {
   aiSaasMonitorConnectors,
   aiSaasMonitorCredentials,
   aiSaasMonitorPolicy,
+  aiSaasMonitorRuns,
   and,
   auditLog,
   complianceProfiles,
@@ -26,7 +27,17 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { runAiSaasEvidenceRetentionSweep, runAiSaasMonitorSweep, AI_SAAS_RULE_IDS } from "./ai-saas-monitor.js";
+import {
+  AI_SAAS_MONITOR_MANUAL_RUNS_PER_MINUTE,
+  AI_SAAS_RULE_IDS,
+  cascadeForTags,
+  cascadeLoosens,
+  runAiSaasEvidenceRetentionSweep,
+  runAiSaasMonitor,
+  runAiSaasMonitorSweep,
+} from "./ai-saas-monitor.js";
+import { ConnectorError, type ComplianceConnector } from "./ai-saas-connectors.js";
+import { encryptSecret } from "./secrets.js";
 import { retentionFloor } from "./org-settings.js";
 import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -242,6 +253,9 @@ describe("ADR-0361 a run: evidence, findings, audit", () => {
     expect(listed.statusCode).toBe(200);
     expect(listed.json().interactions.map((i: { id: string }) => i.id)).toContain(p1.id);
     expect(listed.body).not.toContain(`jane.doe.${RUN}`);
+    // with capture off nothing returned text, so the read is not a content read and writes no audit row
+    const reads = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, AI_SAAS_RULE_IDS.interactionContentRead), eq(auditLog.objectId, connectorId)));
+    expect(reads).toHaveLength(0);
   });
 
   it("a re-run of an overlapping window writes nothing twice", async () => {
@@ -262,6 +276,11 @@ describe("ADR-0361 a run: evidence, findings, audit", () => {
     const listed = await app.inject({ method: "GET", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/interactions`, headers: KEY });
     const p3 = listed.json().interactions.find((i: { id: string }) => i.id === row!.id);
     expect(p3.redactedContent).toBe("call me on [EMAIL] tomorrow");
+    // reading captured text is audited: who read which interactions, never the text (review R7 [4], security S1)
+    const [read] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, AI_SAAS_RULE_IDS.interactionContentRead), eq(auditLog.objectId, connectorId))).limit(1);
+    expect(read?.userId).toBe(adminId);
+    expect(JSON.stringify(read)).toContain(row!.id);
+    expect(JSON.stringify(read)).not.toContain("tomorrow");
   });
 
   it("the evidence is append-only: no update, no delete, no truncate", async () => {
@@ -352,5 +371,117 @@ describe("ADR-0361 retention follows the compliance cascade", () => {
     expect(left.map((l) => l.v)).toEqual([`${RUN}-ret-recent`]);
     const [a] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, AI_SAAS_RULE_IDS.retentionPurged), eq(auditLog.objectId, connectorId))).limit(1);
     expect(a?.reason).toContain(`retention ${days}d`);
+  });
+});
+
+describe("ADR-0361 review fixes", () => {
+  it("removing a tag that holds retention is a step-up, and the audit row names both values (review R7 [3])", async () => {
+    const before = await cascadeForTags(db, [TAG]);
+    const after = await cascadeForTags(db, []);
+    const loosens = cascadeLoosens(before, after);
+    expect(loosens).toContain("retention"); // the tag's 400 days are gone
+    const payload = { config, complianceTags: [], reason: "drop the profile" };
+    const plain = await app.inject({ method: "PUT", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/config`, headers: KEY, payload });
+    expect(plain.statusCode).toBe(403);
+    const [tagsStill] = await db.select().from(aiSaasMonitorConnectorTags).where(eq(aiSaasMonitorConnectorTags.connectorId, connectorId));
+    expect(tagsStill?.profileTag).toBe(TAG);
+    const s = await stepped({ aiSaasConnector: connectorId, values: { cascade: loosens } });
+    const ok = await app.inject({ method: "PUT", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/config`, ...s, payload });
+    expect(ok.statusCode, ok.body).toBe(200);
+    const rows = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, AI_SAAS_RULE_IDS.connectorConfigured), eq(auditLog.objectId, connectorId)));
+    const last = rows.find((r) => JSON.stringify(r).includes("drop the profile"));
+    expect((last?.detail as { retentionDays?: unknown } | undefined)?.retentionDays).toEqual({ from: 400, to: null });
+    // putting the tag back keeps evidence longer; it needs a step-up only if it also makes the PII action less strict
+    const back = cascadeLoosens(after, before);
+    const s2 = back ? await stepped({ aiSaasConnector: connectorId, values: { cascade: back } }) : { headers: KEY };
+    const restored = await app.inject({ method: "PUT", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/config`, ...s2, payload: { config, complianceTags: [TAG], reason: "restore the profile" } });
+    expect(restored.statusCode, restored.body).toBe(200);
+  });
+
+  it("a window that holds too much is halved on each bounded failure, then advances (review R7 [1])", async () => {
+    const spans: number[] = [];
+    const stub: ComplianceConnector = {
+      vendor: "m365_copilot",
+      validateConfig: () => null,
+      authorise: async () => ({ scope: "read_only", permissions: [], headers: {} }),
+      async *listInteractions(_ctx: unknown, _auth: unknown, w: { start: Date; end: Date }) {
+        const span = w.end.getTime() - w.start.getTime();
+        spans.push(span);
+        if (span > 3 * 3600_000) throw new ConnectorError("page_limit", "one user had too many pages in the window");
+        yield { unit: USER_A, interactions: [] };
+      },
+    } as unknown as ComplianceConnector;
+    const [c] = await db.insert(aiSaasMonitorConnectors).values({ vendor: "m365_copilot", name: `adr0361-${RUN}-window`, enabled: true, publicConfig: config }).returning();
+    await db.insert(aiSaasMonitorCredentials).values({ connectorId: c!.id, secretCiphertext: encryptSecret(DATA_KEY, SECRET), scopePosture: "read_only" });
+    await db.update(aiSaasMonitorPolicy).set({ enabled: true });
+    try {
+      const deps = { connectors: new Map([["m365_copilot", stub]]) as never };
+      const statuses: string[] = [];
+      for (let i = 0; i < 4; i++) statuses.push((await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps })).status);
+      expect(statuses).toEqual(["failed", "failed", "failed", "succeeded"]);
+      expect(spans).toEqual([24, 12, 6, 3].map((h) => h * 3600_000));
+      const runs = await db.select().from(aiSaasMonitorRuns).where(eq(aiSaasMonitorRuns.connectorId, c!.id));
+      // a failed run records the window it asked for, so the narrowing is visible
+      expect(runs.filter((r) => r.status === "failed").every((r) => r.windowStart !== null && r.errorCode === "page_limit")).toBe(true);
+      const [after] = await db.select().from(aiSaasMonitorConnectors).where(eq(aiSaasMonitorConnectors.id, c!.id));
+      const ok = runs.find((r) => r.status === "succeeded")!;
+      expect(after!.monitoredThrough?.getTime()).toBe(ok.windowEnd!.getTime());
+      // a success resets the span
+      await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps });
+      expect(spans[4]).toBe(24 * 3600_000);
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false });
+      await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, c!.id));
+    }
+  });
+
+  it("a 3xx from the Entra token endpoint is still refused, so the client secret is never re-sent (review #985 R2 [1])", async () => {
+    const stolen: string[] = [];
+    // the redirect target is an allow-listed host, so only the guard's redirect refusal stands between it and the secret
+    const redirecting = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname.startsWith("/stolen")) stolen.push(url.toString());
+      if (url.hostname === "login.microsoftonline.com" && url.pathname.endsWith("/oauth2/v2.0/token")) {
+        return new Response(null, { status: 307, headers: { location: "https://graph.microsoft.com/stolen/token" } });
+      }
+      return fakeFetch(input, init);
+    }) as typeof fetch;
+    const [c] = await db.insert(aiSaasMonitorConnectors).values({ vendor: "m365_copilot", name: `adr0361-${RUN}-redirect`, enabled: true, publicConfig: config }).returning();
+    await db.insert(aiSaasMonitorCredentials).values({ connectorId: c!.id, secretCiphertext: encryptSecret(DATA_KEY, SECRET), scopePosture: "read_only" });
+    await db.update(aiSaasMonitorPolicy).set({ enabled: true });
+    try {
+      const run = await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps: { fetchImpl: redirecting, resolve } });
+      expect(run.status).toBe("failed");
+      const [row] = await db.select().from(aiSaasMonitorRuns).where(eq(aiSaasMonitorRuns.connectorId, c!.id));
+      expect(["token_failed", "egress_refused"]).toContain(row!.errorCode);
+      expect(stolen).toEqual([]);
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false });
+      await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, c!.id));
+    }
+  });
+
+  it("serves the guided M365 setup checklist to an admin, and no secret (D-2026-11-22-06)", async () => {
+    const res = await app.inject({ method: "GET", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/setup`, headers: KEY });
+    expect(res.statusCode, res.body).toBe(200);
+    const setup = res.json().setup;
+    expect(setup.vendor).toBe("m365_copilot");
+    const ids = setup.steps.map((st: { id: string }) => st.id);
+    expect(ids).toEqual(expect.arrayContaining(["register_app", "api_permissions", "admin_consent", "client_secret", "egress", "turn_on", "data_flowing"]));
+    // this file allowed both hosts
+    expect(setup.steps.find((st: { id: string }) => st.id === "egress").state).toBe("done");
+    expect(res.body).not.toContain(SECRET);
+  });
+
+  it("manual runs are rate limited per admin (security S2)", async () => {
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0361-limit-${RUN}@example.com`, displayName: "limit admin", isAdmin: true } });
+    const k = await app.inject({ method: "POST", url: `/v1/users/${u.json().id}/keys`, headers: AUTH, payload: { name: "limit" } });
+    const headers = { authorization: `Bearer ${k.json().token}` };
+    const codes: number[] = [];
+    for (let i = 0; i <= AI_SAAS_MONITOR_MANUAL_RUNS_PER_MINUTE; i++) {
+      codes.push((await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/runs`, headers })).statusCode);
+    }
+    expect(codes.slice(0, -1).every((c) => c !== 429)).toBe(true);
+    expect(codes.at(-1)).toBe(429);
   });
 });

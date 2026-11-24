@@ -509,6 +509,21 @@ describe("6. the covered / NOT-covered inventory", () => {
     "engine_runners.revoke_reason",
     // ADR-0217: an automatic re-test's reason
     "mrm_retest_runs.reason",
+    // ADR-0331: the admin's reason for removing an MCP server from endpoints
+    "endpoint_addon_removals.reason",
+    // ADR-0338: the admin's reason for a vendor agent control action
+    "vendor_agent_actions.reason",
+    // ADR-0313: the admin's note on a paid-call price
+    "paid_call_prices.note",
+    // ADR-0337 §5: a SaaS finding review's reason and its rendered rationale; a reader's usage note
+    "saas_finding_reviews.reason",
+    "saas_finding_reviews.rationale",
+    "saas_entitlement_usage_reads.note",
+    // ADR-0366: a builder agent's halt reason and a containment's release reason
+    "builder_agents.halted_reason",
+    "agent_containments.release_reason",
+    "agent_containments.explanation",
+    "virtual_keys.halted_reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -531,6 +546,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",
     "approval_delegations.reason",
+    // ADR-0350 (lane E31): per-device command-rule exceptions
+    "endpoint_command_exceptions.reason",
+    "endpoint_command_exceptions.decision_reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",
@@ -540,6 +558,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "config_canary_observations.failure_reason",
     "config_canary_observations.served_reason",
     "connector_revocations.reason",
+    "a2a_agent_revocations.reason",
+    // ADR-0327 addendum — a decision-table version's proposal reason
+    "decision_table_versions.reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
     "connectors.disabled_reason",
     "copilot_proposals.rationale",
@@ -577,6 +598,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "redteam_runs.gate_reason",
     "redteam_runs.note",
     "remediation_proposals.rationale",
+    // ADR-0327 slice 4a — a rule-step switch request's reason and revert reason
+    "rule_step_switches.reason",
+    "rule_step_switches.revert_reason",
     "shadow_ai_findings.disposition_reason",
     "shadow_ai_findings.replacement_note",
     "shadow_ai_imports.reason",
@@ -602,6 +626,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
+    // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
+    "agent_identity_links.note",
+    "agent_identity_links.decision_note",
     "vendor_account_aliases.reason",
     "vendor_domain_rules.reason",
     "workflow_templates.retired_reason",
@@ -646,6 +674,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",
+    // ADR-0359 (lane E40)
+    "behaviour_anomaly_findings.explanation",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {
@@ -665,6 +695,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "fairness_datasets.purge_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
+      // ADR-0313: a CHECK-constrained three-member release code
+      "paid_call_holds.release_reason",
       "risk_acceptances.compensating_controls",
       "trace_retention_holds.release_reason",
       "usage_events.stop_reason",
