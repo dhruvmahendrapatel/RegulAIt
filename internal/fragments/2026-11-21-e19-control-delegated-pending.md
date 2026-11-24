@@ -10,8 +10,7 @@ Remaining:
   delegated sign-in against a real Entra app registration (its redirect URI must name the gateway's
   `/v1/discovery/control-credential/delegated/callback`). Until then every control credential reports
   `controlScope: unverified`.
-- **#1160 (triage-low): no sweep.** Final `vendor_control_delegated_requests` rows are not deleted; each is a few
-  hundred bytes and holds no secret (CHECKs tie the verifier and the held token to the open states). A sign-in that is
-  never completed keeps its encrypted verifier until the request is next read (then it expires) or its source is
-  deleted.
+- **#1160 (triage-low): final rows are kept.** Final `vendor_control_delegated_requests` rows are not deleted; each is
+  a few hundred bytes, holds no secret (CHECKs tie the verifier and the held token to the open states) and is the
+  two-person evidence. Open rows past their window are expired by the `vendor-control-delegated-expiry-sweep` job.
 - **Screen.** The admin screen is on #453.

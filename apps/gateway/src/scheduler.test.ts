@@ -36,6 +36,7 @@ import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegis
 import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
 import { AGENT_RISK_PROOF_JOB_NAME } from "./agent-risk-proof-runner.js"; // ADR-0345 slice 2a
 import { ROBOT_RUN_STALE_SWEEP_JOB_NAME } from "./robot-runs.js"; // ADR-0364 S3
+import { VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME } from "./vendor-agent-control-delegated.js"; // ADR-0338 slice 1c
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -853,6 +854,9 @@ describe("every sweep is registered", () => {
         // evidence retention (nothing with no floor); driven end to end in zz-adr0361-ai-saas-monitoring.test.ts
         SCHEDULER_JOB_NAMES.aiSaasMonitorSweep,
         SCHEDULER_JOB_NAMES.aiSaasEvidenceRetentionSweep,
+        // ADR-0338 slice 1c (lane E19): expires delegated control sign-ins and destroys what they held; driven in
+        // zz-adr0338-1c-delegated.test.ts
+        VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

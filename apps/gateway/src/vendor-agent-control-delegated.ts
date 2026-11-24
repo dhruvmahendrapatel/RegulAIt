@@ -34,6 +34,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ConfidentialClientApplication, CryptoProvider, LogLevel, type AuthenticationResult, type INetworkModule, type NetworkRequestOptions, type NetworkResponse } from "@azure/msal-node";
+import * as oauth from "oauth4webapi";
 import {
   and,
   approvals,
@@ -44,6 +45,7 @@ import {
   eq,
   inArray,
   isNull,
+  runWithRlsSystem,
   sql,
   users,
   vendorControlDelegatedRequests,
@@ -61,6 +63,7 @@ import {
   type DiscoverySourceKind,
 } from "@regulait/shared";
 import { allowListedFetch } from "./agent-platform-endpoints.js";
+import { readCookie, requestIsSecure, ssoBindingCookie, ssoBindingMatches, ssoBrowserBinding } from "./auth.js";
 import { loadApprovalPool, requestedAtOf } from "./approval-pool.js";
 import { errMessage } from "./err-serializer.js";
 import { federationTokenMinter } from "./federation-signing-keys.js";
@@ -68,6 +71,7 @@ import { deploymentBaseUrl } from "./public-url.js";
 import { whereFrom } from "./state-transition.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
+import type { SchedulerJobDefinition } from "./scheduler.js";
 import type { VendorAgentControl } from "./vendor-agent-control-contract.js";
 
 export const ENTRA_AUTHORITY_HOST = "https://login.microsoftonline.com";
@@ -176,13 +180,56 @@ const aadCode = (err: unknown) => /AADSTS[0-9]{5,7}/.exec(errMessage(err))?.[0];
 const defaultFederationToken = (dataKey: string | undefined) => (db: Db, sourceId: string) =>
   federationTokenMinter(db, { dataKey, subject: vendorAgentControlSubject(sourceId), allowedAudiences: [FEDERATION_AUDIENCES.azure] });
 
-/** the account a token is for, from the token endpoint's own ID token */
-function accountOf(result: AuthenticationResult): { tenantId: string; objectId: string; upn: string } | null {
-  const c = (result.idTokenClaims ?? {}) as Record<string, unknown>;
-  const tid = typeof c.tid === "string" ? c.tid.toLowerCase() : "";
-  const oid = typeof c.oid === "string" ? c.oid.toLowerCase() : "";
-  const upn = typeof c.preferred_username === "string" ? c.preferred_username.toLowerCase() : typeof c.upn === "string" ? c.upn.toLowerCase() : "";
-  return GUID.test(tid) && GUID.test(oid) && upn ? { tenantId: tid, objectId: oid, upn } : null;
+/**
+ * The token endpoint's answer, validated by oauth4webapi (ADR-0176: the library's OIDC Core §3.1.3.7 checks, never
+ * hand-written ones): the ID token's `iss` is this tenant's v2.0 issuer, `aud` is the app, `exp`/`iat` are current and,
+ * on a code redemption, `nonce` is the request's. Its signature is not checked because it came straight from the token
+ * endpoint over TLS (§3.1.3.7 item 6), which is also why no JWKS is fetched (air-gap, one egress call). The granted
+ * scopes must include the control's delegated scope. Answers the validated claims.
+ */
+export async function validatedTokenResponse(
+  result: AuthenticationResult,
+  want: { tenantId: string; clientId: string; scope: string; nonce?: string },
+): Promise<Record<string, unknown>> {
+  if (!result.idToken) throw new DelegatedTokenError("delegated_id_token_missing", "Entra returned no ID token, so the account cannot be established");
+  const granted = (result.scopes ?? []).map((x) => x.toLowerCase());
+  if (!granted.includes(want.scope.toLowerCase())) {
+    throw new DelegatedTokenError("delegated_scope_not_granted", "Entra did not grant the control's delegated scope");
+  }
+  const as: oauth.AuthorizationServer = { issuer: `${ENTRA_AUTHORITY_HOST}/${want.tenantId}/v2.0` };
+  const client: oauth.Client = { client_id: want.clientId };
+  // the same JSON the token endpoint sent, re-presented to the library's response processor
+  const response = new Response(
+    JSON.stringify({ access_token: result.accessToken || "unused", token_type: "Bearer", id_token: result.idToken, scope: (result.scopes ?? []).join(" ") }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const processed =
+      want.nonce !== undefined
+        ? await oauth.processAuthorizationCodeResponse(as, client, response, { expectedNonce: want.nonce, requireIdToken: true })
+        : await oauth.processRefreshTokenResponse(as, client, response);
+    const claims = oauth.getValidatedIdTokenClaims(processed);
+    if (!claims) throw new Error("no validated ID token");
+    return claims as Record<string, unknown>;
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    throw new DelegatedTokenError("delegated_id_token_invalid", `the ID token failed validation${typeof code === "string" ? ` (${code})` : ""}`);
+  }
+}
+
+/**
+ * The account a validated token is for: matched on the immutable `tid` and `oid` (never `preferred_username`, which
+ * Microsoft documents as mutable and not for authorization). A guest (another home tenant: `acct` = 1, or an `idp`
+ * that is not this tenant's issuer) is refused, so a same-UPN guest can never stand in for the named member account.
+ */
+function accountOf(claims: Record<string, unknown>, tenantId: string): { tenantId: string; objectId: string; upn: string | null } | null {
+  const tid = typeof claims.tid === "string" ? claims.tid.toLowerCase() : "";
+  const oid = typeof claims.oid === "string" ? claims.oid.toLowerCase() : "";
+  if (!GUID.test(tid) || !GUID.test(oid)) return null;
+  const guest = claims.acct === 1 || claims.acct === "1" || (typeof claims.idp === "string" && claims.idp !== `https://sts.windows.net/${tenantId}/` && claims.idp !== `${ENTRA_AUTHORITY_HOST}/${tenantId}/v2.0`);
+  if (guest) return null;
+  const upn = typeof claims.preferred_username === "string" ? claims.preferred_username.toLowerCase() : null;
+  return { tenantId: tid, objectId: oid, upn };
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +266,8 @@ export async function delegatedAccessToken(db: Db, deps: DelegatedDeps, cred: Di
     throw new DelegatedTokenError("control_token_failed", `the Entra refresh-token request failed${aad ? ` (${aad})` : ""}`);
   }
   if (!result?.accessToken) throw new DelegatedTokenError("control_token_failed", "the Entra refresh-token request returned no access token");
-  const who = accountOf(result);
+  const claims = await validatedTokenResponse(result, { tenantId, clientId, scope });
+  const who = accountOf(claims, tenantId);
   if (!who || who.tenantId !== tenantId || who.objectId !== accountObjectId) {
     throw new DelegatedTokenError("delegated_account_mismatch", "the refreshed token is not for the credential's named account");
   }
@@ -247,8 +295,10 @@ export const delegatedStartSchema = z
     /** the source's tenant and the write app (identifiers only) */
     tenantId: z.string().regex(/^[0-9a-fA-F-]{36}$/),
     clientId: z.string().regex(/^[0-9a-fA-F-]{36}$/),
-    /** the named admin account that signs in (its UPN); the sign-in must come back as this account */
+    /** the named admin account's UPN: the login hint and a label only (a UPN is mutable, never what is matched) */
     account: z.string().min(3).max(320).regex(/^[^\s@]+@[^\s@]+$/),
+    /** the named admin account's immutable object id (oid): the sign-in must come back as exactly this account */
+    accountObjectId: z.string().regex(/^[0-9a-fA-F-]{36}$/),
     expiresInDays: z.number().int().min(1).max(DELEGATED_MAX_DAYS).default(DELEGATED_DEFAULT_DAYS),
     replacesCredentialId: z.string().uuid().nullable(),
     /** four eyes: the second administrator who must approve it before the credential exists */
@@ -264,6 +314,7 @@ export const delegatedStepUp = (sourceId: string, b: DelegatedStartBody): StepUp
     op: "vendor_control_delegated",
     sourceId: sourceId.toLowerCase(),
     account: b.account.toLowerCase(),
+    accountObjectId: b.accountObjectId.toLowerCase(),
     tenantId: b.tenantId.toLowerCase(),
     clientId: b.clientId.toLowerCase(),
     expiresInDays: b.expiresInDays,
@@ -283,12 +334,12 @@ export interface DelegatedFacts {
   expiresInDays: number;
   replacesCredentialId: string | null;
 }
-const factsOf = (r: VendorControlDelegatedRequestRow, accountObjectId: string): DelegatedFacts => ({
+const factsOf = (r: VendorControlDelegatedRequestRow): DelegatedFacts => ({
   requestId: r.id,
   sourceId: r.sourceId,
   tenantId: r.tenantId,
   clientId: r.clientId,
-  accountObjectId,
+  accountObjectId: r.accountObjectId,
   accountUpn: r.accountUpn,
   expiresInDays: r.expiresInDays,
   replacesCredentialId: r.replacesCredentialId,
@@ -304,6 +355,17 @@ const callbackQuery = z.object({
   code: z.string().min(1).max(8192).optional(),
   error: z.string().max(256).optional(),
 });
+
+/**
+ * ADR-0167's browser binding, reused for this sign-in (review of #1251 [1]). Entra's redirect back is a cross-site
+ * top-level navigation, which never carries the `SameSite=Strict` session cookie, so the callback cannot ask for a
+ * session. Instead the start answer sets an HttpOnly `SameSite=Lax` cookie, scoped to the callback path, holding an
+ * HMAC of the state under the data key; the callback (auth-exempt) completes the request only in the browser that
+ * started it, and acts as the admin who started it. The state stays unguessable and server side, and the PKCE
+ * verifier never leaves the server, so neither a planted redirect nor a stolen URL completes it.
+ */
+export const DELEGATED_BINDING_COOKIE = "regulait_vcd_login";
+export const delegatedBrowserBinding = (dataKey: string | undefined, state: string) => ssoBrowserBinding(dataKey, `vendor-control-delegated\0${state}`);
 
 type Refusal = { status: number; body: Record<string, unknown> };
 const refusal = (status: number, error: string, detail: string, extra: Record<string, unknown> = {}): Refusal => ({ status, body: { error, detail, ...extra } });
@@ -341,7 +403,7 @@ export function delegatedView(r: VendorControlDelegatedRequestRow) {
  * approval whose window passed (its approval is superseded). Each moves `expire` through `whereFrom`, destroys what the
  * state held, and is audited in the same transaction.
  */
-export async function touchDueDelegated(t: Db, scope?: SQL): Promise<void> {
+export async function touchDueDelegated(t: Db, scope?: SQL): Promise<number> {
   const signIns = await t
     .update(vendorControlDelegatedRequests)
     .set({ status: VENDOR_CONTROL_DELEGATED_MACHINE.next("awaiting_sign_in", "expire"), codeVerifierCiphertext: null, outcomeCode: "sign_in_window_passed", updatedAt: sql`now()` })
@@ -366,6 +428,44 @@ export async function touchDueDelegated(t: Db, scope?: SQL): Promise<void> {
   for (const r of [...signIns, ...approvalsDue]) {
     await audit(t, r.requestedBy, null, "vendor-control-delegated-expired", "deny", `a delegated vendor control sign-in expired (${r.outcomeCode}); anything it held was destroyed and nothing was stored (ADR-0338)`, { sourceId: r.sourceId, requestId: r.id, outcomeCode: r.outcomeCode });
   }
+  return signIns.length + approvalsDue.length;
+}
+
+export const VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME = "vendor-control-delegated-expiry-sweep";
+const SWEEP_BATCH = 500;
+
+/**
+ * The scheduled sweep (review of #1251 [2]): expires open requests whose sign-in window or approval has passed, at most
+ * 500 per pass, oldest first, destroying the verifier or the held refresh token. Nothing depends on it having run:
+ * every read, the callback and the decision expire a due request first; the sweep is what keeps a held token from
+ * waiting for someone to look.
+ */
+export async function runDelegatedExpirySweep(db: Db): Promise<{ expired: number }> {
+  const expired = await db.transaction((tx) =>
+    touchDueDelegated(
+      tx as unknown as Db,
+      sql`${vendorControlDelegatedRequests.id} IN (SELECT q.id FROM ${vendorControlDelegatedRequests} q WHERE q.status IN ('awaiting_sign_in', 'awaiting_approval') ORDER BY q.requested_at LIMIT ${SWEEP_BATCH})`,
+    ),
+  );
+  return { expired };
+}
+
+export function vendorControlDelegatedJobDefinitions(): SchedulerJobDefinition[] {
+  return [
+    {
+      name: VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME,
+      description:
+        "Expire delegated vendor control sign-ins whose 10-minute window or whose approval has passed (up to 500 per " +
+        "pass, oldest first), destroying the held PKCE verifier or refresh token, superseding the approval and auditing " +
+        "each. Nothing depends on it: a due request is expired whenever it is read or decided.",
+      adr: "ADR-0338",
+      defaultIntervalSeconds: 300,
+      run: async (ctx) => {
+        const out = await runDelegatedExpirySweep(ctx.db);
+        return { itemsProcessed: out.expired, detail: { ...out } };
+      },
+    },
+  ];
 }
 
 /** the credential module's helpers, passed in so the two modules do not import each other */
@@ -404,7 +504,10 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
     const tenantId = b.tenantId.toLowerCase();
     const clientId = b.clientId.toLowerCase();
     const approverUserId = b.approverUserId.toLowerCase();
-    if (!GUID.test(tenantId) || !GUID.test(clientId)) return send(reply, refusal(400, "invalid_request", "tenantId and clientId must be GUIDs"));
+    const accountObjectId = b.accountObjectId.toLowerCase();
+    if (!GUID.test(tenantId) || !GUID.test(clientId) || !GUID.test(accountObjectId)) {
+      return send(reply, refusal(400, "invalid_request", "tenantId, clientId and accountObjectId must be GUIDs"));
+    }
     const out = await db.transaction(async (tx): Promise<Refusal | { url: string; row: VendorControlDelegatedRequestRow }> => {
       const t = tx as unknown as Db;
       const [s] = await t.select().from(discoverySources).where(eq(discoverySources.id, p.data.sourceId)).for("update");
@@ -467,6 +570,7 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
           tenantId,
           clientId,
           accountUpn: b.account.toLowerCase(),
+          accountObjectId,
           expiresInDays: b.expiresInDays,
           replacesCredentialId: live?.cred.id ?? null,
           redirectUri,
@@ -493,6 +597,7 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
         tenantId,
         clientId,
         accountUpn: b.account.toLowerCase(),
+        accountObjectId,
         expiresInDays: b.expiresInDays,
         replacesCredentialId: live?.cred.id ?? null,
         approverUserId,
@@ -501,14 +606,26 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
       return { url, row: row! };
     });
     if (isRefusal(out)) return send(reply, out);
+    // this sign-in completes only in this browser (ADR-0167's binding; Lax so Entra's top-level redirect carries it)
+    void reply.header(
+      "set-cookie",
+      ssoBindingCookie(DELEGATED_BINDING_COOKIE, delegatedBrowserBinding(deps.dataKey, out.row.state), { path: DELEGATED_CALLBACK_PATH, secure: requestIsSecure(req), crossSite: false }),
+    );
     return reply.status(201).send({ authorizationUrl: out.url, request: delegatedView(out.row) });
   });
 
+  // auth-exempt (route-classes.ts): bound to the browser that started it instead of to a session; see above
   app.get(DELEGATED_CALLBACK_PATH, async (req, reply) => {
     const q = callbackQuery.safeParse(req.query);
     if (!q.success) return badRequest(reply, q.error);
-    const userId = personOf(req);
-    if (!userId) return send(reply, PERSON);
+    // the request's own tables admit an admin or `system_task`; the work is the requester's, audited as them
+    return runWithRlsSystem("system_task", "vendor-control-delegated.callback", () => completeSignIn(req, reply, q.data));
+  });
+
+  async function completeSignIn(req: FastifyRequest, reply: FastifyReply, query: z.infer<typeof callbackQuery>) {
+    const binding = delegatedBrowserBinding(deps.dataKey, query.state);
+    const clearBinding = () =>
+      void reply.header("set-cookie", `${DELEGATED_BINDING_COOKIE}=; Path=${DELEGATED_CALLBACK_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${requestIsSecure(req) ? "; Secure" : ""}`);
     /** sign_in_fail, through the machine; a request another callback already moved changes nothing */
     const failSignIn = (t: Db, r: VendorControlDelegatedRequestRow, outcomeCode: string, reason: string, extra: Record<string, unknown> = {}) =>
       t
@@ -517,31 +634,33 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
         .where(and(eq(vendorControlDelegatedRequests.id, r.id), whereFrom(vendorControlDelegatedRequests.status, VENDOR_CONTROL_DELEGATED_MACHINE, "sign_in_fail")))
         .returning()
         .then(async (moved) => {
-          if (moved.length) await audit(t, userId, null, `vendor-control-delegated-${outcomeCode.replace(/_/g, "-")}`, "deny", `${reason}; nothing was stored (ADR-0338)`, { sourceId: r.sourceId, requestId: r.id, accountUpn: r.accountUpn, outcomeCode, ...extra });
+          if (moved.length) await audit(t, r.requestedBy, null, `vendor-control-delegated-${outcomeCode.replace(/_/g, "-")}`, "deny", `${reason}; nothing was stored (ADR-0338)`, { sourceId: r.sourceId, requestId: r.id, accountObjectId: r.accountObjectId, outcomeCode, ...extra });
           return moved.length > 0;
         });
-    // 1. read the request (the expiries first); a declined sign-in fails it at once
+    // 1. read the request (the expiries first) and check the browser binding; a declined sign-in fails it at once
     const first = await db.transaction(async (tx): Promise<Refusal | { r: VendorControlDelegatedRequestRow; verifier: string }> => {
       const t = tx as unknown as Db;
-      await touchDueDelegated(t, eq(vendorControlDelegatedRequests.state, q.data.state));
-      const [r] = await t.select().from(vendorControlDelegatedRequests).where(eq(vendorControlDelegatedRequests.state, q.data.state)).for("update");
+      await touchDueDelegated(t, eq(vendorControlDelegatedRequests.state, query.state));
+      const [r] = await t.select().from(vendorControlDelegatedRequests).where(eq(vendorControlDelegatedRequests.state, query.state)).for("update");
       if (!r) return refusal(404, "delegated_request_not_found", "no such delegated sign-in");
-      if (r.requestedBy !== userId) {
-        await audit(t, userId, null, "vendor-control-delegated-wrong-admin", "deny", "a delegated vendor control sign-in was completed by a different admin than the one who started it; it was refused (ADR-0338)", { sourceId: r.sourceId, requestId: r.id });
-        return refusal(403, "delegated_request_not_yours", "only the admin who started this sign-in can complete it");
+      if (!ssoBindingMatches(readCookie(req.headers.cookie, DELEGATED_BINDING_COOKIE), binding)) {
+        // refused before any vendor call; the request stays open for the browser that started it
+        await audit(t, r.requestedBy, null, "vendor-control-delegated-browser-mismatch", "deny", "a delegated vendor control sign-in was completed in a different browser than the one that started it; it was refused (ADR-0338, ADR-0167)", { sourceId: r.sourceId, requestId: r.id });
+        return refusal(403, "delegated_request_not_bound_to_this_browser", "this sign-in was started in a different browser; start it again from there");
       }
       if (r.status === "expired") return refusal(409, "delegated_request_expired", "this delegated sign-in expired; start a new one", { lifecycle: VENDOR_CONTROL_DELEGATED_MACHINE.describe(r.status) });
       if (!VENDOR_CONTROL_DELEGATED_MACHINE.can(r.status, "sign_in")) {
         return refusal(409, "delegated_request_used", "this delegated sign-in was already completed or abandoned; start a new one", { lifecycle: VENDOR_CONTROL_DELEGATED_MACHINE.describe(r.status) });
       }
-      if (q.data.error || !q.data.code) {
-        await failSignIn(t, r, "sign_in_declined", "the vendor's sign-in returned no authorization code", { vendorError: q.data.error?.slice(0, 64) ?? null });
+      if (query.error || !query.code) {
+        await failSignIn(t, r, "sign_in_declined", "the vendor's sign-in returned no authorization code", { vendorError: query.error?.slice(0, 64) ?? null });
         return refusal(400, "delegated_sign_in_failed", "the vendor's sign-in returned no authorization code");
       }
       if (!deps.dataKey || !r.codeVerifierCiphertext) return refusal(503, "data_key_unavailable", "the data key is not configured");
       return { r, verifier: decryptSecret(deps.dataKey, r.codeVerifierCiphertext) };
     });
     if (isRefusal(first)) return send(reply, first);
+    clearBinding();
     const r = first.r;
     const [s] = await db.select().from(discoverySources).where(eq(discoverySources.id, r.sourceId));
     const control = s ? deps.controlForKind(deps.controls, s.kind) : null;
@@ -557,15 +676,22 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
     const client = msalClient(await deps.fetch(), r.tenantId, r.clientId, assertion);
     let result: AuthenticationResult;
     try {
-      result = await client.acquireTokenByCode({ code: q.data.code!, redirectUri: r.redirectUri, scopes: [scope], codeVerifier: first.verifier, nonce: r.nonce, state: r.state }, { code: q.data.code!, state: r.state, nonce: r.nonce });
+      result = await client.acquireTokenByCode({ code: query.code!, redirectUri: r.redirectUri, scopes: [scope], codeVerifier: first.verifier, nonce: r.nonce, state: r.state }, { code: query.code!, state: r.state, nonce: r.nonce });
     } catch (err) {
       const aad = aadCode(err);
       return failNow("control_token_failed", `the delegated vendor control code redemption failed${aad ? ` (${aad})` : ""}`, refusal(502, "control_token_failed", `the Entra code redemption failed${aad ? ` (${aad})` : ""}`), { aad: aad ?? null });
     }
-    const who = accountOf(result);
-    const claims = (result.idTokenClaims ?? {}) as Record<string, unknown>;
-    if (!who || who.tenantId !== r.tenantId || who.upn !== r.accountUpn || claims.nonce !== r.nonce) {
-      return failNow("delegated_account_mismatch", "the delegated sign-in came back as a different account, tenant or nonce than the step-up was bound to", refusal(403, "delegated_account_mismatch", "the sign-in must be the named account, in the source's tenant"), { returnedTenant: who?.tenantId ?? null });
+    // the library's iss/aud/exp/nonce checks and the granted scope, then the immutable account
+    let claims: Record<string, unknown>;
+    try {
+      claims = await validatedTokenResponse(result, { tenantId: r.tenantId, clientId: r.clientId, scope, nonce: r.nonce });
+    } catch (err) {
+      const e = err instanceof DelegatedTokenError ? err : new DelegatedTokenError("delegated_id_token_invalid", "the ID token failed validation");
+      return failNow(e.code, `the delegated sign-in's token response was refused: ${e.message}`, refusal(403, e.code, e.message));
+    }
+    const who = accountOf(claims, r.tenantId);
+    if (!who || who.tenantId !== r.tenantId || who.objectId !== r.accountObjectId) {
+      return failNow("delegated_account_mismatch", "the delegated sign-in came back as a different account or tenant than the step-up was bound to, or as a guest", refusal(403, "delegated_account_mismatch", "the sign-in must be the named member account (its object id), in the source's tenant"), { returnedTenant: who?.tenantId ?? null });
     }
     const refreshToken = await refreshTokenOf(client);
     if (!refreshToken) {
@@ -576,11 +702,11 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
     const out = await db.transaction(async (tx): Promise<Refusal | { row: VendorControlDelegatedRequestRow }> => {
       const t = tx as unknown as Db;
       const [settings] = await t.select({ ttl: discoverySettings.vendorAgentControlApprovalTtlHours }).from(discoverySettings).limit(1);
-      const facts = factsOf(r, who.objectId);
+      const facts = factsOf(r);
       const [approval] = await t
         .insert(approvals)
         .values({
-          userId,
+          userId: r.requestedBy,
           objectType: "vendor_control_delegated",
           approverUserId: r.approverUserId,
           stageId: `${VENDOR_CONTROL_DELEGATED_APPROVAL_PREFIX}${r.id}`,
@@ -596,7 +722,6 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
           status: VENDOR_CONTROL_DELEGATED_MACHINE.next("awaiting_sign_in", "sign_in"),
           codeVerifierCiphertext: null,
           refreshTokenCiphertext: encryptSecret(deps.dataKey!, refreshToken),
-          accountObjectId: who.objectId,
           approvalId: approval!.id,
           updatedAt: sql`now()`,
         })
@@ -606,11 +731,12 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
         // another callback or a cancel moved it first: the approval written above rolls back with this transaction
         throw new DelegatedMovedError();
       }
-      await audit(t, userId, null, "vendor-control-delegated-signed-in", "require_approval", `'${who.upn}' signed in for a delegated vendor control credential on discovery source '${s.name}'; its refresh token is held encrypted until the second administrator approves (ADR-0338)`, {
+      await audit(t, r.requestedBy, null, "vendor-control-delegated-signed-in", "require_approval", `the named account (${who.objectId}) signed in for a delegated vendor control credential on discovery source '${s.name}'; its refresh token is held encrypted until the second administrator approves (ADR-0338)`, {
         sourceId: s.id,
         requestId: r.id,
         accountObjectId: who.objectId,
-        accountUpn: who.upn,
+        accountUpn: r.accountUpn,
+        returnedUpn: who.upn,
         approvalId: approval!.id,
         approverUserId: r.approverUserId,
         expiresAt: approval!.expiresAt?.toISOString() ?? null,
@@ -622,7 +748,7 @@ export function registerDelegatedControlCredentialRoutes(app: FastifyInstance, d
     });
     if (isRefusal(out)) return send(reply, out);
     return reply.status(202).send({ request: delegatedView(out.row) });
-  });
+  }
 
   app.get("/v1/discovery/control-credential/delegated/:requestId", async (req, reply) => {
     const p = requestParam.safeParse(req.params);
@@ -687,8 +813,12 @@ export async function precheckVendorControlDelegatedDecision(
   decision: "approved" | "denied",
   req: FastifyRequest | undefined,
 ): Promise<DecideRefusal | null> {
+  // the approval's own window first (review of #1251 [2]): a request past it is expired, its token destroyed
+  await db.transaction((tx) => touchDueDelegated(tx as unknown as Db, eq(vendorControlDelegatedRequests.approvalId, approval.id)));
   const [r] = await db.select().from(vendorControlDelegatedRequests).where(eq(vendorControlDelegatedRequests.approvalId, approval.id));
   if (!r) return { status: 409, body: { error: "delegated_request_missing", detail: "this approval names no delegated sign-in" } };
+  if (r.status === "expired") return { status: 409, body: { error: "approval_expired", detail: "this approval's window passed; the held token was destroyed. Start a new sign-in" } };
+  if (r.status !== "awaiting_approval") return { status: 409, body: { error: "delegated_request_not_open", detail: `this delegated sign-in is ${r.status}`, lifecycle: VENDOR_CONTROL_DELEGATED_MACHINE.describe(r.status) } };
   if (r.requestedBy === deciderUserId || approval.userId === deciderUserId) {
     return { status: 403, body: { error: "cannot_approve_own_delegated_credential", detail: "the decider connected this credential; another administrator must decide it" } };
   }
@@ -710,11 +840,11 @@ export async function vendorControlDelegatedApprovalLabels(db: Db, stageIds: rea
   const out = new Map<string, string>();
   if (ids.length === 0) return out;
   const rows = await db
-    .select({ id: vendorControlDelegatedRequests.id, upn: vendorControlDelegatedRequests.accountUpn, days: vendorControlDelegatedRequests.expiresInDays, source: discoverySources.name })
+    .select({ id: vendorControlDelegatedRequests.id, upn: vendorControlDelegatedRequests.accountUpn, oid: vendorControlDelegatedRequests.accountObjectId, days: vendorControlDelegatedRequests.expiresInDays, source: discoverySources.name })
     .from(vendorControlDelegatedRequests)
     .innerJoin(discoverySources, eq(discoverySources.id, vendorControlDelegatedRequests.sourceId))
     .where(inArray(vendorControlDelegatedRequests.id, ids));
-  for (const r of rows) out.set(`${VENDOR_CONTROL_DELEGATED_APPROVAL_PREFIX}${r.id}`, `connect '${r.upn}' as the delegated vendor control credential of '${r.source}' for ${r.days} days`);
+  for (const r of rows) out.set(`${VENDOR_CONTROL_DELEGATED_APPROVAL_PREFIX}${r.id}`, `connect '${r.upn}' (object id ${r.oid}) as the delegated vendor control credential of '${r.source}' for ${r.days} days`);
   return out;
 }
 
@@ -739,6 +869,9 @@ export class VendorControlDelegatedDecideError extends Error {
 export async function applyVendorControlDelegatedDecision(tx: Db, approval: ApprovalLike, decision: "approved" | "denied", deciderUserId: string, req: FastifyRequest | undefined): Promise<void> {
   const [r] = await tx.select().from(vendorControlDelegatedRequests).where(eq(vendorControlDelegatedRequests.approvalId, approval.id)).for("update");
   if (!r || r.status !== "awaiting_approval") return;
+  // decided only inside the approval's window, by the database clock (the precheck expired a due one already)
+  const [window] = await tx.select({ open: sql<boolean>`${approvals.expiresAt} IS NOT NULL AND ${approvals.expiresAt} > now()` }).from(approvals).where(eq(approvals.id, approval.id));
+  if (!window?.open) throw new VendorControlDelegatedDecideError(409, "approval_expired", "this approval's window passed; start a new sign-in");
   if (!req || !approval.argumentsDigest) throw new VendorControlDelegatedDecideError(403, "step_up_required", "a delegated control credential needs the approver's step-up");
   const su = await checkStepUp(tx, req, delegatedDecideStepUp(approval.id, decision, approval.argumentsDigest), { spend: true });
   if (!su.ok) throw new VendorControlDelegatedDecideError(su.status, String(su.body.error ?? "step_up_required"), "the approver's step-up was not accepted");

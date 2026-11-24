@@ -20741,13 +20741,14 @@ export const vendorControlDelegatedRequests = pgTable(
     sourceId: uuid("source_id")
       .notNull()
       .references(() => discoverySources.id, { onDelete: "cascade" }),
+    // the two people are evidence: no ON DELETE, so a user with a request is never deleted out from under it
     requestedBy: uuid("requested_by")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+      .references(() => users.id),
     /** four eyes: the second administrator who must approve it, never the requester */
     approverUserId: uuid("approver_user_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+      .references(() => users.id),
     status: text("status", { enum: VENDOR_CONTROL_DELEGATED_STATES }).notNull().default("awaiting_sign_in"),
     state: text("state").notNull(),
     nonce: text("nonce").notNull(),
@@ -20759,12 +20760,13 @@ export const vendorControlDelegatedRequests = pgTable(
     tenantId: text("tenant_id").notNull(),
     clientId: text("client_id").notNull(),
     accountUpn: text("account_upn").notNull(),
-    accountObjectId: text("account_object_id"),
+    /** the account's immutable object id (oid), named at the start; the UPN beside it is a hint and a label only */
+    accountObjectId: text("account_object_id").notNull(),
     expiresInDays: integer("expires_in_days").notNull(),
-    replacesCredentialId: uuid("replaces_credential_id").references(() => discoveryCredentials.id, { onDelete: "cascade" }),
+    replacesCredentialId: uuid("replaces_credential_id").references(() => discoveryCredentials.id),
     redirectUri: text("redirect_uri").notNull(),
     approvalId: uuid("approval_id").references(() => approvals.id),
-    credentialId: uuid("credential_id").references(() => discoveryCredentials.id, { onDelete: "cascade" }),
+    credentialId: uuid("credential_id").references(() => discoveryCredentials.id),
     outcomeCode: text("outcome_code"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
     signInExpiresAt: timestamp("sign_in_expires_at", { withTimezone: true }).notNull(),
@@ -20777,7 +20779,7 @@ export const vendorControlDelegatedRequests = pgTable(
     check("vendor_control_delegated_requests_nonce_check", sql`${t.nonce} ~ '^[A-Za-z0-9_-]{43}$'`),
     check(
       "vendor_control_delegated_requests_ids_check",
-      sql`${t.tenantId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.clientId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND (${t.accountObjectId} IS NULL OR ${t.accountObjectId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')`,
+      sql`${t.tenantId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.clientId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.accountObjectId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
     ),
     check("vendor_control_delegated_requests_account_check", sql`char_length(${t.accountUpn}) BETWEEN 3 AND 320 AND ${t.accountUpn} = lower(${t.accountUpn})`),
     check("vendor_control_delegated_requests_days_check", sql`${t.expiresInDays} BETWEEN 1 AND 90`),
@@ -20787,13 +20789,17 @@ export const vendorControlDelegatedRequests = pgTable(
     check("vendor_control_delegated_requests_held_token_check", sql`(${t.status} = 'awaiting_approval') = (${t.refreshTokenCiphertext} IS NOT NULL)`),
     check(
       "vendor_control_delegated_requests_signed_in_check",
-      sql`(${t.status} <> 'awaiting_sign_in' OR (${t.accountObjectId} IS NULL AND ${t.approvalId} IS NULL)) AND (${t.status} NOT IN ('awaiting_approval', 'connected') OR (${t.accountObjectId} IS NOT NULL AND ${t.approvalId} IS NOT NULL))`,
+      sql`(${t.status} <> 'awaiting_sign_in' OR ${t.approvalId} IS NULL) AND (${t.status} NOT IN ('awaiting_approval', 'connected') OR ${t.approvalId} IS NOT NULL)`,
     ),
     check("vendor_control_delegated_requests_connected_check", sql`(${t.status} = 'connected') = (${t.credentialId} IS NOT NULL)`),
     check("vendor_control_delegated_requests_outcome_check", sql`${t.outcomeCode} IS NULL OR ${t.outcomeCode} ~ '^[a-z][a-z0-9_]{0,63}$'`),
     uniqueIndex("vendor_control_delegated_requests_open_uq").on(t.sourceId).where(sql`${t.status} IN ('awaiting_sign_in', 'awaiting_approval')`),
     index("vendor_control_delegated_requests_source_idx").on(t.sourceId, t.requestedAt),
     index("vendor_control_delegated_requests_approval_idx").on(t.approvalId),
+    index("vendor_control_delegated_requests_credential_idx").on(t.credentialId),
+    index("vendor_control_delegated_requests_replaces_idx").on(t.replacesCredentialId),
+    index("vendor_control_delegated_requests_requested_by_idx").on(t.requestedBy),
+    index("vendor_control_delegated_requests_approver_idx").on(t.approverUserId),
   ],
 );
 export type VendorControlDelegatedRequestRow = typeof vendorControlDelegatedRequests.$inferSelect;

@@ -10,11 +10,15 @@
  *    is refused.
  *  - STARTING: off until the delegated opt-in is on; a `settings_relax` step-up bound to source, account, tenant, app,
  *    expiry, the row replaced and the approver; a second eligible admin; one open request per source.
- *  - THE CALLBACK: only the admin who started it; the code is redeemed with the stored verifier and a federated
- *    assertion; the account, tenant and nonce must match; the refresh token is HELD encrypted and an approval queued.
+ *  - THE CALLBACK: shaped as a real browser sends it (Entra's cross-site redirect: no session cookie, no bearer), so it
+ *    is bound to the starting browser by ADR-0167's binding cookie; the code is redeemed with the stored verifier and a
+ *    federated assertion; oauth4webapi validates the ID token's iss, aud, exp and nonce; the granted scope must include
+ *    the control's; the account is matched on its immutable object id and a guest is refused; the refresh token is
+ *    HELD encrypted and an approval queued.
  *  - THE DECISION: never the requester, only the named approver, with an `approval_decide` step-up bound to the digest;
  *    approve stores the credential (revoking a replaced row), deny destroys the held token.
- *  - EXPIRY AND CANCEL: a passed sign-in window or approval expires the request and destroys what it held.
+ *  - EXPIRY AND CANCEL: a passed sign-in window or approval expires the request and destroys what it held, on read, on
+ *    decide and by the scheduled sweep; an expired approval cannot be decided.
  *  - USE: the refresh token is redeemed for exactly the delegated scope, the rotated one replaces it in the same row,
  *    and a token for another account is refused.
  */
@@ -51,10 +55,13 @@ import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { controlCredentialResolver } from "./vendor-agent-control-credentials.js";
 import {
+  DELEGATED_BINDING_COOKIE,
   DELEGATED_CALLBACK_PATH,
   delegatedDecideStepUp,
   delegatedStartSchema,
   delegatedStepUp,
+  runDelegatedExpirySweep,
+  delegatedBrowserBinding,
   vendorControlDelegatedApprovalLabels,
 } from "./vendor-agent-control-delegated.js";
 
@@ -93,6 +100,10 @@ const entra = {
   noRefreshToken: false,
   /** answer the code redemption with an ID token for another nonce (a replayed sign-in) */
   otherNonce: false,
+  /** claims merged over the ID token's (a bad iss, aud or exp; a guest) */
+  claims: null as null | Record<string, unknown>,
+  /** the scope string the token endpoint reports as granted (null: the delegated scope) */
+  grantedScope: null as null | string,
 };
 const idToken = (claims: Record<string, unknown>) => `${b64u({ alg: "RS256", typ: "JWT" })}.${b64u(claims)}.c2ln`;
 function tokenResponse(acct: { upn: string; oid: string }, nonce: string | undefined, withRefresh: boolean) {
@@ -101,12 +112,12 @@ function tokenResponse(acct: { upn: string; oid: string }, nonce: string | undef
   if (withRefresh) entra.refreshTokens.set(rt, acct);
   return json({
     token_type: "Bearer",
-    scope: `${POWER_PLATFORM_DELEGATED_SCOPE} openid profile offline_access`,
+    scope: entra.grantedScope ?? `${POWER_PLATFORM_DELEGATED_SCOPE} openid profile offline_access`,
     expires_in: 3600,
     ext_expires_in: 3600,
     access_token: `a338c-at-${randomBytes(12).toString("hex")}`,
     ...(withRefresh ? { refresh_token: rt } : {}),
-    id_token: idToken({ aud: WRITE_APP, iss: `https://login.microsoftonline.com/${TENANT}/v2.0`, iat: now, nbf: now, exp: now + 3600, tid: TENANT, oid: acct.oid, sub: `sub-${acct.oid}`, preferred_username: acct.upn, name: "Quarantine Admin", ...(nonce ? { nonce } : {}) }),
+    id_token: idToken({ aud: WRITE_APP, iss: `https://login.microsoftonline.com/${TENANT}/v2.0`, iat: now, nbf: now, exp: now + 3600, tid: TENANT, oid: acct.oid, sub: `sub-${acct.oid}`, preferred_username: acct.upn, name: "Quarantine Admin", ...(nonce ? { nonce } : {}), ...(entra.claims ?? {}) }),
     client_info: b64u({ uid: acct.oid, utid: TENANT }),
   });
 }
@@ -160,7 +171,7 @@ async function seedSource(kind: "agent_registry_copilot_studio" | "agent_registr
   await db.insert(discoveryCredentials).values({ sourceId: src!.id, credentialMode: "federated", publicConfig: { tenantId: TENANT, clientId: READ_APP }, createdBy: adminId });
   return src!.id;
 }
-const startBody = (b: Record<string, unknown> = {}) => ({ tenantId: TENANT, clientId: WRITE_APP, account: UPN, expiresInDays: 14, replacesCredentialId: null, approverUserId: approverId, ...b });
+const startBody = (b: Record<string, unknown> = {}) => ({ tenantId: TENANT, clientId: WRITE_APP, account: UPN, accountObjectId: ACCOUNT_OID, expiresInDays: 14, replacesCredentialId: null, approverUserId: approverId, ...b });
 async function start(sourceId: string, b: Record<string, unknown> = {}, who = adminId) {
   const payload = startBody(b);
   return as(who, delegatedStepUp(sourceId, delegatedStartSchema.parse(payload)), "POST", startUrl(sourceId), payload);
@@ -172,7 +183,27 @@ function signIn(authorizationUrl: string, acct = { upn: UPN, oid: ACCOUNT_OID })
   entra.codes.set(code, { challenge: u.searchParams.get("code_challenge")!, nonce: u.searchParams.get("nonce")!, ...acct });
   return { code, state: u.searchParams.get("state")! };
 }
-const callback = (q: Record<string, string>, who = adminId) => as(who, null, "GET", `${DELEGATED_CALLBACK_PATH}?${new URLSearchParams(q)}`);
+/** the binding cookie the start answer set for this browser */
+const bindingOf = (startRes: { headers: Record<string, unknown> }) => {
+  const raw = ([] as string[]).concat((startRes.headers["set-cookie"] as string | string[] | undefined) ?? []).find((c) => c.startsWith(`${DELEGATED_BINDING_COOKIE}=`));
+  return raw ? raw.split(";")[0]! : null;
+};
+/**
+ * The callback exactly as a browser sends it after Entra's redirect: a cross-site top-level GET, so no session cookie
+ * (SameSite=Strict) and no bearer; only the Lax binding cookie scoped to the callback path rides along.
+ */
+const callback = (q: Record<string, string>, binding: string | null) =>
+  app.inject({
+    method: "GET",
+    url: `${DELEGATED_CALLBACK_PATH}?${new URLSearchParams(q)}`,
+    headers: { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", referer: "https://login.microsoftonline.com/", ...(binding ? { cookie: binding } : {}) },
+  });
+/** start and the browser leg: the redirect query and this browser's binding */
+async function startAndSignIn(sourceId: string, b: Record<string, unknown> = {}, acct = { upn: UPN, oid: ACCOUNT_OID }) {
+  const st = await start(sourceId, b);
+  expect(st.statusCode, st.body).toBe(201);
+  return { st, leg: signIn(st.json().authorizationUrl, acct), binding: bindingOf(st) };
+}
 const setOptIn = (on: boolean) => db.update(discoverySettings).set({ vendorAgentControlDelegatedEnabled: on }).where(eq(discoverySettings.id, 1));
 const liveControl = async (sourceId: string) =>
   (await db.select().from(discoveryCredentials).where(sql`${discoveryCredentials.sourceId} = ${sourceId} AND ${discoveryCredentials.purpose} = 'platform_write' AND ${discoveryCredentials.revokedAt} IS NULL`))[0];
@@ -195,9 +226,8 @@ async function pgError(p: Promise<unknown>): Promise<string> {
 }
 /** start, sign in: the request awaiting the second administrator */
 async function signedIn(sourceId: string, b: Record<string, unknown> = {}) {
-  const s = await start(sourceId, b);
-  expect(s.statusCode, s.body).toBe(201);
-  const cb = await callback(signIn(s.json().authorizationUrl));
+  const { leg, binding } = await startAndSignIn(sourceId, b);
+  const cb = await callback(leg, binding);
   expect(cb.statusCode, cb.body).toBe(202);
   return cb.json().request as { id: string; approvalId: string; status: string };
 }
@@ -258,7 +288,7 @@ afterAll(async () => {
 describe("ADR-0338 slice 1c: the request table holds the machine", () => {
   it("shapes, two people, a 10-minute window, only the machine's moves, final rows fixed, and no TRUNCATE", async () => {
     const sourceId = await seedSource();
-    const base = { sourceId, requestedBy: adminId, approverUserId: approverId, nonce: randomBytes(32).toString("base64url"), codeVerifierCiphertext: encryptSecret(DATA_KEY, "v"), tenantId: TENANT, clientId: WRITE_APP, accountUpn: UPN, expiresInDays: 30, redirectUri: "https://gw.example/cb" };
+    const base = { sourceId, requestedBy: adminId, approverUserId: approverId, nonce: randomBytes(32).toString("base64url"), codeVerifierCiphertext: encryptSecret(DATA_KEY, "v"), tenantId: TENANT, clientId: WRITE_APP, accountUpn: UPN, accountObjectId: ACCOUNT_OID, expiresInDays: 30, redirectUri: "https://gw.example/cb" };
     type Insert = typeof vendorControlDelegatedRequests.$inferInsert;
     const ins = (v: { [K in keyof Insert]?: Insert[K] | ReturnType<typeof sql> }) =>
       db.insert(vendorControlDelegatedRequests).values({ ...base, state: randomBytes(32).toString("base64url"), signInExpiresAt: sql`now() + interval '5 minutes'`, ...v } as Insert).returning();
@@ -274,6 +304,10 @@ describe("ADR-0338 slice 1c: the request table holds the machine", () => {
     const upd = (v: Partial<typeof vendorControlDelegatedRequests.$inferInsert>) => pgError(db.update(vendorControlDelegatedRequests).set(v).where(eq(vendorControlDelegatedRequests.id, row!.id)));
     expect(await upd({ accountUpn: "someone-else@contoso.example" })).toMatch(/along its machine/);
     expect(await upd({ approverUserId: otherAdminId })).toMatch(/along its machine/);
+    // the account is its immutable object id, fixed at the start
+    expect(await upd({ accountObjectId: randomUUID() })).toMatch(/along its machine/);
+    // the two people are evidence: a user with a request is not deleted out from under it
+    expect(await pgError(db.delete(users).where(eq(users.id, approverId)))).toMatch(/foreign key|violates|approver/i);
     // awaiting_sign_in cannot jump to connected or denied
     expect(await upd({ status: "denied", codeVerifierCiphertext: null })).toMatch(/along its machine/);
     // a move must destroy what the state held
@@ -351,10 +385,16 @@ describe("ADR-0338 slice 1c: starting a delegated sign-in", () => {
 describe("ADR-0338 slice 1c: the callback and the second administrator", () => {
   it("holds the refresh token encrypted and queues the approval; only the approver's approval stores the credential", async () => {
     const sourceId = await seedSource();
-    const s = await start(sourceId);
+    const { st: s, leg, binding } = await startAndSignIn(sourceId);
+    const { code, state } = leg;
+    // the start answer set the binding: HttpOnly, SameSite=Lax (Entra's top-level redirect carries it), callback path only
+    const setCookie = ([] as string[]).concat((s.headers["set-cookie"] as string | string[]) ?? []).find((c) => c.startsWith(`${DELEGATED_BINDING_COOKIE}=`))!;
+    expect(setCookie).toMatch(/HttpOnly/);
+    expect(setCookie).toMatch(/SameSite=Lax/);
+    expect(setCookie).toContain(`Path=${DELEGATED_CALLBACK_PATH}`);
     const before = entra.bodies.length;
-    const { code, state } = signIn(s.json().authorizationUrl);
-    const cb = await callback({ code, state });
+    // a real browser after Entra's redirect: no session cookie, no bearer, only the binding
+    const cb = await callback({ code, state }, binding);
     expect(cb.statusCode, cb.body).toBe(202);
     expect(cb.json().request).toMatchObject({ status: "awaiting_approval", accountObjectId: ACCOUNT_OID, lifecycle: { state: "awaiting_approval" } });
     const body = entra.bodies.slice(before);
@@ -375,7 +415,7 @@ describe("ADR-0338 slice 1c: the callback and the second administrator", () => {
     const labels = await vendorControlDelegatedApprovalLabels(db, [ap.stageId]);
     expect(labels.get(ap.stageId!)).toContain(UPN);
     // spent: the same redirect again is refused
-    expect((await callback({ code, state })).json().error).toBe("delegated_request_used");
+    expect((await callback({ code, state }, binding)).json().error).toBe("delegated_request_used");
     // the approver approves with the bound step-up
     const d = await decide(req.approvalId!);
     expect(d.statusCode, d.body).toBe(200);
@@ -412,14 +452,23 @@ describe("ADR-0338 slice 1c: the callback and the second administrator", () => {
     expect(await liveControl(sourceId)).toBeUndefined();
   });
 
-  it("only the admin who started it can complete it, and a declined, expired or wrong-account sign-in stores nothing", async () => {
+  it("only the browser that started it can complete it; a declined, wrong-account, guest or invalid-token sign-in stores nothing", async () => {
     const sourceId = await seedSource();
-    const s = await start(sourceId);
-    const leg = signIn(s.json().authorizationUrl);
-    const other = await callback(leg, otherAdminId);
-    expect(other.statusCode).toBe(403);
-    expect(other.json().error).toBe("delegated_request_not_yours");
-    // the wrong admin did not spend it
+    const { st: s, leg, binding } = await startAndSignIn(sourceId);
+    // no binding (another browser, or a planted link), or another request's binding: refused before any vendor call
+    const calls = entra.bodies.length;
+    const none = await callback(leg, null);
+    expect(none.statusCode).toBe(403);
+    expect(none.json().error).toBe("delegated_request_not_bound_to_this_browser");
+    const otherSrc = await seedSource();
+    const { binding: otherBinding } = await startAndSignIn(otherSrc);
+    expect((await callback(leg, otherBinding)).json().error).toBe("delegated_request_not_bound_to_this_browser");
+    // a session cookie of another admin is not a binding either
+    const g = await grantStepUpForTest(db, otherAdminId, { kind: "settings_relax", facts: { unused: RUN } });
+    const sess = sessionRequest(g);
+    const withSession = await app.inject({ method: "GET", url: `${DELEGATED_CALLBACK_PATH}?${new URLSearchParams(leg)}`, headers: sess.headers, cookies: sess.cookies });
+    expect(withSession.json().error).toBe("delegated_request_not_bound_to_this_browser");
+    expect(entra.bodies.length).toBe(calls);
     expect((await requestRow(s.json().request.id)).status).toBe("awaiting_sign_in");
     const failed = async (go: (sid: string) => Promise<{ statusCode: number; json: () => { error: string } }>, status: number, error: string, outcome: string) => {
       const sid = await seedSource();
@@ -430,23 +479,59 @@ describe("ADR-0338 slice 1c: the callback and the second administrator", () => {
       expect(row).toMatchObject({ status: "failed", outcomeCode: outcome, codeVerifierCiphertext: null, refreshTokenCiphertext: null, approvalId: null });
       expect(await liveControl(sid)).toBeUndefined();
     };
-    await failed(async (sid) => callback(signIn((await start(sid)).json().authorizationUrl, { upn: `intruder-${RUN}@contoso.example`, oid: randomUUID() })), 403, "delegated_account_mismatch", "delegated_account_mismatch");
-    await failed(async (sid) => callback({ state: new URL((await start(sid)).json().authorizationUrl).searchParams.get("state")!, error: "access_denied" }), 400, "delegated_sign_in_failed", "sign_in_declined");
+    const leg2 = async (sid: string, acct?: { upn: string; oid: string }) => {
+      const x = await startAndSignIn(sid, {}, acct);
+      return callback(x.leg, x.binding);
+    };
+    // another account: a different object id
+    await failed((sid) => leg2(sid, { upn: `intruder-${RUN}@contoso.example`, oid: randomUUID() }), 403, "delegated_account_mismatch", "delegated_account_mismatch");
+    // the SAME UPN but another object id (a renamed or re-created account): the UPN is never what is matched
+    await failed((sid) => leg2(sid, { upn: UPN, oid: randomUUID() }), 403, "delegated_account_mismatch", "delegated_account_mismatch");
+    // a guest with the named account's object id in this tenant (acct = 1; an idp from another tenant)
+    for (const guest of [{ acct: 1 }, { idp: "https://sts.windows.net/99999999-0000-4000-8000-000000000000/" }]) {
+      entra.claims = guest;
+      try {
+        await failed((sid) => leg2(sid), 403, "delegated_account_mismatch", "delegated_account_mismatch");
+      } finally {
+        entra.claims = null;
+      }
+    }
+    // the ID token's issuer, audience and expiry are validated by oauth4webapi
+    const now = Math.floor(Date.now() / 1000);
+    for (const bad of [{ iss: "https://login.microsoftonline.com/99999999-0000-4000-8000-000000000000/v2.0" }, { aud: READ_APP }, { exp: now - 3600, iat: now - 7200, nbf: now - 7200 }]) {
+      entra.claims = bad;
+      try {
+        await failed((sid) => leg2(sid), 403, "delegated_id_token_invalid", "delegated_id_token_invalid");
+      } finally {
+        entra.claims = null;
+      }
+    }
+    // the granted scopes must include the control's delegated scope
+    entra.grantedScope = "openid profile offline_access";
+    try {
+      await failed((sid) => leg2(sid), 403, "delegated_scope_not_granted", "delegated_scope_not_granted");
+    } finally {
+      entra.grantedScope = null;
+    }
+    await failed(async (sid) => {
+      const x = await startAndSignIn(sid);
+      return callback({ state: x.leg.state, error: "access_denied" }, x.binding);
+    }, 400, "delegated_sign_in_failed", "sign_in_declined");
     entra.noRefreshToken = true;
     try {
-      await failed(async (sid) => callback(signIn((await start(sid)).json().authorizationUrl)), 502, "delegated_no_refresh_token", "delegated_no_refresh_token");
+      await failed((sid) => leg2(sid), 502, "delegated_no_refresh_token", "delegated_no_refresh_token");
     } finally {
       entra.noRefreshToken = false;
     }
-    // an ID token minted for another sign-in's nonce: msal refuses the redemption (our own check is a second guard)
+    // an ID token minted for another sign-in's nonce: msal refuses the redemption (oauth4webapi is a second guard)
     entra.otherNonce = true;
     try {
-      await failed(async (sid) => callback(signIn((await start(sid)).json().authorizationUrl)), 502, "control_token_failed", "control_token_failed");
+      await failed((sid) => leg2(sid), 502, "control_token_failed", "control_token_failed");
     } finally {
       entra.otherNonce = false;
     }
-    // the first request is still completable by the admin who started it
-    expect((await callback(leg)).statusCode).toBe(202);
+    // the first request is still completable in the browser that started it
+    expect((await callback(leg, binding)).statusCode).toBe(202);
   });
 });
 
@@ -466,13 +551,15 @@ describe("ADR-0338 slice 1c: expiry and cancel", () => {
         tenantId: TENANT,
         clientId: WRITE_APP,
         accountUpn: UPN,
+        accountObjectId: ACCOUNT_OID,
         expiresInDays: 30,
         redirectUri: "https://gw.example/cb",
         requestedAt: sql`now() - interval '20 minutes'`,
         signInExpiresAt: sql`now() - interval '11 minutes'`,
       })
       .returning();
-    expect((await callback({ state, code: "x" })).json().error).toBe("delegated_request_expired");
+    const expiredCb = await callback({ state, code: "x" }, `${DELEGATED_BINDING_COOKIE}=${delegatedBrowserBinding(DATA_KEY, state)}`);
+    expect(expiredCb.json().error).toBe("delegated_request_expired");
     expect(await requestRow(old!.id)).toMatchObject({ status: "expired", outcomeCode: "sign_in_window_passed", codeVerifierCiphertext: null });
     // the approval window: the approval's own expiry
     const r = await signedIn(sourceId);
@@ -499,6 +586,55 @@ describe("ADR-0338 slice 1c: expiry and cancel", () => {
     expect(again.statusCode).toBe(409);
     expect(again.json().error).toBe("delegated_request_not_open");
     expect(await liveControl(sourceId)).toBeUndefined();
+  });
+});
+
+describe("ADR-0338 slice 1c: an expired approval, and the sweep", () => {
+  it("an approval past its window cannot be decided, even by the right approver with the right step-up; its token is destroyed", async () => {
+    const sourceId = await seedSource();
+    const r = await signedIn(sourceId);
+    await db.update(approvals).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(approvals.id, r.approvalId));
+    // nobody read the request: the decision itself expires it
+    const d = await decide(r.approvalId);
+    expect(d.statusCode).toBe(409);
+    expect(d.json().error).toBe("approval_expired");
+    expect(await requestRow(r.id)).toMatchObject({ status: "expired", outcomeCode: "approval_expired", refreshTokenCiphertext: null, credentialId: null });
+    expect(await liveControl(sourceId)).toBeUndefined();
+  });
+
+  it("the scheduled sweep expires due sign-ins and approvals that nobody reads, destroying what they held", async () => {
+    const a = await seedSource();
+    const b = await seedSource();
+    // a sign-in whose 10 minutes passed, never completed
+    const [oldA] = await db
+      .insert(vendorControlDelegatedRequests)
+      .values({
+        sourceId: a,
+        requestedBy: adminId,
+        approverUserId: approverId,
+        state: randomBytes(32).toString("base64url"),
+        nonce: randomBytes(32).toString("base64url"),
+        codeVerifierCiphertext: encryptSecret(DATA_KEY, "v"),
+        tenantId: TENANT,
+        clientId: WRITE_APP,
+        accountUpn: UPN,
+        accountObjectId: ACCOUNT_OID,
+        expiresInDays: 30,
+        redirectUri: "https://gw.example/cb",
+        requestedAt: sql`now() - interval '20 minutes'`,
+        signInExpiresAt: sql`now() - interval '11 minutes'`,
+      })
+      .returning();
+    // and an approval whose window passed, never decided
+    const signedB = await signedIn(b);
+    await db.update(approvals).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(approvals.id, signedB.approvalId));
+    const out = await runDelegatedExpirySweep(db);
+    expect(out.expired).toBeGreaterThanOrEqual(2);
+    expect(await requestRow(oldA!.id)).toMatchObject({ status: "expired", outcomeCode: "sign_in_window_passed", codeVerifierCiphertext: null });
+    expect(await requestRow(signedB.id)).toMatchObject({ status: "expired", refreshTokenCiphertext: null });
+    expect((await approvalOf(signedB.approvalId)).status).toBe("superseded");
+    const [audited] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'vendor-control-delegated-expired' AND ${auditLog.detail}->>'requestId' = ${signedB.id}`);
+    expect(audited?.userId).toBe(adminId);
   });
 });
 

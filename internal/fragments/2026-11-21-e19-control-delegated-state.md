@@ -16,5 +16,10 @@
   the same row. A token for another account is refused.
 - **Library.** `@azure/msal-node` 7.1.1, now a direct exact pin, talks only to the tenant's token endpoint through the
   guarded fetch, with static metadata (no discovery call) and a federated client assertion (no stored client secret).
+- **Review of #1251 applied.** The callback works in a real browser: it is bound to the starting browser by ADR-0167's
+  Lax binding cookie instead of the Strict session cookie. An expired approval cannot be decided, and a scheduled
+  sweep destroys held tokens nobody reads. The account is matched on its object id (guests refused). oauth4webapi
+  validates the ID token's iss, aud, exp and nonce, and the granted scope is checked. The evidence foreign keys no
+  longer cascade.
 - **Review of #1120 applied.** The read credential refuses the control app; execute and settle check the step-up
   before minting a token.

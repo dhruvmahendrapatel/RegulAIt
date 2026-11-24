@@ -900,6 +900,7 @@ import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js"
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
 import { robotRunJobDefinitions } from "./robot-runs.js";
+import { vendorControlDelegatedJobDefinitions } from "./vendor-agent-control-delegated.js";
 import { aiSaasMonitorJobDefinitions } from "./ai-saas-monitor.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
@@ -932,6 +933,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...agentRiskProofJobDefinitions(), // ADR-0345 slice 2a: agent-risk-proof-sweep
     ...robotRunJobDefinitions(), // ADR-0364 S3: robot-run-stale-sweep
     ...aiSaasMonitorJobDefinitions({ dataKey: opts.dataKey }), // ADR-0361: ai-saas-monitor-sweep, ai-saas-evidence-retention-sweep
+    ...vendorControlDelegatedJobDefinitions(), // ADR-0338 slice 1c: vendor-control-delegated-expiry-sweep
   ];
 }
 // ===== end ADR-0182 block ====================================================

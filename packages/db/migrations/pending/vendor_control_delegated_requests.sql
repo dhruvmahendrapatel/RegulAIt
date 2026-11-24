@@ -17,8 +17,8 @@
 -- The tenant, app, account and expiry the admin asked for are kept because the start step-up and the approval digest
 -- are bound to them, and the approval stores exactly those: a commented 3NF exception, a point-in-time copy.
 --
--- `vendor_control_delegated_requests_guard`: the identity is fixed; the account's object id and the approval are set
--- once; only the machine's own moves are allowed; a terminal row never changes. TRUNCATE is refused (the 0185 rules);
+-- `vendor_control_delegated_requests_guard`: the identity (the account's object id included) is fixed; the approval is
+-- set once; only the machine's own moves are allowed; a terminal row never changes. TRUNCATE is refused (the 0185 rules);
 -- the function is SECURITY INVOKER with a pinned search_path. One open request per source (a partial unique index).
 -- Row-level security is ENABLEd and FORCEd: an admin principal, or the `system_task` / `migration` reason. The 0272
 -- default privileges give `regulait_app` its grants.
@@ -26,8 +26,9 @@
 CREATE TABLE IF NOT EXISTS "vendor_control_delegated_requests" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "source_id" uuid NOT NULL REFERENCES "discovery_sources"("id") ON DELETE CASCADE,
-  "requested_by" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
-  "approver_user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+  -- the two people are evidence: a user with a request is never deleted out from under it (no ON DELETE)
+  "requested_by" uuid NOT NULL REFERENCES "users"("id"),
+  "approver_user_id" uuid NOT NULL REFERENCES "users"("id"),
   "status" text DEFAULT 'awaiting_sign_in' NOT NULL,
   "state" text NOT NULL,
   "nonce" text NOT NULL,
@@ -36,12 +37,14 @@ CREATE TABLE IF NOT EXISTS "vendor_control_delegated_requests" (
   "tenant_id" text NOT NULL,
   "client_id" text NOT NULL,
   "account_upn" text NOT NULL,
-  "account_object_id" text,
+  -- the account's immutable object id (oid), named at the start; the sign-in must come back as exactly it. The UPN
+  -- is a login hint and a label only (it is mutable), never what the account is matched on.
+  "account_object_id" text NOT NULL,
   "expires_in_days" integer NOT NULL,
-  "replaces_credential_id" uuid REFERENCES "discovery_credentials"("id") ON DELETE CASCADE,
+  "replaces_credential_id" uuid REFERENCES "discovery_credentials"("id"),
   "redirect_uri" text NOT NULL,
   "approval_id" uuid REFERENCES "approvals"("id"),
-  "credential_id" uuid REFERENCES "discovery_credentials"("id") ON DELETE CASCADE,
+  "credential_id" uuid REFERENCES "discovery_credentials"("id"),
   "outcome_code" text,
   "requested_at" timestamp with time zone DEFAULT now() NOT NULL,
   "sign_in_expires_at" timestamp with time zone NOT NULL,
@@ -53,7 +56,7 @@ CREATE TABLE IF NOT EXISTS "vendor_control_delegated_requests" (
   CONSTRAINT "vendor_control_delegated_requests_ids_check" CHECK (
     "tenant_id" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     AND "client_id" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    AND ("account_object_id" IS NULL OR "account_object_id" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    AND "account_object_id" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   ),
   CONSTRAINT "vendor_control_delegated_requests_account_check" CHECK (char_length("account_upn") BETWEEN 3 AND 320 AND "account_upn" = lower("account_upn")),
   CONSTRAINT "vendor_control_delegated_requests_days_check" CHECK ("expires_in_days" BETWEEN 1 AND 90),
@@ -64,8 +67,8 @@ CREATE TABLE IF NOT EXISTS "vendor_control_delegated_requests" (
   CONSTRAINT "vendor_control_delegated_requests_verifier_check" CHECK (("status" = 'awaiting_sign_in') = ("code_verifier_ciphertext" IS NOT NULL)),
   CONSTRAINT "vendor_control_delegated_requests_held_token_check" CHECK (("status" = 'awaiting_approval') = ("refresh_token_ciphertext" IS NOT NULL)),
   CONSTRAINT "vendor_control_delegated_requests_signed_in_check" CHECK (
-    ("status" <> 'awaiting_sign_in' OR ("account_object_id" IS NULL AND "approval_id" IS NULL))
-    AND ("status" NOT IN ('awaiting_approval', 'connected') OR ("account_object_id" IS NOT NULL AND "approval_id" IS NOT NULL))
+    ("status" <> 'awaiting_sign_in' OR "approval_id" IS NULL)
+    AND ("status" NOT IN ('awaiting_approval', 'connected') OR "approval_id" IS NOT NULL)
   ),
   CONSTRAINT "vendor_control_delegated_requests_connected_check" CHECK (("status" = 'connected') = ("credential_id" IS NOT NULL)),
   CONSTRAINT "vendor_control_delegated_requests_outcome_check" CHECK ("outcome_code" IS NULL OR "outcome_code" ~ '^[a-z][a-z0-9_]{0,63}$')
@@ -77,6 +80,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS "vendor_control_delegated_requests_open_uq" ON
 CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_source_idx" ON "vendor_control_delegated_requests" ("source_id", "requested_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_approval_idx" ON "vendor_control_delegated_requests" ("approval_id");
+--> statement-breakpoint
+-- every foreign key is indexed (the sweep and the evidence joins read by them)
+CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_credential_idx" ON "vendor_control_delegated_requests" ("credential_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_replaces_idx" ON "vendor_control_delegated_requests" ("replaces_credential_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_requested_by_idx" ON "vendor_control_delegated_requests" ("requested_by");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "vendor_control_delegated_requests_approver_idx" ON "vendor_control_delegated_requests" ("approver_user_id");
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION "vendor_control_delegated_requests_guard"() RETURNS trigger LANGUAGE plpgsql
   SET search_path = pg_catalog, public, pg_temp AS $$
@@ -96,7 +108,7 @@ BEGIN
      OR NEW."redirect_uri" IS DISTINCT FROM OLD."redirect_uri"
      OR NEW."requested_at" IS DISTINCT FROM OLD."requested_at"
      OR NEW."sign_in_expires_at" IS DISTINCT FROM OLD."sign_in_expires_at"
-     OR (OLD."account_object_id" IS NOT NULL AND NEW."account_object_id" IS DISTINCT FROM OLD."account_object_id")
+     OR NEW."account_object_id" IS DISTINCT FROM OLD."account_object_id"
      OR (OLD."approval_id" IS NOT NULL AND NEW."approval_id" IS DISTINCT FROM OLD."approval_id")
      -- only the machine's own moves (VENDOR_CONTROL_DELEGATED_MACHINE)
      OR NOT (
