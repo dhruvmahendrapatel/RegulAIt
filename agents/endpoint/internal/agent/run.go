@@ -199,6 +199,7 @@ func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *Sta
 	if err != nil {
 		return nil, err
 	}
+	env.Fingerprint = cfg.CredentialReuse
 	facts, gaps := collect.Collect(env, verified.Collection, disabled)
 	if facts == nil {
 		facts = []contract.Fact{}

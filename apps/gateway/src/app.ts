@@ -708,6 +708,7 @@ import {
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerEndpointCredentialReuseRoutes } from "./endpoint-credential-reuse.js";
 import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
@@ -6518,6 +6519,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  registerEndpointCredentialReuseRoutes(app, db);
   // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
   registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
