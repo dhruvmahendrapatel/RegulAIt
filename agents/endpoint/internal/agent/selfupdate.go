@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
@@ -17,12 +20,18 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/update"
 )
 
-// Spool file names (ADR-0360 §4). The per-user agent writes the first three; the root updater writes the result.
+// Spool file names (ADR-0360 §4). The per-user agent writes the first three and the acknowledgement; the root updater
+// writes the result.
 const (
 	SpoolDirective = "directive.json"
 	SpoolManifest  = "release.json"
 	SpoolBinary    = "regulait-agent.bin"
 	SpoolResult    = "result.json"
+	// SpoolResultAck is the per-user agent's acknowledgement that the result is finished (reported, or one the gateway
+	// will never take): the hex SHA-256 of the result file's bytes. The spool's sticky bit keeps the agent from removing
+	// root's result file, so the root updater removes it once the acknowledgement names exactly those bytes.
+	SpoolResultAck = "result.ack"
+	maxAckBytes    = 128
 )
 
 // Update outcomes, written to the result file the per-user agent reports. None carries a secret.
@@ -34,7 +43,15 @@ const (
 	UpdateFailed       = "failed"
 	UpdateRolledBack   = "rolled_back"
 	UpdateAlreadyAtTop = "up_to_date"
+	// UpdatePending: the previous result is not yet reported, so nothing is done and nothing is written (the first real
+	// outcome of an attempt is the one the gateway sees, and its automatic halt counts).
+	UpdatePending = "result_pending"
 )
+
+// writesResult reports whether an outcome is written to the result file (and consumes the directive).
+func writesResult(outcome string) bool {
+	return outcome != UpdateNothing && outcome != UpdateNotEnabled && outcome != UpdatePending
+}
 
 // UpdateResult is the root updater's outcome (the wire type, so the result file and the report are one shape).
 type UpdateResult = contract.UpdateResult
@@ -98,13 +115,19 @@ func ticketDeviceID(o Options, cfg *Config) (string, error) {
 // directive the device-policy signer signed for this device and still valid, and a release manifest the release keys
 // signed for exactly that version, which is newer than this binary. It stages the binary beside the installed one,
 // checks the staged copy's length and SHA-256, runs its health check, swaps it in, runs the installed binary's health
-// check and rolls back when that fails. Every outcome is written to the spool's result file and logged with its code.
+// check and rolls back when that fails. Every outcome is logged with its code.
+//
+// Each directive is consumed exactly once: once read, it is removed from the spool whatever the outcome, and the
+// outcome is written to the spool's result file. A result file is never overwritten while it is unreported: until the
+// per-user agent has reported it (removed it, or acknowledged its exact bytes in SpoolResultAck), a run does nothing
+// and returns UpdatePending, so hourly runs between the agent's syncs can neither re-install a rolled-back binary nor
+// replace a failure with a later refusal.
 func SelfUpdate(ctx context.Context, o Options, installed string) UpdateResult {
 	o.defaults()
 	res := UpdateResult{Schema: update.SchemaResult, FromVersion: Version}
 	done := func(outcome, code string) UpdateResult {
 		res.Outcome, res.Code, res.At = outcome, code, o.Now().UTC().Format(time.RFC3339)
-		if outcome != UpdateNothing && outcome != UpdateNotEnabled {
+		if writesResult(outcome) {
 			if b, err := json.MarshalIndent(res, "", "  "); err == nil {
 				if err := fsutil.WriteAtomic(filepath.Join(o.Paths.SpoolDir, SpoolResult), append(b, '\n'), 0o644, -1, true); err != nil {
 					o.Log.Error("update: could not write the result file", "err", err)
@@ -123,9 +146,17 @@ func SelfUpdate(ctx context.Context, o Options, installed string) UpdateResult {
 		// secure by default: nothing is pinned, so no signature can count
 		return done(UpdateNotEnabled, "keys_not_pinned")
 	}
-	rawDirective, err := readSpool(filepath.Join(o.Paths.SpoolDir, SpoolDirective), update.MaxDirectiveBytes)
+	if resultPending(o) {
+		return done(UpdatePending, "")
+	}
+	directivePath := filepath.Join(o.Paths.SpoolDir, SpoolDirective)
+	rawDirective, err := readSpool(directivePath, update.MaxDirectiveBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return done(UpdateNothing, "")
+	}
+	// consumed exactly once: whatever follows, this directive (or whatever sits under its name) is not read again
+	if rerr := os.Remove(directivePath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		o.Log.Error("update: could not consume the directive", "err", rerr)
 	}
 	if err != nil {
 		return done(UpdateRefused, update.CodeDirectiveInvalid)
@@ -176,6 +207,41 @@ func SelfUpdate(ctx context.Context, o Options, installed string) UpdateResult {
 		return done(UpdateRolledBack, update.CodeInstalledHealth)
 	}
 	return done(UpdateInstalled, "")
+}
+
+// resultPending reports whether the spool holds a result the per-user agent has not finished with. A result file that
+// is not root's own (a link, another owner, too large) was never written by this updater and is removed. A result the
+// agent acknowledged (SpoolResultAck names its SHA-256) is removed with the acknowledgement. An acknowledgement left
+// without a result is removed.
+func resultPending(o Options) bool {
+	resultPath, ackPath := filepath.Join(o.Paths.SpoolDir, SpoolResult), filepath.Join(o.Paths.SpoolDir, SpoolResultAck)
+	raw, err := fsutil.ReadChecked(resultPath, o.SystemOwner, fsutil.WorldRead, MaxResultBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		_ = os.Remove(ackPath)
+		return false
+	}
+	if errors.Is(err, fsutil.ErrUnsafeFile) {
+		o.Log.Warn("update: removing a result file this updater did not write", "err", err)
+		if rerr := os.Remove(resultPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			return true
+		}
+		_ = os.Remove(ackPath)
+		return false
+	}
+	if err != nil {
+		// unreadable for another reason: never overwritten blind
+		return true
+	}
+	ack, err := readSpool(ackPath, maxAckBytes)
+	sum := sha256.Sum256(raw)
+	if err != nil || strings.TrimSpace(string(ack)) != hex.EncodeToString(sum[:]) {
+		return true
+	}
+	if rerr := os.Remove(resultPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		return true
+	}
+	_ = os.Remove(ackPath)
+	return false
 }
 
 func stageFromSpool(src, dst string, t *update.Target) error {

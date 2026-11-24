@@ -213,3 +213,14 @@ func TestSwapKeepsThePreviousBinaryAndRollsBack(t *testing.T) {
 		t.Fatalf("after a failed swap: %s", b)
 	}
 }
+
+// One version limit across the agent: at most MaxVersionLength characters.
+func TestValidVersionIsBoundedAt32Characters(t *testing.T) {
+	at := "1.0.0-" + strings.Repeat("a", MaxVersionLength-6)
+	if len(at) != MaxVersionLength || !ValidVersion(at) {
+		t.Fatalf("%q refused", at)
+	}
+	if over := at + "a"; ValidVersion(over) || Newer(over, "1.0.0") {
+		t.Fatalf("%q accepted", over)
+	}
+}

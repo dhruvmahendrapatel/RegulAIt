@@ -161,9 +161,14 @@ func TestUpdateSyncSpoolsTheOfferAndReportsTheResult(t *testing.T) {
 	if _, err := os.Lstat(u.spoolFile(SpoolResult)); !os.IsNotExist(err) {
 		t.Fatal("the reported result was not removed")
 	}
-	// a null update removes nothing
-	if _, err := os.Lstat(u.spoolFile(SpoolDirective)); err != nil {
-		t.Fatal("a null update removed the directive")
+	// the root updater consumed the directive; a null update removes nothing else
+	if _, err := os.Lstat(u.spoolFile(SpoolDirective)); !os.IsNotExist(err) {
+		t.Fatal("the root updater left the directive it consumed")
+	}
+	for _, n := range []string{SpoolManifest, SpoolBinary} {
+		if _, err := os.Lstat(u.spoolFile(n)); err != nil {
+			t.Fatalf("a null update removed %s", n)
+		}
 	}
 	if strings.Contains(u.logs.String(), u.gw.Issuer) || strings.Contains(u.logs.String(), "127.0.0.1") {
 		t.Fatalf("a host name was logged:\n%s", u.logs)
@@ -266,7 +271,12 @@ func TestUpdateSyncResultReporting(t *testing.T) {
 		"recorded, halted": {0, "", UpdateResultReported, true, true},
 		"already reported": {409, contract.ErrAlreadyReported, UpdateResultReported, true, false},
 		"a server error":   {500, "internal", UpdateResultKept, false, false},
-		"another conflict": {409, "attempt_closed", UpdateResultKept, false, false},
+		"forbidden":        {403, "device_revoked", UpdateResultKept, false, false},
+		"rate limited":     {429, "rate_limited", UpdateResultKept, false, false},
+		// a 4xx a resend cannot change finishes the result, so later syncs are never stuck on result_pending
+		"a version mismatch": {400, "version_mismatch", UpdateResultDropped, true, false},
+		"an unknown attempt": {404, "attempt_not_found", UpdateResultDropped, true, false},
+		"another conflict":   {409, "attempt_closed", UpdateResultDropped, true, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			u := newUpdateFixture(t)
@@ -409,4 +419,95 @@ func TestUpdateSyncRefusesLinksAndForgeries(t *testing.T) {
 			t.Fatal("written through the link")
 		}
 	})
+}
+
+// The real gateway's config route answers 503 collection_pack_unavailable today: the report fails, and the update
+// offer and the root updater's result still go through.
+func TestUpdateSyncRunsWhenTheConfigRouteRefuses(t *testing.T) {
+	u := newUpdateFixture(t)
+	directive, _ := u.offer(t, "1.1.0", fakeBinary("1.1.0", false))
+	u.gw.Lock()
+	u.gw.ConfigStatus, u.gw.ConfigCode = 503, "collection_pack_unavailable"
+	u.gw.Unlock()
+	r, err := u.cycle().RunOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "collection_pack_unavailable") {
+		t.Fatalf("the report's error is not returned: %v", err)
+	}
+	if r == nil || r.Update == nil || r.Update.Offer != UpdateSyncSpooled || r.Update.AttemptID != attemptID {
+		t.Fatalf("%+v\n%s", r, u.logs)
+	}
+	if got, err := os.ReadFile(u.spoolFile(SpoolDirective)); err != nil || !bytes.Equal(got, directive) {
+		t.Fatalf("the directive was not spooled: %v", err)
+	}
+	// the root updater's result is reported on the next refused cycle
+	if res := u.run(t); res.Outcome != UpdateInstalled {
+		t.Fatalf("%+v\n%s", res, u.logs)
+	}
+	r, err = u.cycle().RunOnce(context.Background())
+	if err == nil || r == nil || r.Update == nil || r.Update.Result != UpdateResultReported {
+		t.Fatalf("%v %+v\n%s", err, r, u.logs)
+	}
+	u.gw.Lock()
+	defer u.gw.Unlock()
+	if len(u.gw.UpdateResults) != 1 || u.gw.UpdateResults[0].Result.Outcome != UpdateInstalled || len(u.gw.Reports) != 0 {
+		t.Fatalf("results %+v, reports %d", u.gw.UpdateResults, len(u.gw.Reports))
+	}
+}
+
+// A 400 version_mismatch finishes the result: it is removed and the same sync goes on to the next offer; the next sync
+// has nothing waiting.
+func TestUpdateSyncDropsAResultTheGatewayRefusesForGood(t *testing.T) {
+	u := newUpdateFixture(t)
+	u.offer(t, "1.1.0", fakeBinary("1.1.0", false))
+	u.sync(t)
+	u.writeResult(t, sampleResult())
+	u.gw.Lock()
+	u.gw.UpdateResultStatus, u.gw.UpdateResultCode = 400, "version_mismatch"
+	u.gw.Update.AttemptID = "7d6c5b4a-3928-4170-8a9b-cdef01234567"
+	u.gw.Unlock()
+	offers := u.requests(contract.RouteUpdate)
+	run := u.sync(t)
+	if run.Result != UpdateResultDropped || run.Offer != UpdateSyncSpooled || u.requests(contract.RouteUpdate) != offers+1 {
+		t.Fatalf("%+v\n%s", run, u.logs)
+	}
+	if _, err := os.Lstat(u.spoolFile(SpoolResult)); !os.IsNotExist(err) {
+		t.Fatal("the refused result was kept")
+	}
+	if run := u.sync(t); run.Result != UpdateResultNone || run.Offer != UpdateSyncSpooled {
+		t.Fatalf("%+v", run)
+	}
+	if !strings.Contains(u.logs.String(), "result_refused_by_gateway") {
+		t.Fatalf("no fixed code logged:\n%s", u.logs)
+	}
+}
+
+// When the sticky spool keeps root's result file from the agent, a finished result is acknowledged by its SHA-256.
+func TestUpdateSyncAcknowledgesAResultItCannotRemove(t *testing.T) {
+	u := newUpdateFixture(t)
+	// a non-empty directory under the result's name cannot be removed, as root's file under the sticky bit cannot
+	stuck := u.spoolFile(SpoolResult)
+	os.MkdirAll(filepath.Join(stuck, "x"), 0o755)
+	u.cycle().finishUpdateResult(stuck, strings.Repeat("ab", 32))
+	if b, err := os.ReadFile(u.spoolFile(SpoolResultAck)); err != nil || string(b) != strings.Repeat("ab", 32)+"\n" {
+		t.Fatalf("%v %q", err, b)
+	}
+	// a removable result takes its acknowledgement with it
+	os.RemoveAll(stuck)
+	os.WriteFile(stuck, []byte("{}"), 0o644)
+	u.cycle().finishUpdateResult(stuck, strings.Repeat("ab", 32))
+	if names := u.spoolNames(t); len(names) != 0 {
+		t.Fatalf("spool: %v", names)
+	}
+}
+
+func TestUpdateResultVersionsAreBoundedAt32Characters(t *testing.T) {
+	r := sampleResult()
+	r.ToVersion = "1.1.0-" + strings.Repeat("a", update.MaxVersionLength-6)
+	if !validResult(&r) {
+		t.Fatal("a 32-character version was refused")
+	}
+	r.ToVersion += "a"
+	if validResult(&r) {
+		t.Fatal("a 33-character version was accepted")
+	}
 }

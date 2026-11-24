@@ -135,9 +135,13 @@ func strictJSON(data []byte, v any) error {
 	return nil
 }
 
+// MaxVersionLength is the one version limit across the agent (directive, manifest and result file): a version is
+// at most this many characters of [0-9A-Za-z.+-].
+const MaxVersionLength = 32
+
 // ValidVersion reports whether v is a version this updater can compare.
 func ValidVersion(v string) bool {
-	return versionShape.MatchString(v) && semver.IsValid("v"+v)
+	return len(v) <= MaxVersionLength && versionShape.MatchString(v) && semver.IsValid("v"+v)
 }
 
 // Newer reports whether candidate is strictly greater than current. A current version that is not a release version

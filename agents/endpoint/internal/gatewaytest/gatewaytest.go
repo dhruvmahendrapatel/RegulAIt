@@ -41,6 +41,10 @@ type Gateway struct {
 	Reports      []contract.Report
 	ReportBodies [][]byte
 	Config       contract.ConfigResponse
+	// ConfigStatus, when set, answers the (authorized) config route with that status and ConfigCode instead of Config,
+	// as the real gateway answers 503 collection_pack_unavailable while it has no pack to serve.
+	ConfigStatus int
+	ConfigCode   string
 	Nonce        string
 	usedJTI      map[string]bool
 	tokens       map[string]string // access token -> client id
@@ -124,6 +128,10 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		g.token(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == contract.RouteConfig:
 		if _, ok := g.authorized(w, r); ok {
+			if g.ConfigStatus != 0 {
+				refuse(w, g.ConfigStatus, g.ConfigCode)
+				return
+			}
 			writeJSON(w, http.StatusOK, g.Config)
 		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteReports:

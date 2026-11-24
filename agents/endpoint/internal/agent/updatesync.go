@@ -57,7 +57,8 @@ const (
 	UpdateResultNoAttempt       = "no_attempt"       // a result, but this agent never carried an attempt
 	UpdateResultAlreadyReported = "already_reported" // these exact bytes were recorded before
 	UpdateResultReported        = "reported"         // the gateway recorded it (200, or 409 already_reported)
-	UpdateResultKept            = "kept"             // the report failed; the file is kept for the next run
+	UpdateResultDropped         = "dropped"          // the gateway refused it for good (another 4xx); it is finished, not resent
+	UpdateResultKept            = "kept"             // the report failed in a way a resend can change; kept for the next run
 )
 
 // UpdateRun is what one update sync did.
@@ -83,7 +84,8 @@ var (
 	attemptIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	sha256Shape    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	resultCode     = regexp.MustCompile(`^[a-z_]{1,64}$`)
-	resultVersion  = regexp.MustCompile(`^[0-9A-Za-z.+-]{1,64}$`)
+	// one version limit across the agent: update.MaxVersionLength characters
+	resultVersion  = regexp.MustCompile(`^[0-9A-Za-z.+-]{1,32}$`)
 	resultOutcomes = map[string]bool{UpdateInstalled: true, UpdateRefused: true, UpdateFailed: true, UpdateRolledBack: true, UpdateAlreadyAtTop: true}
 
 	errBinaryMismatch = errors.New("binary mismatch")
@@ -119,7 +121,11 @@ func (c *Cycle) syncUpdate(ctx context.Context, cl *auth.Client, cfg *Config) *U
 	return run
 }
 
-// reportUpdateResult posts the spool's result file, when there is one, against the attempt last carried.
+// reportUpdateResult posts the spool's result file, when there is one, against the attempt last carried. A result is
+// finished when the gateway records it (200, or 409 already_reported), when it refuses it for good (any other 4xx but
+// 401, 403, 408 and 429), or when it can never be reported (malformed, or no attempt carried); a finished result is
+// removed or, when the sticky spool keeps root's file, acknowledged (SpoolResultAck) so the root updater removes it and
+// takes the next directive. Authentication, rate limits, server and network errors keep it for the next run.
 func (c *Cycle) reportUpdateResult(ctx context.Context, cl *auth.Client, st *updateAttempt) string {
 	path := filepath.Join(c.Paths.SpoolDir, SpoolResult)
 	// root writes it 0644; a link, another owner (a local user's forgery) or a larger file is refused
@@ -133,14 +139,17 @@ func (c *Cycle) reportUpdateResult(ctx context.Context, cl *auth.Client, st *upd
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
 	if digest == st.ReportedResult {
-		_ = os.Remove(path)
+		c.finishUpdateResult(path, digest)
 		return UpdateResultAlreadyReported
 	}
 	var r contract.UpdateResult
 	if err := fsutil.StrictJSON(raw, &r); err != nil || !validResult(&r) {
+		// root's own file, but nothing the gateway would take: finished, or no later directive is ever processed
+		c.finishUpdateResult(path, digest)
 		return UpdateResultRefused
 	}
 	if st.AttemptID == "" {
+		c.finishUpdateResult(path, digest)
 		return UpdateResultNoAttempt
 	}
 	body, err := json.Marshal(contract.UpdateResultRequest{AttemptID: st.AttemptID, Result: r})
@@ -151,6 +160,7 @@ func (c *Cycle) reportUpdateResult(ctx context.Context, cl *auth.Client, st *upd
 	if err != nil {
 		return UpdateResultKept
 	}
+	outcome := UpdateResultReported
 	switch {
 	case res.Status == http.StatusOK:
 		var rr contract.UpdateResultResponse
@@ -158,6 +168,10 @@ func (c *Cycle) reportUpdateResult(ctx context.Context, cl *auth.Client, st *upd
 			return UpdateResultKept
 		}
 	case res.Status == http.StatusConflict && res.Code() == contract.ErrAlreadyReported:
+	case permanentResultRefusal(res.Status):
+		// a resend of the same bytes gets the same answer: finished, so later syncs are not stuck on result_pending
+		c.Log.Warn("self-update sync", "code", "result_refused_by_gateway", "status", res.Status)
+		outcome = UpdateResultDropped
 	default:
 		return UpdateResultKept
 	}
@@ -165,11 +179,33 @@ func (c *Cycle) reportUpdateResult(ctx context.Context, cl *auth.Client, st *upd
 	if err := c.saveUpdateAttempt(st); err != nil {
 		c.Log.Warn("self-update sync", "code", "state_write_failed")
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		// the spool's sticky bit: root's file stays, and the recorded digest stops a resend
-		c.Log.Info("self-update sync", "code", "result_not_removed")
+	c.finishUpdateResult(path, digest)
+	return outcome
+}
+
+// permanentResultRefusal is a 4xx a resend cannot change. 401 and 403 (credentials, a revocation being undone), 408 and
+// 429 may pass; a 409 other than already_reported (the attempt closed) is final.
+func permanentResultRefusal(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
 	}
-	return UpdateResultReported
+	return status >= 400 && status < 500
+}
+
+// finishUpdateResult removes a finished result file. When the spool's sticky bit keeps root's file from this user, it
+// writes the acknowledgement (the file's SHA-256) instead, and the root updater removes both before its next directive.
+func (c *Cycle) finishUpdateResult(path, digest string) {
+	ack := filepath.Join(c.Paths.SpoolDir, SpoolResultAck)
+	if err := os.Remove(path); err == nil || errors.Is(err, fs.ErrNotExist) {
+		if err := os.Remove(ack); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			c.Log.Info("self-update sync", "code", "ack_not_removed")
+		}
+		return
+	}
+	if err := fsutil.WriteAtomic(ack, []byte(digest+"\n"), 0o644, -1, true); err != nil {
+		c.Log.Warn("self-update sync", "code", "result_not_acknowledged")
+	}
 }
 
 func validResult(r *contract.UpdateResult) bool {
