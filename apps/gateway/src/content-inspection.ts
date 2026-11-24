@@ -182,7 +182,6 @@ export async function inspectDispatchFiles(
     forced: policy.forced,
     onUninspectable: policy.onUninspectable,
     engine: { runId: engine.runId, outcome: engineOutcome },
-    receiptClass: "decision",
   };
   const fileList = (rs: InspectedFileRecord[]) => rs.map((r) => `#${r.index} (${r.kind}, ${r.reason ?? r.status})`).join(", ");
 
@@ -198,7 +197,7 @@ export async function inspectDispatchFiles(
         userId: args.userId,
         objectType: "agent",
         objectId: args.agentId,
-        detail: { ...auditBase, outcome, files: records },
+        detail: { ...auditBase, outcome, files: records, receiptClass: "decision" },
         effect: "deny",
         ruleId: CONTENT_INSPECTION_RULE_IDS.dispatch,
         ruleChain: [],
@@ -230,7 +229,7 @@ export async function inspectDispatchFiles(
     userId: args.userId,
     objectType: "agent",
     objectId: args.agentId,
-    detail: { ...auditBase, outcome, files: records },
+    detail: { ...auditBase, outcome, files: records, receiptClass: "decision" },
     effect: "allow",
     ruleId: CONTENT_INSPECTION_RULE_IDS.dispatch,
     ruleChain: [],
