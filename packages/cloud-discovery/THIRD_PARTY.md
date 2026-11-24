@@ -44,7 +44,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 |---|---|---|---|
 | `google-gax` | `6.12.1` | Apache-2.0 | The GAPIC runtime. Used only in REST fallback mode; its gRPC transport is never selected. |
 | `@grpc/grpc-js` | `1.14.5` | Apache-2.0 | Installed as a dependency of `google-gax`; never used as a transport by this package. |
-| `gaxios` | `8.3.1` | Apache-2.0 | Google's HTTP client; constructed through `google-auth-library`'s own re-export with `fetchImplementation` set to the guarded fetch. |
+| `gaxios` | `8.3.3` | Apache-2.0 | Google's HTTP client; constructed through `google-auth-library`'s own re-export with `fetchImplementation` set to the guarded fetch. |
 | `@azure/msal-node`, `@azure/msal-common` | `6.0.1`, `16.14.1` | MIT | Entra token acquisition inside `@azure/identity`; its network client is the guarded `HttpClient`. |
 | `protobufjs` | `7.6.6` | BSD-3-Clause | Message encoding for the Google clients' REST fallback. |
 
@@ -63,6 +63,6 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 - **Credential memoisation for AWS** (`memoizeCredentials`, `src/aws.ts`): smithy's `memoize` lives
   under an internal, legacy export path that has moved between minor versions; a stable public equivalent does not
   exist.
-- **The STS transporter fix** (`gcpAuthClient`, `src/gcp.ts`): `google-auth-library` 11.3.1 (and still 11.3.2, re-read 2026-11-06) builds the external
+- **The STS transporter fix** (`gcpAuthClient`, `src/gcp.ts`): `google-auth-library` 11.3.1 (and still 11.3.4, re-read 2026-11-24) builds the external
   account client's `StsCredentials` without the transporter it was given, so the token exchange would bypass the
   guard. We re-point it and fail closed if the internal shape changes. To be reported upstream.
