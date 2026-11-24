@@ -87,6 +87,13 @@ export const ENDPOINT_UPDATE_ATTEMPT_STATES = ["directed", "installed", "current
 export type EndpointUpdateAttemptState = (typeof ENDPOINT_UPDATE_ATTEMPT_STATES)[number];
 /** an attempt with no report within this long expires (the directive's own lifetime is at most 24 hours, ADR-0360 §4) */
 export const ENDPOINT_UPDATE_ATTEMPT_TTL_HOURS = 24;
+/**
+ * One limit for an agent version everywhere (review of #1248): a rollout's target, the release manifest, the device's
+ * reported version and the update result all hold at most 32 characters, the same as the agent (internal/update).
+ */
+export const ENDPOINT_AGENT_VERSION_MAX = 32;
+/** a rollout target and a release version: semver, with an optional pre-release, at most 32 characters in all */
+export const ENDPOINT_AGENT_RELEASE_VERSION = /^(?=.{1,32}$)[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,30})?$/;
 
 const REPORTABLE = ["directed", "expired"] as const;
 export const ENDPOINT_UPDATE_ATTEMPT_MACHINE = defineMachine({

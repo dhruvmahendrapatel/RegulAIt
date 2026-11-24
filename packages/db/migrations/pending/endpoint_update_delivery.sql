@@ -5,11 +5,13 @@
 --    a waiting rollout names its requester and that the decider is never the requester.
 -- 2. endpoint_update_attempts: one device's attempt to install one rollout's version, created when the gateway first
 --    offers it a signed directive and settled by the device's one report (ENDPOINT_UPDATE_ATTEMPT_MACHINE).
+-- 3. endpoint_update_rollout_devices: the devices a start or resume approval covers (security review of #1248).
+-- 4. the rollout target version CHECK gains the 32-character limit the device and the result already hold.
 --
 -- Row-level security, ENABLED and FORCED: an active admin principal and the `system_task` and `migration` reasons
 -- (the device routes run their reads and writes under `system_task`, scoped to the calling device).
 --
--- Hand-authored, additive and idempotent. It sorts after endpoint_fleet_operations, whose tables it alters. No
+-- Hand-authored and idempotent; additive apart from the tightened version CHECK (the product is not live, ADR-0180). It sorts after endpoint_fleet_operations, whose tables it alters. No
 -- functions or triggers.
 ALTER TABLE "endpoint_update_rollouts" ADD COLUMN IF NOT EXISTS "approval_requested_by" uuid REFERENCES "users"("id");
 --> statement-breakpoint
@@ -68,3 +70,35 @@ DROP POLICY IF EXISTS "endpoint_update_attempts_admin" ON "endpoint_update_attem
 CREATE POLICY "endpoint_update_attempts_admin" ON "endpoint_update_attempts" FOR ALL
   USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
   WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+-- 3. endpoint_update_rollout_devices (security review of #1248): the devices a start or resume approval covers. The
+--    gateway offers the update only to a captured device still in its stage's group, so a later membership change by
+--    one admin never widens a two-person-approved rollout.
+CREATE TABLE IF NOT EXISTS "endpoint_update_rollout_devices" (
+  "rollout_id" uuid NOT NULL REFERENCES "endpoint_update_rollouts"("id") ON DELETE CASCADE,
+  "device_id" uuid NOT NULL REFERENCES "endpoint_devices"("id") ON DELETE CASCADE,
+  "stage_ordinal" integer NOT NULL,
+  "approved_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "endpoint_update_rollout_devices_pk" PRIMARY KEY ("rollout_id", "device_id"),
+  CONSTRAINT "endpoint_update_rollout_devices_stage_fk" FOREIGN KEY ("rollout_id", "stage_ordinal")
+    REFERENCES "endpoint_update_rollout_stages"("rollout_id", "ordinal") ON DELETE CASCADE
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "endpoint_update_rollout_devices_device_idx" ON "endpoint_update_rollout_devices" ("device_id");
+--> statement-breakpoint
+ALTER TABLE "endpoint_update_rollout_devices" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "endpoint_update_rollout_devices" FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+DROP POLICY IF EXISTS "endpoint_update_rollout_devices_admin" ON "endpoint_update_rollout_devices";
+--> statement-breakpoint
+CREATE POLICY "endpoint_update_rollout_devices_admin" ON "endpoint_update_rollout_devices" FOR ALL
+  USING ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']))
+  WITH CHECK ((SELECT regulait_rls_is_admin()) OR (SELECT regulait_rls_system_reason()) = ANY (ARRAY['system_task', 'migration']));
+--> statement-breakpoint
+-- 4. one version limit everywhere (review of #1248): a rollout target holds at most 32 characters, as the device's
+--    reported version, the update result and the agent do.
+ALTER TABLE "endpoint_update_rollouts" DROP CONSTRAINT IF EXISTS "endpoint_update_rollouts_version_check";
+--> statement-breakpoint
+ALTER TABLE "endpoint_update_rollouts" ADD CONSTRAINT "endpoint_update_rollouts_version_check"
+  CHECK (length("target_version") <= 32 AND "target_version" ~ '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,30})?$');

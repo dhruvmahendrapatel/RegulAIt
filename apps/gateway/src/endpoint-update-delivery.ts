@@ -8,9 +8,11 @@
  *   POST /v1/endpoint-agent/update-results  the root updater's one outcome, which settles the attempt and can halt the
  *                                           rollout
  *
- * WHEN A DEVICE IS OFFERED THE UPDATE: its source has a `running` rollout; the first stage (in ordinal order) whose
- * ADR-0350 group holds the device has been reached (`active` or `done`) and that group's self-update is still on (read
- * at every offer, so turning it off stops the offer at once); the device does not already run the version; its attempt
+ * WHEN A DEVICE IS OFFERED THE UPDATE: its source has a `running` rollout; the device was in the rollout's stage
+ * groups when a second admin approved its start or resume (`endpoint_update_rollout_devices`, captured with the first
+ * stage in ordinal order whose ADR-0350 group held it), so a later membership change never widens the approval; it is
+ * still in that stage's group; the stage has been reached (`active` or `done`) and its group's self-update is still on
+ * (read at every offer, so turning it off stops the offer at once); the device does not already run the version; its attempt
  * for the rollout is not settled; the execution dial is `normal`; and the release is on the gateway and verifies. The
  * device's updater still refuses anything that is not newer than what runs (ADR-0360 §4), so the gateway never needs to
  * order versions itself.
@@ -37,13 +39,13 @@ import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
-  asc,
   auditLog,
   endpointDeviceGroupFleetSettings,
   endpointDeviceGroupMembers,
   endpointDevices,
   endpointUpdateAttempts,
   endpointUpdateRollouts,
+  endpointUpdateRolloutDevices,
   endpointUpdateRolloutStages,
   eq,
   inArray,
@@ -54,6 +56,7 @@ import {
   type EndpointUpdateAttemptRow,
 } from "@regulait/db";
 import {
+  ENDPOINT_AGENT_RELEASE_VERSION,
   ENDPOINT_ROLLOUT_DECISION_TTL_HOURS,
   ENDPOINT_ROLLOUT_MACHINE,
   ENDPOINT_UPDATE_ATTEMPT_MACHINE,
@@ -83,13 +86,13 @@ export const ENDPOINT_UPDATE_PATHS = {
 
 // Bounds (secure by default, ADR-0180: compiled in; the device's updater holds the same, agents/endpoint/internal/update)
 /** a directive lives this long, and never past its attempt's expiry (the device refuses one longer than 24 hours) */
-export const UPDATE_DIRECTIVE_LIFETIME_MINUTES = 360;
+export const UPDATE_DIRECTIVE_LIFETIME_MINUTES = 60;
 const MAX_MANIFEST_BYTES = 64 << 10;
 const MAX_BINARY_BYTES = 256 << 20;
 const MAX_RELEASE_KEYS = 2;
 const RESULTS_BODY_LIMIT = 4096;
 const KEY_ID_SHAPE = /^[a-z0-9][a-z0-9-]{2,63}$/;
-const VERSION_SHAPE = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$/;
+const VERSION_SHAPE = ENDPOINT_AGENT_RELEASE_VERSION;
 const HEX64 = /^[0-9a-f]{64}$/;
 const CODE_SHAPE = /^[a-z_]{1,64}$/;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -230,23 +233,35 @@ interface Offer {
 }
 
 /** the rollout that offers this device the update now, or null (every condition in the header) */
-async function offerFor(db: Db, agent: EndpointAgentContext): Promise<Offer | null> {
+async function offerFor(db: Db, agent: EndpointAgentContext, lock = false): Promise<Offer | null> {
   const [device] = await db.select().from(endpointDevices).where(eq(endpointDevices.id, agent.deviceId));
   if (!device || device.revokedAt) return null;
-  const [rollout] = await db
+  const running = db
     .select()
     .from(endpointUpdateRollouts)
     .where(and(eq(endpointUpdateRollouts.sourceId, agent.sourceId), eq(endpointUpdateRollouts.state, "running")));
+  // the offer route holds the rollout row FOR SHARE until the directive is signed, so a pause, abort or halt (each
+  // FOR UPDATE) waits for it, and no directive is signed for a rollout that has already stopped (review of #1248)
+  const [rollout] = lock ? await running.for("share") : await running;
   if (!rollout || device.agentVersion === rollout.targetVersion) return null;
-  const stages = await db.select().from(endpointUpdateRolloutStages).where(eq(endpointUpdateRolloutStages.rolloutId, rollout.id)).orderBy(asc(endpointUpdateRolloutStages.ordinal));
-  const groupIds = stages.map((s) => s.groupId).filter((g): g is string => g !== null);
-  if (groupIds.length === 0) return null;
-  const mine = new Set(
-    (await db.select({ g: endpointDeviceGroupMembers.groupId }).from(endpointDeviceGroupMembers).where(and(eq(endpointDeviceGroupMembers.deviceId, device.id), inArray(endpointDeviceGroupMembers.groupId, groupIds)))).map((r) => r.g),
-  );
-  // a device is offered the update by the first stage, in ordinal order, whose group holds it (ADR-0360 §3)
-  const stage = stages.find((s) => s.groupId !== null && mine.has(s.groupId));
-  if (!stage || (stage.state !== "active" && stage.state !== "done")) return null;
+  // only a device the two-person approval covered (security review of #1248): captured when the start or resume was
+  // approved, so a group membership added afterwards waits for a new approval
+  const [covered] = await db
+    .select({ ordinal: endpointUpdateRolloutDevices.stageOrdinal })
+    .from(endpointUpdateRolloutDevices)
+    .where(and(eq(endpointUpdateRolloutDevices.rolloutId, rollout.id), eq(endpointUpdateRolloutDevices.deviceId, device.id)));
+  if (!covered) return null;
+  const [stage] = await db
+    .select()
+    .from(endpointUpdateRolloutStages)
+    .where(and(eq(endpointUpdateRolloutStages.rolloutId, rollout.id), eq(endpointUpdateRolloutStages.ordinal, covered.ordinal)));
+  if (!stage?.groupId || (stage.state !== "active" && stage.state !== "done")) return null;
+  // and still in that stage's group: removing a device from the group narrows the rollout at once
+  const [member] = await db
+    .select({ g: endpointDeviceGroupMembers.groupId })
+    .from(endpointDeviceGroupMembers)
+    .where(and(eq(endpointDeviceGroupMembers.deviceId, device.id), eq(endpointDeviceGroupMembers.groupId, stage.groupId)));
+  if (!member) return null;
   const [on] = await db
     .select({ on: endpointDeviceGroupFleetSettings.selfUpdate })
     .from(endpointDeviceGroupFleetSettings)
@@ -334,50 +349,60 @@ export function registerEndpointUpdateRoutes(scope: FastifyInstance, db: Db, dep
   scope.get(ENDPOINT_UPDATE_PATHS.update, async (req, reply) => {
     const agent = await deps.agentOf(req, reply);
     if (!agent) return reply;
-    return asSystem("offer", async () => {
-      const offer = await offerFor(db, agent);
-      // nothing to offer is the common answer on every sync, and is not audited
-      if (!offer) return reply.send({ update: null });
-      const release = await loadRelease(offer.rollout.targetVersion, offer.device.os, offer.device.arch, env());
-      const detail = { deviceId: agent.deviceId, rolloutId: offer.rollout.id, targetVersion: offer.rollout.targetVersion };
-      if (typeof release === "string") {
-        // a release that is missing or does not verify is never offered; the admin sees why in the audit stream
-        await deps.audit(db, agent.sourceId, "endpoint-update-offer-refused", "deny", `an update was not offered to a device: ${release} (ADR-0360)`, { ...detail, code: release });
-        return reply.send({ update: null });
-      }
-      const signer = deps.signer !== undefined ? deps.signer : await resolveDirectiveSigner(env());
-      if (!signer || !KEY_ID_SHAPE.test(signer.keyId)) {
-        await deps.audit(db, agent.sourceId, "endpoint-update-offer-refused", "deny", "an update was not offered to a device: update_signer_unavailable (ADR-0360)", { ...detail, code: "update_signer_unavailable" });
-        return deps.refuse(reply, 503, "update_signer_unavailable");
-      }
-      const attempt = await openAttempt(db, offer);
-      if (!attempt) return reply.send({ update: null });
-      const now = await databaseNow(db);
-      const notAfter = new Date(Math.min(now.getTime() + UPDATE_DIRECTIVE_LIFETIME_MINUTES * 60_000, attempt.expiresAt.getTime()));
-      const bytes = updateDirectiveBytes({ deviceId: offer.device.id, rolloutId: offer.rollout.id, targetVersion: offer.rollout.targetVersion, issuedAt: now.toISOString(), notAfter: notAfter.toISOString() });
-      let signature: Buffer;
-      try {
-        // signing is the external write: the execution dial is re-read immediately before it (ADR-0338)
-        signature = await runExternalWrite(db, "device_policy.sign_payload", () => signer.signPayload(updateDirectiveSigningInput(bytes)));
-      } catch (e) {
-        if (e instanceof ExternalEffectBlockedError) {
-          await deps.audit(db, agent.sourceId, "endpoint-update-offer-refused", "deny", `an update was not offered to a device: ${e.code}, the execution dial stops delivery (ADR-0360)`, { ...detail, code: e.code });
-          return reply.send({ update: null });
+    // the answer is built inside a transaction (the rollout row held FOR SHARE) and sent after it commits, so the
+    // attempt and its audit row are visible to the device's next request
+    type OfferAnswer = { body: Record<string, unknown> } | { refuse: [number, string] };
+    const answer = await asSystem("offer", () =>
+      db.transaction(async (rawTx): Promise<OfferAnswer> => {
+        const tx = rawTx as unknown as Db;
+        const offer = await offerFor(tx, agent, true);
+        // nothing to offer is the common answer on every sync, and is not audited
+        if (!offer) return { body: { update: null } };
+        const release = await loadRelease(offer.rollout.targetVersion, offer.device.os, offer.device.arch, env());
+        const detail = { deviceId: agent.deviceId, rolloutId: offer.rollout.id, targetVersion: offer.rollout.targetVersion };
+        if (typeof release === "string") {
+          // a release that is missing or does not verify is never offered; the admin sees why in the audit stream
+          await deps.audit(tx, agent.sourceId, "endpoint-update-offer-refused", "deny", `an update was not offered to a device: ${release} (ADR-0360)`, { ...detail, code: release });
+          return { body: { update: null } };
         }
-        throw e;
-      }
-      if (!Buffer.isBuffer(signature) || signature.length !== 64) throw new Error("the device-policy signer returned no Ed25519 signature");
-      await deps.audit(db, agent.sourceId, "endpoint-update-offered", "allow", `a device was offered the agent update to ${offer.rollout.targetVersion} (ADR-0360)`, { ...detail, attemptId: attempt.id, keyId: signer.keyId, notAfter: notAfter.toISOString() });
-      reply.header("cache-control", "no-store");
-      return reply.send({
-        update: {
-          attemptId: attempt.id,
-          directive: { keyId: signer.keyId, payload: bytes.toString("base64"), signature: signature.toString("base64") },
-          manifest: release.manifest,
-          binary: { path: ENDPOINT_UPDATE_PATHS.binary, os: release.target.os, arch: release.target.arch, length: release.target.length, sha256: release.target.sha256 },
-        },
-      });
-    });
+        const signer = deps.signer !== undefined ? deps.signer : await resolveDirectiveSigner(env());
+        if (!signer || !KEY_ID_SHAPE.test(signer.keyId)) {
+          await deps.audit(tx, agent.sourceId, "endpoint-update-offer-refused", "deny", "an update was not offered to a device: update_signer_unavailable (ADR-0360)", { ...detail, code: "update_signer_unavailable" });
+          return { refuse: [503, "update_signer_unavailable"] };
+        }
+        const attempt = await openAttempt(tx, offer);
+        if (!attempt) return { body: { update: null } };
+        const now = await databaseNow(tx);
+        const notAfter = new Date(Math.min(now.getTime() + UPDATE_DIRECTIVE_LIFETIME_MINUTES * 60_000, attempt.expiresAt.getTime()));
+        const bytes = updateDirectiveBytes({ deviceId: offer.device.id, rolloutId: offer.rollout.id, targetVersion: offer.rollout.targetVersion, issuedAt: now.toISOString(), notAfter: notAfter.toISOString() });
+        let signature: Buffer;
+        try {
+          // signing is the external write: the execution dial is re-read immediately before it (ADR-0338)
+          signature = await runExternalWrite(tx, "device_policy.sign_payload", () => signer.signPayload(updateDirectiveSigningInput(bytes)));
+        } catch (e) {
+          if (e instanceof ExternalEffectBlockedError) {
+            await deps.audit(tx, agent.sourceId, "endpoint-update-offer-refused", "deny", `an update was not offered to a device: ${e.code}, the execution dial stops delivery (ADR-0360)`, { ...detail, code: e.code });
+            return { body: { update: null } };
+          }
+          throw e;
+        }
+        if (!Buffer.isBuffer(signature) || signature.length !== 64) throw new Error("the device-policy signer returned no Ed25519 signature");
+        await deps.audit(tx, agent.sourceId, "endpoint-update-offered", "allow", `a device was offered the agent update to ${offer.rollout.targetVersion} (ADR-0360)`, { ...detail, attemptId: attempt.id, keyId: signer.keyId, notAfter: notAfter.toISOString() });
+        return {
+          body: {
+            update: {
+              attemptId: attempt.id,
+              directive: { keyId: signer.keyId, payload: bytes.toString("base64"), signature: signature.toString("base64") },
+              manifest: release.manifest,
+              binary: { path: ENDPOINT_UPDATE_PATHS.binary, os: release.target.os, arch: release.target.arch, length: release.target.length, sha256: release.target.sha256 },
+            },
+          },
+        };
+      }),
+    );
+    if ("refuse" in answer) return deps.refuse(reply, answer.refuse[0], answer.refuse[1]);
+    reply.header("cache-control", "no-store");
+    return reply.send(answer.body);
   });
 
   scope.get(ENDPOINT_UPDATE_PATHS.binary, async (req, reply) => {
@@ -393,7 +418,13 @@ export function registerEndpointUpdateRoutes(scope: FastifyInstance, db: Db, dep
       const release = await loadRelease(offer.rollout.targetVersion, offer.device.os, offer.device.arch, env());
       if (typeof release === "string") return deps.refuse(reply, 404, "no_open_update");
       const fh = await open(release.binaryPath, "r");
-      await deps.audit(db, agent.sourceId, "endpoint-update-binary-served", "allow", `a device downloaded the agent binary ${offer.rollout.targetVersion} (ADR-0360)`, { deviceId: agent.deviceId, rolloutId: offer.rollout.id, attemptId: attempt.id, length: release.target.length });
+      try {
+        await deps.audit(db, agent.sourceId, "endpoint-update-binary-served", "allow", `a device downloaded the agent binary ${offer.rollout.targetVersion} (ADR-0360)`, { deviceId: agent.deviceId, rolloutId: offer.rollout.id, attemptId: attempt.id, length: release.target.length });
+      } catch (e) {
+        // the stream closes the handle once sent; on a failed audit nothing is sent, so close it here
+        await fh.close();
+        throw e;
+      }
       reply.header("content-type", "application/octet-stream");
       reply.header("content-length", String(release.target.length));
       reply.header("cache-control", "no-store");

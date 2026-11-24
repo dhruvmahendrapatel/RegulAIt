@@ -12,11 +12,12 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { createHash, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
+  and,
   auditLog,
   createDb,
   discoverySources,
@@ -24,6 +25,7 @@ import {
   endpointDeviceGroupMembers,
   endpointDeviceGroups,
   endpointUpdateAttempts,
+  endpointUpdateRolloutDevices,
   endpointUpdateRolloutStages,
   endpointUpdateRollouts,
   eq,
@@ -40,7 +42,9 @@ import { ENDPOINT_UPDATE_ATTEMPT_MACHINE, STATE_MACHINES } from "@regulait/share
 import { buildApp } from "./app.js";
 import type { DirectiveSigner } from "./directive-signer.js";
 import { AGENT_RELEASE_KEYS_ENV, AGENT_RELEASES_DIR_ENV, expireEndpointUpdates, UPDATE_DIRECTIVE_SIGNATURE_DOMAIN } from "./endpoint-update-delivery.js";
+import { rolloutDecisionStepUp } from "./endpoint-fleet-routes.js";
 import { endpointAgentKeys } from "./testing/endpoint-agent-client.js";
+import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { enrolEndpointAgent, type EnrolledAgent } from "./testing/endpoint-addon-removal-fixture.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -68,6 +72,7 @@ const xOf = (k: KeyObject) => (k.export({ format: "jwk" }) as { x: string }).x;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let adminId: string;
+let admin2Id: string;
 let releaseDir: string;
 const BINARY = randomBytes(4096);
 const restores: Array<() => Promise<void>> = [];
@@ -106,6 +111,8 @@ async function deviceWithRollout(version = VERSION, opts: { selfUpdate?: boolean
     .values({ sourceId: a.sourceId, targetVersion: version, state: "running", createdBy: adminId, ...(opts.haltThreshold ? { haltThreshold: opts.haltThreshold, haltThresholdStepUp: "test", haltThresholdAuditId: adminId } : {}) })
     .returning();
   await db.insert(endpointUpdateRolloutStages).values({ rolloutId: r!.id, ordinal: 1, groupId: g!.id, groupName: g!.name, state: "active", startedAt: new Date() });
+  // as the two-person approval captures it (the approval route itself is exercised in its own test below)
+  await db.insert(endpointUpdateRolloutDevices).values({ rolloutId: r!.id, deviceId: a.deviceId, stageOrdinal: 1 });
   return { a, rolloutId: r!.id, groupId: g!.id };
 }
 
@@ -125,6 +132,9 @@ beforeAll(async () => {
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `e41upd-admin-${RUN}@example.com`, displayName: "admin" } });
   adminId = u.json().id as string;
   await db.update(users).set({ isAdmin: true }).where(eq(users.id, adminId));
+  const u2 = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `e41upd-admin2-${RUN}@example.com`, displayName: "admin 2" } });
+  admin2Id = u2.json().id as string;
+  await db.update(users).set({ isAdmin: true }).where(eq(users.id, admin2Id));
 }, 120_000);
 
 afterAll(async () => {
@@ -260,5 +270,66 @@ describe("ADR-0360 slice 1c: results", () => {
     expect((await db.select().from(endpointUpdateAttempts).where(eq(endpointUpdateAttempts.id, id)))[0]!.state).toBe("directed");
     await db.update(endpointUpdateAttempts).set({ state: "expired" }).where(eq(endpointUpdateAttempts.id, id));
     expect((await report(a, id, "refused", { code: "not_newer" })).json()).toEqual({ recorded: true, state: "refused" });
+  });
+});
+
+/** a rollout action by a signed-in admin, and a decision by the second admin with its bound step-up */
+const act = async (rolloutId: string, action: string) => {
+  const g = await grantStepUpForTest(db, adminId, rolloutDecisionStepUp(rolloutId, "approve_start"));
+  return app.inject({ method: "POST", url: `/v1/discovery/update-rollouts/${rolloutId}/${action}`, ...sessionRequest(g), payload: {} });
+};
+const decide = async (rolloutId: string, decision: "approve_start" | "approve_resume") => {
+  const g = await grantStepUpForTest(db, admin2Id, rolloutDecisionStepUp(rolloutId, decision));
+  return app.inject({ method: "POST", url: `/v1/discovery/update-rollouts/${rolloutId}/${decision}`, ...stepUpRequest(g), payload: {} });
+};
+
+describe("ADR-0360 slice 1c: the approval fixes which devices a rollout reaches (security review of #1248)", () => {
+  it("never offers a device added to an approved stage's group afterwards; a new resume approval covers it", async () => {
+    const a = await enrolEndpointAgent(app, db, AgentKey, { auth: AUTH, run: RUN, enabledBy: adminId, sourceIds });
+    const [g] = await db.insert(endpointDeviceGroups).values({ name: `e41upd-${RUN}-cap-${groupIds.length}` }).returning();
+    groupIds.push(g!.id);
+    await db.insert(endpointDeviceGroupFleetSettings).values({ groupId: g!.id, selfUpdate: true, selfUpdateStepUp: "test", selfUpdateAuditId: adminId });
+    const [r] = await db.insert(endpointUpdateRollouts).values({ sourceId: a.sourceId, targetVersion: VERSION, state: "draft", createdBy: adminId }).returning();
+    await db.insert(endpointUpdateRolloutStages).values({ rolloutId: r!.id, ordinal: 1, groupId: g!.id, groupName: g!.name });
+    // the second admin approves while the group holds no device: the approval covers none
+    expect((await act(r!.id, "request_start")).statusCode).toBe(200);
+    const ok = await decide(r!.id, "approve_start");
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().rollout.state).toBe("running");
+    expect(await db.select().from(endpointUpdateRolloutDevices).where(eq(endpointUpdateRolloutDevices.rolloutId, r!.id))).toEqual([]);
+    // one admin adds the device to the group afterwards: it is not offered, and its binary is not served
+    await db.insert(endpointDeviceGroupMembers).values({ groupId: g!.id, deviceId: a.deviceId });
+    expect((await offerOf(a)).json()).toEqual({ update: null });
+    expect((await asAgent(a, "GET", "/v1/endpoint-agent/update/binary")).statusCode).toBe(404);
+    expect(await db.select().from(endpointUpdateAttempts).where(eq(endpointUpdateAttempts.rolloutId, r!.id))).toEqual([]);
+    // pause, then a resume approved by the second admin re-captures the membership as it is now
+    expect((await act(r!.id, "pause")).statusCode).toBe(200);
+    expect((await act(r!.id, "request_resume")).statusCode).toBe(200);
+    const resumed = await decide(r!.id, "approve_resume");
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(await db.select({ d: endpointUpdateRolloutDevices.deviceId, o: endpointUpdateRolloutDevices.stageOrdinal }).from(endpointUpdateRolloutDevices).where(eq(endpointUpdateRolloutDevices.rolloutId, r!.id))).toEqual([{ d: a.deviceId, o: 1 }]);
+    const [row] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-update-rollout-approve-resume' AND ${auditLog.detail}->>'rolloutId' = ${r!.id}`);
+    expect(row?.detail).toMatchObject({ devicesApproved: 1 });
+    const offered = await offerOf(a);
+    expect(offered.json().update?.attemptId, offered.body).toBeTruthy();
+    // removing the device from the group narrows the rollout at once, with no approval
+    await db.delete(endpointDeviceGroupMembers).where(and(eq(endpointDeviceGroupMembers.groupId, g!.id), eq(endpointDeviceGroupMembers.deviceId, a.deviceId)));
+    expect((await offerOf(a)).json()).toEqual({ update: null });
+  });
+});
+
+describe("ADR-0360 slice 1c: an admin reads a rollout's per-device attempts (review of #1248)", () => {
+  it("pages the attempts with their declared lifecycle and reported codes", async () => {
+    const { a, rolloutId } = await deviceWithRollout(VERSION, { haltThreshold: 5 });
+    const id = (await offerOf(a)).json().update.attemptId as string;
+    expect((await report(a, id, "failed", { code: "health_check_failed" })).statusCode).toBe(200);
+    const url = `/v1/discovery/update-rollouts/${rolloutId}/attempts`;
+    const r = await app.inject({ method: "GET", url, headers: AUTH });
+    expect(r.statusCode, r.body).toBe(200);
+    const items = r.json().items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id, deviceId: a.deviceId, state: "failed", code: "health_check_failed", fromVersion: "0.1.0", os: "linux", arch: "amd64" });
+    expect(items[0]!.lifecycle).toMatchObject({ state: "failed", terminal: true });
+    expect((await app.inject({ method: "GET", url: `/v1/discovery/update-rollouts/${randomUUID()}/attempts`, headers: AUTH })).statusCode).toBe(404);
   });
 });

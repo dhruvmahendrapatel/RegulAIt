@@ -20822,7 +20822,7 @@ export const endpointUpdateRollouts = pgTable(
       "endpoint_update_rollouts_two_people_check",
       sql`${t.approvalDecidedBy} IS NULL OR (${t.approvalRequestedBy} IS NOT NULL AND ${t.approvalDecidedBy} <> ${t.approvalRequestedBy})`,
     ),
-    check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
+    check("endpoint_update_rollouts_version_check", sql`length(${t.targetVersion}) <= 32 AND ${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,30})?$'`),
     check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'start_requested', 'running', 'paused', 'halted', 'resume_requested', 'completed', 'aborted')`),
     check("endpoint_update_rollouts_halt_threshold_check", sql`${t.haltThreshold} BETWEEN 1 AND 10`),
     check(
@@ -20867,6 +20867,37 @@ export const endpointUpdateRolloutStages = pgTable(
   ],
 );
 export type EndpointUpdateRolloutStageRow = typeof endpointUpdateRolloutStages.$inferSelect;
+
+/**
+ * ADR-0360 slice 1c (security review of #1248): the devices a rollout's two-person approval covers, captured when a
+ * second admin approves its start or resume, one row per device with the stage that offers it the update (the first
+ * stage, in ordinal order, whose group held the device). The gateway offers the update only to a device in this set
+ * that is still in that stage's group, so a group membership changed after the approval (one admin, an enrolment
+ * token) never widens the rollout; a new resume approval re-captures it. Rewritten only by those approvals.
+ */
+export const endpointUpdateRolloutDevices = pgTable(
+  "endpoint_update_rollout_devices",
+  {
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    stageOrdinal: integer("stage_ordinal").notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_update_rollout_devices_pk", columns: [t.rolloutId, t.deviceId] }),
+    foreignKey({
+      name: "endpoint_update_rollout_devices_stage_fk",
+      columns: [t.rolloutId, t.stageOrdinal],
+      foreignColumns: [endpointUpdateRolloutStages.rolloutId, endpointUpdateRolloutStages.ordinal],
+    }).onDelete("cascade"),
+    index("endpoint_update_rollout_devices_device_idx").on(t.deviceId),
+  ],
+);
+export type EndpointUpdateRolloutDeviceRow = typeof endpointUpdateRolloutDevices.$inferSelect;
 
 /**
  * ADR-0360 slice 1c: one device's attempt to install one rollout's version, created when the gateway first offers the

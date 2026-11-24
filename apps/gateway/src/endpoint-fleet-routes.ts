@@ -33,7 +33,9 @@ import {
   endpointDeviceGroups,
   endpointDeviceGroupFleetSettings,
   endpointEnrolmentTokens,
+  endpointUpdateAttempts,
   endpointUpdateRollouts,
+  endpointUpdateRolloutDevices,
   endpointUpdateRolloutStages,
   eq,
   inArray,
@@ -46,9 +48,12 @@ import {
 } from "@regulait/db";
 import { ENDPOINT_BULK_TOKEN_PREFIX, ENDPOINT_ENROL_FILE_SCHEMA } from "./endpoint-agent.js";
 import {
+  ENDPOINT_AGENT_RELEASE_VERSION,
   ENDPOINT_ROLLOUT_HALT_THRESHOLD as HALT_THRESHOLD,
   ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE,
   ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE,
+  ENDPOINT_UPDATE_ATTEMPT_MACHINE as ATTEMPT_MACHINE,
+  type EndpointUpdateAttemptState as AttemptState,
   type EndpointRolloutEvent as RolloutEvent,
   type EndpointRolloutState as RolloutState,
 } from "@regulait/shared";
@@ -92,10 +97,25 @@ const ROLLOUTS_LIST: ListSpec<{ id: string; targetVersion: string; state: string
   idCol: endpointUpdateRollouts.id,
 };
 
+/** ADR-0226: one rollout's per-device attempts, newest first (review of #1248: which devices failed, for a resume) */
+const ATTEMPTS_LIST: ListSpec<{ id: string; deviceId: string; state: string; code: string | null; updatedAt: string }> = {
+  id: "endpoint-update-attempts",
+  sorts: { updated: { expr: endpointUpdateAttempts.updatedAt, keysetAt: endpointUpdateAttempts.updatedAt } },
+  columns: {
+    deviceId: { label: "Device", value: (r) => r.deviceId },
+    state: { label: "State", value: (r) => r.state },
+    code: { label: "Code", value: (r) => r.code ?? "" },
+    updated: { label: "Updated", value: (r) => r.updatedAt },
+  },
+  filters: [],
+  defaultSort: { col: "updated", dir: "desc" },
+  idCol: endpointUpdateAttempts.id,
+};
+
 const uuid = z.string().uuid();
 const settingsSchema = z.object({ selfUpdate: z.boolean() }).strict();
 const haltThresholdSchema = z.object({ haltThreshold: z.number().int().min(HALT_THRESHOLD.min).max(HALT_THRESHOLD.max) }).strict();
-const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$/;
+const SEMVER = ENDPOINT_AGENT_RELEASE_VERSION;
 const rolloutSchema = z
   .object({
     targetVersion: z.string().regex(SEMVER),
@@ -115,6 +135,29 @@ const oneLineSchema = z
 const ROLLOUT_ACTIONS = ["request_start", "approve_start", "reject_start", "advance", "complete", "pause", "request_resume", "approve_resume", "reject_resume", "abort"] as const satisfies readonly RolloutEvent[];
 const ROLLOUT_DECISIONS: readonly RolloutAction[] = ["approve_start", "reject_start", "approve_resume", "reject_resume"];
 /** slice 1c (review lessons of #979): a start or resume is decided by a second admin with a step-up bound to it */
+/**
+ * Capture the devices an approved start or resume covers (security review of #1248): each live, unrevoked device in
+ * a stage's group, assigned to the first stage in ordinal order that holds it (the offer rule, ADR-0360 §3). The
+ * previous capture is replaced, so a resume approval re-approves the membership as it is then. Returns the count.
+ */
+export async function captureRolloutDevices(tx: Db, r: EndpointUpdateRolloutRow, stages: readonly EndpointUpdateRolloutStageRow[]): Promise<number> {
+  await tx.delete(endpointUpdateRolloutDevices).where(eq(endpointUpdateRolloutDevices.rolloutId, r.id));
+  let n = 0;
+  for (const st of [...stages].sort((a, b) => a.ordinal - b.ordinal)) {
+    if (!st.groupId) continue;
+    const rows = await tx.execute<{ device_id: string }>(sql`
+      INSERT INTO endpoint_update_rollout_devices (rollout_id, device_id, stage_ordinal)
+      SELECT ${r.id}, m.device_id, ${st.ordinal}
+        FROM endpoint_device_group_members m
+        JOIN endpoint_devices d ON d.id = m.device_id AND d.revoked_at IS NULL AND d.source_id = ${r.sourceId}
+       WHERE m.group_id = ${st.groupId}
+      ON CONFLICT (rollout_id, device_id) DO NOTHING
+      RETURNING device_id`);
+    n += rows.rows.length;
+  }
+  return n;
+}
+
 export const rolloutDecisionStepUp = (rolloutId: string, decision: "approve_start" | "reject_start" | "approve_resume" | "reject_resume"): StepUpCheckArgs => ({
   kind: "approval_decide",
   facts: { op: "endpoint_update_rollout", rolloutId, decision },
@@ -320,6 +363,45 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
     return answerListPage(db, req, reply, rolloutsList);
   });
 
+  // one rollout's per-device attempts with their declared lifecycle (ADR-0348): read-only, every step is the device's
+  // or the expiry job's, so an admin deciding a resume after a halt sees which devices failed and why
+  type AttemptView = { id: string; deviceId: string; state: string; code: string | null; fromVersion: string; os: string; arch: string; expiresAt: string; reportedAt: string | null; createdAt: string; updatedAt: string; lifecycle: ReturnType<typeof ATTEMPT_MACHINE.describe> };
+  const attemptsList: ContractList<AttemptView & { _cursorAt?: unknown }, Record<string, never>> = {
+    spec: ATTEMPTS_LIST,
+    filters: z.object({}).strict(),
+    reader: {
+      fetch: async (q) => {
+        const rows = await db.select({ a: endpointUpdateAttempts, _cursorAt: q.cursorAt }).from(endpointUpdateAttempts).where(q.where).orderBy(...q.orderBy).limit(q.limit).offset(q.offset);
+        return rows.map(({ a, _cursorAt }) => ({
+          id: a.id,
+          deviceId: a.deviceId,
+          state: a.state,
+          code: a.code,
+          fromVersion: a.fromVersion,
+          os: a.os,
+          arch: a.arch,
+          expiresAt: a.expiresAt.toISOString(),
+          reportedAt: a.reportedAt?.toISOString() ?? null,
+          createdAt: a.createdAt.toISOString(),
+          updatedAt: a.updatedAt.toISOString(),
+          lifecycle: ATTEMPT_MACHINE.describe(a.state as AttemptState, {}),
+          _cursorAt,
+        }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(endpointUpdateAttempts).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req) => eq(endpointUpdateAttempts.rolloutId, (req.params as { rolloutId: string }).rolloutId),
+  };
+
+  app.get("/v1/discovery/update-rollouts/:rolloutId/attempts", async (req, reply) => {
+    const id = param(req, "rolloutId");
+    if (!id) return reply.status(400).send({ error: "invalid_request", detail: "rolloutId must be a uuid" });
+    const found = await loadRollout(id);
+    if (!found) return reply.status(404).send({ error: "not_found", detail: "no such rollout" });
+    return answerListPage(db, req, reply, attemptsList);
+  });
+
   app.post("/v1/discovery/sources/:sourceId/update-rollouts", async (req, reply) => {
     const source = await agentSource(reply, param(req, "sourceId"));
     if (!source) return reply;
@@ -424,12 +506,15 @@ export function registerEndpointFleetRoutes(app: FastifyInstance, db: Db): void 
         };
         const active = stages.find((s) => s.state === "active");
         if (action === "approve_start") await stageMove(stages[0]!.ordinal, "activate");
+        // the approval covers the devices in the stage groups now (security review of #1248): capture them, so a later
+        // membership change by one admin never widens what two people approved
+        const captured = action === "approve_start" || action === "approve_resume" ? await captureRolloutDevices(tx, r, stages) : null;
         if (action === "advance" && active) {
           await stageMove(active.ordinal, "finish");
           await stageMove(stages.find((s) => s.ordinal > active.ordinal)!.ordinal, "activate");
         }
         if (action === "complete" && active) await stageMove(active.ordinal, "finish");
-        await audit(tx, actor(req), { type: "discovery_source", id: r.sourceId }, `endpoint-update-rollout-${action.replaceAll("_", "-")}`, `update rollout to ${r.targetVersion}: ${action} (${r.state} → ${to}) (ADR-0360)`, { rolloutId: id, event: action, from: r.state, to, activeStage: active?.ordinal ?? null, ...(decision ? { requestedBy: r.approvalRequestedBy } : {}) });
+        await audit(tx, actor(req), { type: "discovery_source", id: r.sourceId }, `endpoint-update-rollout-${action.replaceAll("_", "-")}`, `update rollout to ${r.targetVersion}: ${action} (${r.state} → ${to}) (ADR-0360)`, { rolloutId: id, event: action, from: r.state, to, activeStage: active?.ordinal ?? null, ...(decision ? { requestedBy: r.approvalRequestedBy } : {}), ...(captured !== null ? { devicesApproved: captured } : {}) });
       });
       const found = await loadRollout(id);
       return reply.send({ rollout: rolloutView(found!.r, found!.stages, await selfUpdateOnGroups(db, found!.stages.map((st) => st.groupId)), req.authCtx.userId ?? null) });
