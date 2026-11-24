@@ -32,7 +32,8 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { createGuardedFetch } from "./egress-guard.js";
-import { embedText, localLiteralRefusal, localOnlyResolver } from "./semantic-cache-similarity.js";
+import { embedText, localLiteralRefusal, localOnlyResolver, similarityPartitionKey } from "./semantic-cache-similarity.js";
+import type { NativeCacheConfig, NativeCacheRequest } from "./semantic-cache-shared.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -260,6 +261,17 @@ describe("ADR-0352 the meaning-based tier on the native invoke path", () => {
     expect(opt.dispatched).toBe(1);
   });
 
+  it("never matches across agents: the same user and a paraphrase on another agent is a miss", async () => {
+    const a = await user("ag");
+    const one = await agentFor(a.id);
+    const two = await agentFor(a.id);
+    expect((await invoke(one.id, a, "What is the refund policy?")).dispatched).toBe(1);
+    const other = await invoke(two.id, a, "what is our refunds policy");
+    expect(other.status).toBe(200);
+    expect(other.body.cached).not.toBe(true);
+    expect(other.dispatched).toBe(1);
+  });
+
   it("re-runs the live gates on a hit: a revoked grant is refused, not served from the cache", async () => {
     const a = await user("rv");
     const ag = await agentFor(a.id);
@@ -322,5 +334,42 @@ describe("ADR-0352 the embedder must be local", () => {
       ])("h"),
     ).rejects.toThrow(/8\.8\.8\.8/);
     await expect(localOnlyResolver(async () => [{ address: "127.0.0.1", family: 4 }])("h")).resolves.toHaveLength(1);
+  });
+});
+
+describe("ADR-0352 the partition never crosses a user, an agent, a project or an authorisation input", () => {
+  const request: NativeCacheRequest = {
+    input: "What is the refund policy?",
+    mode: "chat",
+    system: null,
+    baseline: null,
+    referenceContent: null,
+    attachments: [],
+    maxTokens: null,
+    costSensitivity: null,
+    projectId: "11111111-1111-4111-8111-111111111111",
+    planner: {},
+  };
+  const config = { agentId: "22222222-2222-4222-8222-222222222222", provider: "mock", model: "mock-balanced", customProvider: null } as unknown as NativeCacheConfig;
+  const key = (u: string, r: NativeCacheRequest, c: NativeCacheConfig) => similarityPartitionKey(u, r, c);
+  const base = key("user-a", request, config);
+
+  it("only the input text is left out: a paraphrase shares the partition", () => {
+    expect(key("user-a", { ...request, input: "what is our refunds policy" }, config)).toBe(base);
+  });
+
+  it("every other part of the request or its scope moves the partition", () => {
+    const variants: Array<[string, string]> = [
+      ["another user", key("user-b", request, config)],
+      ["another agent", key("user-a", request, { ...config, agentId: "33333333-3333-4333-8333-333333333333" } as NativeCacheConfig)],
+      ["another project", key("user-a", { ...request, projectId: "44444444-4444-4444-8444-444444444444" }, config)],
+      ["no project", key("user-a", { ...request, projectId: null }, config)],
+      ["another model", key("user-a", request, { ...config, model: "mock-premium" } as NativeCacheConfig)],
+      ["another system prompt", key("user-a", { ...request, system: "be terse" }, config)],
+      ["another option", key("user-a", { ...request, maxTokens: 64 }, config)],
+      ["another planner dial", key("user-a", { ...request, planner: { piiMode: "redact" } }, config)],
+    ];
+    for (const [what, k] of variants) expect(k, what).not.toBe(base);
+    expect(new Set(variants.map(([, k]) => k)).size).toBe(variants.length);
   });
 });
