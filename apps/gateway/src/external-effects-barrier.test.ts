@@ -61,6 +61,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { EXTERNAL_WRITE_OPERATIONS, type ExternalWriteOperation } from "./external-effects.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // the probe — hoisted so the mock factories below can see it
@@ -195,6 +196,7 @@ let vendorFake: ReturnType<typeof import("./testing/vendor-agent-control-fixture
 let vendorCreds: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeCredentials>;
 
 // ADR-0361 slice 3: a fake compliance API for one sanctioned AI SaaS tenant; the remediation member is the counting fake
+const saasAllowed = trackEgressAllowHosts();
 const SAAS_HOST = "api.anthropic.com";
 const SAAS_CHATS = ["halted", "read_only", "require_approval", "normal"].map((m) => `bm_chat_${m}_${RUN}`);
 const saasJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -414,6 +416,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setMode("normal");
+  (await saasAllowed.removeAll(app, AUTH)).assertRemoved();
   await app.close();
 });
 
@@ -889,10 +892,8 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
     const { grantStepUpForTest, stepUpRequest } = await import("./testing/step-up-grant.js");
     const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
     const { relaxStepUpAround } = await import("./testing/step-up-posture.js");
-    const { trackEgressAllowHosts } = await import("./testing/egress-allow-cleanup.js");
     type Facts = Parameters<typeof grantStepUpForTest>[2];
     const relax = async (who: string, facts: Record<string, unknown>) => stepUpRequest(await grantStepUpForTest(db, who, { kind: "settings_relax", facts } as Facts));
-    const allowed = trackEgressAllowHosts();
     const restores: Array<() => Promise<unknown>> = [];
     let connectorId: string | undefined;
     const BASE = "/v1/ai-saas-monitoring";
@@ -904,8 +905,9 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
       restores.push(() => db.update(users).set({ isAdmin: a0!.isAdmin }).where(eq(users.id, anaId)));
       // the routes are admin-only; the bootstrap credential keeps flipping the dial
       await db.update(users).set({ isAdmin: true }).where(inArray(users.id, [piaId, anaId]));
+      // egress-allow-cleanup: afterAll
       const host = await relaxStepUpAround(db, () =>
-        post("/v1/egress-allow-hosts", { host: allowed.trackHost(SAAS_HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `barrier ${RUN}` }));
+        post("/v1/egress-allow-hosts", { host: saasAllowed.trackHost(SAAS_HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `barrier ${RUN}` }));
       expect([201, 409], host.body).toContain(host.statusCode);
       await db.insert(aiSaasMonitorPolicy).values({ id: "singleton", enabled: true }).onConflictDoUpdate({ target: aiSaasMonitorPolicy.id, set: { enabled: true, remediationEnabled: false } });
       const created = await post(`${BASE}/connectors`, { vendor: "claude_enterprise", name: `bm-saas-${RUN}`, config: { backfillDays: 2 }, reason: "barrier" }, piaAuth);
@@ -950,7 +952,6 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
         await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, connectorId));
       }
       for (const r of restores.reverse()) await r();
-      (await allowed.removeAll(app, AUTH)).assertRemoved();
     }
   });
 
