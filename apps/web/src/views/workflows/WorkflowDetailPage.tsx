@@ -9,7 +9,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { CheckResult, WorkflowDetailResponse } from "../../api/types";
-import { ago, humanize, errorText } from "../../api/format";
+import { ago, humanize } from "../../api/format";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { PageHeader } from "../../shell/AppShell";
 import {
@@ -24,7 +24,7 @@ import {
   StatusBadge,
   Textarea,
 } from "../../ui/kit";
-import { useToast } from "../../ui/toast";
+import { useAction } from "../admin/adminKit";
 import { useSession } from "../../session/SessionContext";
 import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
@@ -36,7 +36,6 @@ const artifactWords = (output: string | undefined) =>
 
 export default function WorkflowDetailPage() {
   const { instanceId } = useParams<{ instanceId: string }>();
-  const { toast } = useToast();
   const { me } = useSession();
   const queryClient = useQueryClient();
   const [artifactText, setArtifactText] = useState("");
@@ -44,7 +43,7 @@ export default function WorkflowDetailPage() {
   // ADR-0167 (AUTHZ-06): the initiator marking their own failed check as
   // passing is a self-attestation — the gateway refuses it without a reason
   const [checkReason, setCheckReason] = useState("");
-  const [actionError, setActionError] = useState<string | null>(null);
+  const action = useAction();
 
   const q = useQuery({
     queryKey: ["workflow", instanceId],
@@ -86,15 +85,11 @@ export default function WorkflowDetailPage() {
   const ctx = inst.context ?? {};
   const terminal = ["completed", "denied", "aborted"].includes(inst.status);
 
+  // UIW-08: one action at a time. `action.busy` disables every action button
+  // while a request is in flight, so a second click cannot submit it twice
   const act = async (fn: () => Promise<unknown>, label: string) => {
-    setActionError(null);
-    try {
-      await fn();
-      toast(label, "success");
-      void refresh();
-    } catch (e) {
-      setActionError(errorText(e));
-    }
+    if (action.busy) return;
+    if (await action.run(fn, label)) void refresh();
   };
 
   const failedChecks: CheckResult[] =
@@ -184,18 +179,38 @@ export default function WorkflowDetailPage() {
                 this change is in forced planning — nothing builds from it yet.
               </span>
             </span>
-            <div className={v.dim} style={{ marginTop: "var(--s2)" }}>
-              While it rests at <span className={v.mono}>{current.id}</span>, an agent call that
-              names this workflow (<span className={v.mono}>instanceId</span>) is <strong>refused
-              in a mutating mode</strong> — <span className={v.mono}>execute</span>, or any mode
-              not on the plan-safe list. <span className={v.mono}>plan</span>,{" "}
-              <span className={v.mono}>review</span>, <span className={v.mono}>chat</span>,{" "}
-              <span className={v.mono}>ask</span> and <span className={v.mono}>read</span> go
-              through. A call that names no workflow is not constrained by this stage.
-            </div>
+            {/* UIW-07: the copy follows the gateway (plan-only.ts guardProjectPlanOnly, ADR-0250). For a
+                project-attached instance the gate keys on the PROJECT, so an unnamed mutating call is refused too;
+                only a project-less instance is limited to calls that name it */}
+            {inst.projectId ? (
+              <div className={v.dim} style={{ marginTop: "var(--s2)" }} data-testid="plan-only-scope">
+                While it rests at <span className={v.mono}>{current.id}</span>, a mutating agent call
+                attributed to this workflow&apos;s project is <strong>refused on every surface</strong>,
+                whether or not it names this workflow (<span className={v.mono}>instanceId</span>):{" "}
+                <span className={v.mono}>execute</span>, any mode not on the plan-safe list, and write
+                tools. <span className={v.mono}>plan</span>, <span className={v.mono}>review</span>,{" "}
+                <span className={v.mono}>chat</span>, <span className={v.mono}>ask</span>,{" "}
+                <span className={v.mono}>read</span> and read tools go through. The one exception
+                (ADR-0250, audited): the workflow engine&apos;s own work for another instance of this
+                project at a build stage is not stopped by this one.
+              </div>
+            ) : (
+              <div className={v.dim} style={{ marginTop: "var(--s2)" }} data-testid="plan-only-scope">
+                While it rests at <span className={v.mono}>{current.id}</span>, an agent call that
+                names this workflow (<span className={v.mono}>instanceId</span>) is <strong>refused
+                in a mutating mode</strong> — <span className={v.mono}>execute</span>, or any mode
+                not on the plan-safe list. <span className={v.mono}>plan</span>,{" "}
+                <span className={v.mono}>review</span>, <span className={v.mono}>chat</span>,{" "}
+                <span className={v.mono}>ask</span> and <span className={v.mono}>read</span> go
+                through. This workflow has no project, so a call that names no workflow is not
+                constrained by this stage.
+              </div>
+            )}
             <div className={v.row} style={{ marginTop: "var(--s2)" }}>
               <Button
                 variant="primary"
+                disabled={action.busy}
+                aria-busy={action.busy || undefined}
                 onClick={() =>
                   void act(
                     () =>
@@ -228,6 +243,8 @@ export default function WorkflowDetailPage() {
             <div className={v.row} style={{ marginTop: "var(--s1)" }}>
               <Button
                 variant="primary"
+                disabled={action.busy}
+                aria-busy={action.busy || undefined}
                 onClick={() =>
                   void act(
                     () =>
@@ -264,6 +281,8 @@ export default function WorkflowDetailPage() {
           <Card>
             <Button
               variant="primary"
+              disabled={action.busy}
+              aria-busy={action.busy || undefined}
               onClick={() =>
                 void act(
                   () => api.post(`/v1/workflows/instances/${inst.id}/advance`, { stageId: current.id }),
@@ -343,7 +362,8 @@ export default function WorkflowDetailPage() {
                     {c.severity && <Badge tone="warn">{c.severity}</Badge>}
                     <Button
                       size="sm"
-                      disabled={checkReasonMissing}
+                      disabled={checkReasonMissing || action.busy}
+                      aria-busy={action.busy || undefined}
                       title={
                         checkReasonMissing
                           ? "A recorded reason is required when the initiator marks their own check passing"
@@ -372,6 +392,8 @@ export default function WorkflowDetailPage() {
                 <div className={v.row} style={{ marginTop: "var(--s2)" }}>
                   <Button
                     variant="primary"
+                    disabled={action.busy}
+                    aria-busy={action.busy || undefined}
                     onClick={() =>
                       void act(
                         () => api.post(`/v1/workflows/instances/${inst.id}/recheck`, { stageId: current.id }),
@@ -422,7 +444,8 @@ export default function WorkflowDetailPage() {
                 <div className={v.row} style={{ marginTop: "var(--s2)" }}>
                   <Button
                     variant="primary"
-                    disabled={reasonMissing}
+                    disabled={reasonMissing || action.busy}
+                    aria-busy={action.busy || undefined}
                     title={
                       reasonMissing
                         ? "A recorded reason is required when the initiator clears their own deploy gate"
@@ -458,9 +481,9 @@ export default function WorkflowDetailPage() {
           </Card>
         )}
 
-        {actionError && (
+        {action.error && (
           <div className={v.errLine} role="alert">
-            {actionError}
+            {action.error}
           </div>
         )}
 

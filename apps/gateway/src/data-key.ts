@@ -248,6 +248,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
   { table: "pm_connections", column: "previous_webhook_secret_ciphertext", what: "PM webhook secrets in a rotation window" },
+  // ADR-0364 (lane E45 S2): a robot's live and test secrets, filled only on their bound origin by the runner (S3)
+  { table: "robot_secrets", column: "value_ciphertext", what: "robot secrets (live and test)" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
   // ADR-0065: the credential a REMOTE training backend needs before it will do
@@ -289,7 +291,16 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // ADR-0195 SD0 (migration 0202): a discovery source's static scanner secret (never returned), the per-tenant
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
+  { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
+  // ADR-0360 slice 2 (lane E41): an EDR connection's vendor credential and its inbound webhook secret (never returned)
+  { table: "edr_connections", column: "secret_ciphertext", what: "EDR connection credentials (ADR-0360)" },
+  { table: "edr_connections", column: "webhook_secret_ciphertext", what: "EDR inbound webhook secrets (ADR-0360)" },
+  // ADR-0361: an AI SaaS monitor connector's vendor secret (never returned) and an interaction's redacted text copy
+  { table: "ai_saas_monitor_credentials", column: "secret_ciphertext", what: "AI SaaS monitor credentials (ADR-0361)" },
+  { table: "ai_saas_interactions", column: "content_ciphertext", what: "AI SaaS interaction redacted text (ADR-0361)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
+  // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
+  { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
   // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
   { table: "content_digest_keys", column: "key_ciphertext", what: "the content digest key" },
@@ -308,6 +319,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "external_mfa_factors", column: "secret_ciphertext", what: "external portal TOTP secrets" },
   // ADR-0219 (migration 0253): the static credential an admin attached to a remote A2A agent (sent, never returned)
   { table: "a2a_agent_credentials", column: "secret_ciphertext", what: "remote A2A agent credentials" },
+  { table: "browser_prompt_captures", column: "text_ciphertext", what: "prompts captured in the browser while an admin has prompt capture on (ADR-0334)" },
 ];
 
 export interface CiphertextProbe {

@@ -121,8 +121,9 @@ test.describe("ADR-0173: an organisation approval waits in the approvals queue",
 
     await page.goto("/ui/builder/inbox");
     const th = st.threads[0]!;
-    const row = page.locator('[data-list="builder-threads"]').getByRole("link", { name: new RegExp(th.title) });
-    await expect(row).toContainText("Awaiting approval");
+    const row = page.locator('[data-list="builder-threads"]').getByRole("button", { name: new RegExp(th.title) });
+    // the row's button sits in its title cell (UIS-04); the state is in the row beside it
+    await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: new RegExp(th.title) }) })).toContainText("Awaiting approval");
     await row.click();
     await expect(page.getByRole("status").filter({ hasText: "Waiting for approval by Riley Reviewer" })).toBeVisible();
     await expect(page.getByLabel("Reply")).toBeDisabled();

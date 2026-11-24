@@ -128,3 +128,26 @@ changes the scope rules runs the full set, by design (#737 ran 44 check runs).
 - Follow-ups (#738 Lane A): `security / all` and `gateway import cycles / all` aggregates; drafts run the fast set
   only; build once and share `dist`; gateway shards 4 to 6 on tmpfs Postgres; delete the duplicate docker build;
   composite setup actions.
+
+## Addendum (2026-11-23): the real-gateway journeys run on a PR that changes their inputs
+
+**Why.** The decision above puts `spa-journeys` (the real-gateway Playwright journeys: `e2e/phase1`, `phase2` and the
+two `phase6` specs) in the full suite only, on the premise that the merge queue runs the full suite before anything
+reaches `main`. This repository has no merge queue (turning it on is the owner's setting), so a PR never ran the
+journeys and the push-to-`main` run was their first run. #1227 changed table row semantics, passed every PR check,
+merged and turned `main` red on `spa-journeys`.
+
+**Decision.** A new scope output, `journeys`, is `'true'` when a code file in the PR matches `apps/web/**` (sources and
+`e2e/` specs), `packages/shared/**` or `packages/ui/**` (the packages `web` already counts as the SPA's), or
+`apps/gateway/src/**`, and is not a unit test (`*.test.ts`, `*.test.tsx`, which neither the gateway nor the SPA build
+includes). `spa-journeys` runs when `full` or `journeys` is `'true'`. Every other full-suite behaviour is unchanged.
+
+- **Gateway sources are included.** The journeys boot the built gateway on a seeded database and drive its API through
+  the UI, so a route, response-shape or authorisation change in the gateway breaks a journey as easily as an SPA change.
+  A gateway PR already starts the six gateway shards; the journeys add one runner beside them, off the critical path.
+- **Other packages are not.** The gateway imports most of `packages/`, but a hand-kept list of them would drift; a change
+  there alone still meets the journeys on the push to `main` and nightly. Dependencies, workflows, the schema and its
+  migrations are already a full run (ADR-0323).
+- **Cost.** One runner of about 12.5 minutes (install, build, Playwright and the four specs; `timeout-minutes: 25`) per
+  PR push that sets `journeys`. It is not a required check, so a direct gate is safe; if the scope fails, the run is full.
+- If the owner turns the merge queue on, this stays: it catches the break on the PR instead of in the queue.

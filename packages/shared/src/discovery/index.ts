@@ -30,6 +30,20 @@ export const DISCOVERY_SOURCE_KINDS = [
   "saas_inventory_api",
   "idp_entra",
   "ml_mlflow",
+  // ADR-0337 (lane E18): SaaS entitlement readers, in the identity family (each source off until an admin enables it)
+  "entitlement_m365",
+  "entitlement_google_workspace",
+  "entitlement_salesforce",
+  "entitlement_slack",
+  // ADR-0314 (G6): vendor agent registries, imported into the agent inventory (family agent_registry, default off)
+  "agent_registry_entra",
+  "agent_registry_gemini",
+  "agent_registry_agentcore",
+  // ADR-0336 (lane E17): agents built in low-code agent platforms, through one adapter per vendor (same family)
+  "agent_registry_copilot_studio",
+  "agent_registry_agentforce",
+  "agent_registry_openai",
+  "agent_registry_n8n",
 ] as const;
 export type DiscoverySourceKind = (typeof DISCOVERY_SOURCE_KINDS)[number];
 
@@ -45,13 +59,15 @@ export const DISCOVERY_EVIDENCE_KINDS = [
   "saas_inventory",
   "idp_app_grant",
   "ml_platform_inventory",
+  // ADR-0336 slice 4: a plaintext credential found in a staged agent's configuration, reported by location only
+  "agent_config",
 ] as const;
 export type DiscoveryEvidenceKind = (typeof DISCOVERY_EVIDENCE_KINDS)[number];
 
 /** what a finding of each source family is about, in `shadow_ai_findings.subject_kind` terms */
 export type DiscoverySubjectKind = "repo" | "cloud_resource" | "cloud_principal" | "device" | "saas_app" | "system";
 
-export const DISCOVERY_SOURCE_FAMILIES = ["repo", "cloud", "endpoint", "saas", "identity", "ml_platform"] as const;
+export const DISCOVERY_SOURCE_FAMILIES = ["repo", "cloud", "endpoint", "saas", "identity", "ml_platform", "agent_registry"] as const;
 export type DiscoverySourceFamily = (typeof DISCOVERY_SOURCE_FAMILIES)[number];
 
 /**
@@ -60,17 +76,18 @@ export type DiscoverySourceFamily = (typeof DISCOVERY_SOURCE_FAMILIES)[number];
  * free and stops every run of that family at once (the worker and the routes refuse it). The ADR-0195 families
  * (repo, cloud, endpoint) have no switch: each of their sources is already off until an admin enables it.
  */
-export const DISCOVERY_GATED_FAMILIES = ["saas", "identity", "ml_platform"] as const;
+export const DISCOVERY_GATED_FAMILIES = ["saas", "identity", "ml_platform", "agent_registry"] as const;
 export type DiscoveryGatedFamily = (typeof DISCOVERY_GATED_FAMILIES)[number];
 export const isGatedFamily = (f: DiscoverySourceFamily): f is DiscoveryGatedFamily =>
   (DISCOVERY_GATED_FAMILIES as readonly string[]).includes(f);
 /** the switch states, all off by default */
 export type DiscoveryFamilySwitches = Readonly<Record<DiscoveryGatedFamily, boolean>>;
-export const DISCOVERY_FAMILY_SWITCHES_DEFAULT: DiscoveryFamilySwitches = Object.freeze({ saas: false, identity: false, ml_platform: false });
+export const DISCOVERY_FAMILY_SWITCHES_DEFAULT: DiscoveryFamilySwitches = Object.freeze({ saas: false, identity: false, ml_platform: false, agent_registry: false });
 export const DISCOVERY_FAMILY_LABELS: Readonly<Record<DiscoveryGatedFamily, string>> = Object.freeze({
   saas: "SaaS app inventories",
   identity: "Identity-provider app consents",
   ml_platform: "Standalone ML platforms",
+  agent_registry: "Vendor agent registries",
 });
 
 /** null when a source of this kind may be created, enabled or run under these switches; else why not */
@@ -87,10 +104,16 @@ export interface DiscoveryKindSpec {
   /** the subject kinds a scanner of this kind may report; anything else is refused */
   subjectKinds: readonly DiscoverySubjectKind[];
   /** the slice that builds its scanner (ADR-0195 "Slices") */
-  slice: "SD1" | "SD2" | "SD3" | "SD4" | "P9";
+  slice: "SD1" | "SD2" | "SD3" | "SD4" | "P9" | "E18" | "G6" | "E17";
   label: string;
   /** fed by uploads, not by a schedule: the worker never queues a scheduled run for it, and the UI asks no schedule */
   uploadFed?: boolean;
+  /**
+   * ADR-0337: the source reads a SaaS entitlement graph. Its scanner returns a `SaasEntitlementBatch` (and no
+   * observations), which the worker stores in the entitlement tables in the run's own transaction. Only these kinds
+   * may return one.
+   */
+  entitlements?: true;
 }
 
 const REPO: Pick<DiscoveryKindSpec, "family" | "evidenceKinds" | "subjectKinds" | "slice"> = {
@@ -122,7 +145,62 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   saas_inventory_api: { family: "saas", evidenceKinds: ["saas_inventory"], subjectKinds: ["saas_app"], slice: "P9", label: "SaaS app inventory (JSON API)" },
   idp_entra: { family: "identity", evidenceKinds: ["idp_app_grant"], subjectKinds: ["saas_app"], slice: "P9", label: "Microsoft Entra ID app consents" },
   ml_mlflow: { family: "ml_platform", evidenceKinds: ["ml_platform_inventory"], subjectKinds: ["system"], slice: "P9", label: "MLflow-compatible ML platform" },
+  // ADR-0337 (E18): OAuth scopes and permissions apps hold in a SaaS tenant; no observations, an entitlement batch
+  entitlement_m365: { family: "identity", evidenceKinds: [], subjectKinds: [], slice: "E18", label: "Microsoft 365 app permissions (Microsoft Graph)", entitlements: true },
+  entitlement_google_workspace: { family: "identity", evidenceKinds: [], subjectKinds: [], slice: "E18", label: "Google Workspace OAuth app grants", entitlements: true },
+  entitlement_salesforce: { family: "identity", evidenceKinds: [], subjectKinds: [], slice: "E18", label: "Salesforce connected app permissions", entitlements: true },
+  entitlement_slack: { family: "identity", evidenceKinds: [], subjectKinds: [], slice: "E18", label: "Slack app scopes", entitlements: true },
+  // ADR-0314 (G6): a registry source reports no observations (so no evidence or subject kind); it stages agent
+  // records in `agent_registry_records`, which an admin imports one by one into the agent inventory
+  agent_registry_entra: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "Microsoft Entra Agent ID and Agent 365 registry" },
+  agent_registry_gemini: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "Google Gemini Enterprise agents" },
+  agent_registry_agentcore: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "AWS Bedrock AgentCore runtimes" },
+  // ADR-0336 (E17): the agent platforms; each also stages the agent's components (agent_registry_record_components)
+  // ADR-0336 slices 4 and 5: the four E17 adapters report a plaintext credential in an agent's configuration
+  // (`agent_config`, subject `system` = the staged record's external id), by location and rule only
+  agent_registry_copilot_studio: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "Copilot Studio agents (Power Platform Dataverse)" },
+  agent_registry_agentforce: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "Salesforce Agentforce agents" },
+  agent_registry_openai: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
+  agent_registry_n8n: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "n8n AI agent workflows" },
 });
+
+/**
+ * ADR-0314 (G6): the vendor registries an imported agent record can come from. One source can read more than one:
+ * an `agent_registry_entra` source reads Entra Agent ID identities and, when its target asks, the Agent 365 catalogue.
+ * The adapter interface is per registry, so another vendor (an Atlassian agent account directory) adds one value.
+ */
+export const AGENT_REGISTRIES = ["entra_agent_id", "agent_365", "gemini_enterprise", "bedrock_agentcore", "copilot_studio", "agentforce", "openai_gpts", "n8n"] as const;
+export type AgentRegistry = (typeof AGENT_REGISTRIES)[number];
+export const AGENT_REGISTRY_LABELS: Readonly<Record<AgentRegistry, string>> = Object.freeze({
+  entra_agent_id: "Microsoft Entra Agent ID",
+  agent_365: "Microsoft Agent 365",
+  gemini_enterprise: "Google Gemini Enterprise",
+  bedrock_agentcore: "AWS Bedrock AgentCore",
+  copilot_studio: "Copilot Studio",
+  agentforce: "Salesforce Agentforce",
+  openai_gpts: "OpenAI ChatGPT custom GPTs",
+  n8n: "n8n",
+});
+/** which registries a source kind may report records for; anything else is refused by the worker */
+export const AGENT_REGISTRIES_BY_KIND: Readonly<Partial<Record<DiscoverySourceKind, readonly AgentRegistry[]>>> = Object.freeze({
+  agent_registry_entra: ["entra_agent_id", "agent_365"],
+  agent_registry_gemini: ["gemini_enterprise"],
+  agent_registry_agentcore: ["bedrock_agentcore"],
+  agent_registry_copilot_studio: ["copilot_studio"],
+  agent_registry_agentforce: ["agentforce"],
+  agent_registry_openai: ["openai_gpts"],
+  agent_registry_n8n: ["n8n"],
+});
+
+/**
+ * ADR-0336 decision 3: what an agent uses, one row per (record, kind, vendor reference) in
+ * `agent_registry_record_components`. A connected app is a reference only (a connector id), never credential material.
+ */
+export const REGISTRY_COMPONENT_KINDS = ["model", "tool", "mcp_server", "connected_app", "knowledge"] as const;
+export type RegistryComponentKind = (typeof REGISTRY_COMPONENT_KINDS)[number];
+/** who supplies a connected app's connection, where the vendor says: the agent's maker, or each end user */
+export const REGISTRY_COMPONENT_PROVIDERS = ["maker", "end_user"] as const;
+export type RegistryComponentProvider = (typeof REGISTRY_COMPONENT_PROVIDERS)[number];
 
 /** federated (short-lived, the default, free) or static (a stored secret: a `settings_relax` step-up) */
 export const DISCOVERY_CREDENTIAL_MODES = ["federated", "static"] as const;
@@ -134,6 +212,43 @@ export type DiscoveryCredentialMode = (typeof DISCOVERY_CREDENTIAL_MODES)[number
  */
 export const DISCOVERY_WRITE_SCOPE_STATES = ["unverified", "read_only", "refused"] as const;
 export type DiscoveryWriteScopeState = (typeof DISCOVERY_WRITE_SCOPE_STATES)[number];
+/**
+ * ADR-0336 decision 9 (owner build rule 12): the allowed moves of a credential's write-scope state, declared once.
+ * A run's finding moves it forward only: `refused` is final until the credential is replaced (a new row starts at
+ * `unverified`), and a `read_only` credential that later shows a write privilege becomes `refused`.
+ */
+export const DISCOVERY_WRITE_SCOPE_TRANSITIONS: Readonly<Record<DiscoveryWriteScopeState, readonly DiscoveryWriteScopeState[]>> = Object.freeze({
+  unverified: ["read_only", "refused"],
+  read_only: ["refused"],
+  refused: [],
+});
+/** a final state (no move out of it: `refused`) blocks the source until its credential is replaced */
+export function discoveryWriteScopeFinal(state: DiscoveryWriteScopeState): boolean {
+  return DISCOVERY_WRITE_SCOPE_TRANSITIONS[state].length === 0;
+}
+/** what a run learned about its credential, in scanner terms (`write` refuses it) */
+export type DiscoveryWriteScopeObservation = "read_only" | "write" | "unverified";
+/**
+ * The state a credential moves to after a run's observation, or null when it stays where it is (no allowed move).
+ * The worker and the routes read this; neither branches on the states itself.
+ */
+export function nextDiscoveryWriteScope(current: DiscoveryWriteScopeState, observed: DiscoveryWriteScopeObservation | undefined): DiscoveryWriteScopeState | null {
+  const to: DiscoveryWriteScopeState | null = observed === "write" ? "refused" : observed === "read_only" ? "read_only" : null;
+  return to !== null && DISCOVERY_WRITE_SCOPE_TRANSITIONS[current].includes(to) ? to : null;
+}
+
+/**
+ * ADR-0336 decision 5: the kinds whose credential scope no API lets RegulAIt check (an OpenAI Compliance API key; an
+ * n8n API key, which on the community edition carries full scope). Such a credential is accepted only as a recorded
+ * relaxation (ADR-0180): every step-up that stores or enables it names `credentialScope: "unverified"` in its binding
+ * and its audit row, and the source's API representation carries the same field. Its runs report `unverified`.
+ */
+export const DISCOVERY_SCOPE_UNVERIFIABLE_KINDS: readonly DiscoverySourceKind[] = Object.freeze(["agent_registry_openai", "agent_registry_n8n"]);
+export type DiscoveryCredentialScope = "checked" | "unverified";
+/** whether a kind's credential scope is checked on each run (`checked`) or cannot be (`unverified`) */
+export function discoveryCredentialScope(kind: string): DiscoveryCredentialScope {
+  return (DISCOVERY_SCOPE_UNVERIFIABLE_KINDS as readonly string[]).includes(kind) ? "unverified" : "checked";
+}
 
 export const DISCOVERY_RUN_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
 export type DiscoveryRunStatus = (typeof DISCOVERY_RUN_STATUSES)[number];
@@ -179,6 +294,16 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   families: "discoveryWiderSourceFamilies",
   /** ADR-0259: turning on endpoint MCP client-config discovery through the endpoint agent */
   endpointMcpConfig: "discoveryEndpointMcpConfig",
+  /** ADR-0337 §4: allowing Google Workspace sources to use the Directory token listing (its scope could revoke tokens) */
+  googleDirectoryTokens: "discoveryGoogleDirectoryTokens",
+  /** ADR-0337 §4a: allowing Salesforce sources to read org-wide OAuth tokens (needs Customize Application) */
+  salesforceOrgTokens: "discoverySalesforceOrgTokens",
+  /** ADR-0331: turning on the governed removal of flagged MCP servers from endpoints (signed directives) */
+  endpointAddonRemoval: "discoveryEndpointAddonRemoval",
+  /** ADR-0338: turning on governed vendor agent control (disable, quarantine, restore through the vendor admin API) */
+  vendorAgentControl: "discoveryVendorAgentControl",
+  /** ADR-0338 §4: lengthening a vendor agent control approval's window past 24 hours */
+  vendorAgentControlTtl: "discoveryVendorAgentControlApprovalTtl",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 
@@ -235,7 +360,7 @@ export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[])
  * only identifiers of a known form are accepted, and anything that could carry
  * a secret is refused.
  */
-export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url" | "header_name";
+export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url" | "header_name" | "email" | "salesforce_consumer_key";
 
 const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, RegExp>> = {
   numeric_id: /^[0-9]{1,20}$/,
@@ -245,6 +370,11 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   gcp_sa_email: /^[a-z][a-z0-9-]{4,29}@[a-z][a-z0-9-]{4,29}\.iam\.gserviceaccount\.com$/,
   // ADR-0235: the HTTP header a static API token is sent in (a header name, never a value)
   header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
+  // ADR-0336: a Salesforce connected app's consumer key (its OAuth client id; not a secret)
+  salesforce_consumer_key: /^[A-Za-z0-9._]{20,256}$/,
+  // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear); ADR-0337's
+  // Salesforce reader reuses ADR-0336's salesforce_consumer_key shape above
+  email: /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$/,
 };
 
 /**
@@ -343,6 +473,47 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
     static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
   },
   ml_mlflow: { federated: {}, static: { authHeader: { shape: "header_name", required: false } } },
+  // ADR-0337: Microsoft 365 through the same Entra app registration shape as idp_entra (federated by default)
+  entitlement_m365: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+  },
+  // ADR-0337: a service-account key (the secret) with domain-wide delegation, impersonating one admin for the
+  // read-only Reports scope; Google has no keyless delegation RegulAIt can use yet (federationUnsupportedReason)
+  entitlement_google_workspace: { federated: {}, static: { adminSubject: { shape: "email", required: true } } },
+  // ADR-0337: the JWT bearer flow; the secret is the connected app's private key (PEM), signed for `username`
+  entitlement_salesforce: { federated: {}, static: { clientId: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } } },
+  entitlement_slack: { federated: {}, static: {} },
+  // ADR-0314 (G6): the registry sources take the credentials of the cloud they read (federated by default)
+  agent_registry_entra: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+  },
+  agent_registry_gemini: {
+    federated: {
+      projectNumber: { shape: "numeric_id", required: true },
+      workloadIdentityPool: { shape: "gcp_id", required: true },
+      workloadIdentityProvider: { shape: "gcp_id", required: true },
+      serviceAccountEmail: { shape: "gcp_sa_email", required: true },
+    },
+    static: {},
+  },
+  agent_registry_agentcore: { federated: { roleArn: { shape: "aws_role_arn", required: true } }, static: {} },
+  // ADR-0336: Salesforce's JWT bearer flow, signed with the connected app's private key (the secret); bound to one
+  // consumer key and one integration user. Salesforce accepts no external OIDC token, so static only.
+  agent_registry_agentforce: {
+    federated: {},
+    static: { consumerKey: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } },
+  },
+  // ADR-0336: an OpenAI Compliance API key and an n8n API key are the secret, with nothing public beside them; the
+  // workspace id and the base URL are the source's target. Neither vendor accepts an external OIDC token.
+  agent_registry_openai: { federated: {}, static: {} },
+  agent_registry_n8n: { federated: {}, static: {} },
+  // ADR-0336: Dataverse through the same Entra app registration (an application user in each environment)
+  agent_registry_copilot_studio: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+  },
 });
 
 /** null when `config` is exactly an allowed, well-formed public config for this kind and mode; else the problem */
@@ -395,7 +566,7 @@ export function credentialTargetMatch(
     const home = domain.slice(0, -SUFFIX.length);
     return want && home.length > 0 && !home.includes(".") && home === want ? "match" : "unverifiable";
   }
-  if ((kind === "cloud_azure" || kind === "repo_azure_devops" || kind === "idp_entra") && config.tenantId) {
+  if ((kind === "cloud_azure" || kind === "repo_azure_devops" || kind === "idp_entra" || kind === "entitlement_m365") && config.tenantId) {
     const want = t("tenantId");
     if (!want) return "unverifiable";
     return config.tenantId.toLowerCase() === want ? "match" : "mismatch";

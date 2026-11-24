@@ -282,8 +282,9 @@ export class ExecutorClient {
     return this.answer("report", await this.call("report", "POST", `/offers/${encodeURIComponent(offerId)}/report`, { report }), 200, executorReportResponseSchema);
   }
 
-  async end(offerId: string, outcome: string) {
-    const res = await this.call("end", "POST", `/offers/${encodeURIComponent(offerId)}/end`, { outcome });
+  /** ADR-0364 S3: a robot run's end carries its Smokescreen log (`egressLog`, bounded by the caller) */
+  async end(offerId: string, outcome: string, egressLog?: string) {
+    const res = await this.call("end", "POST", `/offers/${encodeURIComponent(offerId)}/end`, egressLog === undefined ? { outcome } : { outcome, egressLog });
     if (res.status === 204) return;
     this.answer("end", res, 204, { safeParse: () => ({ success: true, data: null }) });
   }

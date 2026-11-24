@@ -37,6 +37,7 @@ import { normaliseForInjection } from "./detection-content/index.js";
  * admin's tuning is a conversation about rules rather than about vibes.
  */
 
+import type { CompiledClassifier } from "./custom-classifiers.js";
 import { detectPII, type PiiHit } from "./pii.js";
 // ADR-0186 V: vendored detection content, applied through the foundation's
 // runner (the data is slice V's; this file only calls the runner)
@@ -160,6 +161,9 @@ function escapeTerm(term: string): string {
  * starts/ends with a word character, so "roadmap" does not match "roadmaps"'
  * neighbours accidentally but a multi-word phrase still works.
  */
+/** ADR-0363 slice 2: the admin-term matcher, shared with customer `keyword` classifiers (one rule, one function) */
+export const countGuardrailTerms = (text: string, terms: readonly string[] | undefined): number => countTerms(text, terms);
+
 function countTerms(text: string, terms: readonly string[] | undefined): number {
   if (!terms || terms.length === 0 || !text) return 0;
   let n = 0;
@@ -705,6 +709,13 @@ export function evaluateGuardrails(args: {
   /** ADR-0186 V: `org_settings.vendored_detection_packs`; absent = all on */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
   detectionFeedRules?: readonly DetectionFeedRule[] | undefined;
+  /**
+   * ADR-0363 slice 2: the org's PUBLISHED customer classifiers. Each runs with its OWN mode (an approved publish is
+   * the admin's explicit act, so it does not wait on the `semantic_dlp` switch) and reports as a `semantic_dlp`
+   * finding with category `classifier.<key>`. A classifier that cannot run (`unavailable`) counts as a hit: content
+   * that could not be checked is never reported clean.
+   */
+  classifiers?: readonly CompiledClassifier[] | undefined;
 }): GuardrailEvaluation {
   const findings: GuardrailFinding[] = [];
   let action: GuardrailEvaluation["action"] = "allow";
@@ -721,6 +732,15 @@ export function evaluateGuardrails(args: {
     const findingAction = mode === "block" ? "block" : mode === "warn" ? "warn" : "log";
     findings.push({ detector: id, mode, action: findingAction, hits });
     if (ACTION_RANK[findingAction] > ACTION_RANK[action]) action = findingAction;
+  }
+  for (const c of args.classifiers ?? []) {
+    if (!c.phases.includes(args.phase) || !args.text) continue;
+    const counted = c.count(args.text);
+    const count = counted === "unavailable" ? 1 : counted;
+    if (count === 0) continue;
+    const category = counted === "unavailable" ? `classifier.${c.key}.unavailable` : `classifier.${c.key}`;
+    findings.push({ detector: "semantic_dlp", mode: c.mode, action: c.mode, hits: [{ detector: "semantic_dlp", category, count }] });
+    if (ACTION_RANK[c.mode] > ACTION_RANK[action]) action = c.mode;
   }
   return {
     phase: args.phase,
