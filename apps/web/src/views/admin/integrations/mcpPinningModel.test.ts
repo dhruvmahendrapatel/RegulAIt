@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { approvalItem, describeDiff, findingWords, pinStatusLabel, showValue, staleSentence, type DefinitionPin, type HighRiskPolicyView } from "./mcpPinningModel";
+import {
+  approvalItem,
+  clip,
+  describeDiff,
+  findingWords,
+  pinStatusLabel,
+  showValue,
+  splitDifference,
+  staleSentence,
+  valueText,
+  type DefinitionPin,
+  type HighRiskPolicyView,
+} from "./mcpPinningModel";
 
 describe("describeDiff", () => {
   it("reads each before-value from the approved definition with the earlier operations applied", () => {
@@ -32,6 +44,48 @@ describe("describeDiff", () => {
     expect(showValue("<img src=x onerror=alert(1)>")).toBe('"<img src=x onerror=alert(1)>"');
     expect(showValue("x".repeat(1000)).length).toBe(401);
     expect(showValue(undefined)).toBe("nothing");
+  });
+});
+
+describe("full values (CXR-MCP-001)", () => {
+  const long = `${"a".repeat(590)}ZZZZ${"b".repeat(6)}`;
+  const changed = `${"a".repeat(590)}YYYY${"b".repeat(6)}`;
+
+  it("keeps each before and after value in full, so a change past the summary's bound is never lost", () => {
+    const [line] = describeDiff({ description: long }, [{ op: "replace", path: "/description", value: changed }]);
+    expect(line!.before).toBe(JSON.stringify(long));
+    expect(line!.after).toBe(JSON.stringify(changed));
+    expect(line!.before).not.toBe(line!.after);
+    // the bounded summaries alone look the same, which is why the screen says they were cut
+    expect(clip(line!.before!).shown).toBe(clip(line!.after!).shown);
+    expect(clip(line!.before!)).toMatchObject({ cut: true, total: 602 });
+  });
+
+  it("clips at the bound, says whether it cut, and never splits a surrogate pair", () => {
+    expect(clip("short")).toEqual({ shown: "short", cut: false, total: 5 });
+    expect(clip("x".repeat(400))).toMatchObject({ cut: false });
+    const pair = `${"x".repeat(399)}\u{1F600}tail`;
+    expect(clip(pair)).toEqual({ shown: "x".repeat(399), cut: true, total: pair.length });
+    expect(valueText(undefined)).toBe("nothing");
+    expect(valueText({ a: [1] })).toBe('{\n "a": [\n  1\n ]\n}');
+  });
+
+  it("splits two texts into the common start, the differing middles and the common end", () => {
+    expect(splitDifference(long, changed)).toEqual({ head: "a".repeat(590), before: "ZZZZ", after: "YYYY", tail: "b".repeat(6), at: 591 });
+    // an insertion: nothing differs on the shorter side
+    expect(splitDifference("abcd", "abXcd")).toEqual({ head: "ab", before: "", after: "X", tail: "cd", at: 3 });
+    // changes in two places mark the span between them, so nothing changed is left unmarked
+    expect(splitDifference("1-2-3", "9-2-8")).toEqual({ head: "", before: "1-2-3", after: "9-2-8", tail: "", at: 1 });
+    // a repeated run is never counted twice in the start and the end
+    expect(splitDifference("aaa", "aaaa")).toEqual({ head: "aaa", before: "", after: "a", tail: "", at: 4 });
+    expect(splitDifference("same", "same")).toEqual({ head: "same", before: "", after: "", tail: "", at: null });
+  });
+
+  it("never splits a surrogate pair at either edge of the difference", () => {
+    // U+1F600 and U+1F601 share the high surrogate; the mark covers the whole character
+    expect(splitDifference("a\u{1F600}b", "a\u{1F601}b")).toEqual({ head: "a", before: "\u{1F600}", after: "\u{1F601}", tail: "b", at: 2 });
+    // U+1F600 and U+1E600 share the low surrogate
+    expect(splitDifference("\u{1F600}z", "\u{1E600}z")).toEqual({ head: "", before: "\u{1F600}", after: "\u{1E600}", tail: "z", at: 1 });
   });
 });
 

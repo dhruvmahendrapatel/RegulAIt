@@ -61,11 +61,55 @@ export const pinStatusLabel = (s: DefinitionPin["status"]) => (s === "approved" 
 /** what one re-approval item sends: the digest the admin reviewed (null for a removed item) */
 export const approvalItem = (p: DefinitionPin) => ({ kind: p.kind, name: p.name, observedDigest: p.observedDigest });
 
-/** a value as plain text, bounded; never markup */
-export function showValue(v: unknown, max = 400): string {
+/** how much of a value the one-line summary shows before it says the rest is in the full view */
+export const SUMMARY_MAX = 400;
+
+/** a value as plain text, in full; never markup */
+export function valueText(v: unknown): string {
   if (v === undefined) return "nothing";
-  const text = JSON.stringify(v, null, 1) ?? String(v);
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  return JSON.stringify(v, null, 1) ?? String(v);
+}
+
+const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
+/** the start of a text for the summary line, whether it was cut, and the full length; never splits a surrogate pair */
+export function clip(text: string, max = SUMMARY_MAX): { shown: string; cut: boolean; total: number } {
+  if (text.length <= max) return { shown: text, cut: false, total: text.length };
+  const end = isHigh(text.charCodeAt(max - 1)) ? max - 1 : max;
+  return { shown: text.slice(0, end), cut: true, total: text.length };
+}
+
+/** a value as plain text, bounded; never markup */
+export function showValue(v: unknown, max = SUMMARY_MAX): string {
+  const c = clip(valueText(v), max);
+  return c.cut ? `${c.shown}…` : c.shown;
+}
+
+/**
+ * Where two texts differ: the common start (`head`), the differing middle of each, and the common end (`tail`).
+ * Every changed character lies in `before` or `after`, so marking them hides nothing; a change in two places marks
+ * the span between them. `at` is the 1-based position of the first differing character, null when the texts match.
+ * Never splits a surrogate pair.
+ */
+export interface DifferenceSplit {
+  head: string;
+  before: string;
+  after: string;
+  tail: string;
+  at: number | null;
+}
+
+export function splitDifference(a: string, b: string): DifferenceSplit {
+  if (a === b) return { head: a, before: "", after: "", tail: "", at: null };
+  const n = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < n && a.charCodeAt(p) === b.charCodeAt(p)) p++;
+  if (p > 0 && isHigh(a.charCodeAt(p - 1))) p--;
+  let s = 0;
+  while (s < n - p && a.charCodeAt(a.length - 1 - s) === b.charCodeAt(b.length - 1 - s)) s++;
+  if (s > 0 && isLow(a.charCodeAt(a.length - s))) s--;
+  return { head: a.slice(0, p), before: a.slice(p, a.length - s), after: b.slice(p, b.length - s), tail: a.slice(a.length - s), at: p + 1 };
 }
 
 /** the object holding the pointer's last segment, and that segment (RFC 6901) */
@@ -77,6 +121,7 @@ function locate(doc: unknown, path: string): [Record<string, unknown>, string] |
   return key !== undefined && at && typeof at === "object" ? [at as Record<string, unknown>, key] : null;
 }
 
+/** one operation as text: `before` and `after` are the full values (the screen bounds its summary with `clip`) */
 export interface DiffLine {
   action: string;
   path: string;
@@ -85,7 +130,7 @@ export interface DiffLine {
 }
 
 /**
- * The patch as readable lines: what changed, where, and the value before and after, as text. The operations apply
+ * The patch as readable lines: what changed, where, and the value before and after, in full, as text. The operations apply
  * in order, so each "before" is read from the approved definition with the earlier operations already applied.
  */
 export function describeDiff(approved: Record<string, unknown> | null, diff: readonly PatchOp[]): DiffLine[] {
@@ -105,8 +150,8 @@ export function describeDiff(approved: Record<string, unknown> | null, diff: rea
     out.push({
       action: op.op === "add" ? "Added" : op.op === "remove" ? "Removed" : "Changed",
       path,
-      before: op.op === "add" ? null : showValue(current),
-      after: op.op === "remove" ? null : showValue(op.value),
+      before: op.op === "add" ? null : valueText(current),
+      after: op.op === "remove" ? null : valueText(op.value),
     });
     if (op.path === "") doc = op.value;
     else if (at && arr) (at[0] as unknown as unknown[]).splice(i, op.op === "add" ? 0 : 1, ...(op.op === "remove" ? [] : [op.value]));
