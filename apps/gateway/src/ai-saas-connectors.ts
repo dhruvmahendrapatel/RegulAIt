@@ -47,6 +47,7 @@ import { entraWriteScope } from "./discovery-wider-scanners.js";
 import { createHash } from "node:crypto";
 import { EgressBlockedError, egressRefusal } from "./egress-guard.js";
 import { errMessage } from "./err-serializer.js";
+import type { ConnectorRemediation } from "./ai-saas-remediation-contract.js";
 
 /** a stored credential, decrypted for one run */
 export interface ConnectorCredential {
@@ -106,22 +107,6 @@ export interface ComplianceConnector {
   listInteractions: (ctx: ConnectorContext, auth: ConnectorAuthorisation, window: { start: Date; end: Date }) => AsyncIterable<InteractionPage>;
   /** ADR-0361 slice 3: the vendor's documented delete, called only by the approved remediation flow; absent = none */
   remediation?: ConnectorRemediation;
-}
-
-/** what a remediation acts on: a copy of the interaction's conversation and actor */
-export interface RemediationTarget {
-  conversationRef: string;
-  actorRef: string | null;
-}
-
-export interface ConnectorRemediation {
-  /** delete the conversation; `absent` when the vendor says it is already gone (a 404) */
-  deleteConversation: (ctx: ConnectorContext, target: RemediationTarget) => Promise<{ outcome: "deleted" | "absent"; vendorStatus: number }>;
-  /**
-   * read-only: is the conversation gone? Used to settle an action whose delete call's outcome is unknown. Absent when
-   * the vendor documents no read; the settle then repeats the same idempotent delete (a 404 means it is gone).
-   */
-  conversationGone?: (ctx: ConnectorContext, target: RemediationTarget) => Promise<boolean>;
 }
 
 /** a delete or read whose answer is 200 (done), 404 (already gone) or a fixed error code */
@@ -456,6 +441,7 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
  * connector's separate `remediate` credential, never the read key.
  */
 const CHATGPT_REMEDIATION: ConnectorRemediation = {
+  kind: "vendor",
   deleteConversation: async (ctx, target) => {
     const base = chatGptLogsBase(ctx.config).replace(/\/logs$/, "");
     const url = target.actorRef
@@ -579,6 +565,7 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
 
 /** `DELETE /v1/compliance/apps/chats/{id}` with a `delete:compliance_user_data` key; deletes are permanent */
 const CLAUDE_REMEDIATION: ConnectorRemediation = {
+  kind: "vendor",
   deleteConversation: async (ctx, target) =>
     vendorDelete(
       connectorFetch(ctx),

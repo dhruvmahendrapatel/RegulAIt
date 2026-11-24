@@ -53,7 +53,8 @@ import {
   type AiSaasMonitorVendor,
   type AiSaasRemediationStatus,
 } from "@regulait/shared";
-import { AI_SAAS_CONNECTORS, ConnectorError, type RemediationTarget } from "./ai-saas-connectors.js";
+import { AI_SAAS_CONNECTORS, ConnectorError } from "./ai-saas-connectors.js";
+import type { RemediationTarget } from "./ai-saas-remediation-contract.js";
 import { audit, connectorContextFor, liveCredential, loadAiSaasPolicy, type AiSaasMonitorDeps } from "./ai-saas-monitor.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
