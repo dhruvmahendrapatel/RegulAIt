@@ -22,13 +22,16 @@ const connectors = [
   { id: "mk", name: "Sandbox", kind: "test", providerKind: "mock", baseUrl: null, enabled: true },
   { id: "gv", name: "Ledger", kind: "erp", providerKind: null, baseUrl: null, enabled: true },
   { id: "br", name: "Broken", kind: "crm", providerKind: "github", baseUrl: null, enabled: true },
+  // ADR-0255 catalogue pieces (#1229 review R2 [1][2])
+  { id: "pj", name: "Tracker", kind: "pm", providerKind: "piece_jira_cloud", baseUrl: null, enabled: true },
+  { id: "ps", name: "Team chat", kind: "chat", providerKind: "piece_slack", baseUrl: null, enabled: true },
 ];
 
 const storedGh = { id: "cred-gh", connectorId: "gh", baseUrl: "https://eu.code.example.test", createdAt: "2026-11-01T00:00:00Z" };
 
 type Write = { method: string; path: string; body: unknown };
 
-async function fixture(page: Page, opts: { brokenReads?: { count: number } } = {}) {
+async function fixture(page: Page, opts: { brokenReads?: { count: number }; failSave?: boolean; holdDelete?: Promise<void> } = {}) {
   const writes: Write[] = [];
   const me = { userId: "u", isAdmin: true, user: users[0] };
   let brokenLeft = opts.brokenReads?.count ?? Infinity;
@@ -39,6 +42,9 @@ async function fixture(page: Page, opts: { brokenReads?: { count: number } } = {
     "/v1/connectors/sl/credential": { credential: null },
     "/v1/connectors/mk/credential": { credential: null },
     "/v1/connectors/gv/credential": { credential: null },
+    "/v1/connectors/pj/credential": { credential: null },
+    // a piece saved before the field was hidden: its stale override is dropped on the next save
+    "/v1/connectors/ps/credential": { credential: { id: "cred-ps", connectorId: "ps", baseUrl: "https://proxy.example.test", createdAt: "2026-11-01T00:00:00Z" } },
     "/v1/servers": {
       servers: [
         { id: "s1", name: "Records", baseUrl: "https://records.example.test", enabled: true },
@@ -73,6 +79,8 @@ async function fixture(page: Page, opts: { brokenReads?: { count: number } } = {
       return json(gets[path] ?? {});
     }
     writes.push({ method: req.method(), path, body: req.postDataJSON?.() ?? null });
+    if (opts.failSave && req.method() === "POST") return json({ error: "invalid_connector_credential", detail: "the credential does not match this adapter" }, 400);
+    if (opts.holdDelete && req.method() === "DELETE") await opts.holdDelete;
     return json({ ok: true, id: "synthetic" }, req.method() === "POST" ? 201 : 200);
   });
   return { writes };
@@ -193,5 +201,69 @@ test.describe("INT-002..005: connector credentials and per-subject entitlements"
     await c.getByLabel("Server", { exact: true }).selectOption({ label: "Tickets" });
     await expect(c.getByRole("button", { name: "Remove records.read from this user" })).toHaveCount(0);
     expect(f.writes).toEqual([]);
+  });
+
+  test("R2 [1]: a catalogue piece offers no base URL and sends none, even over a stale stored override", async ({ page }) => {
+    const f = await fixture(page);
+    await page.goto("/ui/admin/connectors");
+    const c = credCard(page);
+    await c.getByLabel("Connector").selectOption({ label: "Team chat · chat" });
+    await expect(c.getByText("credential configured")).toBeVisible();
+    await expect(c.getByLabel("Base URL (optional)")).toHaveCount(0);
+    await expect(c.getByText(/Clear the override/)).toHaveCount(0);
+    await expect(c.getByText("A catalogue connector reaches only its vendor's API, so it takes no base URL override.")).toBeVisible();
+    await c.getByLabel("Token / API key").fill("xoxb-synthetic");
+    await c.getByRole("button", { name: "Rotate credential" }).click();
+    await expect.poll(() => f.writes.length).toBe(1);
+    expect(f.writes[0]).toEqual({ method: "POST", path: "/v1/connectors/ps/credential", body: { token: "xoxb-synthetic" } });
+  });
+
+  test("R2 [2]: a piece whose credential is a document gets the JSON field, its template and its keys", async ({ page }) => {
+    const f = await fixture(page);
+    await page.goto("/ui/admin/connectors");
+    const c = credCard(page);
+    await c.getByLabel("Connector").selectOption({ label: "Tracker · pm" });
+    await expect(c.getByLabel("Token / API key")).toHaveCount(0);
+    const json = c.getByLabel("Credential (JSON — never shown again)");
+    await expect(json).toHaveAttribute("placeholder", /"siteUrl"[\s\S]*"email"[\s\S]*"apiToken"/);
+    await expect(json).toHaveAttribute("spellcheck", "false");
+    await expect(c.getByText(/The piece_jira_cloud credential is a JSON object, not a bare token: \{siteUrl, email, apiToken\}/)).toBeVisible();
+    await expect(c.getByLabel("Base URL (optional)")).toHaveCount(0);
+    const doc = JSON.stringify({ siteUrl: "https://acme.atlassian.net", email: "svc@example.test", apiToken: "t" });
+    await json.fill(doc);
+    await c.getByRole("button", { name: "Save credential" }).click();
+    await expect.poll(() => f.writes.length).toBe(1);
+    expect(f.writes[0]!.body).toEqual({ token: doc });
+  });
+
+  test("R2 [3]: a refused save keeps the drafts, shows the error and no success", async ({ page }) => {
+    const f = await fixture(page, { failSave: true });
+    await page.goto("/ui/admin/connectors");
+    const c = credCard(page);
+    await c.getByLabel("Connector").selectOption({ label: "Chat · chat" });
+    await c.getByLabel("Token / API key").fill("tok-bad");
+    await c.getByLabel("Base URL (optional)").fill("https://chat-override.example.test");
+    await c.getByRole("button", { name: "Save credential" }).click();
+    await expect.poll(() => f.writes.length).toBe(1);
+    await expect(c.getByRole("alert")).toContainText(/invalid_connector_credential|does not match this adapter/);
+    await expect(page.getByText("Credential saved (encrypted at rest, never returned)")).toHaveCount(0);
+    await expect(c.getByLabel("Token / API key")).toHaveValue("tok-bad");
+    await expect(c.getByLabel("Base URL (optional)")).toHaveValue("https://chat-override.example.test");
+  });
+
+  test("R2 [4]: remove is disabled while a remove is in flight", async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const f = await fixture(page, { holdDelete: held });
+    await page.goto("/ui/admin/connectors");
+    const c = credCard(page);
+    await c.getByLabel("Connector").selectOption({ label: "Code host · scm" });
+    await c.getByRole("button", { name: "remove" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: /remove|confirm/i }).last().click();
+    await expect.poll(() => f.writes.filter((w) => w.method === "DELETE").length).toBe(1);
+    await expect(c.getByRole("button", { name: "remove" })).toBeDisabled();
+    release();
+    await expect(c.getByRole("button", { name: "remove" })).toBeEnabled();
+    expect(f.writes.filter((w) => w.method === "DELETE")).toHaveLength(1);
   });
 });

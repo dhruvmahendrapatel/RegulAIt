@@ -55,7 +55,24 @@ export const JSON_CREDENTIAL_FIELDS: Record<string, { required: string[]; option
   teams: { required: ["appId", "appPassword"], optional: ["tenantId", "loginBaseUrl"] },
   outlook: { required: ["appId", "appPassword", "tenantId", "senderUpn"], optional: ["loginBaseUrl"] },
   resend: { required: ["apiKey", "from"], optional: ["fromName"] },
+  // ADR-0255 catalogue pieces whose credential is a document (connector-provider pieces.ts jira/google schemas);
+  // piece_slack and piece_github take a bare token
+  piece_jira_cloud: { required: ["siteUrl", "email", "apiToken"], optional: [] },
+  piece_google_sheets: { required: ["clientId", "clientSecret", "refreshToken"], optional: [] },
+  piece_gmail: { required: ["clientId", "clientSecret", "refreshToken"], optional: [] },
 };
+
+/**
+ * A curated catalogue piece (ADR-0255): it reaches only its vendor's API, and the gateway refuses every call that
+ * carries a base URL override (`piece_base_url_refused`), so its form offers none and sends none.
+ */
+export const isPieceKind = (kind: string | null | undefined): boolean => Boolean(kind?.startsWith("piece_"));
+
+/** a hint for a bare-token adapter whose token has a fixed shape; null when the token is opaque */
+export function credentialTokenHint(kind: string | null | undefined): string | null {
+  if (kind === "jira") return "The jira credential is email:api_token (the account email, a colon, then the API token).";
+  return null;
+}
 
 /** what an optional key is for — shown beside it in the hint */
 const OPTIONAL_KEY_NOTES: Record<string, string> = {
@@ -314,7 +331,7 @@ function CredentialCard(props: { connectors: Connector[] }) {
                       since {ago(stored.createdAt)} · base URL {stored.baseUrl ?? "provider default"}
                     </span>
                     <span className={v.grow} />
-                    <Button size="sm" variant="danger" onClick={() => setRemoveFor(connectorId)}>
+                    <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setRemoveFor(connectorId)}>
                       remove
                     </Button>
                   </>
@@ -370,13 +387,16 @@ function CredentialForm(props: { connector: Connector; stored: ConnectorCredenti
   const setSfF = (k: keyof typeof sf, val: string) => setSf((s) => ({ ...s, [k]: val }));
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const overrideStored = Boolean(stored?.baseUrl);
+  const piece = isPieceKind(connector.providerKind);
+  const tokenHint = credentialTokenHint(connector.providerKind);
 
   return (
     <form
       className={v.stack}
       onSubmit={(e) => {
         e.preventDefault();
-        const choice = credentialBaseUrlChoice(stored?.baseUrl, baseUrl, clearOverride);
+        // a piece takes no base URL: send none (the gateway stores null), whatever was stored before
+        const choice = piece ? {} : credentialBaseUrlChoice(stored?.baseUrl, baseUrl, clearOverride);
         if ("error" in choice) {
           setBaseUrlError(choice.error);
           return;
@@ -423,6 +443,8 @@ function CredentialForm(props: { connector: Connector; stored: ConnectorCredenti
               value={sf.privateKey}
               onChange={(e) => setSfF("privateKey", e.target.value)}
               placeholder="-----BEGIN PRIVATE KEY-----"
+              autoComplete="off"
+              spellCheck={false}
               style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
             />
           </Field>
@@ -443,6 +465,7 @@ function CredentialForm(props: { connector: Connector; stored: ConnectorCredenti
               onChange={(e) => setToken(e.target.value)}
               placeholder={jsonTemplate}
               autoComplete="off"
+              spellCheck={false}
               style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
             />
           </Field>
@@ -460,23 +483,30 @@ function CredentialForm(props: { connector: Connector; stored: ConnectorCredenti
           />
         </Field>
       )}
+      {!isSnowflake && !jsonTemplate && tokenHint && <p className={v.faint}>{tokenHint}</p>}
       <div className={a.formRow}>
-        <Field label="Base URL (optional)" grow error={baseUrlError}>
-          <Input
-            value={clearOverride ? "" : baseUrl}
-            disabled={clearOverride}
-            onChange={(e) => {
-              setBaseUrl(e.target.value);
-              setBaseUrlError(null);
-            }}
-            placeholder={connector.baseUrl ?? "provider default"}
-          />
-        </Field>
+        {piece ? (
+          <p className={`${v.faint} ${v.grow}`}>
+            A catalogue connector reaches only its vendor&apos;s API, so it takes no base URL override.
+          </p>
+        ) : (
+          <Field label="Base URL (optional)" grow error={baseUrlError}>
+            <Input
+              value={clearOverride ? "" : baseUrl}
+              disabled={clearOverride}
+              onChange={(e) => {
+                setBaseUrl(e.target.value);
+                setBaseUrlError(null);
+              }}
+              placeholder={connector.baseUrl ?? "provider default"}
+            />
+          </Field>
+        )}
         <Button type="submit" variant="primary" disabled={act.busy}>
           {stored ? "Rotate credential" : "Save credential"}
         </Button>
       </div>
-      {overrideStored && (
+      {overrideStored && !piece && (
         <label className={v.row}>
           <input
             type="checkbox"

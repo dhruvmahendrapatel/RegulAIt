@@ -12,6 +12,8 @@ import {
   credentialJsonHint,
   credentialJsonTemplate,
   noCredentialStatus,
+  isPieceKind,
+  credentialTokenHint,
 } from "./ConnectorsPage";
 
 describe("ConnectorsPage — the providerKind options", () => {
@@ -82,5 +84,24 @@ describe("ConnectorsPage — credential base URL and no-credential copy (INT-003
       expect(noCredentialStatus(k).text).not.toMatch(/will fail/);
     }
     for (const k of ["github", "slack", "snowflake", "piece_jira_cloud"]) expect(noCredentialStatus(k).tone).toBe("warn");
+  });
+});
+
+describe("#1229 review R2: catalogue pieces and token shapes", () => {
+  it("every piece kind is a piece; no other adapter is", () => {
+    for (const k of PROVIDER_KINDS) expect(isPieceKind(k), k).toBe(k.startsWith("piece_"));
+    expect(isPieceKind(null)).toBe(false);
+  });
+  it("the document-credential pieces get a JSON template with their keys; the token pieces do not", () => {
+    expect(JSON.parse(credentialJsonTemplate("piece_jira_cloud")!)).toEqual({ siteUrl: "…", email: "…", apiToken: "…" });
+    for (const k of ["piece_google_sheets", "piece_gmail"]) {
+      expect(JSON.parse(credentialJsonTemplate(k)!)).toEqual({ clientId: "…", clientSecret: "…", refreshToken: "…" });
+    }
+    expect(credentialJsonTemplate("piece_slack")).toBeNull();
+    expect(credentialJsonTemplate("piece_github")).toBeNull();
+  });
+  it("legacy jira names its email:api_token shape; an opaque token has no hint", () => {
+    expect(credentialTokenHint("jira")).toMatch(/email:api_token/);
+    expect(credentialTokenHint("github")).toBeNull();
   });
 });
