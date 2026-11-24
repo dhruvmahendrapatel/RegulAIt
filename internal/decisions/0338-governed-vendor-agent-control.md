@@ -436,33 +436,60 @@ unchanged; this section records where the build departs from it or fills in what
 Slice 1c connects a delegated control credential (section 3a) and uses it. The decision text above is unchanged; this
 section records where the build fills in what it left open.
 
+- **Two people (review lessons of #1120 and #979).** Connecting a delegated credential gives RegulAIt a named
+  admin's power over the vendor, so it needs two people. The admin who starts the sign-in names a second, active
+  administrator in the approval pool (`approverUserId`; never the requester, `approver_is_requester`; nor anyone
+  delegation-linked, `approver_not_eligible`). After the sign-in the refresh token is held encrypted on the request,
+  and the `discovery_credentials` row is written only when that approver approves in the Approvals Queue.
+- **The machine (ADR-0348).** `vendor_control_delegated_requests.status` is `VENDOR_CONTROL_DELEGATED_MACHINE`:
+  `awaiting_sign_in` → `awaiting_approval` (sign_in) or `failed` (sign_in_fail); `awaiting_approval` → `connected`
+  (approve) or `denied` (deny); both open states → `cancelled` or `expired`. Every writer uses `whereFrom` with a
+  returned row, and responses carry `lifecycle`. The pending migration's guard trigger allows only these moves, fixes
+  the identity, sets the account's object id and the approval once, and refuses any change to a final row. CHECKs tie
+  the verifier to `awaiting_sign_in`, the held token to `awaiting_approval` and the credential to `connected`, so a
+  final row holds no secret. One request may be open per source (a partial unique index).
 - **Starting a sign-in.** `POST /v1/discovery/sources/:sourceId/control-credential/delegated` takes `{tenantId,
-  clientId, account, expiresInDays (1 to 90, 30 by default), replacesCredentialId}`.
+  clientId, account, expiresInDays (1 to 90, 30 by default), replacesCredentialId, approverUserId}`.
   - It is refused while `vendor_agent_control_delegated_enabled` is off (`credential_mode_disabled`), and for a vendor
     whose control does not list `delegated` or declares no `delegatedScope` (`credential_mode_not_accepted`).
-  - The tenant must be the source's, the app must not be the read app, and the replaced row must be the live one.
+  - The tenant must be the source's, the app must not be the read app, the replaced row must be the live one, and no
+    other request may be open (`delegated_request_open`).
   - The `settings_relax` step-up is bound to `{op: "vendor_control_delegated", sourceId, account, tenantId, clientId,
-    expiresInDays, replacesCredentialId}`, which extends the binding section 3a named with the fields the callback
-    then stores.
+    expiresInDays, replacesCredentialId, approverUserId}`.
   - The answer is the Entra authorization URL, built by `@azure/msal-node` from static metadata (no network call):
     the PKCE S256 challenge, a 256-bit state and nonce, `login_hint` = the account, `prompt=login`.
-- **The pending sign-in stays server side.** Pending migration `vendor_control_delegated_requests` keeps the state,
-  the nonce and the PKCE verifier, the verifier encrypted with the data key (`CIPHERTEXT_COLUMNS`). The verifier never
-  reaches the browser, so an intercepted redirect cannot be redeemed. A row lives at most 10 minutes (a CHECK on the
-  database's own clock), is spent once whatever the outcome (a guard trigger: only `used_at`, set once, with the
-  verifier destroyed), has row-level security (admin, or the `system_task` / `migration` reason) and refuses TRUNCATE.
+- **The pending sign-in stays server side.** The request keeps the state, the nonce and the PKCE verifier, the
+  verifier and later the held refresh token encrypted with the data key (both in `CIPHERTEXT_COLUMNS`). The verifier
+  never reaches the browser, so an intercepted redirect cannot be redeemed. The sign-in window is at most 10 minutes
+  (a CHECK on the database's own clock). The table has row-level security (admin, or the `system_task` / `migration`
+  reason) and refuses TRUNCATE.
 - **The callback.** `GET /v1/discovery/control-credential/delegated/callback` is the redirect URI the customer's app
   registration names.
   - Only the admin who started the sign-in can complete it (`delegated_request_not_yours`, audited, and the request
-    stays open for that admin). A used, expired or declined request stores nothing.
+    stays open for that admin). A used or expired request is refused; a declined one moves to `failed`.
   - The code is redeemed with the verifier and nonce. The ID token comes from the token endpoint's own TLS response
     (OIDC Core §3.1.3.7). msal checks the nonce, and the route then requires the tenant, the account's UPN and the
-    nonce to match what the step-up was bound to (`delegated_account_mismatch`).
-  - A sign-in that returns no refresh token (offline access not granted) stores nothing (`delegated_no_refresh_token`).
-  - The store transaction re-checks the opt-in and the replaced row (`credential_changed` when it moved), revokes the
-    old row with its secret destroyed, and stores the `delegated` row: `public_config` holds the tenant, app, the
-    account's object id and UPN; `secret_ciphertext` holds the refresh token; `expires_at` is `now()` plus the chosen
-    days. It is audited with the account's object id and UPN.
+    nonce to match what the step-up was bound to (`delegated_account_mismatch`, `failed`).
+  - A sign-in that returns no refresh token (offline access not granted) moves to `failed`
+    (`delegated_no_refresh_token`).
+  - On success the request moves to `awaiting_approval` with the token held, and an approval is queued in the same
+    transaction: object type `vendor_control_delegated`, the named approver, stage `__vendor_control_delegated__:<id>`,
+    an arguments digest over `{op, requestId, sourceId, tenantId, clientId, accountObjectId, accountUpn,
+    expiresInDays, replacesCredentialId}`, and the vendor control approval window. The answer is `202`.
+- **The decision.** `POST /v1/approvals/:id/decide`. The precheck refuses the requester
+  (`cannot_approve_own_delegated_credential`, also through the admin override), anyone outside the approval's pool
+  (`not_an_eligible_approver`) and a decision without an `approval_decide` step-up bound to `{op, approvalId, decision,
+  argumentsDigest}`; bulk and ChatOps decisions carry no step-up and are refused. In the decision's transaction the
+  step-up is spent. Approve re-checks the opt-in and the replaced row (`credential_changed` rolls the whole decision
+  back), revokes the old row with its secret destroyed, and stores the `delegated` row: `public_config` holds the
+  tenant, app, the account's object id and UPN; `secret_ciphertext` is the held envelope moved as it is; `expires_at`
+  is `now()` plus the chosen days; `created_by` is the requester. It is audited with both people. Deny destroys the
+  held token.
+- **Expiry and cancel.** Every read and write of a request first expires a passed sign-in window
+  (`sign_in_window_passed`) and an approval past its own expiry (`approval_expired`, the approval superseded), each
+  audited and destroying what the state held. `GET /v1/discovery/control-credential/delegated/:requestId` returns a
+  request with its lifecycle (never a verifier, token or ciphertext); `POST …/:requestId/cancel` withdraws an open
+  one (narrowing, so no step-up) and supersedes its approval.
 - **Client authentication.** The confidential client authenticates with a federated assertion for the control subject
   (`vendorAgentControlSubject`), never a stored client secret. The row's one ciphertext is the refresh token, so a
   delegated credential has no second secret to hold.
@@ -478,5 +505,9 @@ section records where the build fills in what it left open.
   refuses `delegated` with `409 delegated_needs_sign_in`, pointing to the sign-in route.
 - **Open source (ADR-0176).** `@azure/msal-node` 7.1.1 (MIT) becomes a direct, exact-pinned gateway dependency. It was
   already in the lockfile at that version through `@azure/identity`. No other dependency is added.
-- **Not swept.** Spent or expired request rows are not deleted. A spent row holds no secret, and an unspent expired one
-  keeps only its encrypted verifier until its source is deleted. Filed as #1160 (triage-low), not built.
+- **Not swept.** Final request rows are not deleted. A final row holds no secret (the CHECKs above), and a sign-in
+  that is never completed is expired on its next read, destroying its verifier. Rows that are never read again stay
+  until their source is deleted; filed as #1160 (triage-low), not built.
+- **Also from the review of #1120.** The read-credential store refuses a `clientId` equal to the live control
+  credential's app (`read_app_is_write_app`), so the two apps stay separate whichever is stored first. Execute and
+  settle check the step-up (without spending it) before minting a vendor token.

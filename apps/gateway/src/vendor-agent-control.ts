@@ -551,7 +551,13 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     const id = p.data.id.toLowerCase();
     // the token first, only for an action this person may execute now; everything is re-checked in the transaction
     const [peek] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
-    const pre = peek && peek.createdBy === userId && VENDOR_ACTION_MACHINE.can(peek.status, "execute") ? await tokenBefore(userId, id, peek) : null;
+    const eligible = !!peek && peek.createdBy === userId && VENDOR_ACTION_MACHINE.can(peek.status, "execute");
+    // the step-up is checked (not spent) before any vendor token is minted, so an unconfirmed caller costs no token
+    if (eligible) {
+      const suPeek = await checkStepUp(db, req, vendorControlExecuteStepUp(peek), { spend: false });
+      if (!suPeek.ok) return reply.status(suPeek.status).send(suPeek.body);
+    }
+    const pre = eligible ? await tokenBefore(userId, id, peek) : null;
     if (pre && isRefusal(pre)) return reply.status(pre.status).send(pre.body);
     const started = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; token: string }> => {
       const t = tx as unknown as Db;
@@ -688,7 +694,13 @@ export function registerVendorAgentControlRoutes(app: FastifyInstance, db: Db, d
     const audit = auditWith(actorOf(req));
     const id = p.data.id.toLowerCase();
     const [peek] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
-    const pre = peek && peek.status === "unknown" ? await tokenBefore(actorOf(req), id, peek) : null;
+    const eligible = !!peek && peek.status === "unknown";
+    // the step-up is checked (not spent) before any vendor token is minted
+    if (eligible) {
+      const suPeek = await checkStepUp(db, req, vendorControlSettleStepUp(peek.id), { spend: false });
+      if (!suPeek.ok) return reply.status(suPeek.status).send(suPeek.body);
+    }
+    const pre = eligible ? await tokenBefore(actorOf(req), id, peek) : null;
     if (pre && isRefusal(pre)) return reply.status(pre.status).send(pre.body);
     const ready = await db.transaction(async (tx): Promise<Refusal | { row: VendorAgentActionRow; control: VendorAgentControl; token: string }> => {
       const t = tx as unknown as Db;

@@ -292,6 +292,7 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "vendor_control_delegated_requests", column: "code_verifier_ciphertext", what: "delegated vendor control sign-in PKCE verifiers (ADR-0338)" },
+  { table: "vendor_control_delegated_requests", column: "refresh_token_ciphertext", what: "delegated vendor control refresh tokens held until a second admin approves (ADR-0338)" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
   // ADR-0360 slice 2 (lane E41): an EDR connection's vendor credential and its inbound webhook secret (never returned)
   { table: "edr_connections", column: "secret_ciphertext", what: "EDR connection credentials (ADR-0360)" },

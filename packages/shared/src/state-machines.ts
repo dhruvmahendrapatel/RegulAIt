@@ -13,7 +13,7 @@ import { ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE, ENDPOINT_UPDA
 import { EDR_ISOLATION_MACHINE } from "./edr.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
-import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
+import { VENDOR_ACTION_MACHINE, VENDOR_CONTROL_DELEGATED_MACHINE } from "./vendor-agent-control.js";
 import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 import { APPROVAL_SLA_MACHINE } from "./workbench.js";
 
@@ -1139,6 +1139,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  [VENDOR_CONTROL_DELEGATED_MACHINE.def.id]: VENDOR_CONTROL_DELEGATED_MACHINE,
   // ADR-0360 §3 (lane E41): a staged endpoint agent update rollout and its stages
   [ENDPOINT_ROLLOUT_MACHINE.def.id]: ENDPOINT_ROLLOUT_MACHINE,
   [ENDPOINT_ROLLOUT_STAGE_MACHINE.def.id]: ENDPOINT_ROLLOUT_STAGE_MACHINE,

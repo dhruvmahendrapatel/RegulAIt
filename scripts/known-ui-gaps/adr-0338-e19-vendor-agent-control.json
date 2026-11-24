@@ -12,7 +12,9 @@
     "GET /v1/discovery/sources/:sourceId/control-credential": "the source's vendor control credential (purpose platform_write): its mode, app, expiry and whether it is usable, never a secret",
     "PUT /v1/discovery/sources/:sourceId/control-credential": "stores or replaces a source's separate vendor control credential (settings_relax step-up bound to the source, mode and app; audited)",
     "DELETE /v1/discovery/sources/:sourceId/control-credential": "revokes a source's vendor control credential and destroys its stored secret (audited, no step-up)",
-    "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "starts a delegated (named admin) sign-in for a source's vendor control credential: answers the Entra authorization URL (settings_relax step-up bound to the source, account, app and expiry; audited)",
-    "GET /v1/discovery/control-credential/delegated/callback": "the vendor's sign-in redirect: redeems the code with the server-side PKCE verifier and stores the named account's delegated control credential (audited)"
+    "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "starts a delegated (named admin) sign-in for a source's vendor control credential, naming the second administrator who must approve it: answers the Entra authorization URL (API-only; the screen is #453)",
+    "GET /v1/discovery/control-credential/delegated/callback": "the vendor's sign-in redirect: redeems the code with the server-side PKCE verifier, holds the named account's refresh token encrypted and queues the second administrator's approval (API-only; the screen is #453)",
+    "GET /v1/discovery/control-credential/delegated/:requestId": "reads one delegated sign-in request and its lifecycle (API-only; the screen is #453)",
+    "POST /v1/discovery/control-credential/delegated/:requestId/cancel": "withdraws an open delegated sign-in request before it is approved, destroying what it held (API-only; the screen is #453)"
   }
 }
