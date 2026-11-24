@@ -31,6 +31,7 @@
 import { createHash, createPublicKey, verify, type KeyObject } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, open, readFile } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -142,7 +143,7 @@ async function sha256File(p: string, ident: string): Promise<string> {
   const hit = hashCache.get(key);
   if (hit) return hit;
   const h = createHash("sha256");
-  for await (const chunk of createReadStream(p)) h.update(chunk as Buffer);
+  await pipeline(createReadStream(p), h);
   const out = h.digest("hex");
   if (hashCache.size > 64) hashCache.clear();
   hashCache.set(key, out);
