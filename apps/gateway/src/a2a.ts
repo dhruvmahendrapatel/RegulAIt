@@ -507,7 +507,7 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     input: args.text,
   });
   if (processingRefusal) {
-    return { kind: "denied", status: processingRefusal.status, error: processingRefusal.error, ruleId: PRIVACY_RULE_IDS.dispatchRefused, reason: processingRefusal.detail, auditId: processingRefusal.auditLogId ?? "" };
+    return { kind: "denied", status: processingRefusal.status, error: processingRefusal.error, ruleId: PRIVACY_RULE_IDS.dispatchRefused, reason: processingRefusal.detail, auditId: processingRefusal.auditLogId };
   }
 
   // 6b. the ADR-0042 guardrails on the message (PII has its own path above, so the detectors exclude it). There is no

@@ -206,3 +206,26 @@ Tests: `adr0224-processing-limit-a2a-ingest.test.ts` (off passes; on, A2A and in
 storage, unattributed refused, one record permitting the same category on both paths, append limited).
 
 Still open: per-call declared purpose; per-subject objection enforcement; an erasure step-up kind.
+
+### Review fixes to the 2026-11-21 addendum (#1161)
+
+1. **Every corpus path, through one check** (security review S4 [1]). `POST /v1/llm/datasets/:id/versions` stored new
+   rows, or a copy of the current version, without the limit. A new version was a way around it, and a corpus stored
+   while the limit was off could be re-minted unchecked. `regulait-llm.ts` now has one enforcement function,
+   `corpusProcessingRefusal`, and every path that writes corpus rows or sends a corpus to a trainer calls it:
+   - dataset ingest (`phase: "ingest"`);
+   - append (`phase: "append"`);
+   - a new version, on supplied or copied rows (`phase: "version"`);
+   - a training job, under the job's project, so a corpus stored before the limit was on cannot leave for a trainer
+     unchecked (`phase: "train"`).
+
+   Each refusal is 409 `processing_not_permitted` with one audit row, and nothing is stored or created. There is a
+   test per route.
+2. **A refusal always carries its audit id** (code review [2]). The gate throws if its refusal row was not written,
+   and the result type makes `auditLogId` required, so the A2A path no longer needs a fallback.
+3. **The shipped default is one constant** (code review [1]). `PRIVACY_OPS_ENABLED_DEFAULT` in `@regulait/shared`
+   (still `false`; the value is the open owner question). The Drizzle schema reads it, and so does the gateway's
+   strictness rule, which picks its rule from it. SQL and the browser cannot import it, so two tests hold them to it:
+   the live column default, and the Organization page's mirror. To flip it, change the constant and add a migration
+   in `pending/` that sets the column default and decides existing rows (ADR-0180). The two tests fail until both
+   agree.

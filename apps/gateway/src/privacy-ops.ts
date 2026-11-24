@@ -287,7 +287,7 @@ export type ProcessingLimitTarget =
   /** ADR-0224 addendum 2026-11-21: a call to a remote agent (ADR-0219) */
   | { type: "a2a"; agentId: string; agentName: string; skillId: string | null }
   /** ADR-0224 addendum 2026-11-21: rows entering a training corpus (ingest or append), before anything is stored */
-  | { type: "training_dataset"; datasetId: string | null; datasetName: string; phase: "ingest" | "append" };
+  | { type: "training_dataset"; datasetId: string | null; datasetName: string; phase: "ingest" | "append" | "version" | "train" };
 
 export interface ProcessingLimitInput {
   userId: string;
@@ -302,7 +302,8 @@ export type PrivacyGateResult = {
   status: 409;
   error: typeof PROCESSING_NOT_PERMITTED;
   detail: string;
-  auditLogId: string | null;
+  /** the refusal's own audit row: always present, a refusal that could not be audited throws instead */
+  auditLogId: string;
 } | null;
 
 /** the categories the active records of processing for `projectId` permit, and how many records there are */
@@ -390,7 +391,9 @@ export async function processingLimitGate(db: Db, ctx: ProcessingLimitInput): Pr
       reason: detail,
     })
     .returning({ id: auditLog.id });
-  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row?.id ?? null };
+  // fail loudly rather than refuse without evidence (review #1161 R2 [2]); the caller's error path refuses the call
+  if (!row) throw new Error("processing limit: the refusal's audit row was not written");
+  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row.id };
 }
 
 /** the model-dispatch form of `processingLimitGate`, kept for the dispatch callers' existing signature */

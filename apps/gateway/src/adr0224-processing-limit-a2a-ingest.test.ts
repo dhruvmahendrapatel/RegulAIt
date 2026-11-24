@@ -10,7 +10,8 @@
  * Global state (M-068): org settings are restored in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { a2aAgentGrants, a2aAgents, and, auditLog, eq, orgSettings, ORG_SETTINGS_ID, trainingDatasets } from "@regulait/db";
+import { a2aAgentGrants, a2aAgents, and, auditLog, eq, orgSettings, ORG_SETTINGS_ID, sql, trainingDatasets, trainingJobs } from "@regulait/db";
+import { PRIVACY_OPS_ENABLED_DEFAULT } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { A2A_RULE_IDS, executeGovernedA2aCall } from "./a2a.js";
 import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
@@ -31,6 +32,7 @@ const callA2a = (text: string, projectId: string | null) =>
 const ingest = (name: string, input: string, projectId: string | null) =>
   k.req("POST", "/v1/llm/datasets", k.BOOT, { name, rows: [{ input, output: "ok" }], piiMode: "log", ...(projectId ? { projectId } : {}) });
 const datasetsNamed = async (name: string) => k.db.select({ id: trainingDatasets.id }).from(trainingDatasets).where(eq(trainingDatasets.name, name));
+const setLimit = (on: boolean) => k.db.update(orgSettings).set({ privacyOpsEnabled: on }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
 
 beforeAll(async () => {
   k = await builderKit("adr0224-a2a-ingest");
@@ -145,5 +147,92 @@ describe("on: the limit runs on training-corpus ingest and append", () => {
     expect(appended.json().error).toBe("processing_not_permitted");
     const fine = await k.req("POST", `/v1/llm/datasets/${datasetId}/rows`, k.BOOT, { rows: [{ input: `Write to ${SUBJECT}`, output: "ok" }] });
     expect(fine.statusCode, fine.body).toBeLessThan(300);
+  });
+});
+
+/**
+ * Review #1161 S4 [1]: every path that writes corpus rows or sends a corpus to a trainer goes through the one check
+ * (`corpusProcessingRefusal`). Each route gets its own negative assertion (M-035): a new version from supplied rows,
+ * a new version copied from a corpus stored while the limit was off, and a training job on such a corpus.
+ */
+describe("on: the limit runs on every other corpus path (versions and training jobs)", () => {
+  let offDatasetId = "";
+  let offName = "";
+  let baseAgentId = "";
+
+  beforeAll(async () => {
+    // a corpus with an SSN (a category no record lists), stored while the limit was off
+    await setLimit(false);
+    offName = `adr0224-stored-off-${k.RUN}`;
+    const res = await k.req("POST", "/v1/llm/datasets", k.BOOT, {
+      name: offName,
+      rows: [{ input: `Tax id ${SSN}`, output: "ok" }],
+      piiMode: "log",
+      projectId: caller.projectId,
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    offDatasetId = res.json().dataset?.id ?? res.json().id;
+    // a base agent with its default modes (a job is checked against mode 'execute'), granted to the caller
+    const agent = await k.req("POST", "/v1/agents", k.BOOT, { name: `adr0224-base-${k.RUN}`, provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "mock-balanced" });
+    expect(agent.statusCode, agent.body).toBe(201);
+    baseAgentId = agent.json().id;
+    await k.grantModel(caller.id, baseAgentId);
+    await setLimit(true);
+  });
+
+  it("versions with supplied rows: refused 409 and no new version is stored", async () => {
+    const before = (await datasetsNamed(offName)).length;
+    const res = await k.req("POST", `/v1/llm/datasets/${offDatasetId}/versions`, k.BOOT, { rows: [{ input: `Tax id ${SSN}`, output: "ok" }] });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("processing_not_permitted");
+    expect(res.body).not.toContain(SSN);
+    expect(await datasetsNamed(offName)).toHaveLength(before);
+    const rows = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, offDatasetId), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+    expect(rows.some((r) => (r.detail as { phase?: string }).phase === "version")).toBe(true);
+  });
+
+  it("versions with no body: the copied corpus, stored while the limit was off, is refused 409 and nothing is stored", async () => {
+    const before = (await datasetsNamed(offName)).length;
+    const res = await k.req("POST", `/v1/llm/datasets/${offDatasetId}/versions`, k.BOOT, {});
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("processing_not_permitted");
+    expect(await datasetsNamed(offName)).toHaveLength(before);
+  });
+
+  it("a training job on that corpus is refused 409 before any job is created", async () => {
+    const res = await k.req("POST", "/v1/llm/jobs", caller.auth, {
+      name: `adr0224-job-${k.RUN}`,
+      datasetId: offDatasetId,
+      backend: "local",
+      method: "retrieval_index",
+      baseAgentId,
+      projectId: caller.projectId,
+      hyperparameters: { topK: 3 },
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("processing_not_permitted");
+    const jobs = await k.db.select({ id: trainingJobs.id }).from(trainingJobs).where(eq(trainingJobs.datasetId, offDatasetId));
+    expect(jobs).toHaveLength(0);
+    const rows = await k.db.select().from(auditLog).where(and(eq(auditLog.objectId, offDatasetId), eq(auditLog.ruleId, PRIVACY_RULE_IDS.dispatchRefused)));
+    expect(rows.some((r) => (r.detail as { phase?: string }).phase === "train")).toBe(true);
+  });
+
+  it("with the limit off again, both paths run (the check is the limit, not a new block)", async () => {
+    await setLimit(false);
+    try {
+      const v = await k.req("POST", `/v1/llm/datasets/${offDatasetId}/versions`, k.BOOT, {});
+      expect(v.statusCode, v.body).toBe(201);
+    } finally {
+      await setLimit(true);
+    }
+  });
+});
+
+describe("the shipped default is one constant", () => {
+  it("the live column default equals PRIVACY_OPS_ENABLED_DEFAULT (SQL cannot import it)", async () => {
+    const res = await k.db.execute(
+      sql`SELECT column_default FROM information_schema.columns WHERE table_name = 'org_settings' AND column_name = 'privacy_ops_enabled'`,
+    );
+    expect((res.rows[0] as { column_default?: string }).column_default).toBe(String(PRIVACY_OPS_ENABLED_DEFAULT));
   });
 });
