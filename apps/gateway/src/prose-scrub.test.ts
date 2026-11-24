@@ -511,6 +511,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "endpoint_addon_removals.reason",
     // ADR-0338: the admin's reason for a vendor agent control action
     "vendor_agent_actions.reason",
+    // ADR-0360 slice 2: the admin's reason for an EDR isolation request
+    "edr_isolation_requests.reason",
     // ADR-0313: the admin's note on a paid-call price
     "paid_call_prices.note",
     // ADR-0337 §5: a SaaS finding review's reason and its rendered rationale; a reader's usage note

@@ -2003,6 +2003,8 @@ export const auditLog = pgTable(
         // receipt-signing event, and the vendored detection content. Plain
         // text column — no DDL.
         "approval",
+        // ADR-0360 slice 2 (lane E41): an EDR connection's guarded egress (the connection-egress surface)
+        "edr_connection",
         "webauthn_credential",
         "step_up",
         "decision_receipt",
@@ -21248,3 +21250,138 @@ export const aiSaasInteractionFindings = pgTable(
   ],
 );
 // ===== end ADR-0361 block ========================================================================================
+
+// ===== ADR-0360 slice 2 (lane E41): EDR integration =====
+// A read-only-by-default EDR connection per endpoint-agent source (Defender for Endpoint, Falcon, SentinelOne), its
+// sealed credential and webhook secret (AES-256-GCM with the data key, never returned), the latest normalised signal
+// per device, the webhook replay table, and governed isolation requests (lifecycle declared in @regulait/shared's
+// `edr.ts`; every state write is a guarded UPDATE over that table's source states).
+
+export const EDR_VENDORS = ["defender", "falcon", "sentinelone"] as const;
+export const EDR_RISKS = ["none", "low", "medium", "high", "critical"] as const;
+// the isolation states are the declared machine's (`EDR_ISOLATION_MACHINE` in @regulait/shared, ADR-0348)
+import { EDR_ISOLATION_STATES } from "@regulait/shared";
+export { EDR_ISOLATION_STATES };
+
+export const edrConnections = pgTable(
+  "edr_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    vendor: text("vendor", { enum: EDR_VENDORS }).notNull(),
+    name: text("name").notNull(),
+    baseUrl: text("base_url").notNull(),
+    tenantId: text("tenant_id"),
+    clientId: text("client_id"),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    webhookSecretCiphertext: text("webhook_secret_ciphertext"),
+    enabled: boolean("enabled").notNull().default(true),
+    /** ADR-0360 §6: asking the EDR to isolate is off unless relaxed (step-up recorded here, CHECK) */
+    isolationEnabled: boolean("isolation_enabled").notNull().default(false),
+    isolationRelaxedBy: uuid("isolation_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    isolationStepUp: text("isolation_step_up"),
+    isolationAuditId: uuid("isolation_audit_id"),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    lastSyncCode: text("last_sync_code"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("edr_connections_name_uq").on(t.sourceId, t.name),
+    check("edr_connections_vendor_check", sql`${t.vendor} IN ('defender', 'falcon', 'sentinelone')`),
+    check("edr_connections_name_check", sql`length(${t.name}) BETWEEN 1 AND 100`),
+    check("edr_connections_isolation_check", sql`NOT ${t.isolationEnabled} OR (${t.isolationStepUp} IS NOT NULL AND ${t.isolationAuditId} IS NOT NULL)`),
+    index("edr_connections_source_idx").on(t.sourceId),
+  ],
+);
+export type EdrConnectionRow = typeof edrConnections.$inferSelect;
+
+/**
+ * The latest normalised EDR signal per device: a measured read model (ADR-0200 exception) whose source of truth is the
+ * vendor; each sync or verified webhook replaces it. `vendor_device_id` is the vendor's id for the device (needed to ask
+ * it to isolate); no host name is stored.
+ */
+export const edrDeviceSignals = pgTable(
+  "edr_device_signals",
+  {
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => edrConnections.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    vendorDeviceId: text("vendor_device_id").notNull(),
+    risk: text("risk", { enum: EDR_RISKS }).notNull(),
+    alertsLow: integer("alerts_low").notNull().default(0),
+    alertsMedium: integer("alerts_medium").notNull().default(0),
+    alertsHigh: integer("alerts_high").notNull().default(0),
+    alertsCritical: integer("alerts_critical").notNull().default(0),
+    isolatedAtVendor: boolean("isolated_at_vendor").notNull().default(false),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "edr_device_signals_pk", columns: [t.connectionId, t.deviceId] }),
+    unique("edr_device_signals_vendor_uq").on(t.connectionId, t.vendorDeviceId),
+    index("edr_device_signals_device_idx").on(t.deviceId),
+    check("edr_device_signals_risk_check", sql`${t.risk} IN ('none', 'low', 'medium', 'high', 'critical')`),
+    check("edr_device_signals_counts_check", sql`${t.alertsLow} >= 0 AND ${t.alertsMedium} >= 0 AND ${t.alertsHigh} >= 0 AND ${t.alertsCritical} >= 0`),
+  ],
+);
+export type EdrDeviceSignalRow = typeof edrDeviceSignals.$inferSelect;
+
+/** the webhook replay table: one row per (connection, vendor event id), pruned after the freshness window */
+export const edrWebhookDeliveries = pgTable(
+  "edr_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => edrConnections.id, { onDelete: "cascade" }),
+    eventId: text("event_id").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("edr_webhook_deliveries_event_uq").on(t.connectionId, t.eventId), index("edr_webhook_deliveries_received_idx").on(t.receivedAt)],
+);
+
+export const edrIsolationRequests = pgTable(
+  "edr_isolation_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => edrConnections.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    /** "as queued" snapshot (ADR-0200 exception): the vendor id the approver was shown and the action was sent to */
+    vendorDeviceId: text("vendor_device_id").notNull(),
+    state: text("state", { enum: EDR_ISOLATION_STATES }).notNull().default("requested"),
+    reason: text("reason").notNull(),
+    // the people of the two-person rule: never null once set, never deleted under the evidence (restrict, as ADR-0350 §5)
+    requestedBy: uuid("requested_by").notNull().references(() => users.id),
+    decidedBy: uuid("decided_by").references(() => users.id),
+    releaseRequestedBy: uuid("release_requested_by").references(() => users.id),
+    releaseDecidedBy: uuid("release_decided_by").references(() => users.id),
+    vendorActionId: text("vendor_action_id"),
+    errorCode: text("error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("edr_isolation_requests_state_check", sql`${t.state} IN ('requested', 'rejected', 'submitting', 'isolated', 'failed', 'release_requested', 'releasing', 'released')`),
+    check("edr_isolation_requests_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 500`),
+    // the approver is never the requester (also checked by the route, before the step-up)
+    check("edr_isolation_requests_two_people_check", sql`${t.decidedBy} IS NULL OR ${t.decidedBy} <> ${t.requestedBy}`),
+    check("edr_isolation_requests_release_two_people_check", sql`${t.releaseDecidedBy} IS NULL OR (${t.releaseRequestedBy} IS NOT NULL AND ${t.releaseDecidedBy} <> ${t.releaseRequestedBy})`),
+    // one open request per device and connection
+    uniqueIndex("edr_isolation_requests_open_uq").on(t.connectionId, t.deviceId).where(sql`${t.state} NOT IN ('rejected', 'failed', 'released')`),
+    index("edr_isolation_requests_state_idx").on(t.state, t.updatedAt),
+    index("edr_isolation_requests_device_idx").on(t.deviceId),
+    // the list's keyset order
+    index("edr_isolation_requests_created_idx").on(t.createdAt, t.id),
+  ],
+);
+export type EdrIsolationRequestRow = typeof edrIsolationRequests.$inferSelect;
+// ===== end ADR-0360 slice 2 =====

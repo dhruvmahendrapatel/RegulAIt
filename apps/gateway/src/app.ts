@@ -389,6 +389,8 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0360 slice 2: tests only — the EDR connections' egress resolver and fetch (the guard still runs) */
+  edrEgress?: ConnectionEgressDeps;
   /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
   vendorUsageFetch?: typeof fetch;
   vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
@@ -679,6 +681,8 @@ import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
+import { registerEdrRoutes } from "./edr/routes.js";
+import type { ConnectionEgressDeps } from "./connection-egress.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
   applyEndpointAddonRemovalDecision,
@@ -6493,6 +6497,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
   // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
   registerEndpointFleetRoutes(app, db);
+  // ADR-0360 slice 2 (lane E41): EDR connections (read-only by default), device signals, the verified vendor webhook
+  // (auth-exempt, verified in-route) and two-person, stepped-up isolation requests
+  registerEdrRoutes(app, db, { dataKey: opts.dataKey, ...(opts.edrEgress ? { egress: opts.edrEgress } : {}) });
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);

@@ -190,24 +190,74 @@ process list). The token is consumed on use, so a copy left in shell history is 
 
 ### 6. EDR integration (slice 2)
 
-- **Adapters.** One vendor-neutral interface (`EdrAdapter`): `verifyWebhook`, `listDeviceRisk`, `listAlerts`,
-  `requestIsolation`, `releaseIsolation`, `isolationStatus`. Three implementations: Defender for Endpoint, Falcon,
-  SentinelOne. A connection's credentials are sealed server side (the existing connector-credential store) and are
-  never returned by any route.
-- **Read-only by default.** A new EDR connection can only read. Ingest maps the EDR's device record to a RegulAIt
-  endpoint device by the device pseudonym (the EDR hostname keyed-hashed with the discovery data key; no hostname is
-  stored in clear) and stores a normalised signal (`risk`: `none | low | medium | high | critical`, alert counts by
-  severity, observed at). The signal feeds the device risk shown on the device and is offered to the detection engine
-  (lane E15, PR #865) as an event source.
-- **Isolation (optional).** Turning isolation on for a connection is a `settings_relax` step-up, audited. Each request to
-  isolate a device goes through the Approvals Queue (an approver other than the requester) and a fresh step-up of the
-  approver. It only narrows access: the EDR cuts the device's network, and RegulAIt applies the device quarantine lane
-  E15 builds (its detection responses, PR #865 and its follow-ups), not a parallel one. Releasing isolation is the same flow with a `settings_relax`
-  step-up, because it widens access back.
-- **Isolation lifecycle** (declared table): `requested → approved → submitted → isolated`, `requested → rejected`,
-  `submitted → failed`, `isolated → release_requested → released`, terminal `rejected`, `failed`, `released`.
-- **Webhooks** carry an HMAC-SHA256 signature over `timestamp.body`, verified with a timing-safe compare, a 5-minute
-  window, and a replay table keyed by the vendor's event id.
+- **Adapters.** One vendor-neutral interface (`EdrAdapter`, `apps/gateway/src/edr/adapters.ts`): `listDevices`,
+  `listAlerts`, `requestIsolation`, `releaseIsolation`, `actionStatus`, `verifyWebhook`. Three implementations:
+  Defender for Endpoint (`/api/machines`, `/api/alerts`, `/api/machines/{id}/isolate|unisolate`,
+  `/api/machineactions/{id}`; Entra client credentials), Falcon (`devices-scroll`, `alerts/v2`,
+  `devices-actions/v2?action_name=contain|lift_containment`; OAuth client credentials) and SentinelOne (`agents`,
+  `threats`, `agents/actions/disconnect|connect`; API token). Every answer is zod-validated and reduced to fixed enums
+  and counts; a failure is a fixed code, never the vendor's body.
+- **Credentials stay server side.** A connection's secret and webhook secret are sealed with the data key
+  (`encryptSecret`) and never returned; the webhook secret is shown once, at creation. Both rotate in place without
+  losing the connection's evidence, each behind a `settings_relax` step-up bound to the connection and audited:
+  `POST /v1/edr-connections/:id/credential` replaces the vendor credential, and
+  `POST /v1/edr-connections/:id/webhook-secret/rotate` shows a new webhook secret once and stops the old one at once.
+- **Guarded fetch.** Every call goes through `guardConnectionCall` with a new `edr_connection` surface: the base URL is
+  checked against the egress allow-list and audited, and the returned guarded fetch re-checks every request (DNS
+  pinned, SSRF blocked, no redirects), so Defender's sign-in host must be allow-listed too. A disallowed base URL is
+  refused when the connection is created.
+- **Read-only by default.** A new connection can only read. Sync (every 15 minutes, or on demand) maps each EDR device
+  to an enrolled device of the same source by the device pseudonym (the EDR host name keyed-hashed with the discovery
+  data key; no host name is stored) and replaces its signal (`edr_device_signals`: `risk` none to critical, open alert
+  counts by severity, isolated at the vendor). Falcon has no per-host risk, so a host's risk is its worst open alert.
+  A rise to high or critical writes an `edr-device-risk-raised` audit row (effect `deny`), which the detection engine
+  and the SIEM export read from the audit stream.
+- **Webhooks** are verified before anything is read from the body, with one 401 answer for every refusal:
+  - Falcon: `X-Cs-Primary-Signature` = base64(HMAC-SHA256(secret, body ‖ `X-Cs-Delivery-Timestamp`)), compared in
+    constant time (`constantTimeEqual`), with a 5-minute window against the database clock.
+  - SentinelOne sends no signature: the console is configured to send the RegulAIt-generated token in
+    `x-regulait-webhook-token`, compared in constant time, and the event's own `createdAt` must be within 5 minutes.
+    A slow or retried SentinelOne delivery is therefore refused (401, audited `deny`); the 15-minute sync covers the gap.
+    Whether SentinelOne can send a delivery timestamp to check instead is part of the live-tenant check in the E41
+    pending fragment, item (c).
+  - Defender pushes no webhooks (it streams to Event Hubs), so none is accepted.
+  - Replay: one row per (connection, vendor event id) in `edr_webhook_deliveries`, kept 24 hours.
+- **Isolation (optional, narrowing only).** Turning isolation on for a connection is a `settings_relax` step-up bound to
+  that connection, recorded on the row (CHECK) and audited. A request names one device that EDR has reported, with a
+  reason. **Two people, both signed in:** a request, a release request and every decision need a person's session (the
+  bootstrap credential and keys get 403 `user_required`), the requester column is NOT NULL, and the user FKs restrict so
+  the people stay on the evidence. An admin other than the requester decides (also a CHECK on the row), with a fresh
+  `approval_decide` step-up bound to the request and the decision, before anything is sent to the vendor. Releasing
+  widens access back, so it is the same with a `settings_relax` step-up bound to the request. One open request per
+  device.
+- **Isolation lifecycle** (`EDR_ISOLATION_MACHINE` in `@regulait/shared`'s `edr.ts`, an ADR-0348 `defineMachine` registered in `STATE_MACHINES`): `requested →(approve)
+  submitting →(confirm) isolated →(request_release) release_requested →(approve_release) releasing →(confirm_release)
+  released`; `requested →(reject | expire) rejected`; `submitting →(fail) failed →(vendor_isolated) isolated`;
+  `release_requested →(reject_release | expire_release) isolated`; `releasing →(fail_release) isolated`;
+  `isolated →(vendor_released) released`. `rejected` and `released` are terminal; `failed` is not, but it does not
+  hold the device's one open-request slot. Every write is a guarded UPDATE (`whereFrom`) with its audit row in the
+  same transaction. The system events, every minute and on each sync:
+  - the vendor's action status settles `confirm`, `fail`, `confirm_release` and `fail_release`. Falcon and SentinelOne
+    have no action object, so a host that has not moved yet counts as pending;
+  - an action still pending after 30 minutes (`EDR_ACTION_SETTLE_MINUTES`) fails `vendor_timeout`, and a request left
+    in submitting or releasing with no vendor action id for 10 minutes (a restart mid-call) fails `stranded`, so no
+    row holds a device's slot for good;
+  - a request or release request nobody decides within 24 hours (`EDR_DECISION_TTL_HOURS`, a strict compiled default)
+    expires: `requested → rejected`, `release_requested → isolated`;
+  - each sync reconciles against the vendor's real isolation state when the vendor reports it (MDE may omit it). A
+    `failed` request whose device the vendor did isolate (a timeout, MDE's "already in progress") goes back to
+    `isolated`, so its release is governed again. An `isolated` request whose device the vendor no longer isolates
+    (released in the vendor console) goes to `released`, audited `edr-release-outside-governance` (effect `deny`).
+- **Device quarantine.** Lane E15's detection responses (PR #865) have no device quarantine yet. This lane builds no
+  parallel one: when E15's lands, an `isolated` request applies it too (PENDING).
+
+### As built: why not the Approvals Queue rows
+
+The brief asks for approval and step-up. The Approvals Queue's rows (`approvals`) are bound to a tool call's arguments
+and are spent when the requester re-submits the same call (`spendBoundApproval`). An isolation is not a re-submittable
+call, so the request row carries its own two-person decision under the declared lifecycle, with the same rules: the
+requester never decides, and the approver steps up with `approval_decide`. Listing these requests in the Approvals
+Queue screen is a UI follow-up on #453.
 
 ## Consequences
 

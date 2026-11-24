@@ -5187,6 +5187,7 @@ export * from "./agent-identity.js";
 export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-fleet.js";
+export * from "./edr.js";
 export * from "./endpoint-actions.js";
 
 // ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
