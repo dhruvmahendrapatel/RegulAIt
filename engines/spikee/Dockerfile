@@ -64,7 +64,7 @@ COPY apps ./apps
 # reproducible builds (ADR-0187 addendum 2026-10-21): the normaliser sorts .modules.yaml and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-spikee..." build \
  && pnpm --filter @regulait/engine-spikee deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
