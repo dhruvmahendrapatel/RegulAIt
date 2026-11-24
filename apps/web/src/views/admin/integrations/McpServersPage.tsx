@@ -277,15 +277,22 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
   const act = useAction();
   const [userId, setUserId] = useState("");
   const [serverId, setServerId] = useState("");
-  const [rows, setRows] = useState<McpEntitlementRow[] | null>(null);
+  // INT-005: the rows carry the user and server they were read for, and are shown (and removable) only while that
+  // pair is still the one selected, so a Remove can never act on the previous subject's grant
+  const [loaded, setLoaded] = useState<{ subject: string; rows: McpEntitlementRow[] } | null>(null);
+  const subject = `${userId}\u0000${serverId}`;
+  const rows = loaded && loaded.subject === subject ? loaded.rows : null;
 
-  const load = () =>
-    act.run(async () => {
+  const load = () => {
+    const forUser = userId;
+    const forServer = serverId;
+    return act.run(async () => {
       const r = await api.get<{ entitlements: McpEntitlementRow[] }>(
-        `/v1/users/${userId}/servers/${serverId}/entitlements`,
+        `/v1/users/${encodeURIComponent(forUser)}/servers/${encodeURIComponent(forServer)}/entitlements`,
       );
-      setRows(r.entitlements);
+      setLoaded({ subject: `${forUser}\u0000${forServer}`, rows: r.entitlements });
     }, null);
+  };
 
   return (
     <Card
@@ -302,16 +309,17 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
+          setLoaded(null);
           void load();
         }}
       >
         <Field label="User">
-          <Select required value={userId} onChange={(e) => setUserId(e.target.value)}>
+          <Select required value={userId} onChange={(e) => (setUserId(e.target.value), setLoaded(null))}>
             {optionEls(userOpts(props.users.data?.users), "— select —")}
           </Select>
         </Field>
         <Field label="Server">
-          <Select required value={serverId} onChange={(e) => setServerId(e.target.value)}>
+          <Select required value={serverId} onChange={(e) => (setServerId(e.target.value), setLoaded(null))}>
             {optionEls(serverOpts(props.servers), "— select —")}
           </Select>
         </Field>

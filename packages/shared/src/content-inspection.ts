@@ -38,7 +38,7 @@ export type ContentKind = (typeof CONTENT_KINDS)[number];
 export const CONTENT_EXTRACT_HARD_LIMITS = {
   maxFileBytes: 16 * 1024 * 1024,
   maxPages: 200,
-  maxTextChars: 2_000_000,
+  maxTextChars: 750_000,
   maxArchiveEntries: 256,
   maxArchiveDepth: 2,
   maxArchiveTotalBytes: 64 * 1024 * 1024,
@@ -77,3 +77,74 @@ export const contentExtractResultSchema = z.object({
   files: z.array(contentExtractFileResultSchema).max(64),
 }).strict();
 export type ContentExtractResult = z.infer<typeof contentExtractResultSchema>;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR-0362 slice 1b-ii — the request path's vocabulary, declared ONCE (owner build rule "explicit state machines"). The
+// gateway (`apps/gateway/src/content-inspection.ts`) reads these; no literal is repeated there.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * One file's inspection status on a dispatch. A file starts `pending` (in memory only, never recorded) and ends in one
+ * terminal status; `refused` may only become `not_scanned`, when the project's `pass_not_scanned` relaxation lets the
+ * dispatch go on. Nothing is ever recorded as "clean": a file that was not read is `not_scanned`.
+ */
+export const CONTENT_INSPECTION_FILE_STATUSES = ["extracted", "refused", "not_scanned"] as const;
+export type ContentInspectionFileStatus = (typeof CONTENT_INSPECTION_FILE_STATUSES)[number];
+export const CONTENT_INSPECTION_FILE_TRANSITIONS: Readonly<Record<"pending" | ContentInspectionFileStatus, readonly ContentInspectionFileStatus[]>> = {
+  pending: ["extracted", "refused", "not_scanned"],
+  refused: ["not_scanned"],
+  extracted: [],
+  not_scanned: [],
+};
+/** true when `to` is an allowed next status of `from` (the one transition check the gateway uses) */
+export function contentInspectionFileTransitionAllowed(from: "pending" | ContentInspectionFileStatus, to: ContentInspectionFileStatus): boolean {
+  return CONTENT_INSPECTION_FILE_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * The dispatch-level outcome, each with what it does to the dispatch. `not_inspected`: inspection is off for the project
+ * (its files are `not_scanned`); `inspected`: every file was extracted and its text went through the input checks;
+ * `passed_not_scanned`: at least one file could not be read and the project's relaxation let the dispatch go on;
+ * `refused`: at least one file could not be read, so the dispatch is refused 422 before any provider work.
+ */
+export const CONTENT_INSPECTION_DISPATCH_OUTCOMES = {
+  not_inspected: { proceeds: true },
+  inspected: { proceeds: true },
+  passed_not_scanned: { proceeds: true },
+  refused: { proceeds: false },
+} as const;
+export type ContentInspectionDispatchOutcome = keyof typeof CONTENT_INSPECTION_DISPATCH_OUTCOMES;
+
+/**
+ * What the engine answered, at the dispatch level. `result`: the extractor returned a result for every file;
+ * `engine_off`: the engine is off (the shipped default, its image unpublished); `not_queued`: the run could not be
+ * queued (no data key, an over-cap bundle); `timeout`: no answer by the request's deadline; `not_run`, `failed`,
+ * `no_result`: the run ended without a stored, readable result. Every outcome but `result` refuses every file with
+ * reason `timeout` (ADR-0362 decision 2: no answer is a refusal), and the audit row names the outcome.
+ */
+export const CONTENT_INSPECTION_ENGINE_OUTCOMES = ["result", "engine_off", "not_queued", "timeout", "not_run", "failed", "no_result"] as const;
+export type ContentInspectionEngineOutcome = (typeof CONTENT_INSPECTION_ENGINE_OUTCOMES)[number];
+
+/** what a project does with a file that could not be inspected (ADR-0362 decision 6); `refuse` is the secure default */
+export const CONTENT_INSPECTION_ON_UNINSPECTABLE = ["refuse", "pass_not_scanned"] as const;
+export type ContentInspectionOnUninspectable = (typeof CONTENT_INSPECTION_ON_UNINSPECTABLE)[number];
+
+/** the shipped per-project setting when no row exists: off, and a file that cannot be read refuses (ADR-0362 decision 7) */
+export const CONTENT_INSPECTION_DEFAULTS = { enabled: false, onUninspectable: "refuse" } as const satisfies {
+  enabled: boolean;
+  onUninspectable: ContentInspectionOnUninspectable;
+};
+
+/** PUT /v1/projects/:projectId/content-inspection: either field, nothing else */
+export const contentInspectionSettingsBodySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    onUninspectable: z.enum(CONTENT_INSPECTION_ON_UNINSPECTABLE).optional(),
+  })
+  .strict()
+  .refine((b) => b.enabled !== undefined || b.onUninspectable !== undefined, { message: "set enabled, onUninspectable or both" });
+export type ContentInspectionSettingsBody = z.infer<typeof contentInspectionSettingsBodySchema>;
+
+/** the plain cost note the settings routes carry, declared once (lane lead, 2026-11-17) */
+export const CONTENT_INSPECTION_COST_NOTE =
+  "Off by default because each dispatch that carries files pays a sandboxed extraction before the provider call: about 40–130 ms per text document and about 350 ms per scanned page for OCR, plus up to a few seconds of engine-runner pickup today (ADR-0362 §Cost).";

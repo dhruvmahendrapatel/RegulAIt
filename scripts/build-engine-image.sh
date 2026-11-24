@@ -4,9 +4,9 @@
 # engine-images workflows do. ADR-0190 "As built: engine task images";
 # reproducible builds: ADR-0187 addendum 2026-10-21.
 #
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress> build
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress> repro <out.json>
-#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress> push <ghcr.io/owner/regulait-engine-x> <out.json>
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress|contentextract> build
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress|contentextract> repro <out.json>
+#   scripts/build-engine-image.sh <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress|contentextract> push <ghcr.io/owner/regulait-engine-x> <out.json>
 #
 # `build` builds the working tree for linux/amd64 and keeps it only in the
 # build cache (nothing is loaded, tagged or pushed): a quick local check. It
@@ -49,8 +49,8 @@ set -euo pipefail
 
 engine="${1:-}"
 mode="${2:-}"
-case "$engine" in promptfoo | modelscan | garak | spikee | mcpscanner | skillscanner | robot-runner | robot-egress) ;; *)
-  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress> build | repro <out.json> | push <repository> <out.json>" >&2
+case "$engine" in promptfoo | modelscan | garak | spikee | mcpscanner | skillscanner | robot-runner | robot-egress | contentextract) ;; *)
+  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress|contentextract> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;
 esac
@@ -110,8 +110,9 @@ repro)
   repro_build "type=image,name=regulait-engine-${engine}:repro,push=false" "$out" "{}"
   ;;
 push)
-  # ADR-0364 S3: the robot images are built and compared only (engine-images-gate.mjs UNPUBLISHED_ENGINE_IDS)
-  case "$engine" in robot-runner | robot-egress)
+  # ADR-0364 S3: the robot images, and ADR-0362: contentextract (until the owner decides its libpdfium licences,
+  # owner question 1), are built and compared only (engine-images-gate.mjs UNPUBLISHED_ENGINE_IDS)
+  case "$engine" in robot-runner | robot-egress | contentextract)
     echo "${engine} is unpublished: build or repro only, never push" >&2
     exit 2
     ;;
@@ -127,7 +128,7 @@ push)
   repro_build "type=image,name=${repo}:sha-${commit},push=true" "$out" "{\"repository\":\"${repo}\"}"
   ;;
 *)
-  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress> build | repro <out.json> | push <repository> <out.json>" >&2
+  echo "usage: $0 <promptfoo|modelscan|garak|spikee|mcpscanner|skillscanner|robot-runner|robot-egress|contentextract> build | repro <out.json> | push <repository> <out.json>" >&2
   exit 2
   ;;
 esac
