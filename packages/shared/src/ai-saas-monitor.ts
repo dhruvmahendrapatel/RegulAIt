@@ -12,7 +12,7 @@ export const AI_SAAS_MONITOR_VENDORS = ["m365_copilot", "chatgpt_enterprise", "c
 export type AiSaasMonitorVendor = (typeof AI_SAAS_MONITOR_VENDORS)[number];
 
 /** the vendors whose connector is built (slice 1: Microsoft 365 Copilot only); the others are refused at create */
-export const AI_SAAS_MONITOR_BUILT_VENDORS: readonly AiSaasMonitorVendor[] = ["m365_copilot"];
+export const AI_SAAS_MONITOR_BUILT_VENDORS: readonly AiSaasMonitorVendor[] = ["m365_copilot", "chatgpt_enterprise", "claude_enterprise"];
 
 export interface AiSaasMonitorCatalogueEntry {
   vendor: AiSaasMonitorVendor;
@@ -23,6 +23,11 @@ export interface AiSaasMonitorCatalogueEntry {
   permissions: readonly string[];
   /** how the credential's read-only scope is checked */
   scopeCheck: string;
+  /**
+   * false when the vendor offers no probe of a key's scopes: storing such a credential needs the admin's explicit,
+   * audited attestation that the key holds only the read scope named in `permissions` (ADR-0361 §6)
+   */
+  scopeVerifiable: boolean;
   /** whether the vendor's API offers a conversation delete or quarantine (slice 3) */
   remediation: "none" | "planned";
   docs: string;
@@ -37,29 +42,36 @@ export const AI_SAAS_MONITOR_CATALOGUE: Readonly<Record<AiSaasMonitorVendor, AiS
     permissions: ["AiEnterpriseInteraction.Read.All (application)", "User.Read.All (application, only when every user is in scope)"],
     scopeCheck:
       "the issued token's roles must include AiEnterpriseInteraction.Read.All and every role must be a .Read.All permission; any other role refuses the credential",
+    scopeVerifiable: true,
     remediation: "none",
     docs: "https://learn.microsoft.com/microsoft-365/copilot/extensibility/api/ai-services/interaction-export/aiinteractionhistory-getallenterpriseinteractions",
     built: true,
   },
   chatgpt_enterprise: {
     vendor: "chatgpt_enterprise",
-    label: "ChatGPT Enterprise (Compliance API)",
+    label: "ChatGPT Enterprise (Compliance Logs Platform)",
+    // the log download answers 307 to a short-lived signed URL on a storage host OpenAI does not document: a run that
+    // meets one names that host, and the admin adds it to the egress allow-list too
     hosts: ["api.chatgpt.com"],
-    permissions: ["an Enterprise Compliance API key for the workspace"],
-    scopeCheck: "verified against OpenAI's Admin API reference when the connector is built (ADR-0361 slice 2)",
+    permissions: ["a workspace Admin key with only chatgpt.enterprise.compliance_logs_platform.conversation_message.read"],
+    scopeCheck:
+      "OpenAI offers no scope probe: storing the key needs the admin's attestation that it holds only the conversation_message read scope (no compliance_export delete scope)",
+    scopeVerifiable: false,
     remediation: "planned",
-    docs: "https://learn.chatgpt.com/docs/enterprise/compliance-api",
-    built: false,
+    docs: "https://chatgpt.com/public/admin/api-reference",
+    built: true,
   },
   claude_enterprise: {
     vendor: "claude_enterprise",
-    label: "Claude Enterprise (compliance API)",
+    label: "Claude Enterprise (Compliance API)",
     hosts: ["api.anthropic.com"],
-    permissions: ["an organization-scoped compliance API key"],
-    scopeCheck: "verified against Anthropic's documentation when the connector is built (ADR-0361 slice 2)",
+    permissions: ["a Compliance Access Key with only read:compliance_user_data"],
+    scopeCheck:
+      "Anthropic offers no scope probe: storing the key needs the admin's attestation that it holds no delete:compliance_user_data scope (Anthropic recommends a separate key for deletion)",
+    scopeVerifiable: false,
     remediation: "planned",
-    docs: "https://docs.anthropic.com",
-    built: false,
+    docs: "https://platform.claude.com/docs/en/manage-claude/compliance-api",
+    built: true,
   },
 };
 
@@ -127,9 +139,36 @@ export const m365CopilotConfigSchema = z
   .strict();
 export type M365CopilotConfig = z.output<typeof m365CopilotConfigSchema>;
 
+/** an opaque vendor id in a path or filter: letters, digits, `_` and `-` only (no regex backtracking, M-074) */
+const vendorId = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/, "letters, digits, '_' and '-' only");
+
+/** ChatGPT Enterprise: the workspace (or API Platform organization, `org-…`) whose compliance logs are read */
+export const chatGptEnterpriseConfigSchema = z
+  .object({
+    principal: z.enum(["workspace", "organization"]).default("workspace"),
+    principalId: vendorId,
+    backfillDays: z.number().int().min(1).max(AI_SAAS_MONITOR_MAX_BACKFILL_DAYS).default(7),
+  })
+  .strict();
+export type ChatGptEnterpriseConfig = z.output<typeof chatGptEnterpriseConfigSchema>;
+
+/**
+ * Claude Enterprise: org-wide incremental polling (Anthropic rejects a user filter combined with `updated_at`
+ * windows), optionally narrowed to child organizations.
+ */
+export const claudeEnterpriseConfigSchema = z
+  .object({
+    organizationIds: z.array(vendorId).max(20).default([]),
+    backfillDays: z.number().int().min(1).max(AI_SAAS_MONITOR_MAX_BACKFILL_DAYS).default(7),
+  })
+  .strict();
+export type ClaudeEnterpriseConfig = z.output<typeof claudeEnterpriseConfigSchema>;
+
 /** per vendor; a vendor not built yet has no schema and is refused at create */
 export const aiSaasMonitorConfigSchemas: Partial<Record<AiSaasMonitorVendor, z.ZodType<Record<string, unknown>>>> = {
   m365_copilot: m365CopilotConfigSchema as unknown as z.ZodType<Record<string, unknown>>,
+  chatgpt_enterprise: chatGptEnterpriseConfigSchema as unknown as z.ZodType<Record<string, unknown>>,
+  claude_enterprise: claudeEnterpriseConfigSchema as unknown as z.ZodType<Record<string, unknown>>,
 };
 
 /** the backfill a connector's configuration asks for (every schema carries `backfillDays`) */
@@ -322,6 +361,140 @@ export function normalizeGraphInteraction(r: GraphAiInteraction): MonitoredInter
     text,
     truncated,
   };
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// ChatGPT Enterprise Compliance Logs Platform (OpenAPI 2.5.42, chatgpt.com/public/admin/api-reference/openapi.json)
+// --------------------------------------------------------------------------------------------------------------------
+
+export const chatGptLogFileListSchema = z
+  .object({
+    data: z
+      .array(
+        z
+          .object({
+            id: str(200).min(1),
+            event_type: str(100),
+            end_time: z.string().datetime({ offset: true }),
+            file_size: z.number().int().nonnegative().nullish(),
+            file_sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).nullish(),
+          })
+          .passthrough(),
+      )
+      .max(100),
+    has_more: z.boolean(),
+    last_end_time: z.string().datetime({ offset: true }).nullish(),
+  })
+  .passthrough();
+
+/** one `CONVERSATION_MESSAGE` record of a JSONL log file */
+export const chatGptConversationMessageSchema = z
+  .object({
+    event_id: str(200).min(1),
+    type: z.literal("CONVERSATION_MESSAGE"),
+    timestamp: z.string().datetime({ offset: true }),
+    actor: z.object({ user_id: nullableStr(200) }).passthrough().nullish(),
+    message: z
+      .object({
+        id: str(200).min(1),
+        created_at: z.string().datetime({ offset: true }).nullish(),
+        author: z.object({ type: str(50) }).passthrough().nullish(),
+        content: z
+          .object({ type: str(50), value: z.string().nullish(), quote: z.string().nullish() })
+          .passthrough()
+          .nullish(),
+      })
+      .passthrough(),
+    conversation: z.object({ id: nullableStr(500) }).passthrough().nullish(),
+  })
+  .passthrough();
+export type ChatGptConversationMessage = z.infer<typeof chatGptConversationMessageSchema>;
+
+export function normalizeChatGptMessage(r: ChatGptConversationMessage): MonitoredInteraction {
+  const c = r.message.content;
+  const raw = c ? (c.value ?? c.quote ?? "") : "";
+  const { text, truncated } = bound(raw);
+  const author = (r.message.author?.type ?? "").toLowerCase();
+  return {
+    // one event per message snapshot, delivered at least once: the event id is the idempotency key
+    vendorInteractionId: r.event_id,
+    conversationRef: r.conversation?.id ?? null,
+    kind: author === "user" ? "prompt" : author === "assistant" ? "response" : "other",
+    occurredAt: new Date(r.message.created_at ?? r.timestamp),
+    actorRef: r.actor?.user_id ?? null,
+    appRef: "chatgpt",
+    text,
+    truncated,
+  };
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Claude Enterprise Compliance API (platform.claude.com/docs/en/api/compliance/apps/chats)
+// --------------------------------------------------------------------------------------------------------------------
+
+const claudeChatSchema = z
+  .object({
+    id: str(200).min(1),
+    updated_at: z.string().datetime({ offset: true }),
+    user: z.object({ id: nullableStr(200) }).passthrough().nullish(),
+  })
+  .passthrough();
+
+export const claudeChatListSchema = z
+  .object({ data: z.array(claudeChatSchema).max(1000), has_more: z.boolean(), last_id: nullableStr(4096) })
+  .passthrough();
+
+type ClaudeBlock = { type?: string | undefined; text?: string | null | undefined; content?: unknown };
+const claudeBlockSchema: z.ZodType<ClaudeBlock> = z
+  .object({ type: z.string().max(50).optional(), text: z.string().nullish(), content: z.unknown().optional() })
+  .passthrough();
+
+export const claudeChatMessagesSchema = z
+  .object({
+    id: str(200).min(1),
+    user: z.object({ id: nullableStr(200) }).passthrough().nullish(),
+    chat_messages: z
+      .array(
+        z
+          .object({ id: str(200).min(1), role: str(50), created_at: z.string().datetime({ offset: true }), content: z.array(claudeBlockSchema).max(500).nullish() })
+          .passthrough(),
+      )
+      .max(1000),
+    has_more: z.boolean(),
+    last_id: nullableStr(4096),
+  })
+  .passthrough();
+export type ClaudeChatMessages = z.infer<typeof claudeChatMessagesSchema>;
+
+/** text of text blocks, and of text inside tool results (a tool can return a customer record), depth-bounded */
+function claudeBlocksText(blocks: readonly ClaudeBlock[] | null | undefined, depth = 0): string[] {
+  const out: string[] = [];
+  if (!blocks || depth > 3) return out;
+  for (const b of blocks) {
+    // nested `content` is not schema-checked, so a null or a non-object element is skipped, never dereferenced
+    if (!b || typeof b !== "object") continue;
+    if (typeof b.text === "string" && b.text) out.push(b.text);
+    if (Array.isArray(b.content)) out.push(...claudeBlocksText(b.content as ClaudeBlock[], depth + 1));
+  }
+  return out;
+}
+
+export function normalizeClaudeMessages(chat: ClaudeChatMessages): MonitoredInteraction[] {
+  return chat.chat_messages.map((m) => {
+    const { text, truncated } = bound(claudeBlocksText(m.content).join("\n"));
+    const role = m.role.toLowerCase();
+    return {
+      vendorInteractionId: m.id,
+      conversationRef: chat.id,
+      kind: role === "user" ? "prompt" : role === "assistant" ? "response" : "other",
+      occurredAt: new Date(m.created_at),
+      // the chat's owner: Anthropic records the user on the chat, not on each message
+      actorRef: chat.user?.id ?? null,
+      appRef: "claude.ai",
+      text,
+      truncated,
+    };
+  });
 }
 
 // --------------------------------------------------------------------------------------------------------------------

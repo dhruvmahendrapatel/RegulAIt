@@ -199,8 +199,8 @@ describe("ADR-0361 three switches, all off", () => {
   it("a new connector is disabled, validated, and tagged only with real profiles", async () => {
     const bad = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}-bad`, config: { ...config, tenantId: "contoso" }, reason: "pilot tenant" } });
     expect(bad.statusCode).toBe(400);
-    const notBuilt = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "chatgpt_enterprise", name: `adr0361-${RUN}-gpt`, config: {}, reason: "pilot tenant" } });
-    expect(notBuilt.statusCode).toBe(409);
+    const badGpt = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "chatgpt_enterprise", name: `adr0361-${RUN}-gpt`, config: {}, reason: "pilot tenant" } });
+    expect(badGpt.statusCode).toBe(400);
     const unknownTag = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}-tag`, config, complianceTags: [`nope-${RUN}`], reason: "pilot tenant" } });
     expect(unknownTag.statusCode).toBe(400);
     const res = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/connectors", headers: KEY, payload: { vendor: "m365_copilot", name: `adr0361-${RUN}`, config, complianceTags: [TAG], reason: "pilot tenant" } });
@@ -429,6 +429,32 @@ describe("ADR-0361 review fixes", () => {
       // a success resets the span
       await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps });
       expect(spans[4]).toBe(24 * 3600_000);
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false });
+      await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, c!.id));
+    }
+  });
+
+  it("a 3xx from the Entra token endpoint is still refused, so the client secret is never re-sent (review #985 R2 [1])", async () => {
+    const stolen: string[] = [];
+    // the redirect target is an allow-listed host, so only the guard's redirect refusal stands between it and the secret
+    const redirecting = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.pathname.startsWith("/stolen")) stolen.push(url.toString());
+      if (url.hostname === "login.microsoftonline.com" && url.pathname.endsWith("/oauth2/v2.0/token")) {
+        return new Response(null, { status: 307, headers: { location: "https://graph.microsoft.com/stolen/token" } });
+      }
+      return fakeFetch(input, init);
+    }) as typeof fetch;
+    const [c] = await db.insert(aiSaasMonitorConnectors).values({ vendor: "m365_copilot", name: `adr0361-${RUN}-redirect`, enabled: true, publicConfig: config }).returning();
+    await db.insert(aiSaasMonitorCredentials).values({ connectorId: c!.id, secretCiphertext: encryptSecret(DATA_KEY, SECRET), scopePosture: "read_only" });
+    await db.update(aiSaasMonitorPolicy).set({ enabled: true });
+    try {
+      const run = await runAiSaasMonitor(db, c!.id, { trigger: "schedule", dataKey: DATA_KEY, deps: { fetchImpl: redirecting, resolve } });
+      expect(run.status).toBe("failed");
+      const [row] = await db.select().from(aiSaasMonitorRuns).where(eq(aiSaasMonitorRuns.connectorId, c!.id));
+      expect(["token_failed", "egress_refused"]).toContain(row!.errorCode);
+      expect(stolen).toEqual([]);
     } finally {
       await db.update(aiSaasMonitorPolicy).set({ enabled: false });
       await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, c!.id));

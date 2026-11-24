@@ -14,8 +14,8 @@ import {
   normalizeGraphInteraction,
   type GraphAiInteraction,
 } from "@regulait/shared";
-import { ConnectorError, M365_COPILOT_CONNECTOR, m365InteractionsUrl, sameOriginNext, type ConnectorContext } from "./ai-saas-connectors.js";
-import { cascadeLoosens, configWidens, m365SetupGuide, monitorWindow, windowSpanMs } from "./ai-saas-monitor.js";
+import { AI_SAAS_CONNECTORS, ConnectorError, M365_COPILOT_CONNECTOR, chatGptConfigWidens, claudeConfigWidens, m365ConfigWidens, m365InteractionsUrl, sameOriginNext, type ConnectorContext } from "./ai-saas-connectors.js";
+import { cascadeLoosens, m365SetupGuide, monitorWindow, windowSpanMs } from "./ai-saas-monitor.js";
 
 const TENANT = "11111111-2222-3333-4444-555555555555";
 const CLIENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -316,12 +316,40 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
     expect(cascadeLoosens(c(400, "redact"), c(400, "warn"))).toEqual(["pii_mode"]);
   });
 
-  it("knows when a configuration reads more than before", () => {
+  it("knows when an M365 configuration reads more than before", () => {
     const base = listed([USER_A]);
-    expect(configWidens(base, listed([USER_A, USER_B]))).toBe(true);
-    expect(configWidens(base, { ...base, users: { mode: "all" } })).toBe(true);
-    expect(configWidens(listed([USER_A, USER_B]), base)).toBe(false);
-    expect(configWidens({ ...base, appClasses: ["IPM.SkypeTeams.Message.Copilot.Teams"] }, base)).toBe(true);
-    expect(configWidens(base, { ...base, backfillDays: 14 })).toBe(true);
+    expect(m365ConfigWidens(base, listed([USER_A, USER_B]))).toBe(true);
+    expect(m365ConfigWidens(base, { ...base, users: { mode: "all" } })).toBe(true);
+    expect(m365ConfigWidens(listed([USER_A, USER_B]), base)).toBe(false);
+    expect(m365ConfigWidens({ ...base, appClasses: ["IPM.SkypeTeams.Message.Copilot.Teams"] }, base)).toBe(true);
+    expect(m365ConfigWidens(base, { ...base, backfillDays: 14 })).toBe(true);
+    expect(m365ConfigWidens(base, base)).toBe(false);
+  });
+
+  it("knows when a ChatGPT configuration reads more than before (review #985 S4 [1])", () => {
+    const ws1 = { principal: "workspace", principalId: "ws-1", backfillDays: 7 };
+    expect(chatGptConfigWidens(ws1, { ...ws1, principalId: "ws-2" })).toBe(true); // another workspace's people
+    expect(chatGptConfigWidens(ws1, { ...ws1, principal: "organization", principalId: "org-1" })).toBe(true); // the whole organization
+    expect(chatGptConfigWidens(ws1, { ...ws1, principal: "organization" })).toBe(true); // same id, wider principal
+    expect(chatGptConfigWidens({ principalId: "ws-1" }, { principal: "organization", principalId: "ws-1" })).toBe(true); // the default is a workspace
+    expect(chatGptConfigWidens(ws1, { ...ws1, backfillDays: 14 })).toBe(true);
+    expect(chatGptConfigWidens(ws1, { ...ws1, backfillDays: 3 })).toBe(false);
+    expect(chatGptConfigWidens(ws1, { principalId: "ws-1" })).toBe(false); // the default principal is unchanged
+  });
+
+  it("knows when a Claude configuration reads more than before (review #985 S4 [1])", () => {
+    const one = { organizationIds: ["org-a"], backfillDays: 7 };
+    expect(claudeConfigWidens(one, { ...one, organizationIds: [] })).toBe(true); // one child organization becomes org-wide
+    expect(claudeConfigWidens(one, { ...one, organizationIds: ["org-a", "org-b"] })).toBe(true); // an added organization
+    expect(claudeConfigWidens(one, { ...one, organizationIds: ["org-b"] })).toBe(true); // a different organization
+    expect(claudeConfigWidens({ ...one, organizationIds: [] }, one)).toBe(false); // org-wide narrowed to one
+    expect(claudeConfigWidens({ ...one, organizationIds: ["org-a", "org-b"] }, one)).toBe(false);
+    expect(claudeConfigWidens(one, { ...one, backfillDays: 30 })).toBe(true);
+    expect(claudeConfigWidens(one, one)).toBe(false);
+  });
+
+  it("every registered connector declares its own widening check and only ChatGPT gets the redirect-returning fetch", () => {
+    for (const c of AI_SAAS_CONNECTORS.values()) expect(typeof c.configWidens).toBe("function");
+    expect([...AI_SAAS_CONNECTORS.values()].filter((c) => c.signedRedirectDownload).map((c) => c.vendor)).toEqual(["chatgpt_enterprise"]);
   });
 });
