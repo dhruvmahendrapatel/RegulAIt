@@ -25,7 +25,10 @@ export interface VendorAgentRef {
  */
 export interface ControlTokenSpec {
   readonly provider: "entra";
+  /** the app-only scope (a federated service principal or a stored client secret) */
   readonly scope: string;
+  /** ADR-0338 slice 1c: the one delegated permission a named admin consents to; absent where `delegated` is not accepted */
+  readonly delegatedScope?: string;
 }
 
 /**
