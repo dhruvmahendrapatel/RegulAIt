@@ -9,7 +9,11 @@
  *    signature, a stale timestamp and MDE (no webhooks) are refused with one answer;
  *  - isolation is off until relaxed (step-up bound to the connection); a request waits for a second admin, the
  *    requester cannot decide, the approver steps up, the vendor is asked, its action status settles the request, and
- *    a release needs the same plus a settings_relax step-up; the CHECK holds two people.
+ *    a release needs the same plus a settings_relax step-up; the CHECK holds two people;
+ *  - two signed-in people, always: the bootstrap credential cannot request an isolation or a release (S4 #1, R2 #1);
+ *  - no request is stuck: undecided requests expire, a stranded or unsettled action fails, and the vendor's real state
+ *    is reconciled (a failed isolation the vendor did carry out, a release made in the vendor console) (R2 #2-4);
+ *  - the vendor credential and the webhook secret rotate in place, step-up gated and audited (R2 #5).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
@@ -32,8 +36,8 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { edrIsolationDecideStepUp, edrIsolationEnableStepUp, edrReleaseStepUp } from "./edr/routes.js";
-import { pollEdrIsolations } from "./edr/service.js";
+import { edrCredentialRotateStepUp, edrIsolationDecideStepUp, edrIsolationEnableStepUp, edrReleaseStepUp, edrWebhookSecretRotateStepUp } from "./edr/routes.js";
+import { EDR_ACTION_SETTLE_MINUTES, EDR_DECISION_TTL_HOURS, EDR_STRANDED_MINUTES, pollEdrIsolations } from "./edr/service.js";
 import { ISOLATION_MACHINE } from "./edr/lifecycle.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -59,7 +63,8 @@ process.env.REGULAIT_PUBLIC_URL = "http://localhost";
 
 /** the fake vendors: one per vendor, routed by path; every request is recorded */
 const calls: Array<{ method: string; url: string; auth: string | null; body: string }> = [];
-const state = { isolated: new Set<string>() };
+/** `report`: the fake Defender says whether mde-a is isolated (off: it omits the field, as MDE may) */
+const state = { isolated: new Set<string>(), report: false };
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const fakeFetch: typeof fetch = async (input, init) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -70,14 +75,14 @@ const fakeFetch: typeof fetch = async (input, init) => {
   const p = url.pathname;
   if (p.endsWith("/oauth2/v2.0/token") || p === "/oauth2/token") return reply(200, { access_token: "fake-access", token_type: "Bearer", expires_in: 3600 });
   // Defender
-  if (p === "/api/machines") return reply(200, { value: [{ id: "mde-a", computerDnsName: HOST_A, riskScore: "Medium" }, { id: "mde-x", computerDnsName: "not-enrolled", riskScore: "High" }] });
+  if (p === "/api/machines") return reply(200, { value: [{ id: "mde-a", computerDnsName: HOST_A, riskScore: "Medium", ...(state.report ? { isolated: state.isolated.has("mde-a") } : {}) }, { id: "mde-x", computerDnsName: "not-enrolled", riskScore: "High" }] });
   if (p === "/api/alerts") return reply(200, { value: [{ machineId: "mde-a", severity: "High", status: "New" }, { machineId: "mde-a", severity: "Informational", status: "New" }] });
   if (p === "/api/machines/mde-a/isolate") {
     state.isolated.add("mde-a");
     return reply(201, { id: "action-1", status: "Pending" });
   }
   if (p === "/api/machines/mde-a/unisolate") return reply(201, { id: "action-2", status: "Pending" });
-  if (p.startsWith("/api/machineactions/")) return reply(200, { id: p.split("/").pop(), status: "Succeeded" });
+  if (p.startsWith("/api/machineactions/")) return reply(200, { id: p.split("/").pop(), status: p.includes("pending") ? "Pending" : "Succeeded" });
   // SentinelOne
   if (p === "/web/api/v2.1/agents") return reply(200, { data: [{ id: "s1-b", computerName: HOST_B, networkStatus: "connected", activeThreats: 0 }], pagination: { nextCursor: null } });
   if (p === "/web/api/v2.1/threats") return reply(200, { data: [] });
@@ -169,6 +174,13 @@ describe("ADR-0360 EDR: the declared isolation lifecycle", () => {
     for (const t of Object.values(ISOLATION_MACHINE.def.transitions)) for (const s of ISOLATION_MACHINE.def.terminal) expect(t.from).not.toContain(s);
     expect(ISOLATION_MACHINE.sourcesOf("approve_release")).toEqual(["release_requested"]);
     expect(ISOLATION_MACHINE.def.transitions.fail_release.to).toBe("isolated");
+    // R2 #3: failed is not a dead end; every waiting state has a system way out (expiry, timeout, reconcile)
+    expect(ISOLATION_MACHINE.def.terminal).not.toContain("failed");
+    expect(ISOLATION_MACHINE.sourcesOf("vendor_isolated")).toEqual(["failed"]);
+    for (const [e, from] of [["expire", "requested"], ["expire_release", "release_requested"], ["fail", "submitting"], ["fail_release", "releasing"]] as const) {
+      expect(ISOLATION_MACHINE.sourcesOf(e)).toEqual([from]);
+      expect(ISOLATION_MACHINE.def.transitions[e].by).toEqual(["system"]);
+    }
   });
 });
 
@@ -258,7 +270,7 @@ describe("ADR-0360 EDR: governed isolation", () => {
     const c = await connection("defender", { tenantId: "8f0a7c1e-2b3d-4e5f-9a6b-7c8d9e0f1a2b", clientId: "app-client" });
     const cid = c.connection.id;
     await inject("POST", `/v1/edr-connections/${cid}/sync`, AUTH, {});
-    expect((await inject("POST", `/v1/edr-connections/${cid}/isolations`, AUTH, { deviceId: deviceA, reason: "r" })).json().error).toBe("isolation_off");
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${cid}/isolations`, { deviceId: deviceA, reason: "r" })).json().error).toBe("isolation_off");
     // turning isolation on: a step-up bound to this connection
     const wrong = await asUser(admin1, "PUT", `/v1/edr-connections/${cid}/settings`, { isolation: true }, edrIsolationEnableStepUp(deviceA));
     expect(wrong.statusCode).toBe(422);
@@ -299,5 +311,162 @@ describe("ADR-0360 EDR: governed isolation", () => {
     expect((await asUser(admin2, "POST", `/v1/edr-isolations/${id}/request_release`, {})).json().error).toBe("illegal_transition");
     const rules = (await db.select({ r: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'requestId' = ${id}`)).map((x) => x.r);
     expect(rules).toEqual(expect.arrayContaining(["edr-isolation-requested", "edr-isolation-approve", "edr-isolate-submitted", "edr-isolate-succeeded", "edr-isolation-request-release", "edr-isolation-approve-release", "edr-release-succeeded"]));
+  });
+});
+
+/** a request row written straight to the table, for the system paths (the routes cannot age a row) */
+async function row(connectionId: string, values: Partial<typeof edrIsolationRequests.$inferInsert> & { ageMinutes: number }) {
+  const { ageMinutes, ...rest } = values;
+  const [r] = await db
+    .insert(edrIsolationRequests)
+    .values({ connectionId, deviceId: deviceA, vendorDeviceId: "mde-a", reason: "system path", requestedBy: admin1, ...rest, updatedAt: sql`now() - make_interval(mins => ${ageMinutes})` })
+    .returning();
+  return r!.id;
+}
+const stateOf = async (id: string) => (await db.select().from(edrIsolationRequests).where(eq(edrIsolationRequests.id, id)))[0]!;
+const rulesOf = async (id: string) => (await db.select({ r: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'requestId' = ${id}`)).map((x) => x.r);
+const defender = () => connection("defender", { tenantId: "8f0a7c1e-2b3d-4e5f-9a6b-7c8d9e0f1a2b", clientId: "app-client" });
+
+describe("ADR-0360 EDR: two signed-in people (S4 #1, R2 #1)", () => {
+  it("refuses an isolation or a release requested with the bootstrap credential, and the CHECKs need a named requester", async () => {
+    const c = await defender();
+    const cid = c.connection.id;
+    await inject("POST", `/v1/edr-connections/${cid}/sync`, AUTH, {});
+    expect((await asUser(admin1, "PUT", `/v1/edr-connections/${cid}/settings`, { isolation: true }, edrIsolationEnableStepUp(cid))).statusCode).toBe(200);
+    const boot = await inject("POST", `/v1/edr-connections/${cid}/isolations`, AUTH, { deviceId: deviceA, reason: "bootstrap" });
+    expect(boot.statusCode).toBe(403);
+    expect(boot.json().error).toBe("user_required");
+    expect(await db.select().from(edrIsolationRequests).where(eq(edrIsolationRequests.connectionId, cid))).toEqual([]);
+    // an isolated request: the bootstrap credential cannot ask for its release, nor decide it
+    const id = await row(cid, { state: "isolated", decidedBy: admin2, ageMinutes: 0 });
+    for (const ev of ["request_release", "approve_release", "reject"]) {
+      const r = await inject("POST", `/v1/edr-isolations/${id}/${ev}`, AUTH, {});
+      expect(r.statusCode).toBe(403);
+      expect(r.json().error).toBe("user_required");
+    }
+    expect((await stateOf(id)).state).toBe("isolated");
+    // whatever writes the table: no requester, or a release decided with no named release requester, is refused
+    await expect(db.insert(edrIsolationRequests).values({ connectionId: cid, deviceId: deviceB, vendorDeviceId: "x", reason: "r", requestedBy: null as unknown as string })).rejects.toThrow();
+    await expect(db.update(edrIsolationRequests).set({ releaseDecidedBy: admin2 }).where(eq(edrIsolationRequests.id, id))).rejects.toThrow();
+    // the view fails closed too: no release requester, no "other person" can decide it
+    await db.update(edrIsolationRequests).set({ state: "release_requested" }).where(eq(edrIsolationRequests.id, id));
+    const view = (await asUser(admin2, "GET", "/v1/edr-isolations?open=true", undefined)).json();
+    const mine = view.isolations.find((x: { id: string }) => x.id === id);
+    expect(mine.lifecycle.transitions.find((t: { event: string }) => t.event === "approve_release")).toMatchObject({ allowed: false });
+    await db.update(edrIsolationRequests).set({ state: "released" }).where(eq(edrIsolationRequests.id, id));
+  });
+});
+
+describe("ADR-0360 EDR: nothing waits for ever (R2 #2, #3, #4)", () => {
+  it("expires undecided requests and release requests", async () => {
+    const c = await defender();
+    const cid = c.connection.id;
+    const old = EDR_DECISION_TTL_HOURS * 60 + 5;
+    const a = await row(cid, { state: "requested", ageMinutes: old });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect(await stateOf(a)).toMatchObject({ state: "rejected", errorCode: "expired" });
+    expect(await rulesOf(a)).toContain("edr-isolation-expire");
+    const b = await row(cid, { state: "release_requested", decidedBy: admin2, releaseRequestedBy: admin2, ageMinutes: old });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect(await stateOf(b)).toMatchObject({ state: "isolated", errorCode: "expired" });
+    expect(await rulesOf(b)).toContain("edr-isolation-expire-release");
+    await db.update(edrIsolationRequests).set({ state: "released" }).where(eq(edrIsolationRequests.id, b));
+    // a fresh request is left alone
+    const fresh = await row(cid, { state: "requested", ageMinutes: 1 });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect((await stateOf(fresh)).state).toBe("requested");
+    await db.update(edrIsolationRequests).set({ state: "rejected" }).where(eq(edrIsolationRequests.id, fresh));
+  });
+
+  it("fails a stranded submission and an action the vendor never settles, freeing the device's slot", async () => {
+    const c = await defender();
+    const cid = c.connection.id;
+    const stranded = await row(cid, { state: "submitting", decidedBy: admin2, ageMinutes: EDR_STRANDED_MINUTES + 1 });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect(await stateOf(stranded)).toMatchObject({ state: "failed", errorCode: "stranded" });
+    expect(await rulesOf(stranded)).toContain("edr-isolate-failed");
+    const releasing = await row(cid, { state: "releasing", decidedBy: admin2, releaseRequestedBy: admin2, releaseDecidedBy: admin1, ageMinutes: EDR_STRANDED_MINUTES + 1 });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect(await stateOf(releasing)).toMatchObject({ state: "isolated", errorCode: "stranded" });
+    await db.update(edrIsolationRequests).set({ state: "released" }).where(eq(edrIsolationRequests.id, releasing));
+    // pending at the vendor: left while it may still move, failed once overdue
+    const young = await row(cid, { state: "submitting", decidedBy: admin2, vendorActionId: "action-pending-1", ageMinutes: 1 });
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect((await stateOf(young)).state).toBe("submitting");
+    await db.update(edrIsolationRequests).set({ updatedAt: sql`now() - make_interval(mins => ${EDR_ACTION_SETTLE_MINUTES + 1})` }).where(eq(edrIsolationRequests.id, young));
+    await pollEdrIsolations(db, { dataKey: DATA_KEY, egress });
+    expect(await stateOf(young)).toMatchObject({ state: "failed", errorCode: "vendor_timeout" });
+  });
+
+  it("reconciles with the vendor: a failed isolation it carried out, and a release made in its console", async () => {
+    const c = await defender();
+    const cid = c.connection.id;
+    const id = await row(cid, { state: "failed", decidedBy: admin2, errorCode: "already_in_progress", ageMinutes: 5 });
+    state.report = true;
+    state.isolated.add("mde-a");
+    try {
+      expect((await inject("POST", `/v1/edr-connections/${cid}/sync`, AUTH, {})).json().code).toBe("ok");
+      expect((await stateOf(id)).state).toBe("isolated");
+      expect(await rulesOf(id)).toContain("edr-isolate-reconciled");
+      // isolated again, so its release is governed: a second person decides it
+      expect((await asUser(admin2, "POST", `/v1/edr-isolations/${id}/request_release`, {})).json().isolation.state).toBe("release_requested");
+      await db.update(edrIsolationRequests).set({ state: "isolated", releaseRequestedBy: null }).where(eq(edrIsolationRequests.id, id));
+      // released in the vendor console: recorded, audited as outside governance
+      state.isolated.delete("mde-a");
+      await inject("POST", `/v1/edr-connections/${cid}/sync`, AUTH, {});
+      expect((await stateOf(id)).state).toBe("released");
+      expect(await rulesOf(id)).toContain("edr-release-outside-governance");
+    } finally {
+      state.report = false;
+    }
+  });
+});
+
+describe("ADR-0360 EDR: secrets rotate in place (R2 #5)", () => {
+  it("replaces the vendor credential and rotates the webhook secret, step-up gated and audited", async () => {
+    const c = await connection("sentinelone");
+    const cid = c.connection.id;
+    const [before] = await db.select().from(edrConnections).where(eq(edrConnections.id, cid));
+    const next = createHash("sha256").update(`vendor-next-${RUN}`).digest("hex");
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${cid}/credential`, { secret: next })).statusCode).not.toBe(200);
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${cid}/credential`, { secret: next }, edrCredentialRotateStepUp(cid))).statusCode).toBe(200);
+    const [after] = await db.select().from(edrConnections).where(eq(edrConnections.id, cid));
+    expect(after!.secretCiphertext).not.toBe(before!.secretCiphertext);
+    expect(after!.secretCiphertext).not.toContain(next);
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${cid}/credential`, { secret: next, clientId: "nope" }, edrCredentialRotateStepUp(cid))).statusCode).toBe(400);
+    // the webhook secret: shown once, the old one stops working at once
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${cid}/webhook-secret/rotate`, {})).statusCode).not.toBe(200);
+    const rot = await asUser(admin1, "POST", `/v1/edr-connections/${cid}/webhook-secret/rotate`, {}, edrWebhookSecretRotateStepUp(cid));
+    expect(rot.statusCode, rot.body).toBe(200);
+    expect(rot.headers["cache-control"]).toBe("no-store");
+    const fresh = rot.json().webhook.secret as string;
+    expect(fresh).toMatch(/^rgedr_[0-9a-f]{64}$/);
+    expect(fresh).not.toBe(c.webhook!.secret);
+    const ev = (id: string) => JSON.stringify({ id, createdAt: new Date().toISOString(), agentRealtimeInfo: { agentId: "s1-b" }, threatInfo: { confidenceLevel: "suspicious" } });
+    const post = (id: string, token: string) => app.inject({ method: "POST", url: c.webhook!.path, headers: { "content-type": "application/json", "x-regulait-webhook-token": token }, payload: ev(id) });
+    expect((await post(`old-${RUN}`, c.webhook!.secret)).statusCode).toBe(401);
+    expect((await post(`new-${RUN}`, fresh)).statusCode).toBe(200);
+    const rules = (await db.select({ r: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'connectionId' = ${cid}`)).map((x) => x.r);
+    expect(rules).toEqual(expect.arrayContaining(["edr-credential-rotated", "edr-webhook-secret-rotated"]));
+    const leaked = await db.select({ id: auditLog.id }).from(auditLog).where(sql`${auditLog.detail}::text LIKE ${"%" + fresh + "%"} OR ${auditLog.detail}::text LIKE ${"%" + next + "%"}`);
+    expect(leaked).toEqual([]);
+    const mde = await defender();
+    expect((await asUser(admin1, "POST", `/v1/edr-connections/${mde.connection.id}/webhook-secret/rotate`, {}, edrWebhookSecretRotateStepUp(mde.connection.id))).json().error).toBe("no_webhooks");
+  });
+});
+
+describe("ADR-0360 EDR: lists page by keyset (R2 #8, #9)", () => {
+  it("pages isolations newest first and refuses a malformed signals cursor", async () => {
+    const all = await inject("GET", "/v1/edr-isolations", AUTH);
+    expect(all.statusCode).toBe(200);
+    const first = all.json().isolations as Array<{ id: string; createdAt: string }>;
+    expect(first.length).toBeGreaterThan(1);
+    const after = await inject("GET", `/v1/edr-isolations?after=${first[0]!.id}`, AUTH);
+    expect(after.json().isolations.map((x: { id: string }) => x.id)).not.toContain(first[0]!.id);
+    expect(after.json().isolations[0].id).toBe(first[1]!.id);
+    const closed = await inject("GET", "/v1/edr-isolations?open=false", AUTH);
+    expect(closed.json().isolations.every((x: { state: string }) => !closed.json().open.includes(x.state))).toBe(true);
+    expect((await inject("GET", `/v1/discovery/sources/${sourceId}/edr-signals?after=${deviceA}`, AUTH)).statusCode).toBe(400);
+    expect((await inject("GET", `/v1/discovery/sources/${sourceId}/edr-signals?after=${deviceA}.${deviceB}`, AUTH)).statusCode).toBe(200);
   });
 });

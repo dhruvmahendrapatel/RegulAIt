@@ -73,6 +73,8 @@ export interface EdrDevice {
   hostname: string;
   risk: EdrRisk;
   isolated: boolean;
+  /** false when the vendor's answer did not say (MDE omits the field); the lifecycle is reconciled only on a known state */
+  isolationKnown?: boolean;
 }
 
 export interface EdrAlertCount {
@@ -217,7 +219,7 @@ export const defenderAdapter: EdrAdapter = {
     let url: string | undefined = `${c.baseUrl}/api/machines?$top=${EDR_PAGE_SIZE}`;
     while (url && out.length < EDR_MAX_DEVICES_PER_SYNC) {
       const page: z.infer<typeof mdeMachines> = await json(await f(sameOrigin(url, c.baseUrl), { headers: { authorization: `Bearer ${token}` } }), mdeMachines);
-      for (const m of page.value) if (m.computerDnsName) out.push({ vendorDeviceId: m.id, hostname: m.computerDnsName, risk: mdeRisk(m.riskScore), isolated: m.isolated === true });
+      for (const m of page.value) if (m.computerDnsName) out.push({ vendorDeviceId: m.id, hostname: m.computerDnsName, risk: mdeRisk(m.riskScore), isolated: m.isolated === true, isolationKnown: m.isolated !== undefined });
       url = page["@odata.nextLink"];
     }
     return out.slice(0, EDR_MAX_DEVICES_PER_SYNC);
@@ -348,9 +350,10 @@ export const falconAdapter: EdrAdapter = {
     const token = await falconToken(f, c);
     const hosts = await json(await f(`${c.baseUrl}/devices/entities/devices/v2`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ ids: [a.vendorDeviceId] }) }), falconHosts);
     const status = hosts.resources?.[0]?.status ?? "";
-    // Falcon has no action object: the host's containment status is the answer
-    if (a.kind === "isolate") return { actionId: a.actionId, status: status === "contained" ? "succeeded" : status === "containment_pending" ? "pending" : "failed" };
-    return { actionId: a.actionId, status: status === "normal" ? "succeeded" : status === "lift_containment_pending" ? "pending" : "failed" };
+    // Falcon has no action object: the host's containment status is the answer. A host that has not moved yet (still
+    // `normal` just after contain, still `contained` just after lift) is pending; the poller bounds how long (EDR_ACTION_SETTLE_MINUTES)
+    if (a.kind === "isolate") return { actionId: a.actionId, status: status === "contained" ? "succeeded" : status === "containment_pending" || status === "normal" ? "pending" : "failed" };
+    return { actionId: a.actionId, status: status === "normal" ? "succeeded" : status === "lift_containment_pending" || status === "contained" ? "pending" : "failed" };
   },
   verifyWebhook(headers, rawBody, secret, now) {
     // Falcon webhooks: X-Cs-Primary-Signature = base64(HMAC-SHA256(secret, body + X-Cs-Delivery-Timestamp))
@@ -476,8 +479,9 @@ export const sentinelOneAdapter: EdrAdapter = {
   async actionStatus(f, c, a) {
     const page = await json(await f(`${c.baseUrl}/web/api/v2.1/agents?ids=${encodeURIComponent(a.vendorDeviceId)}`, { headers: { authorization: `ApiToken ${c.secret}` } }), s1Agents);
     const status = page.data[0]?.networkStatus ?? "";
-    if (a.kind === "isolate") return { actionId: a.actionId, status: status === "disconnected" ? "succeeded" : status === "disconnecting" ? "pending" : "failed" };
-    return { actionId: a.actionId, status: status === "connected" ? "succeeded" : status === "connecting" ? "pending" : "failed" };
+    // as Falcon: an agent that has not moved yet is pending, bounded by the poller
+    if (a.kind === "isolate") return { actionId: a.actionId, status: status === "disconnected" ? "succeeded" : status === "disconnecting" || status === "connected" ? "pending" : "failed" };
+    return { actionId: a.actionId, status: status === "connected" ? "succeeded" : status === "connecting" || status === "disconnected" ? "pending" : "failed" };
   },
   verifyWebhook(headers, rawBody, secret, now) {
     // S1 webhooks carry no signature; the console sends the shared token RegulAIt generated in a custom header, which

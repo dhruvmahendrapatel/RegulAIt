@@ -21352,10 +21352,11 @@ export const edrIsolationRequests = pgTable(
     vendorDeviceId: text("vendor_device_id").notNull(),
     state: text("state", { enum: EDR_ISOLATION_STATES }).notNull().default("requested"),
     reason: text("reason").notNull(),
-    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
-    decidedBy: uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
-    releaseRequestedBy: uuid("release_requested_by").references(() => users.id, { onDelete: "set null" }),
-    releaseDecidedBy: uuid("release_decided_by").references(() => users.id, { onDelete: "set null" }),
+    // the people of the two-person rule: never null once set, never deleted under the evidence (restrict, as ADR-0350 §5)
+    requestedBy: uuid("requested_by").notNull().references(() => users.id),
+    decidedBy: uuid("decided_by").references(() => users.id),
+    releaseRequestedBy: uuid("release_requested_by").references(() => users.id),
+    releaseDecidedBy: uuid("release_decided_by").references(() => users.id),
     vendorActionId: text("vendor_action_id"),
     errorCode: text("error_code"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -21365,12 +21366,14 @@ export const edrIsolationRequests = pgTable(
     check("edr_isolation_requests_state_check", sql`${t.state} IN ('requested', 'rejected', 'submitting', 'isolated', 'failed', 'release_requested', 'releasing', 'released')`),
     check("edr_isolation_requests_reason_check", sql`length(${t.reason}) BETWEEN 1 AND 500`),
     // the approver is never the requester (also checked by the route, before the step-up)
-    check("edr_isolation_requests_two_people_check", sql`${t.decidedBy} IS NULL OR ${t.decidedBy} IS DISTINCT FROM ${t.requestedBy}`),
-    check("edr_isolation_requests_release_two_people_check", sql`${t.releaseDecidedBy} IS NULL OR ${t.releaseDecidedBy} IS DISTINCT FROM ${t.releaseRequestedBy}`),
+    check("edr_isolation_requests_two_people_check", sql`${t.decidedBy} IS NULL OR ${t.decidedBy} <> ${t.requestedBy}`),
+    check("edr_isolation_requests_release_two_people_check", sql`${t.releaseDecidedBy} IS NULL OR (${t.releaseRequestedBy} IS NOT NULL AND ${t.releaseDecidedBy} <> ${t.releaseRequestedBy})`),
     // one open request per device and connection
     uniqueIndex("edr_isolation_requests_open_uq").on(t.connectionId, t.deviceId).where(sql`${t.state} NOT IN ('rejected', 'failed', 'released')`),
     index("edr_isolation_requests_state_idx").on(t.state, t.updatedAt),
     index("edr_isolation_requests_device_idx").on(t.deviceId),
+    // the list's keyset order
+    index("edr_isolation_requests_created_idx").on(t.createdAt, t.id),
   ],
 );
 export type EdrIsolationRequestRow = typeof edrIsolationRequests.$inferSelect;

@@ -11,7 +11,7 @@
  *  - A device whose risk rises to high or critical writes an `edr-device-risk-raised` audit row, the signal the
  *    detection engine (lane E15) and the SIEM export read from the audit stream.
  */
-import { and, auditLog, edrConnections, edrDeviceSignals, edrIsolationRequests, edrWebhookDeliveries, endpointDevices, eq, inArray, isNull, lt, sql, type Db, type EdrConnectionRow, type EdrIsolationRequestRow } from "@regulait/db";
+import { and, auditLog, desc, edrConnections, edrDeviceSignals, edrIsolationRequests, edrWebhookDeliveries, endpointDevices, eq, inArray, isNull, lt, sql, type Db, type EdrConnectionRow, type EdrIsolationRequestRow } from "@regulait/db";
 import { ConnectionEgressBlockedError, guardConnectionCall, type ConnectionEgressDeps } from "../connection-egress.js";
 import { derivePseudonym } from "../discovery-worker.js";
 import { decryptSecret } from "../secrets.js";
@@ -24,6 +24,12 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 export const EDR_ALERT_WINDOW_DAYS = 7;
 /** the replay table keeps a delivery this long: well past the 5-minute freshness window */
 export const EDR_REPLAY_RETENTION_HOURS = 24;
+/** an action the vendor has not settled after this long fails (fail / fail_release), so no request waits for ever */
+export const EDR_ACTION_SETTLE_MINUTES = 30;
+/** a submitting or releasing request with no vendor action id after this long was stranded mid-call (a restart) */
+export const EDR_STRANDED_MINUTES = 10;
+/** a request or release request nobody decided within this long expires (strict compiled default, ADR-0180) */
+export const EDR_DECISION_TTL_HOURS = 24;
 
 export interface EdrDeps {
   dataKey: string;
@@ -102,6 +108,7 @@ export async function syncEdrConnection(db: Db, conn: EdrConnectionRow, deps: Ed
         await tx.delete(edrDeviceSignals).where(and(eq(edrDeviceSignals.connectionId, conn.id), eq(edrDeviceSignals.vendorDeviceId, d.vendorDeviceId), sql`${edrDeviceSignals.deviceId} <> ${e.id}`));
         await tx.insert(edrDeviceSignals).values({ connectionId: conn.id, deviceId: e.id, ...values }).onConflictDoUpdate({ target: [edrDeviceSignals.connectionId, edrDeviceSignals.deviceId], set: values });
         matched++;
+        if (d.isolationKnown !== false) await reconcileWithVendor(tx, conn, e.id, d.isolated);
         const before = prior.get(e.id) ?? "none";
         if (rank(risk) >= rank("high") && rank(risk) > rank(before)) {
           await audit(tx, conn.sourceId, "edr-device-risk-raised", `EDR '${conn.name}' rates an enrolled device ${risk} (was ${before}) (ADR-0360)`, { connectionId: conn.id, vendor: conn.vendor, deviceId: e.id, risk, previous: before }, "deny");
@@ -155,6 +162,24 @@ export async function moveIsolation(db: Db, id: string, event: IsolationEvent, s
   return row ?? null;
 }
 
+/** a guarded lifecycle write and its audit row, in one transaction; null when the row moved underneath */
+export async function moveIsolationAudited(
+  db: Db,
+  conn: EdrConnectionRow,
+  req: EdrIsolationRequestRow,
+  event: IsolationEvent,
+  set: Partial<typeof edrIsolationRequests.$inferInsert>,
+  entry: { ruleId: string; reason: string; detail?: Record<string, unknown>; effect?: "allow" | "deny"; userId?: string },
+): Promise<EdrIsolationRequestRow | null> {
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const moved = await moveIsolation(tx, req.id, event, set);
+    if (!moved) return null;
+    await audit(tx, conn.sourceId, entry.ruleId, entry.reason, { connectionId: conn.id, requestId: req.id, deviceId: req.deviceId, event, from: req.state, to: moved.state, ...entry.detail }, entry.effect ?? "allow", entry.userId);
+    return moved;
+  });
+}
+
 /** ask the vendor to isolate or release, after the approval moved the request to submitting or releasing */
 export async function submitIsolation(db: Db, conn: EdrConnectionRow, req: EdrIsolationRequestRow, kind: "isolate" | "release", deps: EdrDeps): Promise<EdrIsolationRequestRow> {
   const adapter = EDR_ADAPTERS[conn.vendor];
@@ -163,44 +188,105 @@ export async function submitIsolation(db: Db, conn: EdrConnectionRow, req: EdrIs
     const f = await guarded(db, conn, deps);
     const cred = credentialOf(conn, deps.dataKey);
     const action = kind === "isolate" ? await adapter.requestIsolation(f, cred, req.vendorDeviceId, comment) : await adapter.releaseIsolation(f, cred, req.vendorDeviceId, comment);
-    const [row] = await db.update(edrIsolationRequests).set({ vendorActionId: action.actionId, updatedAt: sql`now()` }).where(eq(edrIsolationRequests.id, req.id)).returning();
-    await audit(db, conn.sourceId, `edr-${kind}-submitted`, `EDR '${conn.name}' asked to ${kind} a device (ADR-0360)`, { connectionId: conn.id, requestId: req.id, deviceId: req.deviceId, vendor: conn.vendor }, kind === "isolate" ? "deny" : "allow");
-    return action.status === "succeeded" ? ((await settleIsolation(db, conn, row!, kind, "succeeded")) ?? row!) : row!;
+    const row = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [r] = await tx.update(edrIsolationRequests).set({ vendorActionId: action.actionId, updatedAt: sql`now()` }).where(eq(edrIsolationRequests.id, req.id)).returning();
+      await audit(tx, conn.sourceId, `edr-${kind}-submitted`, `EDR '${conn.name}' asked to ${kind} a device (ADR-0360)`, { connectionId: conn.id, requestId: req.id, deviceId: req.deviceId, vendor: conn.vendor }, kind === "isolate" ? "deny" : "allow");
+      return r!;
+    });
+    return action.status === "succeeded" ? ((await settleIsolation(db, conn, row, kind, "succeeded")) ?? row) : row;
   } catch (err) {
     const code = codeOf(err);
-    const moved = await moveIsolation(db, req.id, kind === "isolate" ? "fail" : "fail_release", { errorCode: code });
-    await audit(db, conn.sourceId, `edr-${kind}-failed`, `EDR '${conn.name}' could not ${kind} a device: ${code} (ADR-0360)`, { connectionId: conn.id, requestId: req.id, deviceId: req.deviceId, code }, "deny");
+    const moved = await moveIsolationAudited(db, conn, req, kind === "isolate" ? "fail" : "fail_release", { errorCode: code }, { ruleId: `edr-${kind}-failed`, reason: `EDR '${conn.name}' could not ${kind} a device: ${code} (ADR-0360)`, detail: { code }, effect: "deny" });
     return moved ?? req;
   }
 }
 
-async function settleIsolation(db: Db, conn: EdrConnectionRow, req: EdrIsolationRequestRow, kind: "isolate" | "release", status: "succeeded" | "failed") {
+async function settleIsolation(db: Db, conn: EdrConnectionRow, req: EdrIsolationRequestRow, kind: "isolate" | "release", status: "succeeded" | "failed", errorCode = "vendor_failed") {
   const event: IsolationEvent = kind === "isolate" ? (status === "succeeded" ? "confirm" : "fail") : status === "succeeded" ? "confirm_release" : "fail_release";
-  const moved = await moveIsolation(db, req.id, event, status === "failed" ? { errorCode: "vendor_failed" } : {});
-  if (moved) {
-    await audit(db, conn.sourceId, `edr-${kind}-${status}`, `EDR '${conn.name}': ${kind} ${status} (ADR-0360)`, { connectionId: conn.id, requestId: req.id, deviceId: req.deviceId, state: moved.state }, kind === "isolate" && status === "succeeded" ? "deny" : "allow");
-  }
-  return moved;
+  return moveIsolationAudited(db, conn, req, event, status === "failed" ? { errorCode } : {}, {
+    ruleId: `edr-${kind}-${status}`,
+    reason: `EDR '${conn.name}': ${kind} ${status}${status === "failed" ? ` (${errorCode})` : ""} (ADR-0360)`,
+    ...(status === "failed" ? { detail: { code: errorCode } } : {}),
+    effect: kind === "isolate" && status === "succeeded" ? "deny" : "allow",
+  });
 }
 
-/** the scheduler's half: poll every submitting or releasing request's vendor action and settle it */
+/**
+ * The vendor's real isolation state, from a sync, against ours (R2 #3). A failed request whose device the vendor did
+ * isolate (a timeout, a restart, MDE's "already in progress") moves to isolated, so its release is governed again; an
+ * isolated request whose device the vendor no longer isolates (released in the vendor console) moves to released and is
+ * audited as outside governance. Requests in flight (submitting, releasing) are left to the action poller.
+ */
+export async function reconcileWithVendor(db: Db, conn: EdrConnectionRow, deviceId: string, isolatedAtVendor: boolean): Promise<void> {
+  const fromState = isolatedAtVendor ? "failed" : "isolated";
+  const [r] = await db
+    .select()
+    .from(edrIsolationRequests)
+    .where(and(eq(edrIsolationRequests.connectionId, conn.id), eq(edrIsolationRequests.deviceId, deviceId), eq(edrIsolationRequests.state, fromState)))
+    .orderBy(desc(edrIsolationRequests.updatedAt))
+    .limit(1);
+  if (!r) return;
+  if (isolatedAtVendor) {
+    try {
+      await db.transaction(async (rawSp) => {
+        const sp = rawSp as unknown as Db;
+        await moveIsolationAudited(sp, conn, r, "vendor_isolated", {}, { ruleId: "edr-isolate-reconciled", reason: `EDR '${conn.name}' reports a device isolated after its request failed; the request is isolated again and its release is governed (ADR-0360)`, effect: "deny" });
+      });
+    } catch (e) {
+      // a newer open request for the device already holds its slot and governs it
+      if ((e as { code?: string }).code !== "23505") throw e;
+    }
+    return;
+  }
+  await moveIsolationAudited(db, conn, r, "vendor_released", {}, { ruleId: "edr-release-outside-governance", reason: `EDR '${conn.name}' reports an isolated device released outside RegulAIt (ADR-0360)`, effect: "deny" });
+}
+
+/**
+ * The scheduler's half, every minute:
+ *  - a request or release request nobody decided within EDR_DECISION_TTL_HOURS expires (R2 #4);
+ *  - a submitting or releasing request with no vendor action id after EDR_STRANDED_MINUTES was stranded mid-call and
+ *    fails (`stranded`), so it never holds the device's slot for good (R2 #2);
+ *  - every other submitting or releasing request's vendor action is polled and settled; one still pending after
+ *    EDR_ACTION_SETTLE_MINUTES fails (`vendor_timeout`) (R2 #3). A failed isolation the vendor did carry out is
+ *    reconciled by the next sync (`vendor_isolated`).
+ */
 export async function pollEdrIsolations(db: Db, deps: EdrDeps): Promise<number> {
-  const open = await db
+  let settled = 0;
+  const expiring = await db
     .select({ r: edrIsolationRequests, c: edrConnections })
+    .from(edrIsolationRequests)
+    .innerJoin(edrConnections, eq(edrConnections.id, edrIsolationRequests.connectionId))
+    .where(and(inArray(edrIsolationRequests.state, ["requested", "release_requested"]), lt(edrIsolationRequests.updatedAt, sql`now() - make_interval(hours => ${EDR_DECISION_TTL_HOURS})`)))
+    .limit(100);
+  for (const { r, c } of expiring) {
+    const event: IsolationEvent = r.state === "requested" ? "expire" : "expire_release";
+    if (await moveIsolationAudited(db, c, r, event, { errorCode: "expired" }, { ruleId: `edr-isolation-${event.replace("_", "-")}`, reason: `EDR isolation ${r.state === "requested" ? "request" : "release request"} expired undecided after ${EDR_DECISION_TTL_HOURS} hours (ADR-0360)` })) settled++;
+  }
+  const open = await db
+    .select({
+      r: edrIsolationRequests,
+      c: edrConnections,
+      stranded: sql<boolean>`${edrIsolationRequests.updatedAt} < now() - make_interval(mins => ${EDR_STRANDED_MINUTES})`,
+      overdue: sql<boolean>`${edrIsolationRequests.updatedAt} < now() - make_interval(mins => ${EDR_ACTION_SETTLE_MINUTES})`,
+    })
     .from(edrIsolationRequests)
     .innerJoin(edrConnections, eq(edrConnections.id, edrIsolationRequests.connectionId))
     .where(inArray(edrIsolationRequests.state, ["submitting", "releasing"]))
     .limit(100);
-  let settled = 0;
-  for (const { r, c } of open) {
-    if (!r.vendorActionId) continue;
+  for (const { r, c, stranded, overdue } of open) {
     const kind = r.state === "submitting" ? "isolate" : "release";
+    if (!r.vendorActionId) {
+      if (stranded && (await settleIsolation(db, c, r, kind, "failed", "stranded"))) settled++;
+      continue;
+    }
     try {
       const f = await guarded(db, c, deps);
       const st = await EDR_ADAPTERS[c.vendor].actionStatus(f, credentialOf(c, deps.dataKey), { actionId: r.vendorActionId, vendorDeviceId: r.vendorDeviceId, kind });
-      if (st.status !== "pending" && (await settleIsolation(db, c, r, kind, st.status))) settled++;
+      if (st.status === "pending" ? overdue && (await settleIsolation(db, c, r, kind, "failed", "vendor_timeout")) : await settleIsolation(db, c, r, kind, st.status)) settled++;
     } catch {
-      // a failed poll changes nothing; the next run asks again
+      // a failed poll changes nothing until the action is overdue; then it fails, so an unreachable vendor holds no slot
+      if (overdue && (await settleIsolation(db, c, r, kind, "failed", "vendor_timeout"))) settled++;
     }
   }
   return settled;
