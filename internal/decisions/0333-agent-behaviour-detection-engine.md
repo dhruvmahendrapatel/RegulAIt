@@ -208,6 +208,17 @@ match tool names only, so they are heuristics, and the admin can edit them.
   one group key (`user:`, `grant:` or `endpoint:`; never a wildcard: silencing a rule for everyone is a pack edit,
   which has its own step-up). It lasts 1 to 720 hours, and the database caps the row at 30 days. At most 200 are
   active at once, and one per (rule, group).
+- **No self-exemption and no critical rule (security review of #1157).** A `critical` rule is never suppressed
+  (`suppression_not_allowed_for_severity`); changing it is a pack edit, which is global, visible and needs its own
+  step-up. A requester cannot suppress their own group (`cannot_suppress_own_detection`): their `user:` key, or a
+  delegation tree whose root grant they sponsor. Another admin must decide it, which is the second person the
+  four-eyes rule asks for. An `endpoint:` group carries no user, because device users are pseudonymous (ADR-0195), so
+  it cannot be attributed to the requester. As defence in depth, the sweep never applies a suppression to a match whose
+  sponsor is the suppression's creator.
+- **Bound to the rule's content.** A suppression stores the digest of the rule as suppressed: its canonical JSON plus
+  the globs of the tool classes it names. It holds back a match only while the active rule still has that digest, so a
+  pack edit that keeps the id but changes what the rule matches, its severity or its response ends the suppression's
+  effect. The row stays active, so the admin who created it sees why it no longer applies.
 - **Creating one is a relaxation.** `POST /v1/detection/suppressions` takes a `settings_relax` step-up bound to the
   exact terms (rule, group, hours and a digest of the reason). The method is stored on the row, and the creation is
   audited (`detection-suppression-created`). The reason is free text, so it is registered with the prose scrub.

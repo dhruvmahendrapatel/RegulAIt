@@ -20323,6 +20323,9 @@ export const detectionSuppressions = pgTable(
     ruleId: text("rule_id").notNull(),
     groupKey: text("group_key").notNull(),
     reason: text("reason").notNull(),
+    /** the sha-256 of the rule as suppressed (its JSON plus the tool-class globs it uses): a point-in-time snapshot of the
+     * pack's configuration document (ADR-0200 exception), so an edited rule is no longer suppressed (review of #1157) */
+    ruleDigest: text("rule_digest").notNull(),
     status: text("status", { enum: DETECTION_SUPPRESSION_STATUSES }).notNull().default("active"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -20339,6 +20342,7 @@ export const detectionSuppressions = pgTable(
       sql`${t.groupKey} ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
     ),
     check("detection_suppressions_reason_check", sql`length(btrim(${t.reason})) BETWEEN 1 AND 500`),
+    check("detection_suppressions_rule_digest_check", sql`${t.ruleDigest} ~ '^[0-9a-f]{64}$'`),
     check("detection_suppressions_status_check", sql`${t.status} IN ('active', 'revoked')`),
     check("detection_suppressions_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`),
     check("detection_suppressions_step_up_check", sql`${t.createStepUp} ~ '^[a-z_]{1,32}$'`),

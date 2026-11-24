@@ -332,7 +332,7 @@ async function runRange(
     const degraded: string[] = [];
     const evaluated = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result, degraded);
     // ADR-0333 §5b: a match an active suppression covers raises nothing, and is counted in the batch's audit
-    const { kept: matches, suppressed } = await splitSuppressed(db, evaluated);
+    const { kept: matches, suppressed } = await splitSuppressed(db, active.pack, evaluated);
     result.suppressed += suppressed.length;
     const window = { fromSeq: cursor, toSeq: lastSeq, maxSpanSeconds };
     result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode, degraded.length ? { groups: degraded, ...window } : null, suppressed);
@@ -633,7 +633,7 @@ export async function dryRunDetectionPack(db: Db, pack: DetectionPack, window: {
     const events = (truncated ? loaded.slice(0, DRY_RUN_LIMITS.maxRows) : loaded).map(toEvent);
     const fresh = new Set(events.filter((e) => e.at >= fromMs).map((e) => e.seq));
     const matches = evaluateDetections(pack, events, fresh);
-    const { suppressed } = await splitSuppressed(tx, matches);
+    const { suppressed } = await splitSuppressed(tx, pack, matches);
     const suppressedBy = new Map<string, number>();
     for (const s of suppressed) suppressedBy.set(s.ruleId, (suppressedBy.get(s.ruleId) ?? 0) + 1);
     const rules = pack.rules

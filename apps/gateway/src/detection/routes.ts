@@ -28,6 +28,7 @@ import {
   desc,
   detectionIncidents,
   detectionRulePacks,
+  delegationGrants,
   detectionSuppressions,
   DETECTION_SUPPRESSION_STATUSES,
   endpointDeviceQuarantines,
@@ -44,7 +45,7 @@ import { DETECTION_RULE_IDS, DRY_RUN_LIMITS, dryRunDetectionPack, loadActiveDete
 import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE, ENDPOINT_DEVICE_QUARANTINE_MACHINE } from "@regulait/shared";
 import { whereFrom } from "../state-transition.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "../pagination.js";
-import { packChangeIsRelaxation, packDigest, parseDetectionPack, signDetectionPack } from "./pack.js";
+import { packChangeIsRelaxation, packDigest, parseDetectionPack, ruleDigest, signDetectionPack } from "./pack.js";
 import { QUARANTINE_DEVICE_ENFORCEMENT, releaseQuarantine } from "./quarantine.js";
 import { createSuppression, describeSuppression, revokeSuppression, SUPPRESSION_LIMITS } from "./suppressions.js";
 
@@ -350,6 +351,17 @@ function registerSuppressionRoutes(app: FastifyInstance, db: Db): void {
   const refuse = (reply: FastifyReply, status: number, error: string, detail?: string) =>
     reply.status(status).send({ error, ...(detail ? { detail } : {}) });
   const view = (row: typeof detectionSuppressions.$inferSelect) => ({ ...row, ...describeSuppression(row) });
+  /** the requester's own group: their `user:` key, or a delegation tree whose root grant they sponsor. An endpoint
+   * device carries no user (ADR-0195: device users are pseudonymous), so it is never attributable to the requester. */
+  const isOwnGroup = async (groupKey: string, userId: string): Promise<boolean> => {
+    const [kind, id] = groupKey.split(":") as [string, string];
+    if (kind === "user") return id === userId;
+    if (kind === "grant") {
+      const [g] = await db.select({ sponsor: delegationGrants.sponsorUserId }).from(delegationGrants).where(eq(delegationGrants.id, id)).limit(1);
+      return g?.sponsor === userId;
+    }
+    return false;
+  };
   const human = (req: FastifyRequest): string | null => {
     const id = req.authCtx.userId;
     return id && id !== NIL_UUID ? id : null;
@@ -424,8 +436,15 @@ function registerSuppressionRoutes(app: FastifyInstance, db: Db): void {
     const actorUserId = human(req);
     if (!actorUserId) return refuse(reply, 403, "human_admin_required", "a suppression is a human admin's decision");
     const active = await loadActiveDetectionPack(db);
-    if (!active.pack.rules.some((r) => r.id === body.data.ruleId)) {
-      return refuse(reply, 422, "unknown_rule", "the active rule pack has no rule with that id");
+    const rule = active.pack.rules.find((r) => r.id === body.data.ruleId);
+    if (!rule) return refuse(reply, 422, "unknown_rule", "the active rule pack has no rule with that id");
+    // review of #1157 [1]: a critical rule is never suppressed per group; changing it is a pack edit with its own step-up
+    if (rule.severity === "critical") {
+      return refuse(reply, 422, "suppression_not_allowed_for_severity", "a critical rule cannot be suppressed; change the rule pack instead");
+    }
+    // review of #1157 [1]: no admin exempts themselves; another admin must create a suppression of their own group
+    if (await isOwnGroup(body.data.groupKey, actorUserId)) {
+      return refuse(reply, 403, "cannot_suppress_own_detection", "this group is the requester's own; another admin must decide it");
     }
     // a suppression relaxes detection: a settings_relax step-up bound to exactly these terms
     const reasonDigest = createHash("sha256").update(body.data.reason).digest("hex");
@@ -434,7 +453,7 @@ function registerSuppressionRoutes(app: FastifyInstance, db: Db): void {
       facts: { detection: "suppression", ruleId: body.data.ruleId, groupKey: body.data.groupKey, hours: body.data.hours, reasonDigest },
     });
     if (!su.ok) return reply;
-    const out = await createSuppression(db, { ...body.data, actorUserId, stepUp: su.method });
+    const out = await createSuppression(db, { ...body.data, ruleDigest: ruleDigest(active.pack, rule), actorUserId, stepUp: su.method });
     if (!out.ok) return refuse(reply, out.status, out.code, out.detail);
     return reply.status(201).send({ suppression: view(out.row) });
   });

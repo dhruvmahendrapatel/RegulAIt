@@ -1,7 +1,7 @@
 -- ADR-0333 §5b (lane E15, slice 4): per-rule detection suppressions.
 --
 -- `detection_suppressions`: while a row is `active` and before `expires_at`, matches of `rule_id` in exactly
--- `group_key` raise no incident; the sweep counts them in a `detection-suppressed` audit row instead. Expiry is derived
+-- `group_key` raise no incident while `rule_digest` (the rule as suppressed) still equals the rule; the sweep counts them in a `detection-suppressed` audit row instead. Expiry is derived
 -- from `expires_at` (never stored), at most 30 days after creation. Its lifecycle is the ADR-0348 machine
 -- DETECTION_SUPPRESSION_MACHINE (active -> revoked). Row-level security (ADR-0234), ENABLED and FORCED, with the
 -- incident tables' policy: an admin principal, or the sweep (`system_task`) and migrations. One deployment is one
@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS "detection_suppressions" (
   "rule_id" text NOT NULL,
   "group_key" text NOT NULL,
   "reason" text NOT NULL,
+  "rule_digest" text NOT NULL,
   "status" text DEFAULT 'active' NOT NULL,
   "expires_at" timestamp with time zone NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS "detection_suppressions" (
   CONSTRAINT "detection_suppressions_rule_id_check" CHECK ("rule_id" ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
   CONSTRAINT "detection_suppressions_group_key_check" CHECK ("group_key" ~ '^(grant|user|endpoint):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
   CONSTRAINT "detection_suppressions_reason_check" CHECK (length(btrim("reason")) BETWEEN 1 AND 500),
+  CONSTRAINT "detection_suppressions_rule_digest_check" CHECK ("rule_digest" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "detection_suppressions_status_check" CHECK ("status" IN ('active', 'revoked')),
   CONSTRAINT "detection_suppressions_expiry_check" CHECK ("expires_at" > "created_at" AND "expires_at" <= "created_at" + interval '30 days'),
   CONSTRAINT "detection_suppressions_step_up_check" CHECK ("create_step_up" ~ '^[a-z_]{1,32}$'),

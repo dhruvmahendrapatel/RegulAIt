@@ -9,13 +9,26 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { and, auditLog, createDb, detectionIncidents, detectionRulePacks, detectionSuppressions, eq, runMigrations, sql, type Db } from "@regulait/db";
+import {
+  and,
+  auditLog,
+  createDb,
+  delegationGrants,
+  detectionIncidents,
+  detectionRulePacks,
+  detectionSuppressions,
+  eq,
+  runMigrations,
+  sql,
+  workloadIdentities,
+  type Db,
+} from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { loadActiveDetectionPack, runDetectionSweep } from "./detection/sweep.js";
-import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack } from "./detection/pack.js";
+import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, ruleDigest } from "./detection/pack.js";
 import { SUPPRESSION_RULE_IDS } from "./detection/suppressions.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -57,6 +70,11 @@ async function call(userId: string): Promise<string> {
   const id = randomUUID();
   await db.insert(auditLog).values({ id, userId, objectType: "mcp_tool", toolName: "noop", effect: "allow", ruleId: CALL_RULE_ID, ruleChain: [], reason: "t" });
   return id;
+}
+
+async function activeRuleDigest(): Promise<string> {
+  const { pack } = await loadActiveDetectionPack(db);
+  return ruleDigest(pack, pack.rules.find((r) => r.id === RULE)!);
 }
 
 const incidentOf = async (trigger: string) => (await db.select().from(detectionIncidents).where(eq(detectionIncidents.triggerAuditId, trigger)))[0];
@@ -116,6 +134,74 @@ describe("ADR-0333 §5b suppressions: create", () => {
     expect((await app.inject({ method: "POST", url: "/v1/detection/suppressions", headers: AUTH, payload: { ruleId: RULE, groupKey: "user:*", hours: 2, reason: "x" } })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: "/v1/detection/suppressions", headers: AUTH, payload: { ruleId: RULE, groupKey: `user:${bob}`, hours: 721, reason: "x" } })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: "/v1/detection/suppressions", headers: AUTH, payload: { ruleId: RULE, groupKey: `user:${bob}`, hours: 2, reason: "  " } })).statusCode).toBe(400);
+  });
+});
+
+describe("ADR-0333 §5b suppressions: no self-exemption, no critical rule (review of #1157 [1])", () => {
+  it("refuses a critical rule before any step-up, and creates nothing", async () => {
+    const critical = DEFAULT_DETECTION_PACK.rules.find((r) => r.severity === "critical")!;
+    const res = await suppress({ ruleId: critical.id, groupKey: `user:${bob}`, hours: 2, reason: "critical" });
+    expect(res.statusCode, res.body).toBe(422);
+    expect(res.json().error).toBe("suppression_not_allowed_for_severity");
+    expect(await db.select().from(detectionSuppressions).where(eq(detectionSuppressions.ruleId, critical.id))).toHaveLength(0);
+  });
+
+  it("refuses the requester's own user group", async () => {
+    const res = await suppress({ ruleId: RULE, groupKey: `user:${adminId}`, hours: 2, reason: "myself" });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("cannot_suppress_own_detection");
+    expect(await db.select().from(detectionSuppressions).where(eq(detectionSuppressions.groupKey, `user:${adminId}`))).toHaveLength(0);
+  });
+
+  it("refuses a delegation tree whose root grant the requester sponsors, and allows one they do not", async () => {
+    const [ident] = await db
+      .insert(workloadIdentities)
+      .values({ kind: "worker_runtime", identifier: `spiffe://regulait.test/regulait/worker_runtime/${randomUUID()}`, sponsorUserIds: [adminId] } as never)
+      .returning({ id: workloadIdentities.id });
+    const base = { actorIdentityId: ident!.id, scope: [], environment: "test", bindingKind: "in_process", depthLimit: 2, expiresAt: new Date(Date.now() + 3_600_000), depth: 0, path: [] };
+    const own = randomUUID();
+    const other = randomUUID();
+    await db.insert(delegationGrants).values({ ...base, id: own, rootGrantId: own, sponsorUserId: adminId } as never);
+    await db.insert(delegationGrants).values({ ...base, id: other, rootGrantId: other, sponsorUserId: bob } as never);
+    const refused = await suppress({ ruleId: RULE, groupKey: `grant:${own}`, hours: 2, reason: "my tree" });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().error).toBe("cannot_suppress_own_detection");
+    const allowed = await suppress({ ruleId: RULE, groupKey: `grant:${other}`, hours: 2, reason: "bob's tree" });
+    expect(allowed.statusCode, allowed.body).toBe(201);
+    await app.inject({ method: "POST", url: `/v1/detection/suppressions/${allowed.json().suppression.id}/revoke`, headers: AUTH, payload: {} });
+  });
+
+  it("never applies to the creating admin's own calls, even in a group it covers", async () => {
+    // a suppression row as if created for bob's group by bob himself (an older row, or one written around the route)
+    const [row] = await db
+      .insert(detectionSuppressions)
+      .values({ ruleId: RULE, groupKey: `user:${bob}`, reason: "self", ruleDigest: await activeRuleDigest(), expiresAt: sql`now() + interval '1 hour'`, createdBy: bob, createStepUp: "not_required" })
+      .returning({ id: detectionSuppressions.id });
+    try {
+      const trigger = await call(bob);
+      await runDetectionSweep(db, adminId);
+      expect(await incidentOf(trigger)).toMatchObject({ groupKey: `user:${bob}` });
+    } finally {
+      await db.update(detectionSuppressions).set({ status: "revoked", revokedAt: sql`now()` }).where(eq(detectionSuppressions.id, row!.id));
+    }
+  });
+});
+
+describe("ADR-0333 §5b suppressions: bound to the rule's content (review of #1157 [2])", () => {
+  it("an edited rule with the same id is no longer suppressed", async () => {
+    const created = await suppress({ ruleId: RULE, groupKey: `user:${alice}`, hours: 2, reason: "bound" });
+    expect(created.statusCode, created.body).toBe(201);
+    expect(created.json().suppression.ruleDigest).toBe(await activeRuleDigest());
+    const held = await call(alice);
+    await runDetectionSweep(db, adminId);
+    expect(await incidentOf(held)).toBeUndefined();
+    // the same id, a changed severity: the suppression no longer matches the rule
+    await storePack([{ ...WATCH_RULE, severity: "high" }]);
+    const raised = await call(alice);
+    await runDetectionSweep(db, adminId);
+    expect(await incidentOf(raised)).toMatchObject({ ruleId: RULE, severity: "high", groupKey: `user:${alice}` });
+    await app.inject({ method: "POST", url: `/v1/detection/suppressions/${created.json().suppression.id}/revoke`, headers: AUTH, payload: {} });
+    await storePack([WATCH_RULE]);
   });
 });
 
