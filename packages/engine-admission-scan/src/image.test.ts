@@ -79,7 +79,11 @@ describe.each(SUBJECT_ENGINE_IDS)("the %s image's runner stage", (engine) => {
     expect(closure).toContain("COPY engines/contentextract/requirements.txt engines/contentextract/licence-gate.mjs");
     expect(dockerfile).not.toMatch(/COPY engines\/(?!contentextract\/)/);
     expect(closure).toContain("node licence-gate.mjs /opt/contentextract/venv/lib/python3.12/site-packages licence-allow.json --readings licence-readings.json --runtime python=PSF-2.0");
-    expect(closure).toContain("REGULAIT_REQUIRE_PDFIUM=1 /opt/contentextract/venv/bin/python -I -m unittest discover -s /opt/contentextract");
+    expect(closure).toContain("REGULAIT_REQUIRE_PDFIUM=1 REGULAIT_REQUIRE_OCR=1 /opt/contentextract/venv/bin/python -I -m unittest discover -s /opt/contentextract");
+    // ADR-0362 slice 2: Tesseract at exact versions in the test stage AND the runtime, never unpinned
+    const tess = "tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2";
+    expect(dockerfile.split(tess).length - 1).toBe(2);
+    expect(dockerfile).not.toMatch(/apt-get install[^\n]*\btesseract-ocr(?![-=])/);
     expect(closure).toContain("rm /opt/contentextract/test_extract.py");
     // the runtime ships the closure read-only and no package installer
     const runtime = stage(dockerfile, "runtime");
