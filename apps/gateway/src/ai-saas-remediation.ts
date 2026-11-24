@@ -364,7 +364,8 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
       const out = await runExternalWrite(db, "vendor.delete_conversation", () => impl.remediation!.deleteConversation(ctx, target));
       return { event: "succeed", outcomeCode: out.outcome === "deleted" ? "deleted" : "already_absent", vendorStatus: out.vendorStatus };
     } catch (err) {
-      if (err instanceof ExternalEffectBlockedError) return { event: mode === "delete" ? "lose" : "fail", outcomeCode: "execution_mode_blocked", vendorStatus: null };
+      // the barrier refused before the vendor call: nothing was sent, so a delete has certainly not happened
+      if (err instanceof ExternalEffectBlockedError) return { event: "fail", outcomeCode: "execution_mode_blocked", vendorStatus: null };
       if (err instanceof ConnectorError) {
         // the vendor answered and refused: nothing was deleted
         if (err.code === "unauthorized" || err.code === "forbidden" || err.code === "http_error") return { event: "fail", outcomeCode: `vendor_${err.code}`, vendorStatus: null };
