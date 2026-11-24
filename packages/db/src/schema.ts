@@ -184,6 +184,7 @@ import {
   ENDPOINT_ADDON_TARGET_STATES,
   // ADR-0338 (migration vendor_agent_control): the vendor agent action lifecycle, an ADR-0348 machine
   VENDOR_AGENT_ACTION_STATES,
+  VENDOR_CONTROL_DELEGATED_STATES,
   VENDOR_AGENT_CONTROL_ACTIONS,
   VENDOR_AGENT_STATES,
   // ADR-0359 (lane E40): behaviour baselines, in lockstep with the CHECKs
@@ -2133,6 +2134,9 @@ export const auditLog = pgTable(
         // ADR-0338 (lane E19): a governed vendor agent control action (requested, decided, executed, settled,
         // cancelled; objectId = the action). Plain text column — no DDL.
         "vendor_agent_control",
+        // ADR-0338 slice 1c: a delegated vendor control credential's two-person approval (the decide path audits the
+        // approval with its own object type; objectId = the approval). Plain text column — no DDL.
+        "vendor_control_delegated",
         // ADR-0337 §5 slice 3b: a SaaS entitlement finding review (raised, decided, withdrawn; objectId = the review).
         // Plain text column — no DDL.
         "saas_finding_review",
@@ -20801,6 +20805,82 @@ export const vendorAgentActions = pgTable(
   ],
 );
 export type VendorAgentActionRow = typeof vendorAgentActions.$inferSelect;
+
+/**
+ * ADR-0338 slice 1c: one delegated sign-in an admin started (pending migration vendor_control_delegated_requests). Its
+ * `status` is ADR-0348's `vendor_control_delegated` machine. The state, nonce and PKCE verifier stay server side (the
+ * verifier a data-key envelope, CIPHERTEXT_COLUMNS); after the sign-in the refresh token is HELD here, encrypted, until
+ * a second administrator approves it, and only then is the credential stored. A terminal row holds no secret.
+ */
+export const vendorControlDelegatedRequests = pgTable(
+  "vendor_control_delegated_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    // the two people are evidence: no ON DELETE, so a user with a request is never deleted out from under it
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id),
+    /** four eyes: the second administrator who must approve it, never the requester */
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id),
+    status: text("status", { enum: VENDOR_CONTROL_DELEGATED_STATES }).notNull().default("awaiting_sign_in"),
+    state: text("state").notNull(),
+    nonce: text("nonce").notNull(),
+    codeVerifierCiphertext: text("code_verifier_ciphertext"),
+    /** the signed-in account's refresh token, held encrypted only while the approval is awaited */
+    refreshTokenCiphertext: text("refresh_token_ciphertext"),
+    // 3NF exception (ADR-0200 addendum): the point-in-time copy the start step-up and the approval digest are bound
+    // to; the approval stores exactly these, never a live reference
+    tenantId: text("tenant_id").notNull(),
+    clientId: text("client_id").notNull(),
+    accountUpn: text("account_upn").notNull(),
+    /** the account's immutable object id (oid), named at the start; the UPN beside it is a hint and a label only */
+    accountObjectId: text("account_object_id").notNull(),
+    expiresInDays: integer("expires_in_days").notNull(),
+    replacesCredentialId: uuid("replaces_credential_id").references(() => discoveryCredentials.id),
+    redirectUri: text("redirect_uri").notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id),
+    credentialId: uuid("credential_id").references(() => discoveryCredentials.id),
+    outcomeCode: text("outcome_code"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    signInExpiresAt: timestamp("sign_in_expires_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("vendor_control_delegated_requests_state_uq").on(t.state),
+    check("vendor_control_delegated_requests_status_check", sql`${t.status} IN ('awaiting_sign_in', 'awaiting_approval', 'connected', 'denied', 'failed', 'expired', 'cancelled')`),
+    check("vendor_control_delegated_requests_state_check", sql`${t.state} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check("vendor_control_delegated_requests_nonce_check", sql`${t.nonce} ~ '^[A-Za-z0-9_-]{43}$'`),
+    check(
+      "vendor_control_delegated_requests_ids_check",
+      sql`${t.tenantId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.clientId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND ${t.accountObjectId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`,
+    ),
+    check("vendor_control_delegated_requests_account_check", sql`char_length(${t.accountUpn}) BETWEEN 3 AND 320 AND ${t.accountUpn} = lower(${t.accountUpn})`),
+    check("vendor_control_delegated_requests_days_check", sql`${t.expiresInDays} BETWEEN 1 AND 90`),
+    check("vendor_control_delegated_requests_window_check", sql`${t.signInExpiresAt} > ${t.requestedAt} AND ${t.signInExpiresAt} <= ${t.requestedAt} + interval '10 minutes'`),
+    check("vendor_control_delegated_requests_two_people_check", sql`${t.approverUserId} <> ${t.requestedBy}`),
+    check("vendor_control_delegated_requests_verifier_check", sql`(${t.status} = 'awaiting_sign_in') = (${t.codeVerifierCiphertext} IS NOT NULL)`),
+    check("vendor_control_delegated_requests_held_token_check", sql`(${t.status} = 'awaiting_approval') = (${t.refreshTokenCiphertext} IS NOT NULL)`),
+    check(
+      "vendor_control_delegated_requests_signed_in_check",
+      sql`(${t.status} <> 'awaiting_sign_in' OR ${t.approvalId} IS NULL) AND (${t.status} NOT IN ('awaiting_approval', 'connected') OR ${t.approvalId} IS NOT NULL)`,
+    ),
+    check("vendor_control_delegated_requests_connected_check", sql`(${t.status} = 'connected') = (${t.credentialId} IS NOT NULL)`),
+    check("vendor_control_delegated_requests_outcome_check", sql`${t.outcomeCode} IS NULL OR ${t.outcomeCode} ~ '^[a-z][a-z0-9_]{0,63}$'`),
+    uniqueIndex("vendor_control_delegated_requests_open_uq").on(t.sourceId).where(sql`${t.status} IN ('awaiting_sign_in', 'awaiting_approval')`),
+    index("vendor_control_delegated_requests_source_idx").on(t.sourceId, t.requestedAt),
+    index("vendor_control_delegated_requests_approval_idx").on(t.approvalId),
+    index("vendor_control_delegated_requests_credential_idx").on(t.credentialId),
+    index("vendor_control_delegated_requests_replaces_idx").on(t.replacesCredentialId),
+    index("vendor_control_delegated_requests_requested_by_idx").on(t.requestedBy),
+    index("vendor_control_delegated_requests_approver_idx").on(t.approverUserId),
+  ],
+);
+export type VendorControlDelegatedRequestRow = typeof vendorControlDelegatedRequests.$inferSelect;
 // ===== end ADR-0338 =====
 // ===== ADR-0313 (lane E2, G9): paid-tool and agent-payment budgets ===================================================
 /**
