@@ -23,7 +23,11 @@ const (
 	// ADR-0331: signed add-on removal directives, and the agent's per-directive outcomes
 	RouteDirectives        = "/v1/endpoint-agent/directives"
 	RouteDirectiveOutcomes = "/v1/endpoint-agent/directive-outcomes"
-	RouteToken             = "/oauth/token"
+	// ADR-0360 §4 (slice 1c): the update offer, its binary, and the root updater's result as the per-user agent reports it
+	RouteUpdate        = "/v1/endpoint-agent/update"
+	RouteUpdateBinary  = "/v1/endpoint-agent/update/binary"
+	RouteUpdateResults = "/v1/endpoint-agent/update-results"
+	RouteToken         = "/oauth/token"
 	// ResourcePath is the RFC 8707 resource an agent's self token names (ADR-0188 S7 point 1).
 	ResourcePath = "/v1/endpoint-agent"
 )
@@ -479,3 +483,61 @@ type DirectiveOutcome struct {
 type DirectiveOutcomesRequest struct {
 	Outcomes []DirectiveOutcome `json:"outcomes"`
 }
+
+// ADR-0360 §4 (slice 1c): self-update delivery. The per-user agent carries the gateway's offer into the update spool
+// and the root updater's result back; it verifies no signature (the root updater does), so these bodies are transport.
+
+// UpdateResponse is GET RouteUpdate. Update is null when nothing is offered.
+type UpdateResponse struct {
+	Update *UpdateOffer `json:"update"`
+}
+
+// UpdateOffer is one update attempt: the signed directive and release manifest envelopes ({keyId, payload,
+// signature}, written to the spool byte for byte as received) and where to fetch the binary.
+type UpdateOffer struct {
+	AttemptID string          `json:"attemptId"` // UUID
+	Directive json.RawMessage `json:"directive"`
+	Manifest  json.RawMessage `json:"manifest"`
+	Binary    UpdateBinary    `json:"binary"`
+}
+
+// UpdateBinary names the binary to download: Path is exactly RouteUpdateBinary, OS and Arch the device's own, Length
+// in 1..update.MaxBinaryBytes and SHA256 lower-case hex. The answer to GET Path is application/octet-stream.
+type UpdateBinary struct {
+	Path   string `json:"path"`
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	Length int64  `json:"length"`
+	SHA256 string `json:"sha256"`
+}
+
+// UpdateResult is the root updater's outcome (schema regulait.endpoint-update-result/1), the spool's result file.
+type UpdateResult struct {
+	Schema      string `json:"schema"`
+	Outcome     string `json:"outcome"`
+	Code        string `json:"code,omitempty"`
+	RolloutID   string `json:"rolloutId,omitempty"`
+	FromVersion string `json:"fromVersion"`
+	ToVersion   string `json:"toVersion,omitempty"`
+	At          string `json:"at"`
+}
+
+// UpdateResultRequest is POST RouteUpdateResults: the result file and the attempt the agent last carried into the spool.
+type UpdateResultRequest struct {
+	AttemptID string       `json:"attemptId"`
+	Result    UpdateResult `json:"result"`
+}
+
+// UpdateResultResponse is the 200 answer. State is the attempt's state after the result was recorded.
+type UpdateResultResponse struct {
+	Recorded bool   `json:"recorded"`
+	State    string `json:"state"`
+	// RolloutHalted is true when this result took the rollout to its halt threshold (the gateway halted it).
+	RolloutHalted bool `json:"rolloutHalted,omitempty"`
+}
+
+// Update refusal codes the agent acts on.
+const (
+	ErrUpdateSignerUnavailable = "update_signer_unavailable" // 503 on RouteUpdate: no device-policy signer configured
+	ErrAlreadyReported         = "already_reported"          // 409 on RouteUpdateResults: the attempt has its result
+)

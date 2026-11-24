@@ -58,15 +58,42 @@ device ticket still lives 7 days; a one-line-enrolled device needs a new token (
 3. The spool holds a release manifest (`regulait.endpoint-release/1`) signed by a release key for exactly the
    directive's version, listing this OS and architecture with the binary's SHA-256 and length.
 4. That version is **newer** than the running binary (`golang.org/x/mod/semver`); a downgrade or a development build is
-   refused.
+   refused. A version is at most 32 characters (`x.y.z` with an optional pre-release), the same limit everywhere in the
+   agent.
 
 It then copies the spooled binary to a root-only file beside the installed one, checks the copy's length and SHA-256
 (the copy, so a later change to the spool cannot change what runs), runs `<staged> health` (it must report the target
 version), renames it into place keeping `<binary>.previous`, runs the installed binary's `health` and restores the
 previous binary when that fails. The outcome (`installed`, `rolled_back`, `refused`, `failed`, with a fixed code) is
-written to the spool's `result.json`. On macOS the binary is universal, so a release lists `darwin/arm64` and
+written to the spool's `result.json`, and the directive is **consumed**: removed from the spool as soon as it is read,
+whatever the outcome, so each directive is acted on exactly once. A `result.json` is never overwritten while it is
+unreported: until the per-user agent has removed it or acknowledged it (below), the hourly run does nothing
+(`result_pending`). So runs between the agent's daily syncs cannot re-install a rolled-back binary, and a later refusal
+(say a stale directive) can never replace the `failed` or `rolled_back` the gateway's automatic halt counts; the first
+outcome of an attempt is the one reported. A `result.json` that is not root's own (a link, another owner) was never
+written by the updater and is removed. On macOS the binary is universal, so a release lists `darwin/arm64` and
 `darwin/amd64` with the same digest. A package-managed binary replaced this way differs from the package database until
 the next package upgrade; fleets upgraded by MDM can leave self-update off (the default).
+
+The directive is signed over its own domain (`regulait.endpoint-update-directive/1` and a NUL, then the payload, #1033),
+so a policy or a removal directive signed by the same device-policy key never verifies as an update directive.
+
+**Delivery (slice 1c).** Each `run-once` cycle of the per-user agent, only when both keyrings are pinned, and whatever
+the report half of the cycle did (the config route can refuse, as the gateway's `503 collection_pack_unavailable` does
+while it has no pack, without holding an update back), first reports
+the spool's `result.json` (root's 0644 file only: a link, another owner, more than 4 KiB or an unknown member is refused)
+to `POST /v1/endpoint-agent/update-results` as `{attemptId, result}`, with the attempt id kept in its own state dir
+(`update-attempt.json`). The result is finished on `200` or `409 already_reported`, on any other `4xx` but `401`,
+`403`, `408` and `429` (refused for good, e.g. `400 version_mismatch`: logged as `result_refused_by_gateway` and
+counted `dropped`, never resent), and when it can never be reported (malformed, or no attempt carried). A finished
+result is removed; when the sticky spool keeps root's file from the agent, the agent writes `result.ack` holding the
+file's SHA-256 instead, and the root updater removes both before it takes the next directive (the digest is also
+remembered, so the same bytes are never sent twice). `401`, `403`, `408`, `429`, `5xx` and network errors keep the
+result for the next run, and while it waits no new offer is taken. It then fetches
+`GET /v1/endpoint-agent/update`; an offer's binary is streamed from `/v1/endpoint-agent/update/binary` into a temporary
+spool file, checked against the offered length and SHA-256 and renamed into place, then the release manifest and the
+directive (byte for byte as received) are written, the directive last. It verifies no signature (the root updater
+does), writes only those three spool names and `result.ack`, never through a link, and logs fixed codes only.
 
 ## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
 

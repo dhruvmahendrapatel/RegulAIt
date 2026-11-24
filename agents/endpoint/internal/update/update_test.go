@@ -35,13 +35,26 @@ func newSigner(t *testing.T, id string) signer {
 
 func (s signer) keyring() enforce.Keyring { return enforce.Keyring{s.id: s.pub} }
 
+// envelope signs the bare payload (a release manifest).
 func (s signer) envelope(t *testing.T, payload any) []byte {
+	t.Helper()
+	return s.envelopeIn(t, nil, payload)
+}
+
+// directiveEnvelope signs an update directive the way the gateway does: over its domain, then the payload.
+func (s signer) directiveEnvelope(t *testing.T, payload any) []byte {
+	t.Helper()
+	return s.envelopeIn(t, DirectiveSignatureDomain, payload)
+}
+
+func (s signer) envelopeIn(t *testing.T, domain []byte, payload any) []byte {
 	t.Helper()
 	p, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, _ := json.Marshal(enforce.Envelope{KeyID: s.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(s.key, p))})
+	signed := append(append([]byte{}, domain...), p...)
+	env, _ := json.Marshal(enforce.Envelope{KeyID: s.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(s.key, signed))})
 	return env
 }
 
@@ -61,24 +74,29 @@ func directive(over func(*Directive)) Directive {
 func TestVerifyDirective(t *testing.T) {
 	policy := newSigner(t, "device-policy-aaaaaaaaaaaaaaaaaaaaaaaa")
 	other := newSigner(t, "device-policy-bbbbbbbbbbbbbbbbbbbbbbbb")
-	if d, err := VerifyDirective(policy.envelope(t, directive(nil)), policy.keyring(), device, now); err != nil || d.TargetVersion != "1.2.0" {
+	if d, err := VerifyDirective(policy.directiveEnvelope(t, directive(nil)), policy.keyring(), device, now); err != nil || d.TargetVersion != "1.2.0" {
 		t.Fatalf("a valid directive: %v %+v", err, d)
 	}
 	cases := map[string]struct {
 		raw  []byte
 		code string
 	}{
-		"another signer":     {other.envelope(t, directive(nil)), CodeDirectiveInvalid},
-		"another device":     {policy.envelope(t, directive(func(d *Directive) { d.DeviceID = rollout })), CodeWrongDevice},
-		"expired":            {policy.envelope(t, directive(func(d *Directive) { d.NotAfter = now })), CodeDirectiveStale},
-		"from the future":    {policy.envelope(t, directive(func(d *Directive) { d.IssuedAt = now.Add(10 * time.Minute); d.NotAfter = now.Add(time.Hour) })), CodeDirectiveStale},
-		"lives too long":     {policy.envelope(t, directive(func(d *Directive) { d.IssuedAt = now.Add(-time.Hour); d.NotAfter = now.Add(24 * time.Hour) })), CodeDirectiveInvalid},
-		"bad version":        {policy.envelope(t, directive(func(d *Directive) { d.TargetVersion = "v1.2" })), CodeDirectiveInvalid},
-		"another schema":     {policy.envelope(t, directive(func(d *Directive) { d.Schema = SchemaManifest })), CodeDirectiveInvalid},
-		"unknown member":     {policy.envelope(t, map[string]any{"schema": SchemaDirective, "deviceId": device, "rolloutId": rollout, "targetVersion": "1.2.0", "issuedAt": now, "notAfter": now.Add(time.Hour), "force": true}), CodeDirectiveInvalid},
+		"another signer":     {other.directiveEnvelope(t, directive(nil)), CodeDirectiveInvalid},
+		"another device":     {policy.directiveEnvelope(t, directive(func(d *Directive) { d.DeviceID = rollout })), CodeWrongDevice},
+		"expired":            {policy.directiveEnvelope(t, directive(func(d *Directive) { d.NotAfter = now })), CodeDirectiveStale},
+		"from the future":    {policy.directiveEnvelope(t, directive(func(d *Directive) { d.IssuedAt = now.Add(10 * time.Minute); d.NotAfter = now.Add(time.Hour) })), CodeDirectiveStale},
+		"lives too long":     {policy.directiveEnvelope(t, directive(func(d *Directive) { d.IssuedAt = now.Add(-time.Hour); d.NotAfter = now.Add(24 * time.Hour) })), CodeDirectiveInvalid},
+		"bad version":        {policy.directiveEnvelope(t, directive(func(d *Directive) { d.TargetVersion = "v1.2" })), CodeDirectiveInvalid},
+		"another schema":     {policy.directiveEnvelope(t, directive(func(d *Directive) { d.Schema = SchemaManifest })), CodeDirectiveInvalid},
+		"unknown member":     {policy.directiveEnvelope(t, map[string]any{"schema": SchemaDirective, "deviceId": device, "rolloutId": rollout, "targetVersion": "1.2.0", "issuedAt": now, "notAfter": now.Add(time.Hour), "force": true}), CodeDirectiveInvalid},
 		"not an envelope":    {[]byte(`{"targetVersion":"9.9.9"}`), CodeDirectiveInvalid},
-		"tampered payload":   {bytes.Replace(policy.envelope(t, directive(nil)), []byte(`"payload":"`), []byte(`"payload":"A`), 1), CodeDirectiveInvalid},
+		"tampered payload":   {bytes.Replace(policy.directiveEnvelope(t, directive(nil)), []byte(`"payload":"`), []byte(`"payload":"A`), 1), CodeDirectiveInvalid},
 		"oversized document": {bytes.Repeat([]byte(" "), MaxDirectiveBytes+1), CodeDirectiveInvalid},
+		// #1033: the device-policy key also signs policies (bare payload) and removal directives (their own domain);
+		// neither signature may count as an update directive's
+		"signed over the bare payload":        {policy.envelope(t, directive(nil)), CodeDirectiveInvalid},
+		"signed as a removal directive":       {policy.envelopeIn(t, []byte("regulait.endpoint-directive/1\x00"), directive(nil)), CodeDirectiveInvalid},
+		"signed over the domain only, no NUL": {policy.envelopeIn(t, []byte(SchemaDirective), directive(nil)), CodeDirectiveInvalid},
 	}
 	for name, c := range cases {
 		if _, err := VerifyDirective(c.raw, policy.keyring(), device, now); CodeOf(err) != c.code {
@@ -193,5 +211,16 @@ func TestSwapKeepsThePreviousBinaryAndRollsBack(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(installed); string(b) != "old" {
 		t.Fatalf("after a failed swap: %s", b)
+	}
+}
+
+// One version limit across the agent: at most MaxVersionLength characters.
+func TestValidVersionIsBoundedAt32Characters(t *testing.T) {
+	at := "1.0.0-" + strings.Repeat("a", MaxVersionLength-6)
+	if len(at) != MaxVersionLength || !ValidVersion(at) {
+		t.Fatalf("%q refused", at)
+	}
+	if over := at + "a"; ValidVersion(over) || Newer(over, "1.0.0") {
+		t.Fatalf("%q accepted", over)
 	}
 }

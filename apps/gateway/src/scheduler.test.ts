@@ -834,6 +834,7 @@ describe("every sweep is registered", () => {
         // ADR-0360 slice 2 (lane E41): EDR signal sync, and isolation polling with the webhook replay-table prune
         SCHEDULER_JOB_NAMES.edrSync,
         SCHEDULER_JOB_NAMES.edrIsolationPoll,
+        SCHEDULER_JOB_NAMES.endpointUpdateExpiry,
         // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
         // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
         SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,

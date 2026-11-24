@@ -10,6 +10,7 @@
     "GET /v1/discovery/update-rollouts/:rolloutId": "reads one rollout, its stages and the allowed next steps",
     "POST /v1/discovery/update-rollouts/:rolloutId/:action": "starts, advances, completes, pauses, resumes or aborts a rollout (guarded by the declared table; audited)",
     "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "issues a single-use, 15-minute enrolment token and the one line to paste as root (audited; the secret is shown once)",
-    "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "sets a rollout's halt threshold within its bounds (tightening free, loosening a settings_relax step-up; audited)"
+    "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "sets a rollout's halt threshold within its bounds (tightening free, loosening a settings_relax step-up; audited)",
+    "GET /v1/discovery/update-rollouts/:rolloutId/attempts": "lists one rollout's per-device update attempts with their declared lifecycle and reported codes (paged)"
   }
 }

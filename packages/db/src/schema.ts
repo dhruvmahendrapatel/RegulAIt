@@ -139,7 +139,8 @@ import {
   EXECUTION_OFFER_DECLINE_REASONS,
   EXECUTION_OFFER_END_OUTCOMES,
   // ADR-0195 SD0 (migration 0202): shadow-AI active discovery
-  DISCOVERY_CREDENTIAL_MODES,
+  DISCOVERY_CREDENTIAL_PURPOSES,
+  DISCOVERY_STORED_CREDENTIAL_MODES,
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
   DISCOVERY_SOURCE_KINDS,
@@ -194,6 +195,8 @@ import {
   // ADR-0360 (migration endpoint_fleet_operations): the rollout and stage lifecycles, ADR-0348 machines
   ENDPOINT_ROLLOUT_STATES,
   ENDPOINT_ROLLOUT_STAGE_STATES,
+  // ADR-0360 slice 1c (migration endpoint_update_delivery): a device's update attempt
+  ENDPOINT_UPDATE_ATTEMPT_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -8444,7 +8447,12 @@ export const discoveryCredentials = pgTable(
     sourceId: uuid("source_id")
       .notNull()
       .references(() => discoverySources.id, { onDelete: "cascade" }),
-    credentialMode: text("credential_mode", { enum: DISCOVERY_CREDENTIAL_MODES }).notNull(),
+    // ADR-0338: `delegated` only on a `platform_write` row (pending migration vendor_agent_control_credentials)
+    credentialMode: text("credential_mode", { enum: DISCOVERY_STORED_CREDENTIAL_MODES }).notNull(),
+    /** ADR-0338 §2: fixed at insert (the guard trigger refuses a change); the scanner loads only `discovery_read` */
+    purpose: text("purpose", { enum: DISCOVERY_CREDENTIAL_PURPOSES }).notNull().default("discovery_read"),
+    /** ADR-0338 §3a: mandatory on a delegated row, at most 90 days after it was stored; refused once past */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     publicConfig: jsonb("public_config").$type<Record<string, string>>().notNull(),
     /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
     secretCiphertext: text("secret_ciphertext"),
@@ -8456,7 +8464,14 @@ export const discoveryCredentials = pgTable(
     revokedBy: uuid("revoked_by"),
   },
   (t) => [
-    check("discovery_credentials_mode_check", sql`${t.credentialMode} IN ('federated', 'static')`),
+    check("discovery_credentials_mode_check", sql`${t.credentialMode} IN ('federated', 'static', 'delegated')`),
+    check("discovery_credentials_purpose_check", sql`${t.purpose} IN ('discovery_read', 'platform_write')`),
+    check(
+      "discovery_credentials_delegated_check",
+      sql`${t.credentialMode} <> 'delegated' OR (${t.purpose} = 'platform_write' AND ${t.expiresAt} IS NOT NULL AND ${t.expiresAt} <= ${t.createdAt} + interval '90 days' AND (${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL))`,
+    ),
+    check("discovery_credentials_expires_check", sql`${t.expiresAt} IS NULL OR ${t.expiresAt} > ${t.createdAt}`),
+    check("discovery_credentials_write_purpose_scope_check", sql`${t.purpose} <> 'platform_write' OR ${t.writeScope} = 'unverified'`),
     check("discovery_credentials_write_scope_check", sql`${t.writeScope} IN ('unverified', 'read_only', 'refused')`),
     check("discovery_credentials_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
     check(
@@ -8465,7 +8480,7 @@ export const discoveryCredentials = pgTable(
     ),
     check("discovery_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
     check("discovery_credentials_revoked_by_check", sql`(${t.revokedAt} IS NULL) = (${t.revokedBy} IS NULL)`),
-    uniqueIndex("discovery_credentials_live_uq").on(t.sourceId).where(sql`${t.revokedAt} IS NULL`),
+    uniqueIndex("discovery_credentials_live_uq").on(t.sourceId, t.purpose).where(sql`${t.revokedAt} IS NULL`),
   ],
 );
 export type DiscoveryCredentialRow = typeof discoveryCredentials.$inferSelect;
@@ -8557,6 +8572,8 @@ export const discoverySettings = pgTable(
     vendorAgentControlEnabled: boolean("vendor_agent_control_enabled").notNull().default(false),
     /** ADR-0338 §4: how long a control action's approval stays open, 1 to 72 hours; lengthening past 24 is a step-up */
     vendorAgentControlApprovalTtlHours: integer("vendor_agent_control_approval_ttl_hours").notNull().default(24),
+    /** ADR-0338 §3a: a delegated (named admin) control credential is usable only while this is on; off by default */
+    vendorAgentControlDelegatedEnabled: boolean("vendor_agent_control_delegated_enabled").notNull().default(false),
     version: integer("version").notNull().default(1),
     updatedBy: uuid("updated_by"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -20672,6 +20689,9 @@ export const vendorAgentActions = pgTable(
     sourceId: uuid("source_id").notNull(),
     registry: text("registry").notNull(),
     externalId: text("external_id").notNull(),
+    // 3NF exception, the same snapshot: the vendor locator besides the agent id (Copilot Studio: the environment id),
+    // read from the record's vendor attributes at request time (pending migration vendor_agent_control_credentials)
+    vendorLocator: text("vendor_locator"),
     action: text("action", { enum: VENDOR_AGENT_CONTROL_ACTIONS }).notNull(),
     direction: text("direction", { enum: ["apply", "reverse"] }).notNull(),
     /** a `reverse` (restore) row names the succeeded action it reverses; at most one restore per action */
@@ -20704,6 +20724,7 @@ export const vendorAgentActions = pgTable(
     check("vendor_agent_actions_direction_check", sql`(${t.direction} = 'reverse') = (${t.reversesActionId} IS NOT NULL)`),
     check("vendor_agent_actions_registry_check", sql`char_length(${t.registry}) BETWEEN 1 AND 64`),
     check("vendor_agent_actions_external_id_check", sql`char_length(${t.externalId}) BETWEEN 1 AND 2048`),
+    check("vendor_agent_actions_locator_check", sql`${t.vendorLocator} IS NULL OR char_length(${t.vendorLocator}) BETWEEN 1 AND 256`),
     check("vendor_agent_actions_reason_check", sql`char_length(${t.reason}) BETWEEN 1 AND 500`),
     check(
       "vendor_agent_actions_state_check",
@@ -20856,12 +20877,30 @@ export const endpointUpdateRollouts = pgTable(
     haltThresholdStepUp: text("halt_threshold_step_up"),
     haltThresholdAuditId: uuid("halt_threshold_audit_id"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    /**
+     * slice 1c: the two people of a start or resume (ADR-0360, review of #979). The requester is set by
+     * request_start / request_resume and cleared on the next request; the decider by the approval or rejection. User
+     * FKs restrict, so the people stay on the evidence.
+     */
+    approvalRequestedBy: uuid("approval_requested_by").references(() => users.id),
+    approvalRequestedAt: timestamp("approval_requested_at", { withTimezone: true }),
+    approvalDecidedBy: uuid("approval_decided_by").references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
-    check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')`),
+    // a start or resume waiting for a decision names who asked, and when
+    check(
+      "endpoint_update_rollouts_requested_check",
+      sql`${t.state} NOT IN ('start_requested', 'resume_requested') OR (${t.approvalRequestedBy} IS NOT NULL AND ${t.approvalRequestedAt} IS NOT NULL)`,
+    ),
+    // two people: the decider is never the requester
+    check(
+      "endpoint_update_rollouts_two_people_check",
+      sql`${t.approvalDecidedBy} IS NULL OR (${t.approvalRequestedBy} IS NOT NULL AND ${t.approvalDecidedBy} <> ${t.approvalRequestedBy})`,
+    ),
+    check("endpoint_update_rollouts_version_check", sql`length(${t.targetVersion}) <= 32 AND ${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,30})?$'`),
+    check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'start_requested', 'running', 'paused', 'halted', 'resume_requested', 'completed', 'aborted')`),
     check("endpoint_update_rollouts_halt_threshold_check", sql`${t.haltThreshold} BETWEEN 1 AND 10`),
     check(
       "endpoint_update_rollouts_halt_relaxed_check",
@@ -20905,6 +20944,79 @@ export const endpointUpdateRolloutStages = pgTable(
   ],
 );
 export type EndpointUpdateRolloutStageRow = typeof endpointUpdateRolloutStages.$inferSelect;
+
+/**
+ * ADR-0360 slice 1c (security review of #1248): the devices a rollout's two-person approval covers, captured when a
+ * second admin approves its start or resume, one row per device with the stage that offers it the update (the first
+ * stage, in ordinal order, whose group held the device). The gateway offers the update only to a device in this set
+ * that is still in that stage's group, so a group membership changed after the approval (one admin, an enrolment
+ * token) never widens the rollout; a new resume approval re-captures it. Rewritten only by those approvals.
+ */
+export const endpointUpdateRolloutDevices = pgTable(
+  "endpoint_update_rollout_devices",
+  {
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    stageOrdinal: integer("stage_ordinal").notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_update_rollout_devices_pk", columns: [t.rolloutId, t.deviceId] }),
+    foreignKey({
+      name: "endpoint_update_rollout_devices_stage_fk",
+      columns: [t.rolloutId, t.stageOrdinal],
+      foreignColumns: [endpointUpdateRolloutStages.rolloutId, endpointUpdateRolloutStages.ordinal],
+    }).onDelete("cascade"),
+    index("endpoint_update_rollout_devices_device_idx").on(t.deviceId),
+  ],
+);
+export type EndpointUpdateRolloutDeviceRow = typeof endpointUpdateRolloutDevices.$inferSelect;
+
+/**
+ * ADR-0360 slice 1c: one device's attempt to install one rollout's version, created when the gateway first offers the
+ * device a signed update directive. Lifecycle ENDPOINT_UPDATE_ATTEMPT_MACHINE (@regulait/shared, ADR-0348); every
+ * state write is a guarded UPDATE. Failed and rolled-back attempts count toward the rollout's halt threshold.
+ */
+export const endpointUpdateAttempts = pgTable(
+  "endpoint_update_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    state: text("state", { enum: ENDPOINT_UPDATE_ATTEMPT_STATES }).notNull().default("directed"),
+    /** "as offered" snapshots (ADR-0200 exception): the device's version and platform when the directive was signed */
+    fromVersion: text("from_version").notNull(),
+    os: text("os", { enum: ["linux", "darwin", "windows"] }).notNull(),
+    arch: text("arch", { enum: ["amd64", "arm64"] }).notNull(),
+    /** the fixed code the device's updater reported (agents/endpoint/internal/update), never free text */
+    code: text("code"),
+    /** the attempt expires undecided at this time (ENDPOINT_UPDATE_ATTEMPT_TTL_HOURS after it was offered) */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("endpoint_update_attempts_state_check", sql`${t.state} IN ('directed', 'installed', 'current', 'refused', 'failed', 'rolled_back', 'expired')`),
+    check("endpoint_update_attempts_code_check", sql`${t.code} IS NULL OR ${t.code} ~ '^[a-z_]{1,64}$'`),
+    check("endpoint_update_attempts_version_check", sql`${t.fromVersion} ~ '^[0-9A-Za-z.+-]{1,32}$'`),
+    check("endpoint_update_attempts_os_check", sql`${t.os} IN ('linux', 'darwin', 'windows')`),
+    check("endpoint_update_attempts_arch_check", sql`${t.arch} IN ('amd64', 'arm64')`),
+    // one attempt per device and rollout: a device reports once, and is re-offered only after expiry
+    uniqueIndex("endpoint_update_attempts_device_uq").on(t.rolloutId, t.deviceId),
+    index("endpoint_update_attempts_device_idx").on(t.deviceId),
+    index("endpoint_update_attempts_expiry_idx").on(t.state, t.expiresAt),
+  ],
+);
+export type EndpointUpdateAttemptRow = typeof endpointUpdateAttempts.$inferSelect;
 // ===== end ADR-0360 =====
 
 // ===== ADR-0358 (lane E39): AI adoption analytics =====

@@ -32,6 +32,7 @@
  * a timer does should be able to reach a model the initiating user could not.
  */
 import { edrJobDefinitions } from "./edr/routes.js";
+import { endpointUpdateJobDefinitions } from "./endpoint-update-delivery.js";
 import { runMrmAutoRetestSweep } from "./mrm-auto-retest.js";
 import type { Db } from "@regulait/db";
 import { runMrmExpirySweep } from "./mrm.js";
@@ -149,6 +150,8 @@ export const SCHEDULER_JOB_NAMES = {
   // ADR-0360 slice 2 (lane E41): EDR signal sync and isolation polling (edr/routes.ts)
   edrSync: "edr-sync",
   edrIsolationPoll: "edr-isolation-poll",
+  // ADR-0360 slice 1c (lane E41): expire unreported update attempts and undecided rollout starts or resumes
+  endpointUpdateExpiry: "endpoint-update-expiry",
   // ADR-0334 (owner decision B2): deletes captured browser prompts past their retention (browser-capture-retention.ts)
   browserPromptCaptureRetentionSweep: "browser-prompt-capture-retention-sweep",
   // ADR-0339: scores every agent a change marked (agent-risk.ts)
@@ -915,6 +918,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
     ...edrJobDefinitions({ dataKey: opts.dataKey }), // ADR-0360 slice 2: edr-sync, edr-isolation-poll
+    ...endpointUpdateJobDefinitions(), // ADR-0360 slice 1c: endpoint-update-expiry
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
     ...detectionFeedJobDefinitions(), // ADR-0367: detection-feed-health-sweep
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
