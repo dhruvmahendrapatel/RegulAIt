@@ -149,6 +149,8 @@ function hostBackend(calls: string[][], inputDir: string | null) {
       return { cpu_stats: { throttling_data: { throttled_periods: 0 } } };
     },
     spawnDocker: (args: string[]): DockerChild => {
+      // the first preflight's reconciler listings (tested in robot-egress.test.ts): empty, and not recorded here
+      if (args[0] === "ps" || (args[0] === "network" && args[1] === "ls")) return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
       calls.push(args);
       if (args[0] === "run") return spawn(process.execPath, [INIT], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;
       return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as DockerChild;

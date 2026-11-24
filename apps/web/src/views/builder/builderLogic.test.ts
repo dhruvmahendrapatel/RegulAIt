@@ -9,6 +9,7 @@ import {
   filterIntegrations,
   filterThreads,
   importMessage,
+  isImeComposing,
   isValidTimeUtc,
   localTime,
   parseBundleText,
@@ -21,6 +22,16 @@ import {
   spendState,
   withShare,
 } from "./builderLogic";
+
+describe("composer Enter (UIW-02)", () => {
+  it("does not treat the Enter that commits an IME candidate as send", () => {
+    expect(isImeComposing({ nativeEvent: { isComposing: true, keyCode: 13 } })).toBe(true);
+    // older Safari fires the committing keydown after compositionend, as keyCode 229
+    expect(isImeComposing({ nativeEvent: { isComposing: false, keyCode: 229 } })).toBe(true);
+    expect(isImeComposing({ nativeEvent: { isComposing: false, keyCode: 13 } })).toBe(false);
+    expect(isImeComposing({ nativeEvent: {} })).toBe(false);
+  });
+});
 
 describe("import result", () => {
   it("names what the gateway left out, split by reason", () => {

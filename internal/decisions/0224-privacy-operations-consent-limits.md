@@ -136,3 +136,47 @@ Further honest limits:
    processing lives at `/admin/privacy` (the requests page stays at `/admin/privacy/requests`). Main's own entry is
    138.36 kB, so this lane fits with about 5 B to spare. The next lane that grows the entry will need the owner's
    ceiling decision.
+
+## Addendum, 2026-11-20: the processing limit on connector and MCP calls, and the settings controls (lane E47)
+
+Builder lane E47 (owner choice of lane, 2026-11-20). Two of the honest limits above are closed.
+
+1. **One check path for every call type.** The limit's implementation is now `processingLimitGate` in
+   `privacy-ops.ts`, keyed by a call target (model, connector or MCP tool). The ADR-0251 governed core exposes it as
+   `governedProcessingLimit` (`governed-core.ts`), and every call path calls the core, not the implementation:
+   - model dispatch (`dispatchAttempt` and the native invoke hoist), as before; `privacyDispatchGate` stays as the
+     model-shaped wrapper;
+   - connector calls (`connector-call.ts`), directly after the PII-mode input rung and before guardrails and
+     `provider.invoke`, on the object and payload that would be sent (after any redaction);
+   - MCP `tools/call` (`mcp-proxy.ts`), directly after the PII-mode argument rung, before the approval is consumed
+     and before the upstream is contacted, on the arguments that would be sent (after any redaction);
+   - the other MCP methods (`mcp-protocol.ts`: resources, prompts, completions), after their PII input scan.
+
+   The rule is unchanged: off (as shipped) it is one settings read; on, personal data whose category no active record
+   for the call's project permits is refused, and an unattributed call carrying personal data is refused. The cascade
+   still decides first. A connector refusal is 409 `processing_not_permitted`, as on the model path. On the MCP paths
+   it is a policy denial (`denied`, rule `processing-not-permitted`), so the MCP error, the trace span, the builder
+   tools and orchestration workers all report it as one without a new outcome kind. The audit row carries the call
+   type and categories only. Neither path stores the refused input in its trace span.
+
+2. **Settings controls.** The Organization page has a "2b · Privacy operations" card (the shared `OrgSettingsCard`)
+   for `privacyOpsEnabled` and `dsrSlaDays`, written through the existing audited `PUT /v1/org/settings`. The browser
+   mirrors the gateway's strictness rules (`org-setting-strictness.ts`): the due date is 1 to 90 days with 30 the
+   strict default, and a longer value, or one longer than what is stored, asks for the `settings_relax` step-up;
+   turning the limit off once it is on asks for the step-up. The switch on Records of processing stays.
+
+3. **Default not changed.** `privacy_ops_enabled` still ships false. ADR-0180 makes strict the default unless an ADR
+   records the reason; this ADR records the owner's 2026-10-30 rule for new backlog features (default off), and the
+   gateway's registry already treats "off" as the strict baseline for that reason. Turning it on by default would
+   refuse personal data in every call of an install with no records yet. Whether to change that is an owner question,
+   not part of this slice.
+
+4. **Open source first (ADR-0176).** No new capability: the slice reuses the existing detector, the governed core and
+   the settings card. No dependency added. No migration and no new route.
+
+Tests: `adr0224-processing-limit-tools.test.ts` (connector and MCP tool calls each refused before the provider or
+upstream, unattributed calls refused, one record permitting the same category on both paths, the settings audited);
+`orgSettingSpecs.test.ts` (the two controls' step-up rules). The existing `privacy-ops.test.ts` is unchanged.
+
+Still open: per-call declared purpose; per-subject objection enforcement; erasure step-up kind; A2A calls and
+training-corpus ingest (`regulait-llm.ts`) are not yet limited by records of processing.

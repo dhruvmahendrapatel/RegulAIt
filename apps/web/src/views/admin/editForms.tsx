@@ -17,6 +17,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
+import { api as stepUpApi, withStepUp } from "../../stepup/stepUp";
 import { Button } from "../../ui/kit";
 import { PatchFormModal } from "./PatchFormModal";
 import { BOOL, nullableEnum, TRI_STATE, type Choice, type PatchField } from "./patchForm";
@@ -186,7 +187,7 @@ export function RenamePasskeyButton(props: { passkey: { id: string; label: strin
 
 // ---- external scorers ---------------------------------------------------------
 
-// ADR-0220: the three guardrail kinds a trained-detector service serves
+// ADR-0220: the three guardrail kinds a trained-detector service serves; ADR-0353: the routing classifier kind
 export const SCORER_KINDS: readonly Choice[] = [
   "llm_as_judge",
   "groundedness_judge",
@@ -194,12 +195,13 @@ export const SCORER_KINDS: readonly Choice[] = [
   "guardrail_pii",
   "guardrail_prompt_injection",
   "guardrail_harm",
+  "routing_complexity",
 ].map((k) => ({ value: k, label: k }));
 
 export const EXTERNAL_SCORER_FIELDS: readonly PatchField[] = [
   { key: "name", label: "Name", kind: "text", maxLength: 120, required: true },
   { key: "baseUrl", label: "Endpoint URL", kind: "text", maxLength: 2048, required: true, help: "Moving the endpoint disables the scorer until a fresh connection test passes; the egress guard checks the new host first." },
-  { key: "scorerKinds", label: "Claims to serve", kind: "multi", options: SCORER_KINDS, min: 1, max: 6 },
+  { key: "scorerKinds", label: "Claims to serve", kind: "multi", options: SCORER_KINDS, min: 1, max: 7 },
   {
     key: "allowPlaintextHttp",
     label: "Plaintext http",
@@ -220,7 +222,7 @@ export function EditExternalScorerButton(props: { scorer: { id: string; name: st
       title={`Edit external scorer ${s.name}`}
       fields={EXTERNAL_SCORER_FIELDS}
       record={{ ...s }}
-      save={(body) => api.patch(`/v1/external-scorers/${seg(s.id)}`, body)}
+      save={(body) => withStepUp((h) => stepUpApi.patch(`/v1/external-scorers/${seg(s.id)}`, body, h))}
       onSaved={done}
     />
   );

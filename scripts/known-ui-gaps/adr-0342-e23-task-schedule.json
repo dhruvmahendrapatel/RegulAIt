@@ -1,0 +1,8 @@
+{
+  "adr": "ADR-0342",
+  "lane": "E23",
+  "tracking": "ADR-0342 (lane E23 slice 2): API-only by the lane brief (no screens); the task priority and due-date controls in the approvals queue are posted on #453 for the design builder",
+  "gaps": {
+    "PUT /v1/approvals/:approvalId/schedule": "sets a pending human task's priority, due and warn times and escalation policy; loosening needs a settings_relax step-up (audited)"
+  }
+}
