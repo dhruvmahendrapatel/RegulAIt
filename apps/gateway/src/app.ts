@@ -196,6 +196,7 @@ import { applyRuleStepSwitchDecision, precheckRuleStepSwitchDecision, registerRu
 import { applyDecisionTableDecision, precheckDecisionTableDecision, registerDecisionTableRoutes } from "./decision-tables.js";
 import { applyDecisionTableSwitchDecision, registerDecisionTableSwitchRoutes } from "./decision-table-switch.js";
 import { registerRepetitiveAskRoutes } from "./repetitive-asks.js";
+import { registerContentInspectionRoutes } from "./content-inspection.js";
 import { registerDriftIngestCredentialRoutes } from "./drift-ingest-credentials.js";
 import { AiBomError } from "./ai-bom.js";
 import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -6085,6 +6086,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionTableRoutes(app, db);
   registerDecisionTableSwitchRoutes(app, db);
   registerRepetitiveAskRoutes(app, db);
+  // ADR-0362 slice 1b-ii: the per-project content-inspection setting (GET for project viewers, PUT admin-only)
+  registerContentInspectionRoutes(app, db);
   // ADR-0223 amendment 1: the per-monitor write-only ingestion credential and its one route
   registerDriftIngestCredentialRoutes(app, db);
   // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped

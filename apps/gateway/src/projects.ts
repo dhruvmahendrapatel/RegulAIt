@@ -539,19 +539,27 @@ export type PiiMode = "block" | "warn" | "log" | "redact";
  * relaxation) maps to null = no enforcement. And the org default still never
  * overrides a matched compliance framework — it is the floor under the
  * frameworks, not a ceiling over them. */
+/**
+ * The PII mode the project's EXPLICIT compliance profiles give it: null when the dispatch is unattributed, the project
+ * is unknown or unclassified, or no profile matches its tags (where `projectPiiMode` falls back to the org default).
+ * ADR-0362's content-inspection floor reads this, so the org default never forces inspection on.
+ */
+export async function projectProfilePiiMode(db: Db, projectId: string | null | undefined): Promise<PiiMode | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return effectiveCompliancePolicy(profiles).piiMode;
+}
+
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
 ): Promise<PiiMode | null> {
-  const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
-  if (!projectId) return fallback();
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-  if (!project) return fallback();
-  const tags = (project.classifications ?? []) as string[];
-  if (tags.length === 0) return fallback();
-  const profiles = await profilesForTags(db, tags);
-  if (profiles.length === 0) return fallback();
-  return effectiveCompliancePolicy(profiles).piiMode;
+  return (await projectProfilePiiMode(db, projectId)) ?? orgDefaultPiiMode(await loadOrgSettings(db));
 }
 
 // --- §8.3 mcpDefaultMode enforcement (ADR-0023) ----------------------------
@@ -1220,31 +1228,43 @@ export async function applyProjectPatch(
   return { ok: true, row: row!, changed };
 }
 
+export type ProjectRole = "viewer" | "contributor" | "owner";
+
+/**
+ * The object-level gate of the per-project routes: an admin passes; anyone else must hold a membership of at least
+ * `minRole` on the project, or is refused 403 `forbidden`. Exported so a per-project route outside this file (ADR-0362
+ * content-inspection settings) applies exactly the same check.
+ */
+export async function projectRoleGate(
+  db: Db,
+  req: { authCtx: { userId: string | null; isAdmin: boolean } },
+  projectId: string,
+  minRole: ProjectRole,
+): Promise<
+  | { ok: true; membership: typeof projectMembers.$inferSelect | null }
+  | { ok: false; status: number; error: string }
+> {
+  if (req.authCtx.isAdmin) return { ok: true, membership: null };
+  if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
+  const [membership] = await db
+    .select()
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)));
+  if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  return { ok: true, membership };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
    * membership row for provenance defaults. */
-  async function requireRole(
+  const requireRole = (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     projectId: string,
-    minRole: "viewer" | "contributor" | "owner",
-  ): Promise<
-    | { ok: true; membership: typeof projectMembers.$inferSelect | null }
-    | { ok: false; status: number; error: string }
-  > {
-    if (req.authCtx.isAdmin) return { ok: true, membership: null };
-    if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
-    const [membership] = await db
-      .select()
-      .from(projectMembers)
-      .where(
-        and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
-      );
-    if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
-      return { ok: false, status: 403, error: "forbidden" };
-    }
-    return { ok: true, membership };
-  }
+    minRole: ProjectRole,
+  ) => projectRoleGate(db, req, projectId, minRole);
 
   /** Display enrichment (same discipline as the approvals list): resolve user
    * and team ids to names in one pass. Provenance ids are FK-free by design,
