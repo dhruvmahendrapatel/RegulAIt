@@ -39,7 +39,7 @@ import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 import { errMessage } from "./err-serializer.js";
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -56,7 +56,6 @@ import {
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
-  classifyComplexity,
   estimateTokens,
   routeModel,
   planPromptCache,
@@ -66,6 +65,7 @@ import {
   normalizeCacheInput,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
+import { auditRoutingClassification, classifyForRouting, routingClassifierDetail } from "./routing-classifier.js";
 import {
   defaultBaseUrlFor,
   isModelProviderKind,
@@ -566,6 +566,11 @@ export interface GovernedDispatchArgs {
   delegationGrantId?: string | undefined;
   /** §5.1 lead ceiling (agent ids) for the delegated decision; null/absent = none */
   delegationCeilingAgentIds?: readonly string[] | null | undefined;
+  /**
+   * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`) for the governed core's ABAC v5
+   * request. Absent (an internal dispatch with no request behind it) = each reads as its strict value.
+   */
+  principal?: AbacPrincipalContext | null | undefined;
 }
 
 /**
@@ -1432,6 +1437,9 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     provider: served.provider ?? null,
     model: served.model ?? null,
+    // ADR-0251 slice 4b: the request's session facts and the delegation chain feed the ABAC v5 request
+    principal: args.principal ?? null,
+    delegationGrantId: args.delegationGrantId ?? null,
     // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
     invocation: {
       input: args.input,
@@ -2699,10 +2707,13 @@ async function performDispatch(
     virtualKey?: VirtualKeyContext | null | undefined;
     /** ADR-0173 batch 2c: the pillar-6 compaction state, for the span only */
     compaction?: { active: boolean; compacted?: boolean | undefined } | null | undefined;
+    /** ADR-0251 slice 4b: the request's session facts for the governed core's ABAC v5 request */
+    principal: AbacPrincipalContext;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
   return executeGovernedDispatch(db, dataKey, {
+    principal: args.principal,
     userId,
     served: registry.find((a) => a.id === routing.selectedAgentId),
     requestedAgentId,
@@ -4324,6 +4335,7 @@ export function registerAgentConnectorRoutes(
       if (ruleAnswer && body.input) {
         const ruleStep = ruleAnswer.ref;
         const governed = await executeGovernedDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
           userId,
           served: agent,
           requestedAgentId: agent.id,
@@ -4441,6 +4453,7 @@ export function registerAgentConnectorRoutes(
         });
         if (hit) {
           const governed = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,
@@ -4708,7 +4721,14 @@ export function registerAgentConnectorRoutes(
       // counted into the input estimate so budget gates and cost forecasts
       // stay truthful as the thread grows — the MODEL-BOUND history, i.e.
       // the compacted view when a summary is in play.
-      const complexity = classifyComplexity(body.input);
+      // ADR-0353 part 2: the configured routing classifier is asked only when routing will actually run
+      const classification = await classifyForRouting(
+        db,
+        opts.dataKey,
+        { routingClassifierScorerId: modeFor(org.routingEnabled) === "automatic" ? org.routingClassifierScorerId : null },
+        body.input,
+      );
+      const complexity = classification.complexity;
       const estimate = estimateTokens(body.input, complexity);
       const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
       if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
@@ -4761,6 +4781,14 @@ export function registerAgentConnectorRoutes(
       // exactly what they meant, and the agents it never got to weigh are
       // listed beside them with the reason each was withheld.
       if (skippedCandidates.length > 0) routing = { ...routing, skippedCandidates };
+      await auditRoutingClassification(db, {
+        userId,
+        requestedAgentId: agent.id,
+        projectId,
+        classification,
+        routing,
+        surface: "invoke",
+      });
       // ADR-0021: with the ORG routing toggle off the technique does not run
       // at all — no model_routing ledger row is written (a per-user
       // passthrough, org toggle on, still records its passthrough decision,
@@ -4784,6 +4812,7 @@ export function registerAgentConnectorRoutes(
           detail: {
             effect: routing.effect,
             complexity,
+            ...routingClassifierDetail(classification),
             mode: body.mode,
             ...(body.conversationId ? { conversationId: body.conversationId } : {}),
           },
@@ -5139,6 +5168,7 @@ export function registerAgentConnectorRoutes(
         const send = (event: string, data: unknown) =>
           reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         const outcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5205,6 +5235,7 @@ export function registerAgentConnectorRoutes(
       }
       if (body.dispatch) {
         dispatchOutcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5675,6 +5706,8 @@ export function registerAgentConnectorRoutes(
       object: body.object,
       payload: body.payload,
       projectId: body.projectId ?? null,
+      // ADR-0251 slice 4b: the request's session facts for the ABAC v5 request
+      principal: abacPrincipalFromRequest(req),
     });
     return reply.status(out.status).send(out.body);
   });

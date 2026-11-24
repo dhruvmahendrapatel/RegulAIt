@@ -223,7 +223,7 @@ export default function WorkflowsPage() {
               },
             ]}
             rowKey={(i) => i.id}
-            onRowClick={(i) => navigate(`/workflows/${i.id}`)}
+            rowHref={(i) => `/workflows/${i.id}`}
             rowLabel={(i) => `Open workflow ${i.change?.description ?? i.id}`}
             empty={
               <EmptyState

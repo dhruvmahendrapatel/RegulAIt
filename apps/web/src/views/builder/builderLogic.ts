@@ -17,6 +17,17 @@ import type {
   BuilderUsage,
 } from "../../api/types";
 
+// ---- the composer ---------------------------------------------------------
+
+/**
+ * True while an input method editor (IME) is still composing: the Enter that
+ * commits a Japanese/Chinese/Korean candidate must not also send the message.
+ * `isComposing` is the standard signal; keyCode 229 covers browsers (older
+ * Safari) that report the committing keydown after compositionend (UIW-02).
+ */
+export const isImeComposing = (e: { nativeEvent: { isComposing?: boolean; keyCode?: number } }): boolean =>
+  e.nativeEvent.isComposing === true || e.nativeEvent.keyCode === 229;
+
 // ---- agent identity -------------------------------------------------------
 
 /** Avatar fills. Every one carries white initials at WCAG AA (≥ 4.5:1). */

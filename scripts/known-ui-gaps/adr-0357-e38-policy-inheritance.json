@@ -1,0 +1,15 @@
+{
+  "adr": "ADR-0357",
+  "lane": "E38",
+  "tracking": "ADR-0357 §4 (lane E38): the brief is API and backend only (master brief 2026-11-17, rule 3); the policy hierarchy and effective-policy screen is requested on #453",
+  "gaps": {
+    "GET /v1/business-units": "lists business units (the level between the org and its projects in the policy hierarchy), paginated",
+    "POST /v1/business-units": "creates a business unit (audited)",
+    "PATCH /v1/business-units/:businessUnitId": "renames or describes a business unit (audited)",
+    "PUT /v1/projects/:projectId/business-unit": "moves a project under a business unit or back under the org; a move that loosens its effective policy is a settings_relax step-up (audited)",
+    "GET /v1/governance-policy/layer": "reads one level's own policy layer (org, business unit, project or use case); stored, not yet enforced at call time",
+    "PUT /v1/governance-policy/layer": "writes one level's policy layer: tighten-only against its parent, compare-and-set, loosening its own previous self is a settings_relax step-up (audited); stored, not yet enforced at call time",
+    "DELETE /v1/governance-policy/layer": "removes one level's policy layer (a settings_relax step-up for every rule it set, audited)",
+    "GET /v1/governance-policy/effective": "the effective policy at a level, each rule with its value and the level that set it (admin only); stored, not yet enforced at call time"
+  }
+}

@@ -2,6 +2,9 @@
 export * from "./actor.js";
 // ADR-0251 — the restriction layer of the one governed decision core (model, connector, A2A)
 export * from "./resource.js";
+// ADR-0354 — the graduated, agent-steering response vocabulary (one declared table)
+export * from "./agent-response.js";
+import type { AgentResponse, PolicyResponseSource } from "./agent-response.js";
 import {
   checkActorChain,
   scopeCovers,
@@ -650,6 +653,12 @@ export interface AbacDecision {
   approverName?: string | null;
   /** the policy author's justification/annotation — reason prose only */
   reason?: string | null;
+  /**
+   * ADR-0354 — the governing policy's graduated response (its mode and stored guidance). `effect` is already that
+   * response's enforced effect; this is what `resolveAgentResponse` reads to tell the agent. An `advise` match
+   * leaves `effect` at `permit`.
+   */
+  response?: PolicyResponseSource | null;
 }
 
 export interface EvaluationInput {
@@ -760,6 +769,11 @@ export interface Decision {
   approverUserId?: string;
   /** the approver's display name, when the rule carried one */
   approverName?: string | null;
+  /**
+   * ADR-0354 — set only when a graduated policy chose how to answer the agent (advise, correct, block_session,
+   * disable); absent means the plain response of `effect`. It never changes `effect` (`withAgentResponse`).
+   */
+  response?: AgentResponse;
 }
 
 export interface RuleTrace {

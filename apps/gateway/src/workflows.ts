@@ -3236,6 +3236,36 @@ export async function checkWorkflowTemplateReferences(
   return null;
 }
 
+/**
+ * ADR-0022 retire, the write itself (the route's core, shared with ADR-0357's governance-config apply): under the
+ * template's row lock, mark it retired with the reason, delete the rules of a retired shadow-AI default (ADR-0195 A4)
+ * and audit it. Runs in the caller's transaction. An intake template's retire is gated by the caller
+ * (`writeIntakeTemplateGated`), never here.
+ */
+export async function retireWorkflowTemplateLocked(tx: Db, templateId: string, reason: string, actorUserId: string | null) {
+  const [tpl] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
+  if (!tpl) return { ok: false as const, status: 404, body: { error: "unknown_template" } };
+  if (tpl.retiredAt) return { ok: false as const, status: 409, body: { error: "already_retired" } };
+  const [row] = await tx
+    .update(workflowTemplates)
+    .set({ retiredAt: new Date(), retiredReason: reason })
+    .where(eq(workflowTemplates.id, templateId))
+    .returning();
+  const ruleIds = await deleteRulesOfRetiredDefault(tx, tpl);
+  await tx.insert(auditLog).values({
+    userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+    objectType: "workflow_template",
+    objectId: templateId,
+    // ADR-0195 A4: retiring the shadow-AI default also deletes its rules (an empty list for any other template)
+    detail: { phase: "template-retired", name: tpl.name, reason, ...(ruleIds.length > 0 ? { ruleId: ruleIds[0], ruleIds } : {}) },
+    effect: "allow",
+    ruleId: "workflow-template-retired",
+    ruleChain: [],
+    reason: `workflow template '${tpl.name}' retired: ${reason}`,
+  });
+  return { ok: true as const, value: row! };
+}
+
 async function insertWorkflowTemplate(
   db: Db,
   name: string,
@@ -3841,29 +3871,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const body = retireTemplateSchema.parse(rest);
     const acceptance = parseAcceptance(raw);
     if (!acceptance.ok) return reply.status(422).send({ error: "invalid_regression_acceptance", issues: acceptance.issues });
-    const retire = async (tx: Db) => {
-      const [tpl] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
-      if (!tpl) return { ok: false as const, status: 404, body: { error: "unknown_template" } };
-      if (tpl.retiredAt) return { ok: false as const, status: 409, body: { error: "already_retired" } };
-      const [row] = await tx
-        .update(workflowTemplates)
-        .set({ retiredAt: new Date(), retiredReason: body.reason })
-        .where(eq(workflowTemplates.id, templateId))
-        .returning();
-      const ruleIds = await deleteRulesOfRetiredDefault(tx, tpl);
-      await tx.insert(auditLog).values({
-        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-        objectType: "workflow_template",
-        objectId: templateId,
-        // ADR-0195 A4: retiring the shadow-AI default also deletes its rules (an empty list for any other template)
-        detail: { phase: "template-retired", name: tpl.name, reason: body.reason, ...(ruleIds.length > 0 ? { ruleId: ruleIds[0], ruleIds } : {}) },
-        effect: "allow",
-        ruleId: "workflow-template-retired",
-        ruleChain: [],
-        reason: `workflow template '${tpl.name}' retired: ${body.reason}`,
-      });
-      return { ok: true as const, value: row! };
-    };
+    const retire = (tx: Db) => retireWorkflowTemplateLocked(tx, templateId, body.reason, req.authCtx.userId ?? null);
     const [tpl] = await db.select({ name: workflowTemplates.name }).from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
     if (!tpl || !isIntakeTemplateName(tpl.name)) {
       const out = await db.transaction((tx) => retire(tx as unknown as Db));

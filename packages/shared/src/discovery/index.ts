@@ -59,6 +59,8 @@ export const DISCOVERY_EVIDENCE_KINDS = [
   "saas_inventory",
   "idp_app_grant",
   "ml_platform_inventory",
+  // ADR-0336 slice 4: a plaintext credential found in a staged agent's configuration, reported by location only
+  "agent_config",
 ] as const;
 export type DiscoveryEvidenceKind = (typeof DISCOVERY_EVIDENCE_KINDS)[number];
 
@@ -154,10 +156,12 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   agent_registry_gemini: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "Google Gemini Enterprise agents" },
   agent_registry_agentcore: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "G6", label: "AWS Bedrock AgentCore runtimes" },
   // ADR-0336 (E17): the agent platforms; each also stages the agent's components (agent_registry_record_components)
-  agent_registry_copilot_studio: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Copilot Studio agents (Power Platform Dataverse)" },
-  agent_registry_agentforce: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "Salesforce Agentforce agents" },
-  agent_registry_openai: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
-  agent_registry_n8n: { family: "agent_registry", evidenceKinds: [], subjectKinds: [], slice: "E17", label: "n8n AI agent workflows" },
+  // ADR-0336 slices 4 and 5: the four E17 adapters report a plaintext credential in an agent's configuration
+  // (`agent_config`, subject `system` = the staged record's external id), by location and rule only
+  agent_registry_copilot_studio: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "Copilot Studio agents (Power Platform Dataverse)" },
+  agent_registry_agentforce: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "Salesforce Agentforce agents" },
+  agent_registry_openai: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "OpenAI ChatGPT custom GPTs (Compliance API)" },
+  agent_registry_n8n: { family: "agent_registry", evidenceKinds: ["agent_config"], subjectKinds: ["system"], slice: "E17", label: "n8n AI agent workflows" },
 });
 
 /**
@@ -201,6 +205,19 @@ export type RegistryComponentProvider = (typeof REGISTRY_COMPONENT_PROVIDERS)[nu
 /** federated (short-lived, the default, free) or static (a stored secret: a `settings_relax` step-up) */
 export const DISCOVERY_CREDENTIAL_MODES = ["federated", "static"] as const;
 export type DiscoveryCredentialMode = (typeof DISCOVERY_CREDENTIAL_MODES)[number];
+/**
+ * ADR-0338 §2: what a credential row is for, fixed at insert (an update trigger refuses a change). `discovery_read` is
+ * the scanner's read-only credential (every row before ADR-0338); `platform_write` is a source's separate vendor
+ * control credential. The scanner loads only `discovery_read`, the control path only `platform_write`.
+ */
+export const DISCOVERY_CREDENTIAL_PURPOSES = ["discovery_read", "platform_write"] as const;
+export type DiscoveryCredentialPurpose = (typeof DISCOVERY_CREDENTIAL_PURPOSES)[number];
+/**
+ * ADR-0338 §3a: every mode a stored row may hold. `delegated` (a named admin's refresh token, by admin opt-in, with a
+ * mandatory expiry) is allowed only on a `platform_write` row; a read credential is federated or static as before.
+ */
+export const DISCOVERY_STORED_CREDENTIAL_MODES = [...DISCOVERY_CREDENTIAL_MODES, "delegated"] as const;
+export type DiscoveryStoredCredentialMode = (typeof DISCOVERY_STORED_CREDENTIAL_MODES)[number];
 
 /**
  * The write-scope state of a source's credential (ADR-0195 decision 7). `refused`: a scanner found it grants write
@@ -292,12 +309,16 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   endpointMcpConfig: "discoveryEndpointMcpConfig",
   /** ADR-0337 §4: allowing Google Workspace sources to use the Directory token listing (its scope could revoke tokens) */
   googleDirectoryTokens: "discoveryGoogleDirectoryTokens",
+  /** ADR-0337 §4a: allowing Salesforce sources to read org-wide OAuth tokens (needs Customize Application) */
+  salesforceOrgTokens: "discoverySalesforceOrgTokens",
   /** ADR-0331: turning on the governed removal of flagged MCP servers from endpoints (signed directives) */
   endpointAddonRemoval: "discoveryEndpointAddonRemoval",
   /** ADR-0338: turning on governed vendor agent control (disable, quarantine, restore through the vendor admin API) */
   vendorAgentControl: "discoveryVendorAgentControl",
   /** ADR-0338 §4: lengthening a vendor agent control approval's window past 24 hours */
   vendorAgentControlTtl: "discoveryVendorAgentControlApprovalTtl",
+  /** ADR-0338 §3a: allowing a delegated (named admin) control credential where the vendor documents only that */
+  vendorAgentControlDelegated: "discoveryVendorAgentControlDelegated",
 });
 // revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 
@@ -366,7 +387,8 @@ const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, R
   header_name: /^[A-Za-z][A-Za-z0-9-]{0,63}$/,
   // ADR-0336: a Salesforce connected app's consumer key (its OAuth client id; not a secret)
   salesforce_consumer_key: /^[A-Za-z0-9._]{20,256}$/,
-  // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear)
+  // ADR-0337: the Google Workspace admin a domain-wide delegated read impersonates (bounded, linear); ADR-0337's
+  // Salesforce reader reuses ADR-0336's salesforce_consumer_key shape above
   email: /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}$/,
 };
 
@@ -474,8 +496,8 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
   // ADR-0337: a service-account key (the secret) with domain-wide delegation, impersonating one admin for the
   // read-only Reports scope; Google has no keyless delegation RegulAIt can use yet (federationUnsupportedReason)
   entitlement_google_workspace: { federated: {}, static: { adminSubject: { shape: "email", required: true } } },
-  // slice 2 builds these readers; until then the kinds exist and no scanner is registered ("not built yet")
-  entitlement_salesforce: { federated: {}, static: {} },
+  // ADR-0337: the JWT bearer flow; the secret is the connected app's private key (PEM), signed for `username`
+  entitlement_salesforce: { federated: {}, static: { clientId: { shape: "salesforce_consumer_key", required: true }, username: { shape: "email", required: true } } },
   entitlement_slack: { federated: {}, static: {} },
   // ADR-0314 (G6): the registry sources take the credentials of the cloud they read (federated by default)
   agent_registry_entra: {
