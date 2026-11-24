@@ -26,7 +26,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { withStepUp } from "../../../stepup/stepUp";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { AssertedGroup, GroupRoleMapping, Role } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -290,7 +290,7 @@ export default function GroupMappingsPage() {
         onConfirm={() => {
           const m = confirmDelete;
           setConfirmDelete(null);
-          if (m) void act.run(() => api.del(`/v1/group-role-mappings/${m.id}`), "Mapping removed");
+          if (m) void act.run(() => withStepUp((h) => stepUpApi.del(`/v1/group-role-mappings/${m.id}`, undefined, h)), "Mapping removed");
         }}
       />
     </>

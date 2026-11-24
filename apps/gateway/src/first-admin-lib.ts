@@ -145,7 +145,7 @@ export async function createFirstAdmin(db: Db, input: FirstAdminInput): Promise<
         displayName: username,
         username,
         isAdmin: true,
-        passwordHash: hashPassword(input.password),
+        passwordHash: await hashPassword(input.password),
         passwordUpdatedAt: now,
         // the operator chose it: not a one-time password (ADR-0194 §3)
         mustChangePassword: false,

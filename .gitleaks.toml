@@ -359,3 +359,11 @@ regexes = [
   '''^opaque-token-value-0123456789$''',
   '''^placeholder-secret-0123456789$''',
 ]
+
+[[allowlists]]
+description = "HISTORY ONLY: synthetic GitHub-token-shaped guidance fixture (ADR-0354, lane E35) in the commit that added it; the next commit builds the token at runtime, so the literal is no longer in the tree"
+condition = "AND"
+paths = ['''^packages/shared/src/agent-guidance\.test\.ts$''']
+commits = ["c69bf54bb06851251cfab557a3e04f729dacceb3"]
+regexTarget = "secret"
+regexes = ['''^ghp_0123456789abcdefghijABCDEFGHIJ012345$''']

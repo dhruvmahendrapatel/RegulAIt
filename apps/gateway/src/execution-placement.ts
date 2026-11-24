@@ -79,9 +79,11 @@ import {
   PERSON_STDIO_SUBJECT_KIND,
   projectIsolationSensitivity,
   REQUIRABLE_ISOLATION_CLASSES,
+  robotEgressSchema,
   SENSITIVITY_FLOOR_KEYS,
   workloadKindFloor,
   type AgentAssurance,
+  type RobotEgress,
   type AutonomyClass,
   type ExecutionProfileUnavailable,
   type ExecutionRefusalReason,
@@ -130,6 +132,22 @@ export interface PlacementRequest {
    * sensitivity always wins. Absent with no project = the fact does not resolve, as before.
    */
   sensitivity?: PlacementSensitivity;
+  /**
+   * ADR-0364 S3: a robot run's per-run egress (the hosts and ports of its version's allowed sites, `robotEgressTargets`).
+   * REQUIRED for `robot_browser` and REFUSED for every other kind (`placementEgressProblem`); it travels on the offer and
+   * the executor generates the run's proxy ACL from it.
+   */
+  egress?: RobotEgress;
+}
+
+/** ADR-0364 S3: a caller fault in a placement request's egress (never a policy fact: nothing was decided or offered) */
+export class PlacementEgressError extends Error {}
+
+/** why a request's egress does not fit its kind, or null (the offer schema refuses the same on the wire) */
+export function placementEgressProblem(kind: WorkloadKind, egress: unknown): string | null {
+  if (kind !== "robot_browser") return egress === undefined ? null : `egress is for robot_browser placements only (this is ${kind})`;
+  if (egress === undefined) return "a robot_browser placement needs its per-run egress";
+  return robotEgressSchema.safeParse(egress).success ? null : "the egress is not a list of host and port targets";
 }
 
 /** owner decision C: the relaxation one requirement used (recorded on the decision and the placement audit) */
@@ -282,7 +300,9 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
   let autonomyFloor: RequirableIsolationClass | undefined = NO_AUTONOMY_CLASS_FLOOR;
   let agentProfileId: string | null = null;
   if (req.agent === null) {
-    if (kind !== "engine_worker" && kind !== "byoc_worker") assurance = "unknown";
+    // ADR-0364 S3: a robot run with no agent is an author's governed test run of a fixed, reviewed script in our own
+    // runner image (as an engine run is our own worker): no agent identity to assure. An agent run names its agent.
+    if (kind !== "engine_worker" && kind !== "byoc_worker" && kind !== "robot_browser") assurance = "unknown";
   } else {
     const col = req.agent.kind === "agent" ? workloadIdentities.agentId : workloadIdentities.builderAgentId;
     const [ident] = await db.select().from(workloadIdentities).where(eq(col, req.agent.id));
@@ -328,8 +348,10 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
   const agentRow = agentProfileId ? await byId(agentProfileId) : null;
   if ((serverProfileId && !serverRow) || (agentProfileId && !agentRow)) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
   let configured: ResolvedProfile | null = null;
+  // ADR-0364 S3: a robot run is always placed under the shipped robot-browser profile (the only one that may run it,
+  // with its per-run egress proxy); an agent's own assigned profile still counts as a floor below (`raise`)
   if (serverRow) configured = profileView(serverRow, "mcp_server");
-  else if (agentRow) configured = profileView(agentRow, "agent");
+  else if (agentRow && kind !== "robot_browser") configured = profileView(agentRow, "agent");
   else {
     const row = await shippedProfile(db, defaultProfileFor(kind, "known"));
     if (row) configured = profileView(row, "shipped_default");
@@ -342,9 +364,13 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
   // raises the requirement to it; the shipped version 1 is L2). An L1 engine placement therefore needs the org floor,
   // the sensitivity floor AND an engine-worker version at L1 (each a step-up), and an executor attesting L1: the runc
   // backend attests L1 only, and an L1 attestation never meets an L2 or L3 requirement (the broker's rank check).
-  const engineWorkerFloor = org.isolationFloorEngineWorker as unknown;
-  const relaxable = kind === "engine_worker" && req.agent === null && !serverRow && !agentRow && isRequirableClass(engineWorkerFloor);
-  raise(relaxable && isolationClassRank(engineWorkerFloor) < isolationClassRank(configured.minClass) ? engineWorkerFloor : configured.minClass);
+  // ADR-0364 S3: a robot run's configured profile (robot-browser's latest version) is capped the same way at the org's
+  // robot floor, so an L1 robot run needs that floor, the sensitivity floor AND a robot-browser version at L1 (each a
+  // step-up), and an L1 attestation; an agent's own assigned profile still raises it (below)
+  const kindFloor = (kind === "engine_worker" ? org.isolationFloorEngineWorker : kind === "robot_browser" ? org.isolationFloorRobotBrowser : undefined) as unknown;
+  const relaxable =
+    ((kind === "engine_worker" && req.agent === null && !agentRow) || kind === "robot_browser") && !serverRow && configured.source === "shipped_default" && isRequirableClass(kindFloor);
+  raise(relaxable && isolationClassRank(kindFloor) < isolationClassRank(configured.minClass) ? kindFloor : configured.minClass);
   if (agentRow && agentRow.id !== configured.id) raise(agentRow.minClass as RequirableIsolationClass);
   // owner decision C: an interactive person's own stdio call (no agent) in a relaxed scope is placed under the
   // CONFIGURED profile with the unknown-agent floor at L2 (`unknownAgentFloor`); every other floor still counts
@@ -420,6 +446,9 @@ export async function decidePlacement(
   db: Db,
   req: PlacementRequest & { imageDigest: string; actorUserId?: string | null; onlyExecutorIds?: readonly string[]; ttlSeconds?: number },
 ): Promise<PlacementDecision> {
+  // ADR-0364 S3: egress exactly on a robot run (a caller fault otherwise: thrown before any fact is read or row written)
+  const egressProblem = placementEgressProblem(req.workloadKind, req.egress);
+  if (egressProblem) throw new PlacementEgressError(egressProblem);
   const requirement = await resolveRequirement(db, req);
   if (requirement.kind === "not_isolable") return requirement;
   const userId = req.actorUserId ?? NO_IDENTITY;
@@ -452,11 +481,14 @@ export async function decidePlacement(
     requiredBy: requirement.requiredBy,
     profileDigest: requirement.profile.digest,
     imageDigest: req.imageDigest,
+    ...(req.egress ? { egress: req.egress } : {}),
     ...(req.onlyExecutorIds ? { onlyExecutorIds: req.onlyExecutorIds } : {}),
     ...(req.ttlSeconds !== undefined ? { ttlSeconds: req.ttlSeconds } : {}),
     audit: {
       userId,
       detail: {
+        // ADR-0364 S3: a robot run's egress targets are part of what was decided (hosts and ports, no secrets)
+        ...(req.egress ? { robotRunId: req.egress.runId, egressTargets: req.egress.targets } : {}),
         floors: requirement.floors,
         profileName: requirement.profile.name,
         profileVersion: requirement.profile.version,

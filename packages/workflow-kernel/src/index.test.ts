@@ -3,6 +3,8 @@ import {
   assertCompensationStatus,
   closePrSupersededByMerge,
   COMPENSATION_LIFECYCLE,
+  STAGE_DEADLINE_LIFECYCLE,
+  nextDeadlinePhase,
   compensationStatusFor,
   compensationPhaseOf,
   compensationPlan,
@@ -1159,6 +1161,61 @@ describe("ADR-0340: compensation (saga) stages", () => {
       ],
       /not a forward stage/,
     );
+  });
+});
+
+describe("ADR-0340 slice 2: stage deadlines (sla)", () => {
+  const base = [
+    { id: "intake", type: "trigger" },
+    { id: "req", type: "artifact_generation", output: "r" },
+    { id: "gate", type: "human_approval", approvers: ["requesting_user"] },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+  ];
+  const withStage = (extra: Record<string, unknown>, at = 2) =>
+    validateDefinition({ workflow: "sla", stages: base.map((s, i) => (i === at ? { ...s, ...extra } : s)) });
+
+  it("accepts a bounded deadline on a resting or executed stage, with notify as the default action", () => {
+    const def = withStage({ sla: { warnAfterSeconds: 3600, breachAfterSeconds: 86_400 } }, 1);
+    expect(def.stages[1]!.sla).toEqual({ warnAfterSeconds: 3600, breachAfterSeconds: 86_400, onBreach: "notify" });
+    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "fail" } }, 3).stages[3]!.sla?.onBreach).toBe("fail");
+    // a sign-off may only cancel the instance on breach
+    expect(withStage({ sla: { breachAfterSeconds: 600, onBreach: "fail" } }).stages[2]!.sla?.onBreach).toBe("fail");
+  });
+
+  it("refuses bad bounds, timed failure paths, and a sign-off's own reminders or escalation (decision 9)", () => {
+    expect(() => withStage({ sla: { breachAfterSeconds: 30 } }, 1)).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 600 } }, 1)).toThrow(/less than/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, onBreach: "reassign", reassignTo: ["u"] } })).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, extra: 1 } }, 1)).toThrow();
+    expect(() => withStage({ sla: { breachAfterSeconds: 600 } })).toThrow(/approvals queue's SLA/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600, warnAfterSeconds: 60, onBreach: "fail" } })).toThrow(/approvals queue's SLA/);
+    expect(() => withStage({ sla: { breachAfterSeconds: 600 } }, 0)).toThrow(/not timed/);
+    expect(() =>
+      validateDefinition({
+        workflow: "x",
+        stages: [
+          ...base,
+          { id: "undo", type: "git_operation", action: "delete_branch", connection: "gh", repo: "o/r", compensates: "branch", sla: { breachAfterSeconds: 600 } },
+        ],
+      }),
+    ).toThrow(/not timed/);
+  });
+});
+
+describe("ADR-0340 rule 12: the stage deadline lifecycle is one declared table", () => {
+  it("pins every allowed move, and refuses anything else", () => {
+    expect(STAGE_DEADLINE_LIFECYCLE).toEqual({
+      none: { enter: "scheduled", enter_unsent: "unscheduled" },
+      scheduled: { warn: "warned", breach: "breached" },
+      warned: { breach: "breached" },
+      unscheduled: {},
+      breached: {},
+    });
+    expect(nextDeadlinePhase("scheduled", "warn")).toBe("warned");
+    expect(nextDeadlinePhase("warned", "warn")).toBeNull();
+    expect(nextDeadlinePhase("breached", "warn")).toBeNull();
+    expect(nextDeadlinePhase("breached", "breach")).toBeNull();
+    expect(nextDeadlinePhase("unscheduled", "breach")).toBeNull();
   });
 });
 

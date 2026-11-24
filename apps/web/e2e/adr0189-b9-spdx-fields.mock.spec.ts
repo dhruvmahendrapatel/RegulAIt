@@ -282,7 +282,7 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
   test("an evaluation dataset version: five fields; a gateway refusal is announced without the value", async ({ page }) => {
     const spdx = await setup(page);
     await page.goto("/ui/admin/evals");
-    await page.getByRole("link", { name: /^golden v2/ }).click();
+    await page.getByRole("button", { name: /^golden v2/ }).click();
     await expect(banner(page)).toContainText(
       "SPDX output for this evaluation dataset version is not_producible until these properties are declared: Built time, Originated by, Release time, Download location.",
     );
@@ -314,7 +314,7 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
   test("withdrawn: a declared built time is withdrawn after a confirmation, and the history keeps it", async ({ page }) => {
     const spdx = await setup(page, { seed: { [`eval_dataset:${EVAL_DS}`]: [decl("builtTime", "2026-01-02T03:04:05Z", { seq: 7 })] } });
     await page.goto("/ui/admin/evals");
-    await page.getByRole("link", { name: /^golden v2/ }).click();
+    await page.getByRole("button", { name: /^golden v2/ }).click();
     await expect(panel(page).getByTestId("spdx-value-builtTime")).toHaveText("2026-01-02T03:04:05Z");
     await expect(banner(page)).not.toContainText("Built time");
 
@@ -344,7 +344,7 @@ test.describe("ADR-0189 B9: SPDX fields on dataset versions", () => {
     await page.goto("/ui/admin/regulait-llm");
     // I-2: the datasets live on the stepper's Training data step
     await page.getByRole("list", { name: "Custom-model steps" }).getByRole("button", { name: /^\d?Training data/ }).click();
-    await page.getByRole("link", { name: /^support-corpus v1/ }).click();
+    await page.getByRole("button", { name: /^support-corpus v1/ }).click();
     await expect(banner(page)).toContainText("SPDX output for this training dataset version is not_producible");
     await panel(page).getByRole("button", { name: "Set dataset type" }).click();
     const dialog = page.getByRole("dialog", { name: "Set dataset type" });

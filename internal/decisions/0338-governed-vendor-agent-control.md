@@ -369,3 +369,180 @@ the build departs from it and why.
     lease (deadline + 60 s).
   - A settle reads the state. The target state means `succeeded`. Any other known state means `failed / not_applied`,
     so an agent is never left unactionable when the prior state is missing. Only an unreadable state stays `unknown`.
+
+## As built (slice 1b) — 2026-11-20
+
+Slice 1b adds the control credential and the first vendor member, Copilot Studio quarantine. The decision text above is
+unchanged; this section records where the build departs from it or fills in what it left open.
+
+- **The delegated connect flow is slice 1c.** The table accepts `delegated` rows (CHECK: `platform_write` only, an
+  `expires_at` at most 90 days after the row was stored, a stored secret), the opt-in
+  `discovery_settings.vendor_agent_control_delegated_enabled` is off by default with its `settings_relax` step-up key
+  (`DISCOVERY_STEP_UP_KEYS.vendorAgentControlDelegated`), and the resolver refuses `credential_mode_disabled` and
+  `credential_expired`. Connecting one, the authorization-code flow with PKCE through `@azure/msal-node`, and the
+  refresh-token rotation on use are not built: the store route refuses `delegated` with
+  `409 delegated_connect_not_available`, and a delegated row's token request fails with the same code. A federated
+  service principal or a stored client secret is what slice 1b stores.
+- **The control token has its own federation subject.** A federated control credential is asserted for
+  `regulait:vendor-agent-control:<sourceId>` (`vendorAgentControlSubject`), never the read subject
+  `regulait:discovery-source:<sourceId>`. The customer's write app trusts only the control subject, so an assertion
+  minted for a scan cannot be exchanged for the write app.
+- **The write app is a different app, in the source's tenant.** Storing refuses `write_app_is_read_app` when the
+  control credential names the live read credential's app, and `credential_target_mismatch` for another tenant.
+- **The guard trigger permits three updates.** `discovery_credentials_guard` fixes id, source, purpose, mode, public
+  config, expiry and creator. An update may revoke a row, record the scanner's write-scope verdict, or replace the
+  ciphertext (data-key rotation now; the delegated refresh token's rotation in slice 1c). A revoked row stays revoked.
+  The table also refuses TRUNCATE, so the 0185 rules hold.
+- **The Copilot Studio locator.** The quarantine API addresses an agent by Power Platform environment id and bot id.
+  E17's read path now also reads `RetrieveCurrentOrganization` (a GET, on its endpoint allow-list) and stages each
+  agent with an `environmentId` vendor attribute. An environment whose id cannot be read still stages its agents,
+  without the attribute, so they cannot be controlled. The control contract gains an optional `locatorOf`. A request
+  for an agent without a locator answers `409 vendor_locator_missing`. The locator is snapshotted on the action
+  (`vendor_agent_actions.vendor_locator`, a commented 3NF exception), bound into the approval digest, and re-checked
+  at execute.
+- **The contract gains `acceptedModes` and `token`.** `token` is `{ provider: "entra", scope }`. Copilot Studio's scope
+  is `https://api.powerplatform.com/.default`, and its `acceptedModes` are federated, static and delegated.
+  Slice 2 adds token providers for Agentforce, OpenAI and n8n.
+- **The token is obtained before anything moves.** Execute and settle request the token outside any transaction,
+  before the action's transition. A token failure answers `502 control_token_failed`, keeps only Entra's AADSTS code,
+  is audited, and leaves the action and its approval as they were. The transaction re-reads the credential, and a
+  different row id refuses `credential_changed`.
+- **Vendor answers.** A 2xx means `applied`, then confirmed by the observed read. 401 and 403 mean `refused /
+  vendor_refused_credential`. 404 means `vendor_agent_not_found`. 405 (a classic chatbot) means
+  `vendor_action_unsupported`. Any other 4xx means `failed / vendor_rejected`. A 5xx or a 429 may have acted, so the
+  action goes to `unknown` and is settled by a read, never retried. Every call passes `allowListedFetch`, with three
+  (method, path) pairs on `https://api.powerplatform.com`, inside the guarded fetch. Both ids are checked as GUIDs
+  before anything is sent and are path-encoded. A contract test feeds every registered control hostile ids.
+- **Routes.** `GET`, `PUT` and `DELETE /v1/discovery/sources/:sourceId/control-credential` are admin-only and
+  API-only, with KNOWN_UI_GAPS entries against #453. Storing is the `settings_relax` step-up bound to
+  `{op: "vendor_control_credential", sourceId, mode, tenantId, clientId, replacesCredentialId}`. Revoking is free.
+  Both are audited in the same transaction. The read-credential routes, the discovery list and the scanner select
+  `purpose = 'discovery_read'` only, and a test pins that with a negative control.
+- **Posture.** `delegatedControlCredentials` lists every source whose control credential is delegated, as a finding,
+  and says whether it is usable. Control rows are never counted as read credentials.
+- **Open source (ADR-0176).** The token uses `@azure/identity` through `@regulait/cloud-discovery`'s `azureCredential`,
+  which is already the discovery Entra client and already sends its requests through the guarded fetch. Two options
+  were compared for the delegated refresh in slice 1c:
+  - `@azure/msal-node` (MIT, maintained by Microsoft, in the lockfile through `@azure/identity`) handles the
+    authorization-code flow with PKCE, refresh and rotation.
+  - `oauth4webapi` (MIT, already pinned in the gateway) is a lower-level, spec-exact OAuth client with a custom-fetch
+    hook.
+
+  msal-node stays the choice, as section 3a decided, because it is Entra's own client. No new dependency is added in
+  slice 1b.
+
+## As built (slice 1c) — 2026-11-21
+
+Slice 1c connects a delegated control credential (section 3a) and uses it. The decision text above is unchanged; this
+section records where the build fills in what it left open.
+
+- **Two people (review lessons of #1120 and #979).** Connecting a delegated credential gives RegulAIt a named
+  admin's power over the vendor, so it needs two people. The admin who starts the sign-in names a second, active
+  administrator in the approval pool (`approverUserId`; never the requester, `approver_is_requester`; nor anyone
+  delegation-linked, `approver_not_eligible`). After the sign-in the refresh token is held encrypted on the request,
+  and the `discovery_credentials` row is written only when that approver approves in the Approvals Queue.
+- **The machine (ADR-0348).** `vendor_control_delegated_requests.status` is `VENDOR_CONTROL_DELEGATED_MACHINE`:
+  `awaiting_sign_in` → `awaiting_approval` (sign_in) or `failed` (sign_in_fail); `awaiting_approval` → `connected`
+  (approve) or `denied` (deny); both open states → `cancelled` or `expired`. Every writer uses `whereFrom` with a
+  returned row, and responses carry `lifecycle`. The pending migration's guard trigger allows only these moves, fixes
+  the identity, sets the account's object id and the approval once, and refuses any change to a final row. CHECKs tie
+  the verifier to `awaiting_sign_in`, the held token to `awaiting_approval` and the credential to `connected`, so a
+  final row holds no secret. One request may be open per source (a partial unique index).
+- **Starting a sign-in.** `POST /v1/discovery/sources/:sourceId/control-credential/delegated` takes `{tenantId,
+  clientId, account, accountObjectId, expiresInDays (1 to 90, 30 by default), replacesCredentialId, approverUserId}`.
+  `accountObjectId` is the named account's immutable Entra object id (`oid`), and is what the sign-in is matched on;
+  `account` (the UPN) is the login hint and a label only, because Microsoft documents `preferred_username` as mutable
+  and not for authorization (review of #1251 [3]).
+  - It is refused while `vendor_agent_control_delegated_enabled` is off (`credential_mode_disabled`), and for a vendor
+    whose control does not list `delegated` or declares no `delegatedScope` (`credential_mode_not_accepted`).
+  - The tenant must be the source's, the app must not be the read app, the replaced row must be the live one, and no
+    other request may be open (`delegated_request_open`).
+  - The `settings_relax` step-up is bound to `{op: "vendor_control_delegated", sourceId, account, accountObjectId,
+    tenantId, clientId, expiresInDays, replacesCredentialId, approverUserId}`.
+  - The answer sets ADR-0167's browser binding: an HttpOnly, `SameSite=Lax` cookie scoped to the callback path,
+    holding an HMAC of the state under the data key.
+  - The answer is the Entra authorization URL, built by `@azure/msal-node` from static metadata (no network call):
+    the PKCE S256 challenge, a 256-bit state and nonce, `login_hint` = the account, `prompt=login`.
+- **The pending sign-in stays server side.** The request keeps the state, the nonce and the PKCE verifier, the
+  verifier and later the held refresh token encrypted with the data key (both in `CIPHERTEXT_COLUMNS`). The verifier
+  never reaches the browser, so an intercepted redirect cannot be redeemed. The sign-in window is at most 10 minutes
+  (a CHECK on the database's own clock). The table has row-level security (admin, or the `system_task` / `migration`
+  reason) and refuses TRUNCATE.
+- **The callback.** `GET /v1/discovery/control-credential/delegated/callback` is the redirect URI the customer's app
+  registration names.
+  - Entra's redirect is a cross-site top-level navigation, which never carries the `SameSite=Strict` session cookie,
+    so the route cannot ask for a session (review of #1251 [1]). It is auth-exempt and bound to the browser instead,
+    as the SSO callback is (ADR-0167): it completes only when the binding cookie matches the state, and acts as the
+    admin who started the sign-in, under the `system_task` RLS reason. Without the binding (another browser, a
+    planted link, another request's cookie, or a session of another admin) it is refused before any vendor call
+    (`delegated_request_not_bound_to_this_browser`, audited), and the request stays open for its own browser. The
+    state is 256-bit and server side, and the PKCE verifier never leaves the server. A used or expired request is
+    refused; a declined one moves to `failed`.
+  - The code is redeemed with the verifier and nonce. The token response is then validated by `oauth4webapi`
+    (`processAuthorizationCodeResponse`; refreshes use `processRefreshTokenResponse`), not by hand-written checks:
+    `iss` is the tenant's v2.0 issuer, `aud` is the app, `exp` and `iat` are current, and the nonce is the request's
+    (`delegated_id_token_invalid`, review of #1251 [4]). The signature is not checked and no JWKS is fetched,
+    because the ID token came from the token endpoint over TLS (OIDC Core §3.1.3.7 item 6). The granted scopes must
+    include the control's `delegatedScope` (`delegated_scope_not_granted`).
+  - The account is matched on its immutable `tid` and `oid`, never on the UPN. A guest (`acct` = 1, or an `idp`
+    other than the tenant's own issuer) is refused, so a same-UPN guest or a renamed account cannot stand in for the
+    named member (`delegated_account_mismatch`, `failed`). The approval label shows the object id beside the UPN.
+  - A sign-in that returns no refresh token (offline access not granted) moves to `failed`
+    (`delegated_no_refresh_token`).
+  - On success the request moves to `awaiting_approval` with the token held, and an approval is queued in the same
+    transaction: object type `vendor_control_delegated`, the named approver, stage `__vendor_control_delegated__:<id>`,
+    an arguments digest over `{op, requestId, sourceId, tenantId, clientId, accountObjectId, accountUpn,
+    expiresInDays, replacesCredentialId}`, and the vendor control approval window. The answer is `202`.
+- **The decision.** `POST /v1/approvals/:id/decide`. The precheck first expires the request when its approval's
+  window has passed, and refuses `approval_expired`; the decision's transaction checks the window again by the
+  database clock (review of #1251 [2]). The precheck then refuses the requester
+  (`cannot_approve_own_delegated_credential`, also through the admin override), anyone outside the approval's pool
+  (`not_an_eligible_approver`) and a decision without an `approval_decide` step-up bound to `{op, approvalId, decision,
+  argumentsDigest}`; bulk and ChatOps decisions carry no step-up and are refused. In the decision's transaction the
+  step-up is spent. Approve re-checks the opt-in and the replaced row (`credential_changed` rolls the whole decision
+  back), revokes the old row with its secret destroyed, and stores the `delegated` row: `public_config` holds the
+  tenant, app, the account's object id and UPN; `secret_ciphertext` is the held envelope moved as it is; `expires_at`
+  is `now()` plus the chosen days; `created_by` is the requester. It is audited with both people. Deny destroys the
+  held token.
+- **Expiry and cancel.** Every read, the callback and the decision first expire a passed sign-in window
+  (`sign_in_window_passed`) and an approval past its own expiry (`approval_expired`, the approval superseded), each
+  audited and destroying what the state held. The scheduled `vendor-control-delegated-expiry-sweep` (every 5
+  minutes, at most 500 per pass, oldest first) does the same for requests nobody reads, so a held refresh token never
+  waits for someone to look (review of #1251 [2]). `GET /v1/discovery/control-credential/delegated/:requestId` returns a
+  request with its lifecycle (never a verifier, token or ciphertext); `POST …/:requestId/cancel` withdraws an open
+  one (narrowing, so no step-up) and supersedes its approval.
+- **Client authentication.** The confidential client authenticates with a federated assertion for the control subject
+  (`vendorAgentControlSubject`), never a stored client secret. The row's one ciphertext is the refresh token, so a
+  delegated credential has no second secret to hold.
+- **Use, and the rotation.** The resolver redeems the refresh token for the control's `delegatedScope` only (Copilot
+  Studio: `https://api.powerplatform.com/CopilotStudio.AdminActions.Invoke`). msal-node is told to keep the rotated
+  refresh token (`forceCache`, since each use is a fresh client), and the one Entra returns replaces the stored one in
+  the same row. The update is conditional on the row still holding the token just redeemed, so a concurrent rotation
+  is not overwritten. A refreshed token for another account is refused (`delegated_account_mismatch`) and stores
+  nothing. Token failures keep only the AADSTS code, as the app-only path does.
+- **The network.** msal-node's `networkClient` is the tenant's guarded fetch narrowed by `allowListedFetch` to one
+  call, POST `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`, and its logger is silenced.
+- **The contract.** `ControlTokenSpec` gains an optional `delegatedScope`. The store route (`PUT …/control-credential`)
+  refuses `delegated` with `409 delegated_needs_sign_in`, pointing to the sign-in route.
+- **Open source (ADR-0176).** `@azure/msal-node` 7.1.1 (MIT) becomes a direct, exact-pinned gateway dependency. It was
+  already in the lockfile at that version through `@azure/identity`. No other dependency is added.
+  - **The search, recorded (review of #1251 [5]).** Three maintained clients were compared: `openid-client` (already
+    used for SSO in `auth.ts`), `oauth4webapi` (already pinned, the library under `openid-client`) and
+    `@azure/msal-node` (Entra's own client).
+  - All three do authorization code with PKCE. msal-node was kept for the Entra-specific parts. It sends the
+    federated client assertion through its `clientAssertion` callback. It holds Entra's refresh token and returns the
+    rotated one from its cache, which needs `forceCache`. It builds the authorization URL from static authority
+    metadata with no discovery call. Using `openid-client` would mean hand-writing the token cache and the rotation
+    handling, or fetching the discovery document over egress.
+  - `oauth4webapi`, already in the tree, validates the token response's ID token claims, so neither client's
+    validation is hand-written.
+- **Evidence keys (review of #1251 [6] and the S4 nit).** `requested_by`, `approver_user_id`, `replaces_credential_id`
+  and `credential_id` have no `ON DELETE`. A user or a credential that a request names is not deleted out from under
+  the two-person evidence, and every foreign key is indexed. Deleting the source still removes its requests (the
+  source is the owner).
+- **Final rows are kept.** Final request rows are not deleted. They are the two-person evidence and hold no secret (the
+  CHECKs above). Open rows past their window are expired by the sweep. #1160 (triage-low) tracks pruning old final
+  rows, not built.
+- **Also from the review of #1120.** The read-credential store refuses a `clientId` equal to the live control
+  credential's app (`read_app_is_write_app`), so the two apps stay separate whichever is stored first. Execute and
+  settle check the step-up (without spending it) before minting a vendor token.
