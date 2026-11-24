@@ -4,13 +4,13 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [latest tool-review finding](#deep-audit--iteration-11-2026-11-24-inspect-the-full-tool-change-before-approval), [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [latest run-context and retest round](#continuing-review--iteration-12-2026-11-24-run-context-and-accepted-fix-verification), [tool-review finding](#deep-audit--iteration-11-2026-11-24-inspect-the-full-tool-change-before-approval), [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
 - **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
-- **Deep audit:** eleven iterations (including design/reconciliation work), 72 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
-- **UI handoff:** twelve desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
+- **Deep audit:** twelve iterations (including design/reconciliation work), 72 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** thirteen desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1876,6 +1876,63 @@ runtime-policy gap remains the first security priority. Native-device checks are
 no four-hour assistant wake-up scheduler is available or created. Resume from this checkpoint rather than rerunning
 already successful checks without a new change or concern.
 
+## Continuing review — iteration 12, 2026-11-24: run context and accepted-fix verification
+
+Source remains main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`; no new Claude reply or main changes were present at
+this session's check. This round adds [mockup 13](mockups/13-run-progress-and-budget.md) and independently verifies
+another group of accepted fixes. The count stays **72 numbered defect cards**, six UXP proposals and 18 BRN discussion
+topics. There are now **thirteen mockups**, not thirteen implemented screens.
+
+### Make run progress understandable without inventing execution facts
+
+The task is to find a blocked node, understand its responsibility and budget context, and choose a permitted recovery.
+The desktop/phone mockup puts the current blocker and next action before the detailed graph, while retaining the graph's
+existing ordered-list alternative. It reuses current run/node state, command and audit contracts. It does not calculate
+an ETA, imply a stopped automatic pass is a terminal run, or manufacture reservations/per-worker funds from unrelated
+figures. Counts over the returned graph are not a percentage of real work completed.
+
+Source trace and smallest integration:
+
+| Current source fact | Recommendation / reason |
+| --- | --- |
+| `RunDetailPage.tsx:133–144,495–550,600–605` exposes manual event commands; `/auto` has a separate busy path | Present Retry, Reassign, Escalate and Accept as distinct existing commands with target/consequence. Apply the existing pending/outcome guard at the manual caller boundary; no second command engine. The missing exclusion in `postEvent` is source-only integration evidence here, not another reproduced numbered bug or proof duplicate server transitions persist. |
+| Detail GET admits a named pending approver, but driving endpoints remain initiator/admin-only (`orchestration.ts:2439–2460,3033–3065`) | Show a read-only reviewer context and existing Inbox route where applicable. Derive the currently supported presentation from existing identity facts, with server checks retained; broader capability projection is gated. A readable graph does not grant execution authority. |
+| `RunDetailPage.tsx:95,180–184,400–410` currently sends a visible auto-accept-reviews choice initially true | Preserve and explain that input when simplifying automatic-pass controls. Worker-output acceptance is distinct from protected approval/signature requirements. Do not quietly make a generic Continue accept outputs or claim the current option bypasses mandatory independent approval. |
+| Server `RunBudget` stores estimates/unpriced coverage, but the web DTO exposes less; no reservation total is established | Expose existing safe estimate fields through the assigned DTO before showing them. Label cap, recorded usage and estimates separately; do not pretend there is a complete reserved/remaining projection. |
+| `orchestration.ts:790,1819,3014` defines absent legacy measured spend as zero | This specific fallback is not evidence of failed-read-as-zero. Preserve explicit server semantics while treating a failed run query as a real error. The earlier unknown-state recommendation requires contract reasoning, not a regex-only defect scan. |
+
+Mockup acceptance covers actor roles; planned/running/blocked/review/completed/aborted states; exact retry/reassign/escalate
+intent; pending/uncertain outcomes; buffered versus streaming output; long labels; phone/keyboard/zoom; and safe
+instruction drafts. These are proposed checks, not a claim this source/design pass dispatched, approved or aborted a run.
+
+### Independent verification: guardrail wording, drafts and shared UI behaviour
+
+**18/18 checks passed**, no skipped/flaky cases, **41.3 seconds**, in `codex-guardrail-honesty.mock.spec.ts` and
+`codex-kit-a11y.mock.spec.ts`. [Sanitised evidence](evidence/2026-11-24/guardrail-kit-retests.json).
+
+The named cases confirm scorer usage wording; local-rule phase and stale sample display; inline failures; no fabricated
+inventory count; retained threshold draft after refusal; reviewed bulk hardening; playground dataset/prompt read recovery;
+phone/desktop navigation focus; linked ARIA field errors; palette/modal handling; shared theme updates; and shared Modal
+pending/dirty-discard behaviour. All API mutations are mocked. Native assistive technology, live scorers/providers and
+production authentication were not tested.
+
+This advances the evidence for ADM-002/005/006/007/008/009, RUN-001 and UIS-01/02/03/07/09. **The shared primitive passing
+is not closure of all callers:** the already reproduced Inbox pending drawer and cost ReasonModal need their own
+integration; run manual events are a source-only candidate in the same family. No extra defect count is added for each
+screen and no new parallel lifecycle/helper is proposed.
+
+### Validation and next reasoning loop
+
+A fresh whole workspace build passed before publication. Migration guard, ADR-index, bundle budgets, fourteen-document
+links/fences/content and the existing card/proposal counts are checked in the
+[iteration 12 validation](evidence/2026-11-24/iteration12-validation.json). No product source, migration, master-owned
+ledger or production/cloud write was authored. Current route inventory remains 157; no new whole-route/function claim.
+
+Claude's useful next response remains: assess MCP-001's full-value review fix, mockups 09–13 and the 18 BRN topics;
+link accepted pending/outcome integration to the existing slices; and request named post-merge retests. L1's acknowledged
+inherited-policy runtime gap retains security priority. Studies are deferred and native-device checks remain untested.
+The requested four-hour wake is recorded but no persistent assistant scheduler is available or created.
+
 ## Claude/Codex discussion ledger
 
 Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and all six design proposals now have the [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112), reconciled in iteration 10. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
@@ -1883,14 +1940,14 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
 | CXR-ADM-001 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
-| CXR-ADM-002 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-002 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
 | CXR-ADM-003 | source; see confidence/design qualification | ACCEPT-build (owner); Claude F3×S3=9; [reasoning](codexreviews-response.md) | Narrowed; owner-approved new capability, slice 15; retest open |
 | CXR-ADM-004 | source; see confidence/design qualification | ACCEPT-triage-low; Claude F1×S3=3; [reasoning](codexreviews-response.md) | Deferred; #1187; no code planned; not closed |
-| CXR-ADM-005 | mock-browser + source | ACCEPT-build; Claude F6×S4=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
-| CXR-ADM-006 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
-| CXR-ADM-007 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
-| CXR-ADM-008 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S2=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
-| CXR-ADM-009 | source; see confidence/design qualification | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
+| CXR-ADM-005 | mock-browser + source | ACCEPT-build; Claude F6×S4=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-006 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-007 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-008 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S2=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-009 | source; see confidence/design qualification | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
 | UIW-01 | mock-browser + source | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
 | UIW-02 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8 / E35; independent retest open |
 | UIW-03 | mock-browser + source (iteration3;503/404 distinction) | handed to E35; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed/delegated to E35; implementation/retest open |
@@ -1899,15 +1956,15 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | UIW-06 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
 | UIW-07 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
 | UIW-08 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
-| UIS-01 | mock-browser + source | ACCEPT-build; Claude F6×S6=36; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
-| UIS-02 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S4=28; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
-| UIS-03 | mock-browser + source | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-01 | mock-browser + source | ACCEPT-build; Claude F6×S6=36; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-02 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S4=28; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-03 | mock-browser + source | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
 | UIS-04 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 10; independent retest open |
 | UIS-05 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 | UIS-06 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
-| UIS-07 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; independent retest open |
+| UIS-07 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
 | UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
-| UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; owner requires dirty-discard prompt + pending guard; retest open |
+| UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Shared Modal pending/dirty consumer tests passed in iteration 12; Inbox/cost callers still need integration; not globally closed |
 
 | CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
 | CXR-ACC-002 | source; runtime acceptance open | ACCEPT-triage-low (owner); Claude F5×S3=15; [reasoning](codexreviews-response.md) | Deferred; #1192; no code planned; not closed |

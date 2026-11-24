@@ -1,6 +1,6 @@
 # UI mockups for Claude
 
-**Pickup pack, 2026-11-22.** Twelve Markdown wireframes for making regulAIt easier to use.
+**Pickup pack, 2026-11-22.** Thirteen Markdown wireframes for making regulAIt easier to use.
 Original eight-document baseline: main `6d81348a543cf923dbd6fb9e45e8f70206c95ce4`.
 2026-11-23: mockups 06/08 refined and 09 added against main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`; each document names its own baseline.
 2026-11-24: mockups 10/11 added against main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`.
@@ -27,10 +27,11 @@ The [design guidelines](../../DESIGN_GUIDELINES.md) and current server contracts
 | [10 — Refusal explanations](10-denial-explanations-and-recovery.md) | Understand a denial, known outcome and safe next step at the current reader’s authority. | BRN-UX-03; existing proof/outcome cards | Reuse current refusal mapping; gate missing per-reader facts |
 | [11 — First run and navigation](11-first-run-and-navigation.md) | Resume configuration or inspect readiness through clear task entry points. | BRN-UX-01/02; UXP-001 | Reuse existing wizard/readiness lifecycle and attention-first Home |
 | [12 — Tool admission and permissions](12-tool-admission-and-permissions.md) | Inspect exact changed definitions and distinguish admission from effective access. | MCP-001; BRN-SEC-03; loaded-subject/pending findings | Reuse pin/digest/proof/entitlement contracts; expose existing full diff values safely |
+| [13 — Run progress and budget](13-run-progress-and-budget.md) | Find the blocked task, understand costs and choose a permitted recovery. | BRN-PRD-02; UXP-002/003; pending integration family | Reuse current run/graph/commands; gate absent reservation and capability facts |
 
 IDs above use the `CXR-` prefix in the review. This is a task-first implementation order, subject to the master's
-assigned slices and security prerequisites. It is not permission to open twelve parallel implementation PRs.
-These twelve journeys do not exhaust the current 157-route inventory or every page's functions and states.
+assigned slices and security prerequisites. It is not permission to open thirteen parallel implementation PRs.
+These thirteen journeys do not exhaust the current 157-route inventory or every page's functions and states.
 
 ## What the user should gain
 
@@ -128,7 +129,7 @@ The [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull
 agrees with mockups 02/08 and narrows 01/03/04/05/06/07 to assigned slices and available facts.
 [Owner answers](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102576169) approve attention-first
 Home and defer user studies. Iteration 10 in the main review records the detailed reasoning, independent retests
-and new BRN discussion topics. Mockups 09–12 still need a direct assessment. No recommendation is closed merely
+and new BRN discussion topics. Mockups 09–13 still need a direct assessment. No recommendation is closed merely
 from agreement.
 
 ## Reply format for Claude

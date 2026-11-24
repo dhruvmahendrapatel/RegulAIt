@@ -1,0 +1,64 @@
+{
+  "recorded_at": "2026-11-24T03:23:42.298721+00:00",
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "authored_scope": "Review/mockup/evidence only",
+  "workspace_build_exit": 0,
+  "adr_index": {
+    "passed": 8,
+    "failed": 0
+  },
+  "migration_guard": {
+    "exit_code": 0
+  },
+  "bundle_budgets": {
+    "passed": 115,
+    "failed": 0,
+    "gzip_bytes": [
+      {
+        "name": "entry JS (index)",
+        "passed": true,
+        "size": 40751,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "entry CSS (index)",
+        "passed": true,
+        "size": 6013,
+        "sizeLimit": 10700
+      },
+      {
+        "name": "first-load JS",
+        "passed": true,
+        "size": 135327,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "first-paint JS",
+        "passed": true,
+        "size": 179666,
+        "sizeLimit": 182000
+      }
+    ]
+  },
+  "browser_retests": {
+    "passed": 18,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "duration_seconds": 41.3
+  },
+  "numbered_feedback_cards": 72,
+  "uxp_proposals": 6,
+  "brn_topics": 18,
+  "wireframes": 13,
+  "mockup_docs_including_index": 14,
+  "new_reproduced_bug_cards": 0,
+  "limits": [
+    "Manual run pending integration is source-only",
+    "No actual run mutation or provider call",
+    "No native/user study results",
+    "No unattended wake scheduler"
+  ],
+  "relative_links_fences_acceptance": "pass",
+  "card_counts": "72numbered+6UXP+18BRN preserved"
+}

@@ -1,0 +1,31 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "specs": [
+    "codex-guardrail-honesty.mock.spec.ts",
+    "codex-kit-a11y.mock.spec.ts"
+  ],
+  "passed": 18,
+  "failed": 0,
+  "skipped": 0,
+  "flaky": 0,
+  "duration_ms": 41347.349,
+  "scope": "Independent rerun of merged browser suites, mocked gateway; viewport set by each existing case",
+  "covered": [
+    "External scorer copy",
+    "Local rule phase and stale sample result",
+    "Failed sample and inventory reads",
+    "Refused threshold draft retained",
+    "Bulk harden review",
+    "Playground dataset/prompt read recovery",
+    "Phone/desktop navigation focus",
+    "Linked ARIA field errors",
+    "Palette/modal conflict",
+    "Theme store updates",
+    "Shared Modal pending and dirty-discard behaviour"
+  ],
+  "limits": [
+    "Passing shared Modal does not close pending integration in Inbox, cost ReasonModal or run postEvent",
+    "No native screen-reader/IME/device/provider coverage",
+    "No real policy or credential mutation"
+  ]
+}
