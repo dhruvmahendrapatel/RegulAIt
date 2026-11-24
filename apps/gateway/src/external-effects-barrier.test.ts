@@ -931,7 +931,8 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
         const asked = await app.inject({ method: "POST", url: `${BASE}/remediations`, ...(await relax(piaId, { op: "ai_saas_remediation", interactionId, action: "delete_conversation" })), payload: body });
         expect(asked.statusCode, asked.body).toBe(202);
         const { id, approvalId } = asked.json().remediation as { id: string; approvalId: string };
-        const decideReq = stepUpRequest(await grantStepUpForTest(db, anaId, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved" } } as Facts));
+        const [ap] = await db.select({ d: approvals.argumentsDigest }).from(approvals).where(eq(approvals.id, approvalId));
+        const decideReq = stepUpRequest(await grantStepUpForTest(db, anaId, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved", argumentsDigest: ap!.d } } as Facts));
         const decided = await app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, ...decideReq, payload: { decision: "approved", reason: "barrier" } });
         expect(decided.statusCode, decided.body).toBe(200);
         return async () => app.inject({ method: "POST", url: `${BASE}/remediations/${id}/execute`, ...(await relax(piaId, { op: "ai_saas_remediation_execute", remediationId: id })) });

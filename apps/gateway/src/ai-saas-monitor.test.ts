@@ -364,3 +364,17 @@ describe("ADR-0361 run window, lifecycle and widening", () => {
     expect([...AI_SAAS_CONNECTORS.values()].filter((c) => c.signedRedirectDownload).map((c) => c.vendor)).toEqual(["chatgpt_enterprise"]);
   });
 });
+
+describe("#991 S3 [3]: a stored vendor id is sent only as one exact path segment", () => {
+  it("refuses an id at the stored length (it may be truncated), a path-collapsing id and odd characters", async () => {
+    const { isUsableVendorRef, REMEDIATION_REF_MAX } = await import("./ai-saas-remediation-contract.js");
+    expect(isUsableVendorRef("claude_chat_01abc", "conversation")).toBe(true);
+    expect(isUsableVendorRef("user-1@example.test", "actor")).toBe(true);
+    expect(isUsableVendorRef(null, "actor")).toBe(true);
+    expect(isUsableVendorRef(null, "conversation")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.conversation), "conversation")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.actor), "actor")).toBe(false);
+    expect(isUsableVendorRef("x".repeat(REMEDIATION_REF_MAX.conversation - 1), "conversation")).toBe(true);
+    for (const bad of ["..", ".", "", "a/b", "a%2Fb", "a b", "a?b", "a#b", "\\x"]) expect(isUsableVendorRef(bad, "conversation"), bad).toBe(false);
+  });
+});

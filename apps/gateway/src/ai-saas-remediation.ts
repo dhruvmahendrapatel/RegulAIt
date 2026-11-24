@@ -54,13 +54,15 @@ import {
   type AiSaasRemediationStatus,
 } from "@regulait/shared";
 import { AI_SAAS_CONNECTORS, ConnectorError } from "./ai-saas-connectors.js";
-import type { RemediationTarget } from "./ai-saas-remediation-contract.js";
+import { isUsableVendorRef, type RemediationTarget } from "./ai-saas-remediation-contract.js";
 import { audit, connectorContextFor, liveCredential, loadAiSaasPolicy, type AiSaasMonitorDeps } from "./ai-saas-monitor.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret } from "./secrets.js";
-import { checkStepUp, requireStepUp } from "./step-up.js";
+import { loadApprovalPool, requestedAtOf } from "./approval-pool.js";
+import { whereFrom } from "./state-transition.js";
+import { checkStepUp, requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 
 type RemediationEvent = keyof (typeof AI_SAAS_REMEDIATION_MACHINE)["def"]["transitions"];
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -76,6 +78,9 @@ export const AI_SAAS_REMEDIATION_RULE_IDS = {
   requested: "ai-saas-remediation-requested",
   transitioned: "ai-saas-remediation-transitioned",
 } as const;
+
+/** the execute transaction lost a race on the action row; thrown to roll the approval's consumption back */
+class ExecuteRaced extends Error {}
 
 const unexpired = () => or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`));
 
@@ -108,7 +113,7 @@ async function transition(
       ...(extra.vendorStatus !== undefined ? { vendorStatus: extra.vendorStatus } : {}),
       ...(terminal ? { finishedAt: sql`now()` } : {}),
     })
-    .where(and(eq(aiSaasRemediations.id, row.id), inArray(aiSaasRemediations.status, [...AI_SAAS_REMEDIATION_MACHINE.sourcesOf(event)])))
+    .where(and(eq(aiSaasRemediations.id, row.id), whereFrom(aiSaasRemediations.status, AI_SAAS_REMEDIATION_MACHINE, event)))
     .returning();
   if (!updated) return null;
   await audit(tx, actorUserId, "ai_saas_remediation", row.id, AI_SAAS_REMEDIATION_RULE_IDS.transitioned, to === "failed" || to === "denied" ? "deny" : "allow",
@@ -166,7 +171,7 @@ export async function reconcileRemediation(db: Db, row: AiSaasRemediationRow): P
  */
 export async function precheckAiSaasRemediationDecision(
   db: Db,
-  approval: { id: string; userId: string },
+  approval: { id: string; userId: string; approverUserId: string | null; approverRoleId: string | null; argumentsDigest: string | null },
   deciderUserId: string,
   decision: "approved" | "denied",
   req: FastifyRequest | undefined,
@@ -175,11 +180,51 @@ export async function precheckAiSaasRemediationDecision(
   if (approval.userId === deciderUserId) {
     return { status: 403, body: { error: "cannot_approve_own_ai_saas_remediation", detail: "the person who requested a conversation deletion cannot decide it" } };
   }
+  // #991 S3 [1]: the second person is an ACTIVE administrator in the approval's own pool (the named approver, or their
+  // delegate only where the delegate is an admin too), never an override, checked at decision time (ADR-0180)
+  const [decider] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, deciderUserId), eq(users.isAdmin, true), isNull(users.disabledAt)));
+  const pool = await loadApprovalPool(db, { namedApproverUserId: approval.approverUserId, approverRoleId: approval.approverRoleId, callerUserId: approval.userId, asOf: requestedAtOf(approval.id) });
+  if (!decider || !pool.members.includes(deciderUserId)) {
+    return { status: 403, body: { error: "not_an_eligible_approver", detail: "a conversation deletion is decided by an active administrator it names (or their admin delegate), never by an override" } };
+  }
   if (!req || (channel && channel !== "http")) {
     return { status: 403, body: { error: "step_up_required", detail: "deciding a conversation deletion needs a fresh step-up, which only an interactive session can give" } };
   }
-  const su = await checkStepUp(db, req, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId: approval.id, decision }, channel: "http" });
+  if (!approval.argumentsDigest) return { status: 409, body: { error: "approval_unbound", detail: "this approval carries no arguments digest" } };
+  // only looks here: the grant is spent inside the decision's transaction (applyAiSaasRemediationDecision)
+  const su = await checkStepUp(db, req, aiSaasRemediationDecideStepUp(approval.id, decision, approval.argumentsDigest), { spend: false });
   return su.ok ? null : { status: su.status, body: su.body };
+}
+
+/** the approver's step-up, bound to the approval, the decision and the payload it approves */
+export const aiSaasRemediationDecideStepUp = (approvalId: string, decision: "approved" | "denied", argumentsDigest: string): StepUpCheckArgs => ({
+  kind: "approval_decide",
+  facts: { op: "ai_saas_remediation", approvalId, decision, argumentsDigest },
+  channel: "http",
+});
+
+/** the decision's own failure inside its transaction: the whole decision rolls back */
+export class AiSaasRemediationDecideError extends Error {
+  constructor(readonly statusCode: number, readonly code: string, message: string) {
+    super(message);
+    this.name = "AiSaasRemediationDecideError";
+  }
+}
+
+/**
+ * Inside the decision's transaction: the approver's grant is spent here, with the decision's writes, so a decision
+ * that rolls back leaves the grant unspent and a spent grant always has its decision. The action itself follows the
+ * approval lazily (reconcileRemediation), as before.
+ */
+export async function applyAiSaasRemediationDecision(
+  tx: Db,
+  approval: { id: string; argumentsDigest: string | null },
+  decision: "approved" | "denied",
+  req: FastifyRequest | undefined,
+): Promise<void> {
+  if (!req || !approval.argumentsDigest) throw new AiSaasRemediationDecideError(403, "step_up_required", "a conversation deletion needs the approver's step-up");
+  const su = await checkStepUp(tx, req, aiSaasRemediationDecideStepUp(approval.id, decision, approval.argumentsDigest), { spend: true });
+  if (!su.ok) throw new AiSaasRemediationDecideError(su.status, String(su.body.error ?? "step_up_required"), "the approver's step-up was not accepted");
 }
 
 function view(r: AiSaasRemediationRow, blocked: Partial<Record<RemediationEvent, string>> = {}) {
@@ -224,6 +269,9 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
     if (resolveDeployMode() === "air_gapped") return { status: 409, body: { error: "ai_saas_monitor_air_gapped", detail: "this deployment is air-gapped" } };
     const policy = await loadAiSaasPolicy(db);
     if (!policy.enabled) return { status: 409, body: { error: "ai_saas_monitor_disabled", detail: "AI SaaS monitoring is off for the organisation" } };
+    // #991 S3 [4]: a disabled connector's delete key is not used either
+    const [c] = await db.select({ enabled: aiSaasMonitorConnectors.enabled }).from(aiSaasMonitorConnectors).where(eq(aiSaasMonitorConnectors.id, connectorId));
+    if (!c?.enabled) return { status: 409, body: { error: "connector_disabled", detail: "the connector is disabled; enable it before a deletion runs" } };
     if (!policy.remediationEnabled) return { status: 409, body: { error: "ai_saas_remediation_disabled", detail: "AI SaaS remediation is off for the organisation" } };
     if (!registry().get(vendor)?.remediation) return { status: 409, body: { error: "remediation_not_offered", detail: `the ${vendor} API documents no conversation delete` } };
     if (!(await liveCredential(db, connectorId, "remediate"))) return { status: 409, body: { error: "no_remediation_credential", detail: "store the connector's delete-capable credential first" } };
@@ -257,6 +305,10 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
     const [interaction] = await db.select().from(aiSaasInteractions).where(eq(aiSaasInteractions.id, parsed.data.interactionId)).limit(1);
     if (!interaction) return reply.status(404).send({ error: "not_found" });
     if (!interaction.conversationRef) return reply.status(409).send({ error: "no_conversation", detail: "the interaction names no conversation to delete" });
+    // #991 S3 [3]: an id that may have been truncated on ingest, or that is not one exact path segment, is never sent
+    if (!isUsableVendorRef(interaction.conversationRef, "conversation") || !isUsableVendorRef(interaction.actorRef, "actor")) {
+      return reply.status(409).send({ error: "conversation_ref_unusable", detail: "the stored conversation or user id may be truncated or is not a plain vendor id, so it cannot be deleted safely from here" });
+    }
     const [connector] = await db.select().from(aiSaasMonitorConnectors).where(eq(aiSaasMonitorConnectors.id, interaction.connectorId));
     const off = await switchesOff(connector!.id, connector!.vendor);
     if (off) return reply.status(off.status).send(off.body);
@@ -362,6 +414,10 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
         return gone ? { event: "succeed", outcomeCode: "verified_absent", vendorStatus: null } : { event: "fail", outcomeCode: "not_applied", vendorStatus: null };
       }
       const out = await runExternalWrite(db, "vendor.delete_conversation", () => impl.remediation!.deleteConversation(ctx, target));
+      if (out.outcome === "absent" && mode === "delete") {
+        // #991 S3 [3]: a first delete answered 404 did not delete anything we can vouch for: recorded as such, not as success
+        return { event: "fail", outcomeCode: "not_found_at_vendor", vendorStatus: out.vendorStatus };
+      }
       return { event: "succeed", outcomeCode: out.outcome === "deleted" ? "deleted" : "already_absent", vendorStatus: out.vendorStatus };
     } catch (err) {
       // the barrier refused before the vendor call: nothing was sent, so a delete has certainly not happened
@@ -369,6 +425,8 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
       if (err instanceof ConnectorError) {
         // the vendor answered and refused: nothing was deleted
         if (err.code === "unauthorized" || err.code === "forbidden" || err.code === "http_error") return { event: "fail", outcomeCode: `vendor_${err.code}`, vendorStatus: null };
+        // the stored id was refused before anything was sent
+        if (err.code === "bad_response") return { event: "fail", outcomeCode: "unusable_vendor_ref", vendorStatus: null };
       }
       // a timeout, a dropped connection or a throttle: the vendor state is uncertain
       return { event: mode === "delete" ? "lose" : "fail", outcomeCode: mode === "delete" ? "outcome_unknown" : "settle_unreadable", vendorStatus: null };
@@ -399,7 +457,13 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
         .where(and(eq(approvals.id, r!.approvalId!), eq(approvals.status, "approved"), eq(approvals.argumentsDigest, r!.argumentsDigest), unexpired()))
         .returning({ id: approvals.id });
       if (spent.length !== 1) return null;
-      return transition(tx, r!, "execute", actor(req));
+      const moved = await transition(tx, r!, "execute", actor(req));
+      // #991 R3 [2]: a concurrent writer moved the action first: roll the approval's consumption back with it
+      if (!moved) throw new ExecuteRaced();
+      return moved;
+    }).catch((err: unknown) => {
+      if (err instanceof ExecuteRaced) return null;
+      throw err;
     });
     if (!started) return reply.status(409).send({ error: "approval_not_usable", detail: "the approval was already used, expired or changed" });
     r = started;
@@ -414,6 +478,11 @@ export function registerAiSaasRemediationRoutes(app: FastifyInstance, db: Db, op
     const r = await load(p.data.remediationId);
     if (!r) return reply.status(404).send({ error: "not_found" });
     if (r.status !== "unknown") return reply.status(409).send({ error: "illegal_transition", remediation: view(r, { succeed: `only an action whose outcome is unknown is settled; this one is ${r.status}` }) });
+    // #991 S3 [2]: a settle may repeat the delete (no vendor read), so it re-reads every switch first, as execute does;
+    // a switch now off leaves the action unknown (still open) and sends nothing
+    const [connector] = await db.select({ id: aiSaasMonitorConnectors.id, vendor: aiSaasMonitorConnectors.vendor }).from(aiSaasMonitorConnectors).where(eq(aiSaasMonitorConnectors.id, r.connectorId));
+    const off = await switchesOff(connector!.id, connector!.vendor);
+    if (off) return reply.status(off.status).send({ ...off.body, remediation: view(r) });
     if (!(await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "ai_saas_remediation_settle", remediationId: r.id } })).ok) return reply;
     const out = await callVendor(r, "settle");
     // an unreadable vendor leaves it unknown (still open), never a guessed outcome

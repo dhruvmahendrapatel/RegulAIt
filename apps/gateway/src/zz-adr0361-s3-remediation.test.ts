@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiSaasMonitorConnectors, aiSaasMonitorPolicy, aiSaasRemediations, and, approvals, auditLog, createDb, eq, runMigrations, sql, type Db } from "@regulait/db";
+import { aiSaasMonitorConnectors, aiSaasMonitorPolicy, aiSaasRemediations, and, approvals, auditLog, createDb, eq, runMigrations, sql, users, type Db } from "@regulait/db";
 import { AI_SAAS_REMEDIATION_MACHINE } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { AI_SAAS_REMEDIATION_RULE_IDS } from "./ai-saas-remediation.js";
@@ -29,6 +29,12 @@ const DATA_KEY = "d".repeat(64);
 const RUN = Date.now();
 const CHAT_OK = `claude_chat_ok_${RUN}`;
 const CHAT_SLOW = `claude_chat_slow_${RUN}`;
+// #991 S3 findings: a chat the vendor already lost (its first delete is a 404), a second slow one, and one to review
+// (an id at the stored length is pinned by the unit test in ai-saas-monitor.test.ts: the vendor schema caps ids first)
+const CHAT_GONE = `claude_chat_gone_${RUN}`;
+const CHAT_SLOW2 = `claude_chat_slow2_${RUN}`;
+const CHAT_REVIEW = `claude_chat_review_${RUN}`;
+const CHATS = [CHAT_OK, CHAT_SLOW, CHAT_GONE, CHAT_SLOW2, CHAT_REVIEW];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const recent = () => new Date(Date.now() - 2 * 86_400_000 + 3600_000).toISOString();
 
@@ -41,7 +47,7 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
   if (url.hostname !== "api.anthropic.com") return json({ error: "unexpected" }, 599);
   if (url.pathname === "/v1/compliance/apps/chats" && method === "GET") {
     if (url.searchParams.get("limit") === "1") return json({ data: [], has_more: false, last_id: null });
-    return json({ data: [CHAT_OK, CHAT_SLOW].map((id) => ({ id, updated_at: recent(), user: { id: "user_xyz" } })), has_more: false, last_id: "c" });
+    return json({ data: CHATS.map((id) => ({ id, updated_at: recent(), user: { id: "user_xyz" } })), has_more: false, last_id: "c" });
   }
   const m = /^\/v1\/compliance\/apps\/chats\/([^/]+)(\/messages)?$/.exec(url.pathname);
   if (m && method === "GET" && m[2]) {
@@ -50,8 +56,9 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
   }
   if (m && method === "DELETE" && !m[2]) {
     vendor.deletes.push({ url: url.toString(), key: headers.get("x-api-key") });
+    if (m[1] === CHAT_GONE) return json({ error: { type: "not_found_error" } }, 404);
     vendor.deleted.add(m[1]!);
-    if (m[1] === CHAT_SLOW) throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    if (m[1] === CHAT_SLOW || m[1] === CHAT_SLOW2) throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
     return json({ id: m[1], type: "claude_chat_deleted" });
   }
   return json({ error: "unexpected" }, 599);
@@ -64,8 +71,21 @@ let connectorId: string;
 const restores: Array<() => Promise<void>> = [];
 const allowed = trackEgressAllowHosts();
 const relax = async (who: string, facts: Record<string, unknown>) => stepUpRequest(await grantStepUpForTest(db, who, { kind: "settings_relax", facts } as StepUpCheckArgs));
-const decideAs = async (who: string, approvalId: string) =>
-  stepUpRequest(await grantStepUpForTest(db, who, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved" } } as StepUpCheckArgs));
+const digestOf = async (approvalId: string) => (await db.select({ d: approvals.argumentsDigest }).from(approvals).where(eq(approvals.id, approvalId)))[0]!.d!;
+const decideAs = async (who: string, approvalId: string, decision: "approved" | "denied" = "approved") =>
+  stepUpRequest(await grantStepUpForTest(db, who, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision, argumentsDigest: await digestOf(approvalId) } } as StepUpCheckArgs));
+
+/** request a deletion of `chat` and have the approver approve it */
+async function approvedRemediation(chat: string): Promise<{ id: string; approvalId: string }> {
+  const R = people.requester;
+  const interactionId = await interactionOf(chat);
+  const res = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/remediations", ...(await relax(R.id, { op: "ai_saas_remediation", interactionId, action: "delete_conversation" })), payload: { interactionId, action: "delete_conversation", approverUserId: people.approver.id, reason: "leaked customer data" } });
+  expect(res.statusCode, res.body).toBe(202);
+  const r = res.json().remediation as { id: string; approvalId: string };
+  const ok = await app.inject({ method: "POST", url: `/v1/approvals/${r.approvalId}/decide`, ...(await decideAs(people.approver.id, r.approvalId)), payload: { decision: "approved", reason: "ok" } });
+  expect(ok.statusCode, ok.body).toBe(200);
+  return r;
+}
 
 async function interactionOf(chat: string): Promise<string> {
   const res = await db.execute<{ id: string }>(sql`SELECT id FROM ai_saas_interactions WHERE conversation_ref = ${chat} LIMIT 1`);
@@ -96,7 +116,7 @@ beforeAll(async () => {
   const enabled = await app.inject({ method: "PUT", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/enabled`, ...(await relax(R.id, { aiSaasConnector: connectorId, values: { enabled: true } })), payload: { enabled: true, reason: "go live" } });
   expect(enabled.statusCode, enabled.body).toBe(200);
   const run = await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/connectors/${connectorId}/runs`, headers: R.key });
-  expect(run.json().run).toMatchObject({ status: "succeeded", interactionsNew: 2 });
+  expect(run.json().run).toMatchObject({ status: "succeeded", interactionsNew: CHATS.length });
 });
 
 afterAll(async () => {
@@ -208,6 +228,68 @@ describe("ADR-0361 slice 3: request, four-eyes approval, one execution", () => {
     expect(settled.statusCode, settled.body).toBe(200);
     expect(settled.json().remediation).toMatchObject({ status: "succeeded", outcomeCode: "verified_absent" });
     expect(vendor.deletes).toHaveLength(deletesBefore);
+  });
+
+  it("a first delete answered 404 is recorded as not found at the vendor, never as a success (#991 S3 [3])", async () => {
+    const R = people.requester;
+    const { id } = await approvedRemediation(CHAT_GONE);
+    const run = await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/remediations/${id}/execute`, ...(await relax(R.id, { op: "ai_saas_remediation_execute", remediationId: id })) });
+    expect(run.json().remediation).toMatchObject({ status: "failed", outcomeCode: "not_found_at_vendor", vendorStatus: 404 });
+  });
+
+  it("settle re-reads every switch: a disabled connector leaves it unknown and sends nothing (#991 S3 [2], [4])", async () => {
+    const R = people.requester;
+    const { id } = await approvedRemediation(CHAT_SLOW2);
+    const run = await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/remediations/${id}/execute`, ...(await relax(R.id, { op: "ai_saas_remediation_execute", remediationId: id })) });
+    expect(run.json().remediation.status).toBe("unknown");
+    await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, connectorId));
+    try {
+      const deletesBefore = vendor.deletes.length;
+      const blocked = await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/remediations/${id}/settle`, ...(await relax(R.id, { op: "ai_saas_remediation_settle", remediationId: id })) });
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json()).toMatchObject({ error: "connector_disabled", remediation: { status: "unknown" } });
+      expect(vendor.deletes).toHaveLength(deletesBefore);
+      // a new request on a disabled connector is refused too: its delete key is not used
+      const other = await interactionOf(CHAT_REVIEW);
+      const req = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/remediations", ...(await relax(R.id, { op: "ai_saas_remediation", interactionId: other, action: "delete_conversation" })), payload: { interactionId: other, action: "delete_conversation", approverUserId: people.approver.id, reason: "leaked customer data" } });
+      expect(req.json().error).toBe("connector_disabled");
+    } finally {
+      await db.update(aiSaasMonitorConnectors).set({ enabled: true }).where(eq(aiSaasMonitorConnectors.id, connectorId));
+    }
+    const settled = await app.inject({ method: "POST", url: `/v1/ai-saas-monitoring/remediations/${id}/settle`, ...(await relax(R.id, { op: "ai_saas_remediation_settle", remediationId: id })) });
+    expect(settled.json().remediation).toMatchObject({ status: "succeeded", outcomeCode: "verified_absent" });
+  });
+
+  it("only an active admin in the approval's pool decides: not a demoted approver, not another admin (#991 S3 [1])", async () => {
+    const R = people.requester;
+    const A = people.approver;
+    const interactionId = await interactionOf(CHAT_REVIEW);
+    const res = await app.inject({ method: "POST", url: "/v1/ai-saas-monitoring/remediations", ...(await relax(R.id, { op: "ai_saas_remediation", interactionId, action: "delete_conversation" })), payload: { interactionId, action: "delete_conversation", approverUserId: A.id, reason: "leaked customer data" } });
+    expect(res.statusCode, res.body).toBe(202);
+    const { approvalId } = res.json().remediation;
+    const decide = async (who: string) => app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, ...(await decideAs(who, approvalId)), payload: { decision: "approved", reason: "ok" } });
+    // another active admin, not named and not a delegate: an override is never accepted
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `adr0361s3-other-${RUN}@example.com`, displayName: "other", isAdmin: true } });
+    const other = await decide(u.json().id);
+    expect(other.statusCode, other.body).toBe(403);
+    expect(other.json().error).toBe("not_an_eligible_approver");
+    // the named approver, demoted since the request: refused at decision time
+    await db.update(users).set({ isAdmin: false }).where(eq(users.id, A.id));
+    try {
+      const demoted = await decide(A.id);
+      expect(demoted.statusCode, demoted.body).toBe(403);
+      expect(demoted.json().error).toBe("not_an_eligible_approver");
+    } finally {
+      await db.update(users).set({ isAdmin: true }).where(eq(users.id, A.id));
+    }
+    const [a] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
+    expect(a!.status).toBe("pending");
+    // a grant for another payload is refused: the step-up binds the approval's digest
+    const wrong = stepUpRequest(await grantStepUpForTest(db, A.id, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved", argumentsDigest: "0".repeat(64) } } as StepUpCheckArgs));
+    const refused = await app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, ...wrong, payload: { decision: "approved", reason: "ok" } });
+    expect(refused.statusCode, refused.body).not.toBe(200);
+    expect((await db.select().from(approvals).where(eq(approvals.id, approvalId)))[0]!.status).toBe("pending");
+    expect((await decide(A.id)).statusCode).toBe(200);
   });
 
   it("the stored states are exactly the declared machine's", async () => {

@@ -47,7 +47,7 @@ import { entraWriteScope } from "./discovery-wider-scanners.js";
 import { createHash } from "node:crypto";
 import { EgressBlockedError, egressRefusal } from "./egress-guard.js";
 import { errMessage } from "./err-serializer.js";
-import type { ConnectorRemediation } from "./ai-saas-remediation-contract.js";
+import { isUsableVendorRef, type ConnectorRemediation, type RemediationTarget } from "./ai-saas-remediation-contract.js";
 
 /** a stored credential, decrypted for one run */
 export interface ConnectorCredential {
@@ -110,6 +110,13 @@ export interface ComplianceConnector {
 }
 
 /** a delete or read whose answer is 200 (done), 404 (already gone) or a fixed error code */
+/** refuse an id that cannot be sent as one exact path segment (#991 S3 [3]); nothing is sent */
+function assertUsableTarget(target: RemediationTarget): void {
+  if (!isUsableVendorRef(target.conversationRef, "conversation") || !isUsableVendorRef(target.actorRef, "actor")) {
+    throw new ConnectorError("bad_response", "the stored conversation or user id is not a usable vendor id; nothing was sent");
+  }
+}
+
 async function vendorDelete(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ outcome: "deleted" | "absent"; vendorStatus: number }> {
   const res = await fetchImpl(url, { method: "DELETE", headers: { ...headers, accept: "application/json" }, signal });
   await res.arrayBuffer().catch(() => undefined);
@@ -443,6 +450,7 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
 const CHATGPT_REMEDIATION: ConnectorRemediation = {
   kind: "vendor",
   deleteConversation: async (ctx, target) => {
+    assertUsableTarget(target);
     const base = chatGptLogsBase(ctx.config).replace(/\/logs$/, "");
     const url = target.actorRef
       ? `${base}/users/${encodeURIComponent(target.actorRef)}/conversations/${encodeURIComponent(target.conversationRef)}`
@@ -566,14 +574,17 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
 /** `DELETE /v1/compliance/apps/chats/{id}` with a `delete:compliance_user_data` key; deletes are permanent */
 const CLAUDE_REMEDIATION: ConnectorRemediation = {
   kind: "vendor",
-  deleteConversation: async (ctx, target) =>
-    vendorDelete(
+  deleteConversation: async (ctx, target) => {
+    assertUsableTarget(target);
+    return vendorDelete(
       connectorFetch(ctx),
       `${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(target.conversationRef)}`,
       { "x-api-key": ctx.credential.secret, "anthropic-version": ANTHROPIC_COMPLIANCE_VERSION },
       ctx.signal,
-    ),
+    );
+  },
   conversationGone: async (ctx, target) => {
+    assertUsableTarget(target);
     const res = await connectorFetch(ctx)(`${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(target.conversationRef)}/messages`, {
       method: "GET",
       headers: { "x-api-key": ctx.credential.secret, "anthropic-version": ANTHROPIC_COMPLIANCE_VERSION, accept: "application/json" },

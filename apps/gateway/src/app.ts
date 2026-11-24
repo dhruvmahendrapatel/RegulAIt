@@ -712,7 +712,7 @@ import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
-import { precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
+import { applyAiSaasRemediationDecision, precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -5760,6 +5760,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
       if (updated.objectType === "agent_containment") {
         await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0361 slice 3 (#991 S3 [1]): the approver's digest-bound step-up is spent here, with the decision; the
+      // deletion itself follows the approval when its requester next executes it
+      if (updated.objectType === "ai_saas_remediation") {
+        await applyAiSaasRemediationDecision(tx as unknown as Db, updated, binaryDecision, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);

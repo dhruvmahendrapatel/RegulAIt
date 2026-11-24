@@ -22,3 +22,16 @@ export interface ConnectorRemediation {
    */
   conversationGone?(ctx: ConnectorContext, target: RemediationTarget): Promise<boolean>;
 }
+
+/** the longest stored copy of a vendor id (ai-saas-monitor ingest); a ref at this length may have been cut */
+export const REMEDIATION_REF_MAX = { conversation: 500, actor: 100 } as const;
+
+/**
+ * #991 S3 [3]: a vendor id used as one URL path segment. Ids are opaque vendor tokens, so only their documented
+ * character set is accepted (letters, digits and `_ - : . @`), never `.` or `..` alone (the URL parser would collapse
+ * them into another path), and never at the stored length (it may have been truncated, so it would name another chat).
+ */
+export function isUsableVendorRef(ref: string | null, kind: keyof typeof REMEDIATION_REF_MAX): boolean {
+  if (ref === null) return kind === "actor";
+  return ref.length > 0 && ref.length < REMEDIATION_REF_MAX[kind] && /^[A-Za-z0-9_\-:.@]+$/.test(ref) && ref !== "." && ref !== "..";
+}
