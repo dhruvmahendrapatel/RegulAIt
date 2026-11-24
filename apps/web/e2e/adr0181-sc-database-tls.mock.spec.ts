@@ -48,6 +48,7 @@ const ISOLATION_SETTINGS = {
   isolationFloorRegulated: "microvm",
   isolationFloorMcpStdio: "user_space_kernel",
   isolationFloorEngineWorker: "user_space_kernel",
+  isolationFloorRobotBrowser: "user_space_kernel",
   executorAttestationMaxAgeMinutes: 120,
 };
 

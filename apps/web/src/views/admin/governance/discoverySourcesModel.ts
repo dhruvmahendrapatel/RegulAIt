@@ -129,6 +129,8 @@ export interface DiscoverySettingsView {
   endpointMcpConfig?: boolean;
   /** ADR-0337 §4: Google Workspace sources may use the Directory token listing; absent from an older gateway: read as off */
   googleDirectoryTokens?: boolean;
+  /** ADR-0337 §4a: Salesforce sources may read org-wide OAuth tokens (the audited org switch); absent from an older gateway: read as off */
+  salesforceOrgTokens?: boolean;
   /** ADR-0331: governed removal of flagged MCP servers from endpoints; absent from an older gateway: read as off */
   endpointAddonRemoval?: boolean;
   version: number;

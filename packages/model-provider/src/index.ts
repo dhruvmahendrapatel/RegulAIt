@@ -38,12 +38,22 @@ import {
   type ModalityTokenCounts,
 } from "./core.js";
 export * from "./core.js";
+export * from "./ai-sdk-vendors.js";
+import { AI_SDK_VENDOR_DEFAULT_BASE, AiSdkVendorProvider } from "./ai-sdk-vendors.js";
 
 export const MODEL_PROVIDER_KINDS = [
   "anthropic",
   "openai",
   "google",
   "xai",
+  // ADR-0352 (lane E33): native adapters on each vendor's AI SDK implementation
+  // (`ai-sdk-vendors.ts`). Bedrock is SigV4 or a Bedrock API key; Vertex is a
+  // service account or an express-mode API key; Qwen is Alibaba Model Studio.
+  "bedrock",
+  "vertex",
+  "mistral",
+  "cohere",
+  "qwen",
   // ADR-0034: an ADMIN-REGISTERED endpoint the platform ships no adapter for
   // (Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI, a Bedrock proxy, an
   // internal gateway). It is a KIND, not a vendor — which endpoint is a
@@ -2181,6 +2191,23 @@ export function resolveModelProvider(
         baseUrl: config.baseUrl ?? null,
         fetchImpl: boundFetch,
       });
+    // ADR-0352: one adapter class for the five AI SDK vendor kinds. Bedrock and a
+    // Vertex service account additionally require the explicit baseUrl the
+    // gateway's egress guard adjudicated (ADR-0062); the adapter refuses without.
+    case "bedrock":
+    case "vertex":
+    case "mistral":
+    case "cohere":
+    case "qwen":
+      if (!config.apiKey) {
+        throw new ModelProviderError(`${config.provider} requires an apiKey`);
+      }
+      return new AiSdkVendorProvider({
+        kind: config.provider,
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl ?? null,
+        fetchImpl: boundFetch,
+      });
     // ADR-0034: an admin-registered endpoint. NO API KEY IS REQUIRED — that is
     // the whole point of supporting local Ollama and air-gapped gateways — but
     // baseUrl and wireProtocol are, and their absence is a config error that
@@ -2280,6 +2307,15 @@ export function defaultBaseUrlFor(
       return GOOGLE_DEFAULT_BASE;
     case "xai":
       return XAI_DEFAULT_BASE;
+    // ADR-0352: the SDKs read no *_BASE_URL variable once a baseURL is passed, and
+    // the adapters always pass one, so the constant is the real destination.
+    // Bedrock is null: it cannot be constructed without an explicit, guarded baseUrl.
+    case "bedrock":
+    case "vertex":
+    case "mistral":
+    case "cohere":
+    case "qwen":
+      return AI_SDK_VENDOR_DEFAULT_BASE[kind];
     case "custom":
     // ADR-0065: an artifact this deployment trained is queried IN-PROCESS.
     // There is no compiled vendor endpoint behind it, so there is nothing for
