@@ -295,3 +295,14 @@ owner approved removing them on 2026-11-21. This does what decision 4 did for ra
   `index.test.ts` run through it, and their assertions are unchanged. New cases pin that a missing evaluator refuses
   when rules are present and does not refuse when there are none. A probe that turned the refusal back into "nothing
   matched" failed both new cases.
+- **Never widens access (owner requirement, 2026-11-24).** Each differential file has a "never widens access"
+  property, using the strictness order allow < require_approval < deny:
+  - It runs 3,000 generated cases. On the MCP path, the generator also varies the grant and the kill-switch posture.
+    On the decision core, it varies the entitlement base, the attribution mandate, rate limits, ABAC verdicts,
+    consents and queueability.
+  - For every case, the decision on Cedar, and the decision with no engine at all, must be at least as strict as the
+    legacy decision. Every legacy deny must still be a deny.
+  - The Cedar decision must also equal the legacy one exactly.
+  - Each run must contain more than 100 legacy denies, 100 holds and 100 allows, so the property cannot pass vacuously.
+  - Two probes widened access on purpose: one made Cedar match nothing, the other returned "nothing matched" with no
+    engine. Each probe failed both properties.

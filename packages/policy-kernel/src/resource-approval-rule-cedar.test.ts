@@ -279,3 +279,34 @@ describe("ADR-0239 slice 2b — the policies", () => {
     for (const text of Object.values(resourceApprovalRulePolicySet(3))) expect(text).not.toMatch(/r-1|connector|model|a2a/);
   });
 });
+
+/**
+ * P8b, owner requirement (2026-11-24): retiring the hand-written matcher must never WIDEN access. Strictness rank:
+ * allow < require_approval < deny. Over generated decisions (entitlement denies, the attribution mandate, rate limits,
+ * ABAC verdicts, consents, queueability), every decision on Cedar, and every decision with NO engine (null), is at
+ * least as strict as the legacy one; every decision the legacy matcher denied is still denied.
+ */
+describe("P8b — retiring the hand-written matcher never widens access", () => {
+  const RANK = { allow: 0, require_approval: 1, deny: 2 } as const;
+
+  it("every legacy deny is still a deny, and no decision becomes looser (Cedar engine and no engine)", () => {
+    const seen = { deny: 0, require_approval: 0, allow: 0 };
+    fc.assert(
+      fc.property(arbCompose, (input) => {
+        const legacy = composeResourceDecision({ ...input, approvalRuleEvaluator: referenceResourceApprovalRuleEvaluator });
+        seen[legacy.effect]++;
+        const cedarD = composeResourceDecision({ ...input, approvalRuleEvaluator: perCallResourceApprovalRuleEvaluator() });
+        const none = composeResourceDecision({ ...input, approvalRuleEvaluator: null });
+        for (const d of [cedarD, none]) {
+          expect(RANK[d.effect]).toBeGreaterThanOrEqual(RANK[legacy.effect]);
+          if (legacy.effect === "deny") expect(d.effect).toBe("deny");
+        }
+        expect(cedarD).toEqual(legacy);
+      }),
+      { numRuns: 3000 },
+    );
+    expect(seen.deny).toBeGreaterThan(100);
+    expect(seen.require_approval).toBeGreaterThan(100);
+    expect(seen.allow).toBeGreaterThan(100);
+  }, PROPERTY_TIMEOUT_MS);
+});

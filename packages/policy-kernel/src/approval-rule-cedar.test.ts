@@ -215,3 +215,39 @@ describe("ADR-0239 slice 2 — the policies", () => {
     for (const text of Object.values(approvalRulePolicySet(3))) expect(text).not.toMatch(/u-1|s-1|read_rows/);
   });
 });
+
+/**
+ * P8a, owner requirement (2026-11-24): retiring the hand-written matcher must never WIDEN access. Strictness rank:
+ * allow < require_approval < deny. Over generated calls that also vary the grant and the kill-switch posture (so the
+ * legacy kernel denies often), every Decision on Cedar, and every Decision with NO engine at all, is at least as strict
+ * as the legacy Decision; in particular every call the legacy matcher denied is still denied.
+ */
+describe("P8a — retiring the hand-written matcher never widens access", () => {
+  const RANK = { allow: 0, require_approval: 1, deny: 2 } as const;
+  const POSTURES = [{ mode: "normal" }, { mode: "read_only" }, { mode: "halted" }, { mode: "require_approval", approverUserId: "a-9" }] as const;
+
+  it("every legacy deny is still a deny, and no decision becomes looser (Cedar engine and no engine)", () => {
+    const seen = { deny: 0, require_approval: 0, allow: 0 };
+    fc.assert(
+      fc.property(arbCall, fc.array(arbRule, { maxLength: 8 }), fc.boolean(), fc.constantFrom(...POSTURES), (call, rules, granted, execution) => {
+        const at = (ev?: ApprovalRuleEvaluator) => {
+          const input = inputFor(call, rules, ev) as EvaluationInput & { execution: unknown; toolGrants: unknown };
+          return evaluate({ ...input, execution, toolGrants: granted ? input.toolGrants : [] } as EvaluationInput);
+        };
+        const legacy = at(referenceApprovalRuleEvaluator);
+        seen[legacy.effect]++;
+        for (const d of [at(cedarApprovalRuleEvaluator), at(undefined)]) {
+          expect(RANK[d.effect]).toBeGreaterThanOrEqual(RANK[legacy.effect]);
+          if (legacy.effect === "deny") expect(d.effect).toBe("deny");
+        }
+        // Cedar is not merely as strict: it is the same decision
+        expect(at(cedarApprovalRuleEvaluator)).toEqual(legacy);
+      }),
+      { numRuns: 3000 },
+    );
+    // non-vacuous: the generated inputs exercise all three legacy outcomes
+    expect(seen.deny).toBeGreaterThan(100);
+    expect(seen.require_approval).toBeGreaterThan(100);
+    expect(seen.allow).toBeGreaterThan(100);
+  }, PROPERTY_TIMEOUT_MS);
+});
