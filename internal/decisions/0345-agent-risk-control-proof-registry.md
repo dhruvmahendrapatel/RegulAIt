@@ -1,6 +1,6 @@
 # ADR-0345: Agent risk register with controls and continuous proofs
 
-- **Status**: Accepted (slices 1, 2a, 2b and 2c implemented)
+- **Status**: Accepted (slices 1, 2a, 2b, 2c and 3a implemented)
 - **Date**: 2026-11-17
 - **Lane**: E26
 - **Related**: ADR-0085 (EU AI Act tier screening), ADR-0158 (regulatory intelligence feed), ADR-0180 (continuous assurance: A2 measurable conditions, `MEASUREMENT_STATES`), ADR-0057/0068 (continuous red-team, its statistics), ADR-0058 (compliance packs), ADR-0060 (hash-chained
@@ -169,8 +169,27 @@ What exists already:
        network call, so the transaction never waits on a second connection.
      - Tagged traffic: the red-team `purpose` tag is a label only, and nothing excludes it from metering. No probe
        makes a metered call.
-   - Slice 3: the read and settings APIs for the view. The UI belongs to a design builder and is a `KNOWN_UI_GAPS`
-     entry tracked on #453.
+   - Slice 3a: the register's read and settings APIs (`apps/gateway/src/agent-risk-proof-routes.ts`). All three
+     routes are admin-only through the default gate, and the evidence tables are admin-read under RLS.
+     - `GET /v1/agent-risks` returns the catalogue. Each risk carries its OWASP references, controls and proofs, and
+       each proof carries its effective schedule and its latest result with the slice 2b evidence label. The
+       catalogue is a fixed, versioned list, so the read is bounded without paging.
+     - `GET /v1/agent-risks/proofs/:proofKey/results` returns one proof's results, newest first, keyset-paged (at
+       most 100 a page), each with its label and whether it counts as evidence.
+     - `PUT /v1/agent-risks/proofs/:proofKey/settings` takes `{enabled, intervalHours (1 to 168, or null for the
+       default), reason}`.
+       - A relaxation needs a `settings_relax` step-up bound to the exact values (`requireRelaxStepUp`). A
+         relaxation is a value looser than the secure default (off, or an interval past the catalogue default) that
+         differs from what is stored.
+       - Tightening needs no step-up.
+       - Every change is audited (`agent-risk-proof-settings`) with before, after, the relaxed keys and the reason,
+         in the write's own transaction.
+     - The view is a `KNOWN_UI_GAPS` entry (`scripts/known-ui-gaps/adr-0345-e26-agent-risk-proofs.json`) for the
+       design builder on #453.
+   - Slice 3b: the jurisdiction admin APIs, carrying the #1019 security notes:
+     - narrowing a jurisdiction's obligations is a relaxation;
+     - a feed key must exist and must not be withdrawn;
+     - #1036 and #1037.
 9. **Geography is a factor in risk tiering.** Owner, 2026-11-17, from the competitor gap audit (C5). The
    jurisdictions a use case is deployed or used in decide which obligations apply in this register, and they may
    raise its tier. All three parts are data, not code: seeded by migration and admin-editable.

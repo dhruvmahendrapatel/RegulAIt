@@ -73,10 +73,10 @@ test("agent inventory renders granted and observed apart over the seeded catalog
   await expect(page.getByRole("cell", { name: "Observed (did)" })).toBeVisible();
 
   // the seeded catalog is inventoried
-  await expect(page.getByRole("cell", { name: "balanced-mock", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open the dependencies of balanced-mock" })).toBeVisible();
 
   // open the detail: the two blocks render side by side with their notes
-  await page.getByRole("cell", { name: "balanced-mock", exact: true }).click();
+  await page.getByRole("button", { name: "Open the dependencies of balanced-mock" }).click();
   await expect(page.getByText("Granted — what the entitlement rows allow")).toBeVisible();
   await expect(page.getByText("Observed — what the run history recorded")).toBeVisible();
   // the granted block says what it is NOT — a policy simulation

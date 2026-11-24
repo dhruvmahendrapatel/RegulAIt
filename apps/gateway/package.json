@@ -92,6 +92,7 @@
     "openai": "6.49.0",
     "openid-client": "^6.8.4",
     "otpauth": "9.5.2",
+    "p-limit": "7.3.3",
     "pg-boss": "12.38.2",
     "pino": "10.4.0",
     "pkijs": "3.4.1",

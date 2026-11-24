@@ -292,6 +292,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   // pseudonym HMAC key, and the display names behind pseudonyms
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
+  // ADR-0361: an AI SaaS monitor connector's vendor secret (never returned) and an interaction's redacted text copy
+  { table: "ai_saas_monitor_credentials", column: "secret_ciphertext", what: "AI SaaS monitor credentials (ADR-0361)" },
+  { table: "ai_saas_interactions", column: "content_ciphertext", what: "AI SaaS interaction redacted text (ADR-0361)" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
   // ADR-0363 slice 2: the random EDM HMAC key, enveloped; the key itself never rotates, so stored digests stay valid
   { table: "custom_classifier_hash_key", column: "key_ciphertext", what: "the customer-classifier exact-data-match key" },

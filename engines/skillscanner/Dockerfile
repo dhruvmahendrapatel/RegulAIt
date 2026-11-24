@@ -50,7 +50,7 @@ RUN test "$(go env GOVERSION)" = "go1.27.4" \
  && go version -m /out/skill-scanner-cel-go-linux-amd64 | head -3
 
 # ---- stage 2: the Python closure ----------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -76,7 +76,7 @@ RUN python -m venv /opt/skillscanner/venv \
 # (on the internal `engines` network, holding the runner key; it never runs the scanner) and
 # `node /app/dist/task-main.js skillscanner` is the manifest's taskEntry, started ONLY by the sandbox executor in a gVisor
 # sandbox under the run's engine_worker placement, where it runs our driver on the gateway's subject file.
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
