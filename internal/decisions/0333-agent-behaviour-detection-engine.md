@@ -228,7 +228,7 @@ match tool names only, so they are heuristics, and the admin can edit them.
   (the hits a suppression active today would hold back). Incidents already raised are ignored, so the counts answer
   "what would this pack raise on this history". The run itself is audited (`detection-pack-dry-run`: who, which pack
   digest, which window), because it reads the audit trail.
-- **Overlap with rogue-agent containment (#1134, not yet merged).** Containment acts on governance-monitor alerts, not on
+- **Overlap with rogue-agent containment (#1134, ADR-0366).** Containment acts on governance-monitor alerts, not on
   these incidents. A future link from detection incidents to containment would see only raised incidents, so a
   suppressed match would contain nothing; that is the intended meaning of a suppression.
 
