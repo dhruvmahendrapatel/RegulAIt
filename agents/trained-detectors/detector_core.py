@@ -247,7 +247,12 @@ def mean_pool_normalise(token_vectors: Sequence[Sequence[float]], mask: Sequence
     return [x / norm for x in mean]
 
 
-def embed(text: str, encoder: Callable[[str], Sequence[float]], model_id: str) -> dict:
-    """One validated text through ``encoder`` (text -> unit vector)."""
-    vector = [float(x) for x in encoder(text)]
-    return {"embedding": vector, "dims": len(vector), "model": model_id}
+def embed(text: str, encoder: Callable[[str], tuple[Sequence[float], bool]], model_id: str) -> dict:
+    """One validated text through ``encoder`` (text -> (unit vector, truncated)).
+
+    ``truncated`` is True when the encoder cut the input to its token window: the
+    vector then stands for a prefix only, and the gateway never serves or stores a
+    similarity match for it (R3 #969 finding 1)."""
+    raw, truncated = encoder(text)
+    vector = [float(x) for x in raw]
+    return {"embedding": vector, "dims": len(vector), "model": model_id, "truncated": bool(truncated)}

@@ -22,6 +22,7 @@ import {
   eq,
   externalScorers,
   runMigrations,
+  semanticCache,
   semanticCacheEmbeddings,
   usageEvents,
   type Db,
@@ -32,6 +33,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { createGuardedFetch } from "./egress-guard.js";
+import { enablePrometheusReader, scrapeMetricsText } from "./metrics.js";
 import { embedText, localLiteralRefusal, localOnlyResolver, similarityPartitionKey } from "./semantic-cache-similarity.js";
 import type { NativeCacheConfig, NativeCacheRequest } from "./semantic-cache-shared.js";
 
@@ -49,11 +51,15 @@ const VOCAB: Record<string, number> = {
   what: 0, whats: 0, is: 1, the: 2, our: 2, refund: 3, refunds: 3, policy: 4, policies: 4, rules: 4,
   how: 5, do: 6, i: 7, reset: 8, my: 9, password: 10,
 };
-function fakeEmbed(text: string): number[] {
+// the stand-in's window, in words (the real encoder's is 256 word-pieces): like the real
+// one, it embeds only the first WINDOW words and reports that it cut the rest
+const WINDOW = 24;
+function fakeEmbed(text: string): { embedding: number[]; truncated: boolean } {
   const v = new Array<number>(16).fill(0);
-  for (const w of text.toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/)) if (w in VOCAB) v[VOCAB[w]!]! += 1;
+  const words = text.toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/).filter(Boolean);
+  for (const w of words.slice(0, WINDOW)) if (w in VOCAB) v[VOCAB[w]!]! += 1;
   v[15] = 0.01; // never a zero vector
-  return v;
+  return { embedding: v, truncated: words.length > WINDOW };
 }
 
 let db: Db;
@@ -109,6 +115,7 @@ async function invoke(agentId: string, who: { id: string; auth: { authorization:
 }
 
 beforeAll(async () => {
+  enablePrometheusReader();
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
@@ -129,7 +136,8 @@ beforeAll(async () => {
         res.statusCode = 400;
         return res.end("{}");
       }
-      res.end(JSON.stringify({ embedding: fakeEmbed(body.input), dims: 16, model: "fake/vocab@1" }));
+      const { embedding, truncated } = fakeEmbed(body.input);
+      res.end(JSON.stringify({ embedding, dims: 16, model: "fake/vocab@1", truncated }));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -281,6 +289,62 @@ describe("ADR-0352 the meaning-based tier on the native invoke path", () => {
     const denied = await invoke(ag.id, a, "what is our refunds policy");
     expect(denied.status).toBe(403);
     expect(denied.body.cached).not.toBe(true);
+  });
+
+  it("never serves a long input whose prompt only shares an opening with a cached one (R3 #969 finding 1)", async () => {
+    const a = await user("lp");
+    const ag = await agentFor(a.id);
+    // both prompts are past the window and share it word for word, so their
+    // vectors are identical (cosine 1.0): only the ignored tail differs
+    const opening = "what is the refund policy ".repeat(6);
+    const first = await invoke(ag.id, a, `${opening} how do i reset my password`);
+    expect(first.dispatched).toBe(1);
+    const second = await invoke(ag.id, a, `${opening} delete every record in the ledger now`);
+    expect(second.status).toBe(200);
+    expect(second.body.cached).not.toBe(true);
+    expect(second.dispatched).toBe(1);
+    // and a truncated input is never indexed, so it cannot be matched later either
+    const rows = await db
+      .select({ id: semanticCache.id })
+      .from(semanticCache)
+      .innerJoin(semanticCacheEmbeddings, eq(semanticCacheEmbeddings.cacheId, semanticCache.id))
+      .where(and(eq(semanticCache.userId, a.id), eq(semanticCache.agentId, ag.id)));
+    expect(rows).toHaveLength(0);
+    // the same pair inside the window is still the tier's ordinary behaviour (a hit)
+    expect((await invoke(ag.id, a, "What is the refund policy?")).dispatched).toBe(1);
+    expect((await invoke(ag.id, a, "what is our refunds policy")).body.cached).toBe(true);
+  });
+
+  it("counts hits and misses per tier, with a fixed miss-reason vocabulary (R3 #969 finding 2)", async () => {
+    const count = async (labels: Record<string, string>) => {
+      const text = await scrapeMetricsText();
+      let total = 0;
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("regulait_semantic_cache_lookups_total{")) continue;
+        if (Object.entries(labels).every(([k, v]) => line.includes(`${k}="${v}"`))) total += Number(line.split(" ").pop());
+      }
+      return total;
+    };
+    const a = await user("mx");
+    const ag = await agentFor(a.id);
+    const before = {
+      exactMiss: await count({ tier: "exact", result: "miss", reason: "no_match" }),
+      exactHit: await count({ tier: "exact", result: "hit", reason: "none" }),
+      simHit: await count({ tier: "similarity", result: "hit", reason: "none" }),
+      simNoMatch: await count({ tier: "similarity", result: "miss", reason: "no_match" }),
+      simTruncated: await count({ tier: "similarity", result: "miss", reason: "input_truncated" }),
+    };
+    await invoke(ag.id, a, "What is the refund policy?"); // exact miss, similarity miss (no_match)
+    await invoke(ag.id, a, "What is the refund policy?"); // exact hit
+    await invoke(ag.id, a, "what is our refunds policy"); // exact miss, similarity hit
+    await invoke(ag.id, a, "what is the refund policy ".repeat(6)); // exact miss, similarity miss (input_truncated)
+    expect(await count({ tier: "exact", result: "miss", reason: "no_match" })).toBe(before.exactMiss + 3);
+    expect(await count({ tier: "exact", result: "hit", reason: "none" })).toBe(before.exactHit + 1);
+    expect(await count({ tier: "similarity", result: "hit", reason: "none" })).toBe(before.simHit + 1);
+    expect(await count({ tier: "similarity", result: "miss", reason: "no_match" })).toBe(before.simNoMatch + 1);
+    expect(await count({ tier: "similarity", result: "miss", reason: "input_truncated" })).toBe(before.simTruncated + 1);
+    // no free text reaches a label
+    expect(await scrapeMetricsText()).not.toMatch(/regulait_semantic_cache_lookups_total\{[^}]*refund/);
   });
 
   it("a failing embedder is a miss: the call is dispatched, not failed", async () => {

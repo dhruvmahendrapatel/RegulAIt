@@ -97,7 +97,8 @@ def load_models(wanted: list[str]) -> dict:
 
         path = os.path.join(MODELS_DIR, "embedding")
         tok = Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
-        tok.enable_truncation(max_length=256)
+        # the model's window; `overflowing` is non-empty when an input did not fit
+        tok.enable_truncation(max_length=EMBEDDING_MAX_TOKENS)
         tok.no_padding()
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = int(os.environ.get("DETECTOR_THREADS", "2"))
@@ -114,7 +115,7 @@ def load_models(wanted: list[str]) -> dict:
             if "token_type_ids" in names:
                 feeds["token_type_ids"] = np.asarray([enc.type_ids], dtype=np.int64)
             hidden = sess.run(None, feeds)[0][0]
-            return core.mean_pool_normalise(hidden.tolist(), enc.attention_mask)
+            return core.mean_pool_normalise(hidden.tolist(), enc.attention_mask), len(enc.overflowing) > 0
 
         models["embedding"] = encode
 
@@ -198,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _embed(self, length: int, started: float) -> None:
-    """ADR-0352: POST /embed {"scorerKind": "text_embedding", "input": str} -> {"embedding", "dims", "model"}."""
+    """ADR-0352: POST /embed {"scorerKind": "text_embedding", "input": str} -> {"embedding", "dims", "model", "truncated"}."""
     try:
         text = core.parse_embed_request(json.loads(self.rfile.read(length) or b"null"))
     except (core.RequestError, json.JSONDecodeError, UnicodeDecodeError) as err:
@@ -216,6 +217,7 @@ def _embed(self, length: int, started: float) -> None:
 Handler._embed = _embed  # type: ignore[attr-defined]
 
 # the repository and pinned revision, so a model change makes every stored vector miss
+EMBEDDING_MAX_TOKENS = 256
 EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 
 

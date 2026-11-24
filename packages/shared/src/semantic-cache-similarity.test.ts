@@ -12,8 +12,9 @@ const v16 = (i: number) => Array.from({ length: 16 }, (_, k) => (k === i ? 1 : 0
 
 describe("ADR-0352 embed reply", () => {
   it("accepts a conforming reply and normalises the vector", () => {
-    const r = parseEmbeddingReply(JSON.stringify({ embedding: [3, 4, ...new Array(14).fill(0)], model: "m@1" }));
+    const r = parseEmbeddingReply(JSON.stringify({ embedding: [3, 4, ...new Array(14).fill(0)], model: "m@1", truncated: false }));
     expect(r.model).toBe("m@1");
+    expect(r.truncated).toBe(false);
     expect(r.vector[0]).toBeCloseTo(0.6);
     expect(r.vector[1]).toBeCloseTo(0.8);
   });
@@ -26,10 +27,16 @@ describe("ADR-0352 embed reply", () => {
       JSON.stringify({ embedding: [...v16(0).slice(0, 15), Number.NaN], model: "m" }).replace("null", '"x"'),
       JSON.stringify({ embedding: v16(0), model: "" }),
       JSON.stringify({ embedding: v16(0), model: "has space" }),
-      JSON.stringify({ embedding: new Array(16).fill(0), model: "m" }),
+      JSON.stringify({ embedding: new Array(16).fill(0), model: "m", truncated: false }),
+      // R3 #969 finding 1: an embedder that does not say whether it saw the whole input
+      JSON.stringify({ embedding: v16(0), model: "m" }),
+      JSON.stringify({ embedding: v16(0), model: "m", truncated: "no" }),
     ]) {
       expect(() => parseEmbeddingReply(body)).toThrow();
     }
+  });
+  it("reports a truncated input", () => {
+    expect(parseEmbeddingReply(JSON.stringify({ embedding: v16(0), model: "m", truncated: true })).truncated).toBe(true);
   });
 });
 
