@@ -250,15 +250,16 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
   },
   // ADR-0242: mcp-scanner, run by our offline driver (engines/mcpscanner/scan.py) on one MCP server manifest. Its runs are started by the
   // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
-  // the Node runner stage (§6.1), but no image is published yet (§6.3 adds the lock entry), so the digest is null
-  // and the engine cannot be enabled (secure default).
+  // the Node runner stage (§6.1) and its digests come from the lock (§6.3, L4.5), which stays null until CI's first
+  // signed publish is recorded, so until then no runner passes the self-test and the engine cannot be enabled.
   mcpscanner: {
     id: "mcpscanner",
     kind: "admission_scan",
     displayName: "mcp-scanner",
     version: ADMISSION_SCAN_ENGINES.mcpscanner.version,
-    generation: 1,
-    imageDigest: null,
+    // bump with every build change; plus one per recorded publish (the lock moves it, ADR-0242 L4.5)
+    generation: 1 + ENGINE_IMAGES_LOCK.mcpscanner.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.mcpscanner.manifestDigest,
     licence: "Apache-2.0",
     maintainerCount: null,
     // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
@@ -269,7 +270,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     requiresJudge: false,
     judgeSets: [],
     credentialIsolation: false,
-    taskImage: null,
+    taskImage: ENGINE_IMAGES_LOCK.mcpscanner.imageId,
     // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
     // subject file, runs our driver on it as a child process group and sends the report back as frames
     // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
@@ -280,7 +281,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2 §6.3: the publish and the lock entry; the runner stage is built, unpublished)",
+      "image digest and signature: the engine is publishable (ADR-0242 §6.3, L4.5) but no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
       "maintainer count",
       "transitive licences: the PSF-2.0, MPL-2.0, MIT-0 and CNRI-Python terms are the ones the owner accepted for garak (ADR-0187 decision 193); yara-python is built from source without OpenSSL",
       "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
@@ -288,15 +289,16 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
   },
   // ADR-0242: skill-scanner, run by our offline driver (engines/skillscanner/scan.py) on one agent skill (SKILL.md and its files). Its runs are started by the
   // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
-  // the Node runner stage (§6.1), but no image is published yet (§6.3 adds the lock entry), so the digest is null
-  // and the engine cannot be enabled (secure default).
+  // the Node runner stage (§6.1) and its digests come from the lock (§6.3, L4.5), which stays null until CI's first
+  // signed publish is recorded, so until then no runner passes the self-test and the engine cannot be enabled.
   skillscanner: {
     id: "skillscanner",
     kind: "admission_scan",
     displayName: "skill-scanner",
     version: ADMISSION_SCAN_ENGINES.skillscanner.version,
-    generation: 1,
-    imageDigest: null,
+    // bump with every build change; plus one per recorded publish (the lock moves it, ADR-0242 L4.5)
+    generation: 1 + ENGINE_IMAGES_LOCK.skillscanner.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.skillscanner.manifestDigest,
     licence: "Apache-2.0",
     maintainerCount: null,
     // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
@@ -307,7 +309,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     requiresJudge: false,
     judgeSets: [],
     credentialIsolation: false,
-    taskImage: null,
+    taskImage: ENGINE_IMAGES_LOCK.skillscanner.imageId,
     // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
     // subject file, runs our driver on it as a child process group and sends the report back as frames
     // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
@@ -318,9 +320,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2 §6.3: the publish and the lock entry; the runner stage is built, unpublished)",
+      "image digest and signature: the engine is publishable (ADR-0242 §6.3, L4.5) but no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
       "maintainer count",
-      "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms awaiting an owner decision; pcodedmp (GPL-3.0) is excluded",
+      "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms (owner-accepted, ADR-0242 owner decision Q3); pcodedmp (GPL-3.0) is excluded",
       "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },

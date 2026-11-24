@@ -789,6 +789,14 @@ export interface GuardedFetchOptions extends EgressCheckOptions {
    * which bound their own reads).
    */
   maxResponseBytes?: number;
+  /**
+   * ADR-0361 (the ChatGPT Compliance log download answers 307 to a signed URL): hand a redirect BACK to the caller as
+   * a bodiless response carrying only its `Location`, instead of refusing it. It is never followed here. The caller
+   * that opts in must send the next request through a guarded fetch again, so the target is validated like any other
+   * destination (allow list, DNS pinning, private ranges), and must treat the Location (a signed URL) as a secret.
+   * Absent (every existing caller) = redirects are refused, exactly as before.
+   */
+  returnRedirects?: boolean;
 }
 
 /**
@@ -877,8 +885,11 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
     }
 
     if (res.status >= 300 && res.status < 400) {
-      // the Location is the upstream's text: it is not read, kept or repeated (A2A-SEC-01)
+      const location = opts.returnRedirects && [301, 302, 303, 307, 308].includes(res.status) ? res.headers.get("location") : null;
       void res.body?.cancel().catch(() => {});
+      // opt-in only: the caller gets the Location to re-request through the guard; it is still never followed here
+      if (location) return new Response(null, { status: res.status, headers: { location } });
+      // the Location is the upstream's text: it is not read, kept or repeated (A2A-SEC-01)
       throw new EgressRedirectError();
     }
     return opts.maxResponseBytes !== undefined ? boundResponse(res, opts.maxResponseBytes) : res;

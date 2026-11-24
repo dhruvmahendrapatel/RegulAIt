@@ -29,7 +29,7 @@
 # linux/amd64 ONLY (the wheel hash is the manylinux x86_64 wheel).
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -42,9 +42,12 @@ RUN python -m venv /opt/contentextract/venv \
  && find /opt/contentextract/venv -name '__pycache__' -prune -exec rm -rf {} +
 # ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
 # Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
+# Reproducible builds (ADR-0187 addendum 2026-10-21): the packages' maintainer scripts write wall-clock content
+# (update-alternatives' log, apt's binary caches, fontconfig's cache), which goes, as in robot-runner's image.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
- && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+           /var/cache/apt/*.bin /var/cache/fontconfig/* \
  && tesseract --version
 COPY engines/contentextract/extract.py engines/contentextract/test_extract.py /opt/contentextract/
 RUN REGULAIT_REQUIRE_PDFIUM=1 REGULAIT_REQUIRE_OCR=1 /opt/contentextract/venv/bin/python -I -m unittest discover -s /opt/contentextract \
@@ -56,7 +59,7 @@ RUN REGULAIT_REQUIRE_PDFIUM=1 REGULAIT_REQUIRE_OCR=1 /opt/contentextract/venv/bi
 # (on the internal `engines` network, holding the runner key; it never runs the extractor) and
 # `node /app/dist/task-main.js contentextract` is the manifest's taskEntry, started ONLY by the sandbox executor in a
 # gVisor sandbox under the run's engine_worker placement, where it runs the extractor on the gateway's bundle.
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -88,8 +91,9 @@ RUN apt-get update \
 # ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
 # Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
- && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+           /var/cache/apt/*.bin /var/cache/fontconfig/* \
  && tesseract --version
 # no package installer at run time: the base image's pip goes too
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \

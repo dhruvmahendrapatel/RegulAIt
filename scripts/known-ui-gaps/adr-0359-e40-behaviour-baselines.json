@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0359",
+  "lane": "E40",
+  "tracking": "ADR-0359 (lane E40): API-only behaviour baseline routes, awaiting the screens on #453",
+  "gaps": {
+    "GET /v1/behaviour/settings": "reads the behaviour baseline mode (shadow by default), its limits and the sweep state",
+    "PUT /v1/behaviour/settings": "turns behaviour baselines off (step-up, audited as a relaxation) or back on in shadow mode (audited)",
+    "GET /v1/behaviour/findings": "pages behaviour anomaly findings, newest first, filtered by status, subject or signal",
+    "GET /v1/behaviour/findings/:findingId": "one behaviour finding with its baseline, deviation and allowed next states",
+    "PUT /v1/behaviour/findings/:findingId/status": "acknowledges or dismisses a behaviour finding (audited)",
+    "GET /v1/behaviour/baselines/:subjectKind/:subjectId": "a user's or agent's current baseline per signal (median and MAD, or the usual keys and their shares)"
+  }
+}

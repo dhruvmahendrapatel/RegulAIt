@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-21 - ADR-0239 P8a and P8b: the hand-written approval-rule matchers are removed ([ADR-0239](../decisions/0239-cedar-consolidation-and-relationship-store.md) "As built", lane E48; no migration).** MCP and decision-core (model, connector, A2A) approval rules match only on Cedar. With rules and no engine, the kernel refuses (`approval-rule-engine-error`). `ComposeResourceInput.approvalRuleEvaluator` is required, which closes #1097. The old predicates live on only as the differential tests' oracles.

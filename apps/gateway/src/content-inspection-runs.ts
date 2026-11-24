@@ -27,7 +27,7 @@
  * through `setContentInspectionRuntime`, which `setEngineRuntime` calls.
  */
 import { createHash } from "node:crypto";
-import { and, auditLog, contentInspectionResults, engineRuns, engines, eq, orgSettings, ORG_SETTINGS_ID, type Db, type EngineRunRow } from "@regulait/db";
+import { and, auditLog, contentInspectionResults, engineRuns, engines, eq, inArray, lt, orgSettings, ORG_SETTINGS_ID, sql, type Db, type EngineRunRow } from "@regulait/db";
 import {
   CONTENTEXTRACT_MAX_BUNDLE_BYTES,
   CONTENTEXTRACT_SET,
@@ -37,6 +37,7 @@ import {
   isTerminalEngineRunStatus,
   PLACEMENT_SENSITIVITIES,
   type ContentExtractResult,
+  type ContentInspectionEngineOutcome,
   type EngineTerminalRunStatus,
   type PlacementSensitivity,
 } from "@regulait/shared";
@@ -276,4 +277,115 @@ export async function awaitContentExtractResult(db: Db, runId: string, opts: { d
   }
   await db.delete(contentInspectionResults).where(eq(contentInspectionResults.runId, runId));
   return { kind: "unavailable", reason: "timeout" };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR-0362 slice 1b-ii — the request path's one entry (`extractContentForRequest`), its narrow test seam, and the
+// orphan sweep the engine-run sweep calls.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** one file of the bundle the gateway writes for the extractor (ADR-0362 decision 1) */
+export type ContentExtractBundleFile = { id: string; name: string; mediaType: string; dataBase64: string };
+
+/**
+ * TEST SEAM (the repo's `...ForTest` pattern): a stand-in for the sandboxed extractor, so the request path's outcomes
+ * can be proved while the engine's image stays unpublished. It is called with the bundle and returns what the
+ * extractor would (`null`: no answer). Its reply is held to the same checks as a real run's (strict schema, exactly the
+ * bundle's files in order). Refused outside a test runner, so no deployment can swap the sandbox out.
+ */
+export type ContentExtractorForTest = (bundle: { files: ContentExtractBundleFile[] }) => unknown;
+let extractorForTest: ContentExtractorForTest | null = null;
+export function setContentExtractorForTest(fn: ContentExtractorForTest | null): void {
+  if (fn !== null && process.env.VITEST === undefined && process.env.NODE_ENV !== "test") {
+    throw new Error("setContentExtractorForTest is a test seam: it runs only under a test runner (VITEST set or NODE_ENV=test)");
+  }
+  extractorForTest = fn;
+}
+
+export type ContentExtractRequestOutcome =
+  | { outcome: "result"; runId: string | null; result: ContentExtractResult }
+  | { outcome: Exclude<ContentInspectionEngineOutcome, "result">; runId: string | null };
+
+/** a result that answers for exactly `ids`, in order (the same rule `recordContentExtractRunEndTx` applies to a run) */
+function resultFor(ids: readonly string[], raw: unknown): ContentExtractResult | null {
+  const parsed = contentExtractResultSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  if (parsed.data.files.length !== ids.length || ids.some((id, i) => id !== parsed.data.files[i]!.id)) return null;
+  return parsed.data;
+}
+
+/**
+ * Turn one request's files into text, in the engine sandbox, waiting at most `deadlineMs`: queue the run, await it,
+ * and say what happened. Fail closed: anything but `result` means no file was read. Never throws for an engine
+ * outcome; the caller decides what a refusal does to the dispatch.
+ */
+export async function extractContentForRequest(
+  db: Db,
+  args: { files: ContentExtractBundleFile[]; projectId: string | null; userId: string | null; deadlineMs: number },
+): Promise<ContentExtractRequestOutcome> {
+  const ids = args.files.map((f) => f.id);
+  if (extractorForTest) {
+    const raw = await extractorForTest({ files: args.files });
+    const result = raw === null || raw === undefined ? null : resultFor(ids, raw);
+    return result ? { outcome: "result", runId: null, result } : { outcome: "no_result", runId: null };
+  }
+  const queued = await enqueueContentExtractRun(db, {
+    bundleJson: JSON.stringify({ files: args.files }),
+    projectId: args.projectId,
+    userId: args.userId,
+  });
+  if (queued.kind === "engine_off") return { outcome: "engine_off", runId: null };
+  if (queued.kind === "refused") return { outcome: "not_queued", runId: null };
+  const awaited = await awaitContentExtractResult(db, queued.runId, { deadlineMs: args.deadlineMs });
+  if (awaited.kind === "unavailable") return { outcome: awaited.reason, runId: queued.runId };
+  const result = resultFor(ids, awaited.result);
+  return result ? { outcome: "result", runId: queued.runId, result } : { outcome: "no_result", runId: queued.runId };
+}
+
+/**
+ * How old an unread result, or a still-live extraction run, may get before the sweep removes it. The request that
+ * queued a run waits at most CONTENT_INSPECTION_DEADLINE_MS (30 s) and the run's own row deadline is 60 s, so anything
+ * older than this has nobody waiting for it.
+ */
+export const CONTENT_INSPECTION_ORPHAN_MINUTES = 10;
+
+/**
+ * THE ORPHAN SWEEP (called by `runEngineRunSweep`, ADR-0187's periodic job): delete every stored result older than
+ * CONTENT_INSPECTION_ORPHAN_MINUTES by the database clock (a person's file text nobody will read), and end every
+ * content-extraction run still live after that long, through `cancel` (the gateway's own cancel, which clears the
+ * bundle ciphertext with the run's end). Bounded per pass, like the rest of the sweep.
+ */
+export async function sweepContentInspectionOrphans(
+  db: Db,
+  cancel: (db: Db, runId: string, cause: string) => Promise<void>,
+): Promise<{ resultsDeleted: number; runsCancelled: number }> {
+  const cutoff = sql`now() - make_interval(mins => ${CONTENT_INSPECTION_ORPHAN_MINUTES})`;
+  const deleted = await db
+    .delete(contentInspectionResults)
+    .where(lt(contentInspectionResults.createdAt, cutoff))
+    .returning({ runId: contentInspectionResults.runId });
+  const live = await db
+    .select({ id: engineRuns.id })
+    .from(engineRuns)
+    .where(
+      and(
+        eq(engineRuns.engineId, CONTENTEXTRACT_ENGINE_ID),
+        inArray(engineRuns.status, ["awaiting_approval", "queued", "leased"]),
+        lt(engineRuns.createdAt, cutoff),
+      ),
+    )
+    .limit(500);
+  const liveIds = new Set(live.map((r) => r.id));
+  const ids = new Set([...deleted.map((r) => r.runId), ...liveIds]);
+  let runsCancelled = 0;
+  for (const id of ids) {
+    try {
+      // a run that already ended is left as it is (the cancel is a no-op on a terminal run)
+      await cancel(db, id, "content_inspection_orphan");
+      if (liveIds.has(id)) runsCancelled += 1;
+    } catch {
+      // the run's own deadline and the queue expiry still end it; the next pass tries again
+    }
+  }
+  return { resultsDeleted: deleted.length, runsCancelled };
 }

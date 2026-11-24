@@ -195,7 +195,7 @@ export function accessRecommendationRuleById(id: string): AccessRecommendationRu
  * would rather fail loudly.
  */
 export function renderRecommendationRationale(
-  rule: AccessRecommendationRule,
+  rule: Pick<AccessRecommendationRule, "rationaleTemplate"> & { id: string },
   params: Record<string, string | number>,
 ): string {
   const out = rule.rationaleTemplate.replace(/\{([a-zA-Z]+)\}/g, (_, key: string) => {
