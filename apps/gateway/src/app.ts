@@ -1,3 +1,4 @@
+import { registerDetectionFeedRoutes } from "./detection-feed.js";
 import Fastify, {
   LogController,
   type FastifyReply,
@@ -389,9 +390,16 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0360 slice 2: tests only — the EDR connections' egress resolver and fetch (the guard still runs) */
+  edrEgress?: ConnectionEgressDeps;
   /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
   vendorUsageFetch?: typeof fetch;
   vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
+  /** ADR-0361 test seams: the transport the AI SaaS monitor's guarded fetch sends through, its pinned DNS, and the
+   * connector registry (production: `AI_SAAS_CONNECTORS`) */
+  aiSaasMonitorFetch?: typeof fetch;
+  aiSaasMonitorResolve?: import("./egress-guard.js").EgressResolver;
+  aiSaasMonitorConnectors?: import("./ai-saas-monitor.js").AiSaasMonitorDeps["connectors"];
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
@@ -673,6 +681,9 @@ import { registerCostOutcomeRoutes } from "./cost-outcomes.js";
 import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
+import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
+import { registerEdrRoutes } from "./edr/routes.js";
+import type { ConnectionEgressDeps } from "./connection-egress.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
   applyEndpointAddonRemovalDecision,
@@ -698,6 +709,7 @@ import {
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerEndpointCredentialReuseRoutes } from "./endpoint-credential-reuse.js";
 import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
@@ -705,6 +717,8 @@ import { registerAdoptionAnalyticsRoutes } from "./adoption-analytics.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
+import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
+import { applyAiSaasRemediationDecision, precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -5344,6 +5358,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0361 slice 3 — `cannot_approve_own_ai_saas_remediation` (keyed on the DECIDER, so the requester cannot reach
+    // their own deletion through delegation or the admin override above) and a fresh `approval_decide` step-up on
+    // every decision, so an API key, a chat tap or a bulk decide cannot decide a conversation deletion.
+    if (row.objectType === "ai_saas_remediation") {
+      const refusal = await precheckAiSaasRemediationDecision(db, row, deciderUserId, binaryDecision, input.req, input.channel);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0363 slice 2 — `cannot_approve_own_classifier`, keyed on the DECIDER like the profile check above.
     if (row.objectType === "custom_classifier") {
       const refusal = await precheckCustomClassifierDecision(db, row, deciderUserId);
@@ -5745,6 +5766,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
       if (updated.objectType === "agent_containment") {
         await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0361 slice 3 (#991 S3 [1]): the approver's digest-bound step-up is spent here, with the decision; the
+      // deletion itself follows the approval when its requester next executes it
+      if (updated.objectType === "ai_saas_remediation") {
+        await applyAiSaasRemediationDecision(tx as unknown as Db, updated, binaryDecision, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6478,16 +6504,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
-  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
-  // production until slice 1b; both come only through the code-only test seam below
-  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // ADR-0338: governed vendor agent control (Copilot Studio quarantine since slice 1b); the control credential is the
+  // source's `platform_write` row. The data key comes from buildApp's own option, never from the test seam
+  registerVendorAgentControlRoutes(app, db, { ...(opts.vendorAgentControl ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
   // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
   registerContainmentRoutes(app, db);
+  // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
+  // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
+  registerEndpointFleetRoutes(app, db);
+  // ADR-0360 slice 2 (lane E41): EDR connections (read-only by default), device signals, the verified vendor webhook
+  // (auth-exempt, verified in-route) and two-person, stepped-up isolation requests
+  registerEdrRoutes(app, db, { dataKey: opts.dataKey, ...(opts.edrEgress ? { egress: opts.edrEgress } : {}) });
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  registerEndpointCredentialReuseRoutes(app, db);
   // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
   registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
@@ -6516,6 +6549,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     deps: {
       ...(opts.vendorUsageFetch ? { fetchImpl: opts.vendorUsageFetch } : {}),
       ...(opts.vendorUsageResolve ? { resolve: opts.vendorUsageResolve } : {}),
+    },
+  });
+  // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
+  // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
+  registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
+    },
+  });
+  registerAiSaasRemediationRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
     },
   });
   // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the
@@ -6654,6 +6705,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
+  registerDetectionFeedRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
   registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)

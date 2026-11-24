@@ -197,8 +197,9 @@ describe("ADR-0345: an org_settings control's secure value IS the strictness reg
     r.controls.flatMap((c) => (c.kind === "setting" && c.column.startsWith("org_settings.") ? [{ risk: r.key, c }] : [])),
   );
 
-  it("names at least the four org_settings controls", () => {
+  it("names at least the five org_settings controls", () => {
     expect(orgControls.map((x) => x.c.kind === "setting" && x.c.column).sort()).toEqual([
+      "org_settings.agent_memory_scan_mode", // ADR-0193 addendum (E50): the ADR-0347 memory scan
       "org_settings.approval_ttl_hours",
       "org_settings.budget_enforcement",
       "org_settings.mcp_admission_mode",

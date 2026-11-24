@@ -9,6 +9,8 @@ import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
+import { ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE, ENDPOINT_UPDATE_ATTEMPT_MACHINE } from "./endpoint-fleet.js";
+import { EDR_ISOLATION_MACHINE } from "./edr.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
@@ -394,6 +396,29 @@ export const ENDPOINT_DEVICE_QUARANTINE_MACHINE = defineMachine({
 });
 export type EndpointDeviceQuarantineState = (typeof ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.states)[number];
 
+/** `detection_suppressions.status` (ADR-0333 §5b, lane E15). An admin creates a suppression `active`, with a step-up
+ * (a suppression is a relaxation), for one rule and one group until `expires_at`. While active and unexpired, matches of
+ * that rule in that group raise no incident and are counted in an audit row instead. An admin revokes it early (a
+ * narrowing, no step-up). EXPIRY IS DERIVED from `expires_at`, never stored: an expired row is still `active` in the
+ * column but suppresses nothing, and `describe` shows revoke refused for it. Same values as
+ * `DETECTION_SUPPRESSION_STATUSES` in @regulait/db. */
+export const DETECTION_SUPPRESSION_MACHINE = defineMachine({
+  id: "detection_suppression",
+  stored: "detection_suppressions.status",
+  states: ["active", "revoked"],
+  initial: ["active"],
+  terminal: ["revoked"],
+  transitions: {
+    revoke: {
+      from: ["active"],
+      to: "revoked",
+      by: ["admin"],
+      summary: "An admin ended the suppression early; the rule raises incidents for that group again.",
+    },
+  },
+});
+export type DetectionSuppressionState = (typeof DETECTION_SUPPRESSION_MACHINE.def.states)[number];
+
 /** `rule_step_suggestions.status` (ADR-0327). A scan inserts `suggested`. Shadow mode measures the suggested rule
  * beside the AI without changing routing, and can be stopped and started again. Dismissal is final: a rescan
  * refreshes a dismissed suggestion's evidence but never its status. */
@@ -652,6 +677,39 @@ export const BROWSER_DEVICE_MACHINE = defineMachine({
       to: "revoked",
       by: ["admin"],
       summary: "An admin revokes the device; its proofs are refused and it blocks every governed site.",
+    },
+  },
+});
+
+/** `ai_saas_monitor_runs.status` (ADR-0361). A run opens `running`, or is written already `refused` when another run of
+ * the same connector is in progress. A running run ends exactly once: every page of the window was written, a vendor
+ * call or a write failed (the window is not advanced), or a precondition refused it before any request. */
+export const AI_SAAS_MONITOR_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export type AiSaasMonitorRunStatus = (typeof AI_SAAS_MONITOR_RUN_STATUSES)[number];
+export const AI_SAAS_MONITOR_RUN_MACHINE = defineMachine({
+  id: "ai_saas_monitor_run",
+  stored: "ai_saas_monitor_runs.status",
+  states: AI_SAAS_MONITOR_RUN_STATUSES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "Every page of the window was written and the connector's monitored-through time advanced with it.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "A vendor call, a bound or a write failed, or the process died; the pages written are kept and the window is not advanced.",
+    },
+    refuse: {
+      from: ["running"],
+      to: "refused",
+      by: ["system"],
+      summary: "A precondition failed before any vendor request: monitoring or the connector is off, no usable credential, no data key, or air-gapped.",
     },
   },
 });
@@ -1089,6 +1147,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   // ADR-0359 (lane E40): a behaviour baseline shadow finding
   [BEHAVIOUR_FINDING_MACHINE.def.id]: BEHAVIOUR_FINDING_MACHINE,
   [ENDPOINT_DEVICE_QUARANTINE_MACHINE.def.id]: ENDPOINT_DEVICE_QUARANTINE_MACHINE,
+  [DETECTION_SUPPRESSION_MACHINE.def.id]: DETECTION_SUPPRESSION_MACHINE,
   [RULE_STEP_SUGGESTION_MACHINE.def.id]: RULE_STEP_SUGGESTION_MACHINE,
   [ENDPOINT_COMMAND_EXCEPTION_MACHINE.def.id]: ENDPOINT_COMMAND_EXCEPTION_MACHINE,
   [ROBOT_VERSION_MACHINE.def.id]: ROBOT_VERSION_MACHINE,
@@ -1098,11 +1157,18 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [RULE_STEP_SWITCH_MACHINE.def.id]: RULE_STEP_SWITCH_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
+  [AI_SAAS_MONITOR_RUN_MACHINE.def.id]: AI_SAAS_MONITOR_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  // ADR-0360 §3 (lane E41): a staged endpoint agent update rollout and its stages
+  [ENDPOINT_ROLLOUT_MACHINE.def.id]: ENDPOINT_ROLLOUT_MACHINE,
+  [ENDPOINT_ROLLOUT_STAGE_MACHINE.def.id]: ENDPOINT_ROLLOUT_STAGE_MACHINE,
+  [ENDPOINT_UPDATE_ATTEMPT_MACHINE.def.id]: ENDPOINT_UPDATE_ATTEMPT_MACHINE,
+  // ADR-0360 §6 (lane E41): a governed, two-person EDR isolation request
+  [EDR_ISOLATION_MACHINE.def.id]: EDR_ISOLATION_MACHINE,
   [SHADOW_AI_FINDING_MACHINE.def.id]: SHADOW_AI_FINDING_MACHINE,
   [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,

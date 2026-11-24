@@ -13,7 +13,7 @@
  * `allowListedFetch` refuses any other (method, origin, path) BEFORE the request leaves, on top of the guarded fetch.
  * Pagination cursors are passed back as query parameters on an allowed path, never followed as URLs.
  */
-import type { DiscoverySourceKind } from "@regulait/shared";
+import type { AgentRegistry, DiscoverySourceKind } from "@regulait/shared";
 import { AGENT_REGISTRY_SCANNERS } from "./agent-registry-scanners.js";
 import { AGENTFORCE_ENDPOINTS, AGENTFORCE_SCANNER } from "./agent-registry-agentforce.js";
 import { COPILOT_STUDIO_ENDPOINTS, COPILOT_STUDIO_SCANNER } from "./agent-registry-copilot-studio.js";
@@ -21,6 +21,8 @@ import { N8N_ENDPOINTS, N8N_SCANNER } from "./agent-registry-n8n.js";
 import { OPENAI_ENDPOINTS, OPENAI_SCANNER } from "./agent-registry-openai.js";
 import type { EndpointRule } from "./agent-platform-endpoints.js";
 import type { Scanner } from "./discovery-scanners.js";
+import { COPILOT_STUDIO_CONTROL } from "./agent-platform-copilot-studio-control.js";
+import type { VendorAgentControl } from "./vendor-agent-control-contract.js";
 
 export { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 
@@ -48,6 +50,11 @@ export interface AgentPlatformAdapter {
    */
   readEndpoints: readonly EndpointRule[] | null;
   governedActions: readonly GovernedActionSpec[];
+  /**
+   * ADR-0338 §3: the executing half of `governedActions` (lane E19), keyed by the registry its records carry. Present
+   * exactly when an action is declared, and it executes exactly the declared actions (the adapter-list test pins both).
+   */
+  control?: { readonly registry: AgentRegistry; readonly member: VendorAgentControl };
 }
 
 const VENDOR_OF_REGISTRY_KIND: Readonly<Partial<Record<DiscoverySourceKind, AgentPlatformVendor>>> = Object.freeze({
@@ -64,9 +71,20 @@ export const AGENT_PLATFORM_ADAPTERS: readonly AgentPlatformAdapter[] = Object.f
     if (!vendor) throw new Error(`no vendor declared for registry kind ${scanner.kind}`);
     return Object.freeze({ vendor, kind: scanner.kind, scanner, readEndpoints: null, governedActions: Object.freeze([]) });
   }),
-  // ADR-0336 slice 1. No action: SetAsQuarantined is documented only for a delegated admin user token (decision 2's
-  // open constraint), which ADR-0195's credential model refuses, so E19 decides how, or whether, to close it.
-  Object.freeze({ vendor: "microsoft", kind: "agent_registry_copilot_studio", scanner: COPILOT_STUDIO_SCANNER, readEndpoints: COPILOT_STUDIO_ENDPOINTS, governedActions: Object.freeze([]) }),
+  // ADR-0336 slice 1, with ADR-0338 slice 1b's control: quarantine and its reverse through the documented Power
+  // Platform API, with a separate `platform_write` credential (a federated service principal preferred; a delegated
+  // admin credential only by opt-in, ADR-0338 §3a, which closes decision 2's open constraint)
+  Object.freeze({
+    vendor: "microsoft",
+    kind: "agent_registry_copilot_studio",
+    scanner: COPILOT_STUDIO_SCANNER,
+    readEndpoints: COPILOT_STUDIO_ENDPOINTS,
+    governedActions: Object.freeze([
+      Object.freeze({ action: "quarantine", reversible: true, vendorPermission: "CopilotStudio.AdminActions.Invoke" }),
+      Object.freeze({ action: "unquarantine", reversible: true, vendorPermission: "CopilotStudio.AdminActions.Invoke" }),
+    ]),
+    control: Object.freeze({ registry: "copilot_studio", member: COPILOT_STUDIO_CONTROL }),
+  }),
   // ADR-0336 slice 2. No action yet: deactivating the active BotVersion is E19's, with its own write credential.
   Object.freeze({ vendor: "salesforce", kind: "agent_registry_agentforce", scanner: AGENTFORCE_SCANNER, readEndpoints: AGENTFORCE_ENDPOINTS, governedActions: Object.freeze([]) }),
   // ADR-0336 slice 3. No action yet: GPT removal (Compliance API, destructive, irreversible) and n8n workflow
@@ -75,5 +93,10 @@ export const AGENT_PLATFORM_ADAPTERS: readonly AgentPlatformAdapter[] = Object.f
   Object.freeze({ vendor: "openai", kind: "agent_registry_openai", scanner: OPENAI_SCANNER, readEndpoints: OPENAI_ENDPOINTS, governedActions: Object.freeze([]) }),
   Object.freeze({ vendor: "n8n", kind: "agent_registry_n8n", scanner: N8N_SCANNER, readEndpoints: N8N_ENDPOINTS, governedActions: Object.freeze([]) }),
 ]);
+
+/** ADR-0338: registry → its adapter's control member; what the vendor agent control routes may execute */
+export const AGENT_PLATFORM_CONTROLS: Readonly<Record<string, VendorAgentControl>> = Object.freeze(
+  Object.fromEntries(AGENT_PLATFORM_ADAPTERS.flatMap((a) => (a.control ? [[a.control.registry, a.control.member] as const] : []))),
+);
 
 export const AGENT_PLATFORM_SCANNERS: readonly Scanner[] = Object.freeze(AGENT_PLATFORM_ADAPTERS.map((a) => a.scanner));
