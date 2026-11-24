@@ -372,7 +372,7 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
   order (rate limit, ABAC forbid, approval).
 - **What the core cannot know.** The request's session facts (`sessionOrigin`, `mfaCompleted`, `clientIp`) read as
   unknown, false and absent (the strict values), and the delegation context is empty (the sponsor is evaluated as
-  `User`). Threading them from the routes is a follow-up (PENDING fragment).
+  `User`). Threading them from the routes is a follow-up (PENDING fragment). Done in slice 4b (below).
 - **ABAC `require_approval` on these call types refuses** (fail closed). Their consent binds approval rules and the
   execution dial only, so an ABAC hold could otherwise be released by a rule's approver, or queued with no consent
   bound to the policy version. Queueing it needs the policy version in the consent's context digest, as the MCP path
@@ -388,6 +388,37 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
 - **With hard windows (slice 3).** An ABAC `require_approval` refusal takes no rate slot: the window is counted
   without the lock, an exhausted window still refuses as the rate limit (it comes first in the order), and otherwise
   the call refuses as the ABAC hold.
+
+#### Slice 4b (2026-11-21): session facts and the actor chain reach the governed core
+
+P-01c item 2. The governed core's ABAC v5 request now carries what only a route or the stored grant knows, the same
+facts and defaults as a tool call:
+
+- **Session facts.** `principal.sessionOrigin`, `principal.mfaCompleted` and `context.clientIp` come from
+  `abacPrincipalFromRequest(req)` at the route. `GovernedRequestFacts` (`governed-core.ts`) carries them through
+  `loadResourceRestrictions` / `governedEvaluateResource` / `governedModelGate` into `assembleGovernedAbacRequest`.
+  The connector invoke route, the A2A message route, the native invoke route (every dispatch path in it), the
+  compat shims (read once in prepare), and the setup-assist, decompose, use-case intake and vendor questionnaire
+  routes supply them.
+- **Fail closed when a fact is missing.** A call with no request behind it (a worker loop, a builder turn, an eval,
+  a workflow review check) supplies none. Each then reads as its strict value: origin `unknown`, no second factor,
+  no address. A forbid conditioned on a missing fact therefore fires. It does not silently pass (ADR-0180).
+- **The actor chain.** A delegated call carries its stored chain: `actorForGrant`, read before the core's restrictions
+  on the connector path and inside the model gate. `context.actorChain` and `context.delegationDepth` follow
+  `abacDelegationContextOf`, the tool call's builder. Each actor is then evaluated as `Agent` (`evaluateAbacForChain`,
+  ADR-0188 decision 18). The call is refused by the sponsor's verdict first, else by the first actor whose verdict
+  is not a permit. An identity that cannot be read refuses (`abac-engine-error`). In the model gate, a grant that
+  cannot be read refuses (error is deny). A2A has no delegated path yet, so its chain is empty.
+- **Write-time guard narrowed.** `ABAC_GOVERNED_UNSUPPLIED_FACTS` keeps only `context.rateLimitUsagePct`, which the
+  core still does not compute for these calls. An `Agent`-scoped v5 policy on a governed action now validates.
+- **Tests.** In the kernel (`abac-v5.test.ts`), the session-fact and chain policies on governed actions now validate,
+  and a rate-usage policy is still refused. `zz-adr0251-abac-v5-session-facts.test.ts` (gateway, own scratch database)
+  covers:
+  - each session fact supplied, wrong and absent;
+  - the real invoke route reading an API-key call as `api_key`;
+  - depth and chain-membership policies on a two-hop chain, leaving the person's own call alone;
+  - an `Agent`-scoped forbid refusing a chain that contains the matching actor;
+  - an unreadable identity and an unreadable grant each refusing.
 
 #### Review #836 (2026-11-14)
 
@@ -422,3 +453,41 @@ Supersedes the interim in slice 2 and in "Consequences" ("approval rules on mode
    on model, connector and A2A calls is not previewed. An ABAC forbid or an ABAC hold on a model dispatch answers 403
    `forbidden` (the kernel refuses the hold as a deny); only an approval-rule hold that cannot be queued answers
    `approval_required`.
+
+### P-01 remainder, slice 2: admin routes for the resource rules (2026-11-14; reworked on review of #818, 2026-11-16)
+
+Closes review #715 finding 4 ("no admin routes yet"). `apps/gateway/src/resource-rule-routes.ts`:
+
+| Route | Step-up |
+|---|---|
+| `GET /v1/rules/resource/approval-rules`, `GET /v1/rules/resource/rate-limits` (and each `/export.xlsx`) | none (read; the ADR-0226 list contract: `answerListPage` / `answerListExport` with the `resource-approval-rules` and `resource-rate-limits` list specs, optional `resourceType`) |
+| `POST /v1/rules/resource/approval-rules`, `POST /v1/rules/resource/rate-limits` | none: adding a rule or a limit only ever restricts |
+| `PATCH /v1/rules/resource/approval-rules/:ruleId` (`writeOnly`, `approverUserId`) | `settings_relax` when the approver pool widens (`approvalRuleLoosens`, the pool predicate the MCP approval rules use) or, resource-specific, when `writeOnly` turns on (fewer calls held); none when it only tightens |
+| `PATCH /v1/rules/resource/rate-limits/:ruleId` (`maxCalls`, `windowSeconds`) | `settings_relax` when more calls are allowed or the rate rises (`rateLimitChangeRelaxes`: more calls over a longer window is ambiguous and takes the step-up); none when it only tightens |
+| `DELETE` on either | `settings_relax` (`assertApprovalRuleLooseningStepUp` with the rule removed; `assertRuleRemovalStepUp`) |
+
+- **Reuse (review of #818).** These routes write through the existing approval-rule code rather than beside it:
+  - THE ONE GUARD, `assertApprovalRuleWritable`, runs on every create and edit inside the writer's transaction, so a
+    rule whose pool can never approve (no such approver, a disabled one, the subject as their own approver) is refused
+    with the same 422 `quorum_unsatisfiable` as every other approval-rule writer.
+  - The loosening is judged under the row lock by the shared predicate, and the step-up is asked inside that lock
+    (`approvalRuleStepUp`, `requireRuleStepUp`), bound to the shared facts `{ruleId, values}` (the quorum, approver
+    role and approver, plus `writeOnly: true` when it turns on; `{deleted: true}` for a removal). A concurrent edit
+    can no longer make a judged tightening into a loosening, so the former 409 `rule_changed` is gone.
+  - The lists use the shared list contract, so the console's list kit, its sorting and its export work unchanged.
+- **Admin only** through the global gate (not in `NON_ADMIN_ROUTES`).
+- **Audit in the same transaction** as the write, on `objectType: restriction_rule`, `receiptClass: configuration`:
+  the created or deleted row, or the `{from, to}` transitions, with `relaxed` on a loosening.
+- **Identity is not editable.** The subject and the resource binding select which calls a rule applies to; changing
+  them is a new rule (delete and create), as for the MCP rule kinds (ADR-0073 §2).
+- **Refused with a reason, never stored:** an unknown resource or subject (422); a rule no pool can approve (422
+  `quorum_unsatisfiable`, the shared guard); a write-only model rule and a model rate limit (400: a model call never
+  writes, and model limits stay in `model_rate_limits`, one fact in one place).
+- **Path.** Under `/v1/rules/resource/…` rather than `/v1/rules/resource-…`, so the SPA's generic one-segment
+  `/v1/rules/${kind}` calls are not read by the route census as reaching these routes.
+- **UI.** No screen in this lane: the six writes, two lists and two list exports are known UI gaps
+  (`scripts/known-ui-gaps/adr-0251-l1-resource-rules.json`) and the two removals are `DELIBERATELY_API_ONLY`, all
+  tracked on #453 for the design builder.
+- **Tests.** `zz-adr0251-resource-rule-routes.test.ts` (admin only; create, list, export, tighten, loosen and delete
+  with the step-up refusal naming the exact change; every refusal reason; the core loads what the routes wrote and
+  stops loading a deleted limit); `resource-rules.test.ts` (the rate-limit loosening predicate and the request shapes).

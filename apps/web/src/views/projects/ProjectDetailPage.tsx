@@ -27,7 +27,7 @@ import {
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { ARCHIVED_REASON, ArchivedNote, ProjectChrome, useProjectChrome } from "./projectChrome";
-import { ProjectEditForm } from "./projectForms";
+import { OverageBadge, OverageHistory, ProjectEditForm } from "./projectForms";
 import type { Initiative } from "../../api/adminTypes";
 import v from "../views.module.css";
 
@@ -219,11 +219,7 @@ export default function ProjectDetailPage() {
                   of {fmtUsd(cap)}
                   {bg.period === "monthly" ? " this month" : ""}
                 </span>
-                {over && (
-                  <Badge tone={bg.overageApproved ? "warn" : "danger"}>
-                    {bg.overageApproved ? "overage approved" : "over budget"}
-                  </Badge>
-                )}
+                {over && <OverageBadge budget={bg} />}
                 {crossed && <Badge tone="warn">{bg.alertThresholdPct}% threshold crossed</Badge>}
               </div>
               <div style={{ marginTop: "var(--s1)" }}>
@@ -241,6 +237,7 @@ export default function ProjectDetailPage() {
               <div className={v.faint} style={{ marginTop: "var(--s1)" }}>
                 budget window: {bg.period === "monthly" ? `this calendar month (${bg.periodKey ?? ""})` : "lifetime"}
               </div>
+              <OverageHistory budget={bg} />
             </>
           )}
         </Card>

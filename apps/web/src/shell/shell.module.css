@@ -604,7 +604,9 @@ span.navIcon {
 
 /* ---- responsive (laptop → narrow) ----
    The phone drawer, unchanged by ADR-0169: full labels, opened by the
-   hamburger, and no pin (there is nothing to pin it beside). */
+   hamburger, and no pin (there is nothing to pin it beside). The width is
+   repeated as NARROW_QUERY in AppShell.tsx, which makes the closed drawer
+   inert (UIS-01): change both together. */
 @media (max-width: 960px) {
   .shell,
   .shell[data-rail] {

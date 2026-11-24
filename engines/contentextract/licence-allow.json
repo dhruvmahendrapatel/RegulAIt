@@ -1,0 +1,8 @@
+[
+  {
+    "subject": "python",
+    "licence": "PSF-2.0",
+    "decision": "accepted by owner 2026-10-10 (ADR-0187 decision 193)",
+    "why": "accepted (owner 2026-10-10, open question 21; ADR-0187 decision 193): the CPython runtime of the base image (permissive); PSF-2.0 is not on the ADR-0176 list."
+  }
+]

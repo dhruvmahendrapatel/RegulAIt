@@ -52,6 +52,17 @@ export const DEFAULT_REPETITIVE_ASK_OPTIONS: Readonly<RepetitiveAskOptions> = Ob
   minClusterSize: 20,
 });
 
+/**
+ * How far an admin may relax the defaults (ADR-0180: strict by default, relaxing is audited and bounded). The gateway's
+ * settings schema and the database CHECKs hold the same bounds.
+ */
+export const REPETITIVE_ASK_FLOORS = Object.freeze({
+  /** the most bits an admin may allow (wider than this pairs unrelated asks) */
+  maxHamming: 5,
+  minSimilarity: 0.8,
+  minClusterSize: 10,
+});
+
 export interface Ask {
   readonly id: string;
   readonly text: string;

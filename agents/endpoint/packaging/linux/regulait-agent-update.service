@@ -1,0 +1,18 @@
+# ADR-0360 §4: the root updater. It installs nothing unless the config pins the device-policy and release keys and the
+# spool holds a directive signed for this device, for a release the release keys signed that is newer than this binary.
+[Unit]
+Description=RegulAIt endpoint agent self-update (off unless the gateway signs a directive for this device)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/regulait-agent update
+TimeoutStartSec=300
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/usr/bin /var/lib/regulait-agent

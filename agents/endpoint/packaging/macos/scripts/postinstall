@@ -13,4 +13,10 @@ case "$CONSOLE_USER" in ''|root|loginwindow|*[!A-Za-z0-9._-]*) ;; *) dseditgroup
 GID="$(dscl . -read "/Groups/$GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')"
 case "$GID" in ''|*[!0-9]*) GID=-1 ;; esac
 "$BIN" redeem-ticket -ticket-gid "$GID" || true
+# ADR-0360 §4: the self-update spool (per-user agents write, root verifies) and the root update check
+SPOOL="/Library/Application Support/RegulAIt/Agent/update"
+if [ "$GID" != "-1" ]; then
+  install -d -m 1770 -o root -g "$GID" "$SPOOL" 2>/dev/null || true
+fi
+launchctl bootstrap system /Library/LaunchDaemons/com.regulait.agent.update.plist >/dev/null 2>&1 || true
 exit 0

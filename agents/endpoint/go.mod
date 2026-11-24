@@ -12,6 +12,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.9
 	github.com/tidwall/jsonc v0.3.3
 	github.com/tidwall/sjson v1.2.5
+	golang.org/x/mod v0.42.0
 	golang.org/x/sys v0.50.0
 	mvdan.cc/sh/v3 v3.14.1
 )

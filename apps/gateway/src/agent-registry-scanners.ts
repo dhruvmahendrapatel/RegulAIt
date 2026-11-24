@@ -30,7 +30,7 @@
  *                             credential: AWS role by web identity (or static keys, static)
  */
 import { gcpAuthClient, isAwsRegion, isAwsAccountId, listAgentCoreRuntimes } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, type AgentRegistry, type DiscoveryReadOutcome } from "@regulait/shared";
+import { DISCOVERY_READ_OUTCOMES_MAX, agentConfigSecretRuleAllowed, scrubAuditText, vendoredSecretSpans, type AgentRegistry, type DiscoveryReadOutcome } from "@regulait/shared";
 import { awsCredential, dedupedSecretSink, gcpCredential, scannerFetch, sourceToken, type CloudScannerOptions } from "./discovery-cloud-scanners.js";
 import {
   GRAPH_ORIGIN,
@@ -45,7 +45,7 @@ import {
   sameOriginNext,
   str,
 } from "./discovery-wider-scanners.js";
-import type { RegistryAgentRecord, ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
+import type { RegistryAgentRecord, ScanContext, ScanObservation, ScanResult, Scanner } from "./discovery-scanners.js";
 
 /** at most this many Entra agent identities have their owners read per run (one Graph call each) */
 export const ENTRA_OWNER_LOOKUPS_MAX = 200;
@@ -69,13 +69,84 @@ export const includeSet = (ctx: ScanContext): Set<string> | null =>
 /** is this listing's outcome a full read (read, no cap note)? */
 export const fullyRead = (outcomes: DiscoveryReadOutcome[], read: string): boolean => outcomes.some((o) => o.read === read && o.status === "read" && !o.detail);
 
+/** at most this many plaintext-credential findings per staged agent, and per run */
+export const CONFIG_SECRETS_PER_RECORD_MAX = 20;
+export const CONFIG_SECRETS_PER_RUN_MAX = 1_000;
+/** the longest field path the worker accepts (its `location.path` bound) */
+export const CONFIG_SECRET_PATH_MAX = 512;
+/** the longest a field is scanned (characters); a longer one is scanned up to here */
+export const CONFIG_SECRET_FIELD_MAX = 262_144;
+
+/** one agent content field, read for this scan only: its path (no value in it) and its text */
+export interface ConfigField {
+  /** e.g. `configs/<id>/instructions`: names, ids and keys only, never the text */
+  path: string;
+  text: unknown;
+}
+
+/**
+ * ADR-0336 decision 4 (slice 4): plaintext credentials in a staged agent's configuration, found IN MEMORY by the
+ * vendored secret matcher and reported by location only. For each hit only the field path and the rule id are kept;
+ * the span (start, end) is dropped here, and the text is never returned, stored, hashed or logged. Personal-data
+ * rules are filtered out (`agentConfigSecretRuleAllowed`). The caller drops the text when the read ends.
+ */
+export class ConfigSecretCollector {
+  readonly observations: ScanObservation[] = [];
+  private capped = 0;
+  private unplaceable = 0;
+
+  /** scan one staged agent's fields */
+  scan(subject: string, fields: readonly ConfigField[]): void {
+    const seen = new Set<string>();
+    for (const f of fields) {
+      if (typeof f.text !== "string" || !f.text) continue;
+      // #1130 R9 [2]: a path the worker would refuse (too long, or credential-shaped despite pathSegment) is skipped
+      // and counted, so one odd field cannot fail the whole run
+      if (f.path.length > CONFIG_SECRET_PATH_MAX || !segmentClean(f.path)) {
+        if (vendoredSecretSpans(f.text).some((h) => agentConfigSecretRuleAllowed(h.rule))) this.unplaceable++;
+        continue;
+      }
+      const text = f.text.length > CONFIG_SECRET_FIELD_MAX ? f.text.slice(0, CONFIG_SECRET_FIELD_MAX) : f.text;
+      for (const { rule } of vendoredSecretSpans(text)) {
+        if (!agentConfigSecretRuleAllowed(rule)) continue;
+        const key = `${f.path}\u0000${rule}`;
+        if (seen.has(key)) continue;
+        if (seen.size >= CONFIG_SECRETS_PER_RECORD_MAX || this.observations.length >= CONFIG_SECRETS_PER_RUN_MAX) {
+          this.capped++;
+          continue;
+        }
+        seen.add(key);
+        this.observations.push({ evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: f.path }, secretRule: rule });
+      }
+    }
+  }
+
+  /** a read outcome when some findings were not reported (counts only) */
+  outcome(read: string): DiscoveryReadOutcome | null {
+    const parts: string[] = [];
+    if (this.capped) parts.push(`${this.capped} more plaintext-credential match(es) were not reported: at most ${CONFIG_SECRETS_PER_RECORD_MAX} per agent and ${CONFIG_SECRETS_PER_RUN_MAX} per run`);
+    if (this.unplaceable) parts.push(`${this.unplaceable} field(s) with a plaintext credential could not be named by a safe path (longer than ${CONFIG_SECRET_PATH_MAX} characters) and were not reported`);
+    return parts.length ? { read, status: "read", detail: parts.join("; ") } : null;
+  }
+}
+
+/** text the worker would accept in a path: no credential shape the audit scrub or the vendored pack would see */
+const segmentClean = (v: string): boolean => scrubAuditText(v) === v && vendoredSecretSpans(v).length === 0;
+
+/**
+ * A path segment built from vendor text (a key, an id): kept only when it is a plain identifier AND carries no
+ * credential shape; otherwise the fallback (its position). #1130 S9 [1]: a credential planted as a parameter KEY must
+ * not reach the path, where the worker would refuse it and fail the whole run.
+ */
+export const pathSegment = (v: unknown, fallback: string): string => (typeof v === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(v) && segmentClean(v) ? v : fallback);
+
 /** finish a registry run: problems first; a failure when nothing at all could be read */
-export function finishRegistry(records: RegistryAgentRecord[], outcomes: DiscoveryReadOutcome[], complete: AgentRegistry[], writeScope: ScanResult["credentialWriteScope"]): ScanResult {
+export function finishRegistry(records: RegistryAgentRecord[], outcomes: DiscoveryReadOutcome[], complete: AgentRegistry[], writeScope: ScanResult["credentialWriteScope"], observations: ScanObservation[] = []): ScanResult {
   const sorted = [...outcomes.filter((o) => o.status !== "read"), ...outcomes.filter((o) => o.status === "read")].slice(0, DISCOVERY_READ_OUTCOMES_MAX);
   if (!outcomes.some((o) => o.status === "read")) {
     throw new WiderSourceConfigError(`nothing could be read: ${sorted.map((o) => `${o.read} ${o.status}${o.detail ? ` (${o.detail})` : ""}`).join("; ").slice(0, 600)}`);
   }
-  return { observations: [], registryAgents: records, registriesComplete: complete, readOutcomes: sorted, ...(writeScope ? { credentialWriteScope: writeScope } : {}) };
+  return { observations, registryAgents: records, registriesComplete: complete, readOutcomes: sorted, ...(writeScope ? { credentialWriteScope: writeScope } : {}) };
 }
 
 // ---------------------------------------------------------------------------

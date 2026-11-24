@@ -42,6 +42,7 @@
  * fields only.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { recordCredentialFingerprints } from "./endpoint-credential-reuse.js";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { prefixedBearer } from "./prefixed-bearer.js";
@@ -67,6 +68,7 @@ import {
   discoverySources,
   endpointAgentIdentities,
   endpointAgentReports,
+  endpointDeviceGroupMembers,
   endpointDevices,
   endpointEnrolmentTokens,
   eq,
@@ -470,6 +472,9 @@ function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
     revokedAt: t.revokedAt?.toISOString() ?? null,
     /** ADR-0197 Q13: true when an admin relaxed the 30-day expiry for this token (step-up, audited) */
     expiryRelaxed: t.expiryRelaxationStepUp !== null,
+    /** ADR-0360 §5: a one-line enrolment token (one device, at most 60 minutes) and the group it places its device in */
+    singleUse: t.singleUse,
+    deviceGroupId: t.deviceGroupId,
   };
 }
 
@@ -598,6 +603,11 @@ export function registerEndpointAgentRoutes(
             identityCap: ENDPOINT_TICKET_IDENTITY_CAP,
           })
           .returning();
+        // ADR-0360 §5: a one-line token places its device in the token's ADR-0350 group (only narrows its policy; the
+        // INSERT policy admits exactly this row: a live device whose single-use token names the group)
+        if (locked.row.deviceGroupId) {
+          await t.insert(endpointDeviceGroupMembers).values({ deviceId: row!.id, groupId: locked.row.deviceGroupId, addedBy: locked.row.createdBy }).onConflictDoNothing();
+        }
         await recordPseudonyms(t, dataKey, [device]);
         await audit(t, NIL_UUID, "discovery_source", source.id, "endpoint-enrolment-ticket-issued", "allow", `an endpoint agent device ticket was issued under enrolment token ${token.id} (ADR-0195 SD4b)`, {
           tokenId: token.id,
@@ -607,6 +617,7 @@ export function registerEndpointAgentRoutes(
           arch: body.arch,
           devicesEnrolled: enrolled,
           deviceCap: locked.row.deviceCap,
+          ...(locked.row.singleUse ? { singleUse: true, deviceGroupId: locked.row.deviceGroupId } : {}),
         });
         // R15 cap alerting: crossing 80 % and reaching 100 % of the cap each write their own row
         for (const f of ENDPOINT_CAP_ALERT_FRACTIONS) {
@@ -895,6 +906,14 @@ export function registerEndpointAgentRoutes(
         const complete = !report.gaps.some((g) => g.kind === MCP_CONFIG_KIND);
         mcp = await recordMcpServers(db, { sourceId: agent.sourceId, deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
       }
+      // ADR-0350 §11: credential-reuse fingerprints of the facts this report path accepted (never env-name facts, and
+      // MCP facts only while the switch is on); the values themselves never reach here. Stored server-keyed under the
+      // data key, and a report with no gaps replaces the identity's set.
+      const accepted = report.facts.filter((f) => f.kind !== "env_name" && f.matchedOn !== "envName" && (f.kind !== MCP_CONFIG_KIND || mcpConfigEnabled));
+      const reuse = await recordCredentialFingerprints(db, agent.identityId, accepted.flatMap((f) => [...(f.keys ?? []), ...(f.server?.keys ?? [])]), {
+        dataKey: opts.dataKey,
+        complete: report.gaps.length === 0,
+      });
       await db.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
       await audit(db, NIL_UUID, "discovery_source", agent.sourceId, "endpoint-agent-report-accepted", "allow", `an endpoint agent report was accepted: ${report.facts.length} fact(s), ${reduction.sightings.length} catalogue sighting(s) (ADR-0195 SD4b)`, {
         deviceId: agent.deviceId,
@@ -908,6 +927,9 @@ export function registerEndpointAgentRoutes(
         mcpServersRecorded: mcp.upserted,
         mcpServersPruned: mcp.pruned,
         mcpServersAdded: mcp.added,
+        credentialFingerprints: reuse.recorded,
+        credentialReuseRaised: reuse.reused,
+        credentialFingerprintsPruned: reuse.pruned,
         droppedSnapshots: report.droppedSnapshots,
         bodySha256,
       });

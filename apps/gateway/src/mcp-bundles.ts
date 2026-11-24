@@ -146,7 +146,7 @@ async function unknownItems(db: Db, items: readonly Item[]): Promise<Item[]> {
   return items.filter((i) => isReservedToolName(i.toolName) || !have.has(itemKey(i)));
 }
 
-type Subject = { kind: "user"; id: string } | { kind: "role"; id: string } | { kind: "team"; id: string };
+export type Subject = { kind: "user"; id: string } | { kind: "role"; id: string } | { kind: "team"; id: string };
 
 /**
  * The most identities one SoD check covers (review of #697). Above it the grant is refused rather than checked in
@@ -162,7 +162,7 @@ type SodGate = { ok: true } | { ok: false; status: 409 | 422; body: Record<strin
  * assignees, team members), and `refuseSodFootprint` checks every (identity, tool) pair in memory against queries
  * that depend only on the enabled SoD rules. More than MCP_BUNDLE_SOD_MAX_IDENTITIES identities is refused (422).
  */
-async function bundleSodGate(db: Db, subjects: readonly Subject[], items: readonly Item[], actorUserId: string | null, bundleId: string): Promise<SodGate> {
+export async function bundleSodGate(db: Db, subjects: readonly Subject[], items: readonly Item[], actorUserId: string | null, bundleId: string): Promise<SodGate> {
   if (items.length === 0 || subjects.length === 0) return { ok: true };
   const cap = MCP_BUNDLE_SOD_MAX_IDENTITIES + 1;
   const ids = new Set(subjects.filter((x) => x.kind === "user").map((x) => x.id));

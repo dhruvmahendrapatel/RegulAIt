@@ -5,14 +5,18 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
-import { N8N_ENDPOINTS, N8N_SCANNER, endpointOrigin, n8nBase, n8nEndpoints, n8nTargetProblem, workflowAgents } from "./agent-registry-n8n.js";
+import { N8N_ENDPOINTS, N8N_SCANNER, endpointOrigin, n8nBase, n8nEndpoints, n8nTargetProblem, workflowAgents, workflowScannedFields } from "./agent-registry-n8n.js";
+import { checkObservations } from "./discovery-worker.js";
+import { ConfigSecretCollector } from "./agent-registry-scanners.js";
 import { allowListedFetch } from "./agent-platform-endpoints.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
 const BASE = "https://acme.app.n8n.cloud";
 const KEY = ["n8n", "api", "synthetic", "key"].join("_");
-/** free text a careless adapter might keep: it must never be staged */
-const SECRET_TEXT = "SYSTEM-PROMPT-never-stored-sk_live_example";
+/** a real-shaped credential (built at run time, so no scanner sees a token in this file) */
+const TOKEN = ["gh", "p_", "A1b2C3d4".repeat(4), "E5f6"].join("");
+/** free text a careless adapter might keep: it must never be staged; it carries a plaintext credential */
+const SECRET_TEXT = `SYSTEM-PROMPT-never-stored: the token is ${TOKEN}`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const urlOf = (input: string | URL | Request) => new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 
@@ -87,6 +91,22 @@ function fakeN8n(opts: FakeOpts = {}) {
     }
     return json({}, 404);
   }) as typeof fetch;
+}
+
+function baseCtx(): ScanContext {
+  return {
+    source: { id: "s-n8n", name: "n8n", kind: "agent_registry_n8n", target: { baseUrl: `${BASE}/` }, scope: { orgLevel: true, include: [] } },
+    credential: { mode: "static", publicConfig: {}, secret: KEY },
+    fetch: fakeN8n(),
+    throttle: async () => undefined,
+    backoff: async () => false,
+    recordRaw: () => undefined,
+    registerSecret: () => undefined,
+    pseudonymise: async () => "psn:000000000000000000000000",
+    heartbeat: async () => true,
+    signal: new AbortController().signal,
+    catalogue: { matches: () => true, rows: () => [] },
+  };
 }
 
 function run(opts: FakeOpts = {}, source: Partial<ScanSource> = {}) {
@@ -230,5 +250,56 @@ describe("ADR-0336 agent_registry_n8n: the endpoint allow-list and the graph", (
     expect(workflowAgents(AGENT_WF.nodes, { "OpenAI Chat Model": { ai_languageModel: "not a list" }, x: { ai_languageModel: [[{ node: "AI Agent" }]] } }).components).toBeNull();
     const many = Array.from({ length: 1001 }, (_, i) => ({ id: `n${i}`, name: `n${i}`, type: "x", parameters: {} }));
     expect(workflowAgents([...AGENT_WF.nodes, ...many], AGENT_WF.connections).components).toBeNull();
+  });
+});
+
+describe("ADR-0336 slice 4: plaintext credentials in an agent workflow, by location only", () => {
+  it("reports each node parameter with a credential: subject, a path of ids and keys, and the rule id; nothing else", async () => {
+    const res = await run().promise;
+    const subject = `acme.app.n8n.cloud/${AGENT_WF.id}`;
+    // the system message, the HTTP tool's header value and the MCP endpoint's query (all hold the same credential)
+    expect(res.observations).toEqual([
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `workflows/${AGENT_WF.id}/nodes/n2/parameters/options/systemMessage` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `workflows/${AGENT_WF.id}/nodes/n4/parameters/endpointUrl` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `workflows/${AGENT_WF.id}/nodes/n6/parameters/headerValue` }, secretRule: "pipelock.secrets.github_token" },
+    ]);
+    const out = JSON.stringify(res);
+    for (let i = 0; i + 8 <= TOKEN.length; i++) expect(out).not.toContain(TOKEN.slice(i, i + 8));
+    // a plain workflow (no agent) is not scanned; the worker's contract accepts the findings, vendor n8n
+    expect(out).not.toContain(PLAIN_WF.id);
+    expect(checkObservations("agent_registry_n8n", res.observations!, "2026-11-21T00:00:00.000Z")[0]).toMatchObject({ configSecret: { rule: "pipelock.secrets.github_token", vendor: "n8n" } });
+  });
+
+  it("#1130 S9 [1]: a credential planted as a parameter KEY never reaches a path, and the run still succeeds", async () => {
+    const planted = { ...AGENT_WF, nodes: [...AGENT_WF.nodes, { id: "n9", name: "Planted", type: "n8n-nodes-base.set", parameters: { [TOKEN]: `value ${TOKEN}` } }] };
+    const f = fakeN8n();
+    const calls = { urls: [] as string[] };
+    const res = await N8N_SCANNER.run({
+      ...baseCtx(),
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        calls.urls.push(urlOf(input).href);
+        const url = urlOf(input);
+        if (url.pathname === "/api/v1/workflows") return json({ data: [planted], nextCursor: null });
+        return f(input, init);
+      }) as typeof fetch,
+    });
+    const paths = res.observations!.map((o) => o.location!.path);
+    expect(paths).toContain(`workflows/${AGENT_WF.id}/nodes/n9/parameters/#0`);
+    const out = JSON.stringify(res);
+    for (let i = 0; i + 8 <= TOKEN.length; i++) expect(out).not.toContain(TOKEN.slice(i, i + 8));
+    // and the worker accepts every observation, so the run is not refused
+    expect(() => checkObservations("agent_registry_n8n", res.observations!, "2026-11-21T00:00:00.000Z")).not.toThrow();
+  });
+
+  it("#1130 R9 [2]: a field whose path would be too long is skipped and counted, not a refused run", () => {
+    const c = new ConfigSecretCollector();
+    c.scan("acme/wf", [{ path: `workflows/wf/${"k".repeat(600)}`, text: `x ${TOKEN}` }, { path: "workflows/wf/ok", text: `y ${TOKEN}` }]);
+    expect(c.observations.map((o) => o.location!.path)).toEqual(["workflows/wf/ok"]);
+    expect(c.outcome("r")?.detail).toMatch(/1 field\(s\) with a plaintext credential could not be named/);
+  });
+
+  it("paths carry no user text: a node name or an odd key becomes its position", () => {
+    const fields = workflowScannedFields("wf1", [{ name: "My secret node", parameters: { "header value!": "x", ok_key: ["a", { deep: "b" }] } }]);
+    expect(fields.map((f) => f.path)).toEqual(["workflows/wf1/nodes/#0/parameters/#0", "workflows/wf1/nodes/#0/parameters/ok_key/0", "workflows/wf1/nodes/#0/parameters/ok_key/1/deep"]);
   });
 });
