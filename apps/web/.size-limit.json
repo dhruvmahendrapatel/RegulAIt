@@ -121,6 +121,12 @@
     "limit": "6.8 kB"
   },
   {
+    "name": "chunk: ConnectorsPage",
+    "path": "dist/assets/ConnectorsPage-????????.js",
+    "gzip": true,
+    "limit": "7.0 kB"
+  },
+  {
     "name": "chunk: CopilotRedteamGateCard",
     "path": "dist/assets/CopilotRedteamGateCard-????????.js",
     "gzip": true,
@@ -227,6 +233,12 @@
     "path": "dist/assets/IsolationSettings-????????.js",
     "gzip": true,
     "limit": "4.4 kB"
+  },
+  {
+    "name": "chunk: LifecycleActions",
+    "path": "dist/assets/LifecycleActions-????????.js",
+    "gzip": true,
+    "limit": "4.8 kB"
   },
   {
     "name": "chunk: ListPreview",

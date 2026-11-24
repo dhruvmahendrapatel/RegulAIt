@@ -130,7 +130,8 @@ export async function startEngineTaskRig(o: EngineTaskRigOptions): Promise<Engin
       // a subject run's only input is the gateway's subject file, at the input root (#843 security review)
       files: run.targetKind === "subject" ? [] : [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }],
       artifact: run.targetKind === "artifact" ? { path: `${runId}/artifact.pkl` } : null,
-      subject: run.targetKind === "subject" ? { path: run.engineId === "mcpscanner" ? "tools.json" : "SKILL.md" } : null,
+      // (ADR-0362: the content extractor's subject is the request's bundle.json)
+      subject: run.targetKind === "subject" ? { path: run.engineId === "mcpscanner" ? "tools.json" : run.engineId === "contentextract" ? "bundle.json" : "SKILL.md" } : null,
       secret: m.needsModelAccess ? `rig-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` : null,
     };
     setEngineTaskPlacementAffinityForTest([executorId]);

@@ -276,6 +276,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "GET /v1/projects": { summary: "Projects visible to the caller." },
   "POST /v1/projects": { summary: "Create a project.", body: createProjectSchema },
+  "GET /v1/projects/:projectId/content-inspection": { summary: "A project's content-inspection setting (ADR-0362): stored values, the effective policy and whether the compliance floor forces it." },
+  "PUT /v1/projects/:projectId/content-inspection": { summary: "Change a project's content-inspection setting (ADR-0362). Turning it off or passing unreadable files is a settings_relax step-up; every change is audited." },
   "GET /v1/projects/:projectId/costs": { summary: "Per-project AI spend, attributed at the point of every gateway call (pillar 5)." },
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },

@@ -14,6 +14,7 @@ import {
   CONTENT_REFUSAL_REASONS,
   contentExtractResultSchema,
 } from "./content-inspection.js";
+import { CONTENTEXTRACT_ENGINE_VERSION, CONTENTEXTRACT_MAX_BUNDLE_BYTES } from "./engines/contentextract.js";
 
 const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../engines/contentextract");
 const HAVE_PYTHON = spawnSync("python3", ["--version"]).status === 0;
@@ -34,6 +35,12 @@ describe.skipIf(!HAVE_PYTHON)("ADR-0362 extractor parity", () => {
     expect(got.r).toEqual([...CONTENT_REFUSAL_REASONS]);
     expect(got.l).toEqual({ ...CONTENT_EXTRACT_HARD_LIMITS });
     expect(got.v).toBe(CONTENT_EXTRACT_RESULT_VERSION);
+  });
+
+  it("the extractor's version is the manifest's (ADR-0362 slice 1b)", () => {
+    expect(py("import extract; print(extract.EXTRACTOR_VERSION)").trim()).toBe(CONTENTEXTRACT_ENGINE_VERSION);
+    // the largest bundle the gateway queues is the largest the extractor reads
+    expect(Number(py("import extract; print(extract.MAX_BUNDLE_BYTES)").trim())).toBe(CONTENTEXTRACT_MAX_BUNDLE_BYTES);
   });
 
   it("the extractor's unit tests pass", () => {

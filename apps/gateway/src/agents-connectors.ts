@@ -125,6 +125,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
+import { inspectableFilesOf, inspectDispatchFiles, notInspectedAuditNote, type ContentInspectionVerdict, type InspectableFile } from "./content-inspection.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
@@ -571,11 +572,22 @@ export interface GovernedDispatchArgs {
   /** §5.1 lead ceiling (agent ids) for the delegated decision; null/absent = none */
   delegationCeilingAgentIds?: readonly string[] | null | undefined;
   /**
+   * ADR-0362 — the caller files to inspect when `messages` does not carry them (the native invoke path's semantic-cache
+   * hit, which sends no messages). Absent: the image and document blocks of `messages` are inspected.
+   */
+  inspectFiles?: readonly InspectableFile[] | undefined;
+  /**
    * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`) for the governed core's ABAC v5
    * request. Absent (an internal dispatch with no request behind it) = each reads as its strict value.
    */
   principal?: AbacPrincipalContext | null | undefined;
 }
+
+/**
+ * ADR-0362: one inspection per dispatch, shared by its fallback hops (a hop re-runs `dispatchAttempt` with the same
+ * `messages` / `inspectFiles` array), so the files are extracted and audited once.
+ */
+const contentInspectionMemo = new WeakMap<object, Promise<ContentInspectionVerdict>>();
 
 /**
  * ADR-0066 §4 — THE ONE GOVERNED-DISPATCH ENTRY POINT, now with fallback.
@@ -1667,6 +1679,31 @@ async function dispatchAttempt(
     ? effectiveCompliancePolicy(await complianceProfilesForTags(db, labelTags)).piiMode
     : null;
 
+  // ADR-0362 — CONTENT INSPECTION, after the ADR-0363 label gate (so a label-blocked file is never extracted and a
+  // label-redacted file is inspected as its marker) and before the three input checks: the files the provider will be
+  // sent (image and document blocks of `dispatchMessages`) are
+  // read in the sandbox when the project's inspection is on (or forced by the compliance floor), and their text joins
+  // the prompt for exactly those checks. A file that cannot be read refuses 422 here, audited, before provider work.
+  // No files, or inspection off: nothing changes (`checkedInput` is the prompt, byte-identical).
+  let checkedInput = args.input;
+  {
+    const source: object | undefined = args.inspectFiles ?? dispatchMessages;
+    const files = args.inspectFiles ?? inspectableFilesOf(dispatchMessages);
+    if (source && files.length > 0 && served) {
+      let pending = contentInspectionMemo.get(source);
+      if (!pending) {
+        pending = inspectDispatchFiles(db, { userId, agentId: served.id, projectId: args.projectId ?? null, files });
+        contentInspectionMemo.set(source, pending);
+      }
+      const verdict = await pending;
+      if (verdict.kind === "refused") {
+        sink.auditLogId = verdict.auditLogId;
+        return { ok: false, status: verdict.status, error: verdict.error, detail: verdict.detail };
+      }
+      if (verdict.kind === "proceed") checkedInput = args.input + verdict.inspectedText;
+    }
+  }
+
   const piiMode = stricterPiiMode(await projectPiiMode(db, args.projectId ?? null), labelPiiFloor);
   // ADR-0117: resolved ONCE for this dispatch and reused by the output check
   // below, so the input and output gates can never disagree about which
@@ -1676,7 +1713,7 @@ async function dispatchAttempt(
   if (piiMode) {
     // INPUT check runs BEFORE any provider work, so a block incurs no cost —
     // no usage row, no dispatch, no tokens.
-    const chk = enforcePII(piiMode, { input: args.input }, piiIntl);
+    const chk = enforcePII(piiMode, { input: checkedInput }, piiIntl);
     inputHits = chk.hits;
     if (chk.action === "block") {
       const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -1718,7 +1755,7 @@ async function dispatchAttempt(
     userId,
     target: { type: "model", agentId: served.id, agentName: served.name },
     projectId: args.projectId ?? null,
-    input: args.input,
+    input: checkedInput,
   });
   if (privacyRefusal) {
     sink.auditLogId = privacyRefusal.auditLogId;
@@ -1752,7 +1789,7 @@ async function dispatchAttempt(
     // INPUT phase, BEFORE any provider work — a block costs nothing: no
     // dispatch, no usage row, no tokens. Identical placement to the PII input
     // check immediately above.
-    guardrailInput = await runGuardrailsAsync(guardrails, "input", args.input);
+    guardrailInput = await runGuardrailsAsync(guardrails, "input", checkedInput);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
       sink.auditLogId = await recordGuardrailDecision(db, {
@@ -4255,6 +4292,9 @@ export function registerAgentConnectorRoutes(
     let routing: (RoutingDecision & { skippedCandidates?: SkippedCandidate[] }) | null = null;
     let dispatchOutcome: DispatchOutcome | null = null;
     let convoContext: PreparedConversationContext | null = null;
+    // ADR-0362 decision 7: with content inspection OFF, the dispatch audit row records every attached file as
+    // `not_scanned` (an additive key; null when there are no files or inspection is on, which writes its own row)
+    let contentInspectionNote: Awaited<ReturnType<typeof notInspectedAuditNote>> = null;
     if (decision.effect === "allow") {
       // §8.4 PII INPUT GATE — hoisted ahead of BOTH the semantic-cache serve and
       // the per-technique cost_events writes below, so a PII-bearing prompt can
@@ -4264,6 +4304,7 @@ export function registerAgentConnectorRoutes(
       // Runs only when dispatching (a decision-only invoke sends nothing to a
       // model and produces no output to leak).
       if (body.dispatch === true) {
+        contentInspectionNote = await notInspectedAuditNote(db, projectId, body.attachments ?? []);
         const inputBlock = await enforceProjectInputPii(db, userId, agent.id, projectId, body.input);
         if (inputBlock) {
           return reply
@@ -4489,6 +4530,8 @@ export function registerAgentConnectorRoutes(
             cachedResponse: hit,
             modelFeature: CHAT_FEATURE,
             detail: { surface: "invoke_cache", mode: body.mode },
+            // ADR-0362: a hit sends no messages, so the files the key commits to are inspected from here
+            ...(body.attachments?.length ? { inspectFiles: body.attachments } : {}),
           });
           if (!governed.ok) {
             return reply
@@ -4556,6 +4599,7 @@ export function registerAgentConnectorRoutes(
                 cachedAt: hit.createdAt,
                 ...semanticCacheTierDetail(hit),
               },
+              ...(contentInspectionNote ?? {}),
               receiptClass: "decision",
             },
             effect: decision.effect,
@@ -5237,6 +5281,7 @@ export function registerAgentConnectorRoutes(
             ...(routing.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
             ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
             stream: true,
+            ...(contentInspectionNote ?? {}),
             dispatch: outcome.ok
               ? {
                   model: outcome.result.model,
@@ -5309,6 +5354,7 @@ export function registerAgentConnectorRoutes(
         // §8.4: the caller asked for SSE and got a buffered JSON reply instead
         // because the project's PII mode is 'block' — recorded, never silent.
         ...suppressionFlag,
+        ...(contentInspectionNote ?? {}),
         ...(dispatchOutcome
           ? {
               dispatch: dispatchOutcome.ok

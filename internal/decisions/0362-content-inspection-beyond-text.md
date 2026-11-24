@@ -73,13 +73,16 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
    decoded document so no encoding (UTF-16 included) can hide it; this closes entity expansion, external entities and
    text injected through internal entities, whatever the expat version.
 4. **Limits.** The hard caps below are baked into the extractor; a request may only lower them. Every zip read stops
-   one byte past its limit, whatever the header claims.
+   one byte past its limit, whatever the header claims. The text cap (750,000 characters, lowered from 2,000,000 by the
+   lane lead on 2026-11-17) keeps the result, as escaped JSON, under the engine contract's 3 MiB raw-report cap for
+   ordinary text (at most 4 UTF-8 bytes a character); text that escapes to more (control characters) makes the report
+   over the cap, which fails closed (`report_too_large`, every file refused).
 
    | Limit | Hard cap |
    |---|---|
    | one input file | 16 MiB |
    | PDF pages | 200 |
-   | text returned per request | 2,000,000 characters |
+   | text returned per request | 750,000 characters |
    | archive entries (OOXML parts count) | 256 |
    | archive nesting | 2 (an archive in an archive in an archive is refused) |
    | uncompressed bytes per archive tree | 64 MiB |
@@ -127,11 +130,58 @@ the existing `maxAttachmentsPerDispatch` and `maxAttachmentBytes` org settings.
 2. **Widen the floor?** Should inspection also be forced on when any guardrail detector is at `block` for the project,
    not only the cascade PII mode? The builder kept the narrower floor so as not to change existing projects' attachment
    behaviour without a decision.
+4. **The org default and the floor** (lane lead, 2026-11-17): The floor applies only to explicit compliance profiles at
+   PII `block`, not the org-default PII mode (also `block` by default, ADR-0181), which would force inspection on
+   everywhere and contradict the owner's off-by-default direction. Should the org default also force it?
 
 ## As built
 
 - **Slice 1a (2026-11-17)**: `engines/contentextract/` (the extractor, its tests, the pinned closure, the reused
   licence gate, the image), `packages/shared/src/content-inspection.ts` and its parity test. No gateway change and no
   migration yet.
+- **Slice 1b-i (2026-11-17)**: the engine is registered, inert. `contentextract` (kind `content_extract`) joins
+  ENGINE_IDS and the manifest (null digest, so it cannot be enabled),
+  compose (runner and build-only image services), the build script and the image build-and-compare workflow. The
+  image is HELD UNPUBLISHED, like mcpscanner and skillscanner, until the owner decides owner question 1 (lane lead,
+  2026-11-17): it has no images-lock entry, the publish gate lists it as unpublished, the build script refuses to push
+  it, and the manifest hardcodes a null digest and task image. Pending migration
+  `content_extract_engine`: the engine row (off), trigger `inspection`, a third `engine_runs_target_check` branch (a
+  `subject` run of `contentextract` only, which may name the request's person and project), and
+  `content_inspection_results` (the result, encrypted under the data key, deleted when read; in the data-key
+  re-encryption registry). The runner and task are the admission-scan shim's (`packages/engine-admission-scan`), made a
+  three-engine subject shim: the extractor differs only in its input argument (the bundle file, not the input root).
+  The image gains that shim stage; the licence gate is now this engine's own copy of mcpscanner's, because the
+  publish gate refuses an engine whose image inputs name another engine's directory. Gateway:
+  `apps/gateway/src/content-inspection-runs.ts` (`enqueueContentExtractRun`, `awaitContentExtractResult` and the
+  input, end and placement hooks). The raw report of a `contentextract` run is never kept on the run. No request-path
+  wiring yet (slice 1b-ii).
+- **Slice 1b-ii (2026-11-17)**: the request path, behind a per-project setting. Pending migration
+  `content_inspection_settings`: `project_content_inspection` (one row per project; no row is off / `refuse`; no
+  row-level security yet, like every project-scoped table, so by the ADR-0234 appendix rule it joins batch 5).
+  `apps/gateway/src/content-inspection.ts`: `effectiveContentInspection` (on = row enabled OR the project's explicit
+  compliance profiles' effective PII mode is `block`, resolved by `projectProfilePiiMode`, the profile resolution
+  `projectPiiMode` uses without its org-default fallback, so an unclassified project, unmatched tags and an unattributed
+  dispatch are never forced (lane lead decision 2026-11-17, owner question 4); under the floor `onUninspectable` is
+  always `refuse`) and `inspectDispatchFiles`, which
+  `dispatchAttempt` runs before the three input checks on every image and document block of the dispatch's messages
+  (so the native invoke path and both compat shims converge on it; the native semantic-cache hit passes its files as
+  `inspectFiles`), once per dispatch (memoised across fallback hops). Extracted text joins the prompt, each file behind
+  `[attachment aN]`, for exactly those checks; a file that cannot be read refuses `422 content_not_inspectable`
+  (index, kind and reason only), audited, before any provider work, or with `pass_not_scanned` goes on recorded
+  `not_scanned`. One `content-inspection` audit row per inspected dispatch (files by index and kind, the extractor's
+  detected type, the PII categories found per file, the engine run and outcome; never a name or any text). With
+  inspection off the native invoke path's dispatch audit row carries an additive `contentInspection` key, every file
+  `not_scanned`. Every engine outcome but a result refuses every file with reason `timeout`; the dispatch-level
+  `engine.outcome` says which (`engine_off`, `not_queued`, `timeout`, `not_run`, `failed`, `no_result`). The request
+  waits at most 30 s (`CONTENT_INSPECTION_DEADLINE_MS`). Routes `GET` (project viewer or admin, `projectRoleGate`) and
+  `PUT` (admin; turning it off or choosing `pass_not_scanned` is a `settings_relax` step-up) `/v1/projects/:projectId/
+  content-inspection`, both with the lane lead's `CONTENT_INSPECTION_COST_NOTE`; KNOWN_UI_GAPS entries on #453. The
+  engine-run sweep deletes unread results and ends extraction runs older than ten minutes (database clock). The
+  vocabulary (file statuses and their transitions, dispatch and engine outcomes, `onUninspectable`) is declared once in
+  `packages/shared/src/content-inspection.ts`. With inspection off an unclassified project's dispatch is byte-identical
+  (`attachments.test.ts` and `org-settings.test.ts` pass unchanged under the shipped org default `block`). PUT on an
+  archived project is refused 409 `project_archived` (`refuseIfArchived`), as `PATCH /v1/projects/:projectId` and its
+  classifications are. Not built: the redact case of decision 5 (no dispatch PII mode redacts today), per-file guardrail attribution,
+  and the response-side files.
 - **Review round 1 on #967 (2026-11-21)**: the DOCTYPE/ENTITY refusal moved from a byte search (which a UTF-16 part
   bypassed) into the parser (`refuse_dtd`, expat handlers on the decoded document); UTF-16 LE/BE and BOM tests added.

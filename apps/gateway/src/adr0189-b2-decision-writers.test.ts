@@ -35,6 +35,7 @@ const DECISION_WRITERS = [
   "compiled-egress.ts",
   "connection-egress.ts",
   "connector-call.ts", // connector invoke
+  "content-inspection.ts", // ADR-0362: a dispatch refused (or passed not scanned) by content inspection (insert(auditLog) on the chained handle)
   "decompose.ts", // orchestration lead entitlement
   "delegated-evaluate.ts", // ADR-0188 delegated dispatch
   "engine-runs.ts",

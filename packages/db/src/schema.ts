@@ -14931,8 +14931,9 @@ export const engineRuns = pgTable(
     /** ADR-0242 L4.3: the subject digest the run scans (sha256 hex) */
     targetSubjectDigest: text("target_subject_digest"),
     /**
-     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads,
-     * encrypted under the data key, cleared when the run ends; never returned by any route (ADR-0242 L4.3).
+     * ADR-0200 exception: a temporary verbatim external payload. The MCP manifest snapshot an admission scan reads
+     * (ADR-0242 L4.3), or the file bundle a content-extraction run reads (ADR-0362), encrypted under the data key,
+     * cleared when the run ends; never returned by any route.
      */
     targetSubjectInputCiphertext: text("target_subject_input_ciphertext"),
     /**
@@ -14987,10 +14988,11 @@ export const engineRuns = pgTable(
   },
   (t) => [
     uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
-    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`); the trigger and target-kind CHECKs live in SQL only
+    // ADR-0242 L4.3 (pending migration `admission_scan_subject_target`) and ADR-0362 (pending migration
+    // `content_extract_engine`: the `inspection` branch); the trigger and target-kind CHECKs live in SQL only
     check(
       "engine_runs_target_check",
-      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} <> 'admission' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner'))`,
+      sql`(${t.targetKind} IN ('agent', 'artifact') AND ${t.trigger} NOT IN ('admission', 'inspection') AND ${t.engineId} <> 'contentextract' AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NULL AND ${t.targetSubjectInputCiphertext} IS NULL AND ((${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL))) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'admission' AND ${t.engineId} IN ('mcpscanner', 'skillscanner') AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.runAsUserId} IS NULL AND ${t.projectId} IS NULL AND num_nonnulls(${t.targetMcpServerId}, ${t.targetBuilderSkillId}) <= 1 AND (${t.targetMcpServerId} IS NULL OR ${t.engineId} = 'mcpscanner') AND (${t.targetBuilderSkillId} IS NULL OR ${t.engineId} = 'skillscanner') AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$' AND (${t.targetSubjectInputCiphertext} IS NULL OR ${t.engineId} = 'mcpscanner')) OR (${t.targetKind} = 'subject' AND ${t.trigger} = 'inspection' AND ${t.engineId} = 'contentextract' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL AND ${t.targetArtifactId} IS NULL AND ${t.targetMcpServerId} IS NULL AND ${t.targetBuilderSkillId} IS NULL AND ${t.targetSubjectDigest} IS NOT NULL AND ${t.targetSubjectDigest} ~ '^[0-9a-f]{64}$')`,
     ),
     check("engine_runs_trials_check", sql`${t.trials} BETWEEN 1 AND 25`),
     check("engine_runs_budget_check", sql`${t.budgetUsd} > 0`),
@@ -21790,3 +21792,58 @@ export const edrIsolationRequests = pgTable(
 );
 export type EdrIsolationRequestRow = typeof edrIsolationRequests.$inferSelect;
 // ===== end ADR-0360 slice 2 =====
+
+// ===== ADR-0362 =====
+/**
+ * ADR-0362 (pending migration `content_extract_engine`): the sandboxed extractor's result for one `contentextract`
+ * run, waiting for the request that queued it. The extracted text is sensitive (it is the content of a person's
+ * files), so it is stored ONLY encrypted under the data key and deleted when the gateway reads it. One row per run;
+ * gone with its run. `id` is the key the data-key re-encryption walk pages by.
+ */
+export const contentInspectionResults = pgTable(
+  "content_inspection_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => engineRuns.id, { onDelete: "cascade" }),
+    /**
+     * ADR-0200 exception: a temporary verbatim external payload (the extractor's `contentExtractResultSchema` JSON),
+     * encrypted under the data key and deleted when read (ADR-0362).
+     */
+    resultCiphertext: text("result_ciphertext").notNull(),
+    /** the sha256 of the plaintext result JSON, checked when it is read */
+    resultSha256: text("result_sha256").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("content_inspection_results_run_uq").on(t.runId),
+    check("content_inspection_results_sha256_check", sql`${t.resultSha256} ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+export type ContentInspectionResultRow = typeof contentInspectionResults.$inferSelect;
+
+/**
+ * ADR-0362 slice 1b-ii (pending migration `content_inspection_settings`): one project's content-inspection setting. No
+ * row means the shipped default: off, and a file that cannot be read refuses the dispatch (`refuse`). Inspection is also
+ * forced on, whatever this row says, when the project's effective compliance cascade PII mode is `block`; the floor then
+ * also forces `refuse`. Turning it off or choosing `pass_not_scanned` is a `settings_relax` step-up, audited.
+ */
+export const projectContentInspection = pgTable(
+  "project_content_inspection",
+  {
+    projectId: uuid("project_id")
+      .primaryKey()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    onUninspectable: text("on_uninspectable").notNull().default("refuse"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("project_content_inspection_updated_by_idx").on(t.updatedBy),
+    check("project_content_inspection_on_uninspectable_check", sql`${t.onUninspectable} IN ('refuse', 'pass_not_scanned')`),
+  ],
+);
+export type ProjectContentInspectionRow = typeof projectContentInspection.$inferSelect;
+// ===== end ADR-0362 =====
