@@ -245,20 +245,33 @@ the device carries out by refusing every call (as a missing policy already does)
 
 The same credential on several devices or users is a finding, found without anyone, including us, learning it.
 
-- **On the device:** every reported key carries `fingerprint`, an HMAC-SHA256 of its value (domain-separated) under the
-  tenant's **credential-reuse key**, and `fingerprintKeyId`, a 16-hex name of that key. The value is used only to
-  compute the HMAC and is never reported or kept. The key is 32 random bytes made by `regulait-agent
-  credential-reuse-key` and deployed by the admin, the same on every device of the tenant, in the agent's root-owned
-  config (`credentialReuseKey`). No key: no fingerprints. A malformed key refuses the config.
-- **On the control plane:** fingerprints are stored per agent identity (device and user pseudonym joined, never
-  copied: `endpoint_credential_fingerprints`, migration `pending/endpoint_credential_fingerprints.sql`, RLS
-  admin-only). A fingerprint held by two or more devices or users under the same key id is a finding: raised once per
-  identity in the audit trail (`endpoint-credential-reuse-detected`) and listed by `GET /v1/endpoint-credential-reuse`,
-  which shows a 12-character prefix only. Revoked devices stop counting. Env-name facts and switched-off MCP facts,
-  which the report path refuses, contribute nothing.
-- **The control plane never holds the key**, so a copy of its database cannot be used to test guesses offline. Anyone
-  who can read the device's config can compute fingerprints of guesses, but sees no one else's; that is stated, and
-  it is why the key is per tenant and rotatable (a new key id starts a fresh comparison).
+- **On the device:** every reported key carries `fingerprint`, an HMAC-SHA256 (domain-separated) of the credential
+  under the tenant's **credential-reuse key**, and `fingerprintKeyId`, a 16-hex name of that key. The value is used
+  only to compute the HMAC and is never reported or kept. What is fingerprinted is the credential, not its field: a
+  recognised token is cut out of a header, URL or quoted value, and an auth scheme (`Bearer`, `Basic`, `token`) is
+  dropped, so one token in a header on one device and in an env var on another is one fingerprint. Values shorter
+  than 8 characters, with fewer than 5 distinct characters, or on a placeholder list (`changeme`, `your-key-here`, …)
+  get none. The key is 32 random bytes made by `regulait-agent credential-reuse-key` and deployed by the admin, the
+  same on every device of the tenant, in the agent config (`credentialReuseKey`). No key: no fingerprints. A malformed
+  key refuses the config.
+- **The device key is not a secret from the device's users.** It is on every enrolled device, the config is
+  world-readable (0644) and on macOS the collector runs as the user, so anyone with one enrolled laptop can compute
+  device fingerprints of guesses. It keeps the values from anyone without an enrolled device, nothing more.
+- **On the control plane:** the device fingerprint is never stored. The gateway stores
+  `HMAC(serverKey, keyId ‖ 0x00 ‖ fingerprint)`, with `serverKey` derived from its deploy-time data key by HKDF-SHA-256
+  under its own label (`regulait/adr0350/credential-reuse/v1`), per agent identity (device and user pseudonym joined,
+  never copied: `endpoint_credential_fingerprints`, migration `pending/endpoint_credential_fingerprints.sql`, RLS
+  admin-only). Without a data key nothing is stored. A copy of the table plus a laptop's key is therefore not enough
+  to test guesses offline; the gateway's data key is needed too. A value held by two or more active devices or users
+  under the same key id is a finding: raised once per identity in the audit trail (`endpoint-credential-reuse-detected`)
+  and listed by `GET /v1/endpoint-credential-reuse`, which shows a 12-character prefix of the server-keyed value only
+  and at most 50 holders per group. Revoked devices stop counting, in the groups, their holders and the detection.
+  Env-name facts and switched-off MCP facts, which the report path refuses, contribute nothing.
+- **Pruning:** a report with no collection gaps replaces the identity's set, so a rotated or removed secret stops
+  counting on the next complete report; a report with gaps never prunes by value. Rows under a key id the identity no
+  longer reports are dropped on its next report, so a tenant-key rotation clears the old comparison. A rotation has no
+  overlap window: while the fleet moves to the new key, devices on different keys compare nothing. Rotating the data
+  key likewise starts a fresh comparison, and the old rows are pruned as devices report.
 
 ### Slices
 

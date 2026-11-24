@@ -4,9 +4,13 @@
  *  - a fingerprint shared by two devices under the same key id is a finding: listed with the devices and user
  *    pseudonyms, and raised once in the audit trail for the identity that made it shared;
  *  - the same fingerprint under a different key id, or on one identity only, is not a finding;
- *  - a revoked device's fingerprints no longer count;
- *  - only the first 12 hex characters of a fingerprint are returned, and the report schema refuses a fingerprint
- *    without its key id;
+ *  - a revoked device's fingerprints no longer count, in the groups, their holders and the detection;
+ *  - the stored value is server-keyed under the data key, never the device fingerprint, and nothing is stored
+ *    without a data key;
+ *  - a complete report replaces the identity's set, a report with gaps never prunes by value, and rows under a key
+ *    id the identity no longer reports are dropped;
+ *  - only the first 12 hex characters of the server-keyed value are returned, and the report schema refuses a
+ *    fingerprint without its key id;
  *  - the route is admin-only.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -18,6 +22,7 @@ import {
   createDb,
   discoverySources,
   endpointAgentIdentities,
+  endpointCredentialFingerprints,
   endpointDevices,
   endpointEnrolmentTokens,
   eq,
@@ -28,7 +33,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { recordCredentialFingerprints } from "./endpoint-credential-reuse.js";
+import { credentialReuseServerKey, recordCredentialFingerprints, storedFingerprint, type ReportedKey } from "./endpoint-credential-reuse.js";
 import { keyFoundSchema } from "./endpoint-mcp-config.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
@@ -44,6 +49,12 @@ const KEY = hex("key", 16);
 const OTHER_KEY = hex("other-key", 16);
 const SHARED = hex("shared", 64);
 const ALONE = hex("alone", 64);
+const DATA_KEY = hex("data-key", 64);
+const SERVER_KEY = credentialReuseServerKey(DATA_KEY)!;
+const stored = (keyId: string, fp: string) => storedFingerprint(SERVER_KEY, keyId, fp);
+const record = (id: string, keys: ReportedKey[], complete = false) => recordCredentialFingerprints(db, id, keys, { dataKey: DATA_KEY, complete });
+const storedFor = async (id: string) =>
+  (await db.select({ keyId: endpointCredentialFingerprints.keyId, fingerprint: endpointCredentialFingerprints.fingerprint }).from(endpointCredentialFingerprints).where(eq(endpointCredentialFingerprints.identityId, id))).map((r) => `${r.keyId}:${r.fingerprint}`).sort();
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -71,7 +82,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   await relaxIdentityForTest(db, { mfaRequired: "off" });
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: hex("data-key", 64) });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
   let adminId = "";
   const mk = async (name: string, admin: boolean) => {
@@ -88,7 +99,7 @@ beforeAll(async () => {
   const [src] = await db.insert(discoverySources).values({ name: `e31r-${RUN}`, kind: "endpoint_agent", target: {}, scope: { orgLevel: true, include: [] }, createdBy: adminId }).returning({ id: discoverySources.id });
   sourceId = src!.id;
   const [tok] = await db.insert(endpointEnrolmentTokens).values({ sourceId, label: "e31r", tokenHash: hex("tok", 64), deviceCap: 5, expiresAt: new Date(Date.now() + 86_400_000) }).returning({ id: endpointEnrolmentTokens.id });
-  for (const d of ["d1", "d2"]) {
+  for (const d of ["d1", "d2", "d3"]) {
     const [row] = await db
       .insert(endpointDevices)
       .values({ sourceId, tokenId: tok!.id, devicePseudonym: `psn:${hex(d, 24)}`, os: "linux", arch: "amd64", agentVersion: "1.0.0", ticketHash: hex(`t-${d}`, 64), ticketExpiresAt: new Date(Date.now() + 86_400_000) })
@@ -108,33 +119,84 @@ afterAll(async () => {
 });
 
 describe("ADR-0350 §11 credential reuse", () => {
+  let a = "";
+  let b = "";
   it("one holder is not a finding; a second device makes it one, raised once", async () => {
-    const a = await identity(devices[0]!, "u1");
-    const b = await identity(devices[1]!, "u2");
-    expect(await recordCredentialFingerprints(db, a, [{ ruleId: "dlp.secret.github_pat", fingerprint: SHARED, fingerprintKeyId: KEY }, { fingerprint: ALONE, fingerprintKeyId: KEY }, { ruleId: "x" }])).toEqual({ recorded: 2, reused: 0 });
+    a = await identity(devices[0]!, "u1");
+    b = await identity(devices[1]!, "u2");
+    expect(await record(a, [{ ruleId: "dlp.secret.github_pat", fingerprint: SHARED, fingerprintKeyId: KEY }, { fingerprint: ALONE, fingerprintKeyId: KEY }, { ruleId: "x" }])).toEqual({ recorded: 2, reused: 0, pruned: 0 });
     // the same fingerprint under another tenant key is not the same credential
-    await recordCredentialFingerprints(db, b, [{ fingerprint: ALONE, fingerprintKeyId: OTHER_KEY }]);
+    await record(b, [{ fingerprint: ALONE, fingerprintKeyId: OTHER_KEY }]);
     expect(await mine()).toEqual([]);
 
-    expect((await recordCredentialFingerprints(db, b, [{ ruleId: "dlp.secret.github_pat", fingerprint: SHARED, fingerprintKeyId: KEY }])).reused).toBe(1);
+    expect((await record(b, [{ ruleId: "dlp.secret.github_pat", fingerprint: SHARED, fingerprintKeyId: KEY }])).reused).toBe(1);
     // a repeat report raises nothing new
-    expect((await recordCredentialFingerprints(db, b, [{ fingerprint: SHARED, fingerprintKeyId: KEY }])).reused).toBe(0);
+    expect((await record(b, [{ fingerprint: SHARED, fingerprintKeyId: KEY }])).reused).toBe(0);
     const found = await mine();
     expect(found).toHaveLength(1);
-    expect(found[0]!.fingerprintPrefix).toBe(SHARED.slice(0, 12));
-    expect(found[0]!.devices.map((d) => d.deviceId).sort()).toEqual([...devices].sort());
+    expect(found[0]!.fingerprintPrefix).toBe(stored(KEY, SHARED).slice(0, 12));
+    expect(found[0]!.devices.map((d) => d.deviceId).sort()).toEqual([devices[0]!, devices[1]!].sort());
     expect(found[0]!.userPseudonyms).toHaveLength(2);
     expect(found[0]!.ruleIds).toEqual(["dlp.secret.github_pat"]);
-    expect(JSON.stringify(await items())).not.toContain(SHARED);
+    const listed = JSON.stringify(await items());
+    expect(listed).not.toContain(SHARED);
+    expect(listed).not.toContain(SHARED.slice(0, 12));
 
-    const raised = await db.select({ objectId: auditLog.objectId, ruleId: auditLog.ruleId }).from(auditLog).where(inArray(auditLog.objectId, [a, b]));
-    expect(raised.filter((r) => r.ruleId === "endpoint-credential-reuse-detected")).toEqual([{ objectId: b, ruleId: "endpoint-credential-reuse-detected" }]);
+    const raised = await db.select({ objectId: auditLog.objectId, ruleId: auditLog.ruleId, detail: auditLog.detail }).from(auditLog).where(inArray(auditLog.objectId, [a, b]));
+    const hits = raised.filter((r) => r.ruleId === "endpoint-credential-reuse-detected");
+    expect(hits.map((r) => r.objectId)).toEqual([b]);
+    expect(JSON.stringify(hits)).not.toContain(SHARED.slice(0, 12));
   });
 
-  it("a revoked device's fingerprints stop counting", async () => {
+  it("stores the server-keyed value, never the device fingerprint, and nothing without a data key", async () => {
+    const rows = await storedFor(a);
+    expect(rows).toEqual([`${KEY}:${stored(KEY, ALONE)}`, `${KEY}:${stored(KEY, SHARED)}`].sort());
+    expect(rows.join()).not.toContain(SHARED);
+    expect(rows.join()).not.toContain(ALONE);
+    // another data key gives other values: a table copy plus a laptop's key is not enough to test guesses
+    expect(storedFingerprint(credentialReuseServerKey(hex("other-data-key", 64))!, KEY, SHARED)).not.toBe(stored(KEY, SHARED));
+    const c = await identity(devices[2]!, "u3");
+    expect(await recordCredentialFingerprints(db, c, [{ fingerprint: SHARED, fingerprintKeyId: KEY }], { dataKey: undefined, complete: true })).toEqual({ recorded: 0, reused: 0, pruned: 0 });
+    expect(await storedFor(c)).toEqual([]);
+  });
+
+  it("a revoked device stops counting in the groups, their holders and the detection", async () => {
+    const c = await identity(devices[2]!, "u4");
+    await record(c, [{ fingerprint: SHARED, fingerprintKeyId: KEY }]);
+    expect((await mine())[0]!.devices).toHaveLength(3);
+    await db.update(endpointDevices).set({ revokedAt: new Date() }).where(eq(endpointDevices.id, devices[2]!));
+    // still a group of two active devices, and the revoked third is not listed as a holder
+    const found = await mine();
+    expect(found).toHaveLength(1);
+    expect(found[0]!.devices.map((d) => d.deviceId).sort()).toEqual([devices[0]!, devices[1]!].sort());
+    // a fingerprint held only by an active device and a revoked one raises nothing
+    const LONE = hex("lone", 64);
+    await record(c, [{ fingerprint: LONE, fingerprintKeyId: KEY }]);
+    await record(a, [{ fingerprint: SHARED, fingerprintKeyId: KEY }, { fingerprint: ALONE, fingerprintKeyId: KEY }, { fingerprint: LONE, fingerprintKeyId: KEY }]);
+    const prefixes = (await db.select({ detail: auditLog.detail, ruleId: auditLog.ruleId }).from(auditLog).where(eq(auditLog.objectId, a)))
+      .filter((r) => r.ruleId === "endpoint-credential-reuse-detected")
+      .map((r) => (r.detail as { fingerprintPrefix: string }).fingerprintPrefix);
+    expect(prefixes).toContain(stored(KEY, SHARED).slice(0, 12)); // shared with the active second device
+    expect(prefixes).not.toContain(stored(KEY, LONE).slice(0, 12)); // held elsewhere by the revoked device only
     await db.update(endpointDevices).set({ revokedAt: new Date() }).where(eq(endpointDevices.id, devices[1]!));
     expect(await mine()).toEqual([]);
-    await db.update(endpointDevices).set({ revokedAt: null }).where(eq(endpointDevices.id, devices[1]!));
+    await db.update(endpointDevices).set({ revokedAt: null }).where(inArray(endpointDevices.id, [devices[1]!, devices[2]!]));
+  });
+
+  it("prunes: a complete report replaces the set, a report with gaps does not, and an old key id is dropped", async () => {
+    const ROTATED = hex("rotated", 64);
+    // a report with gaps keeps what it did not see
+    expect((await record(a, [{ fingerprint: SHARED, fingerprintKeyId: KEY }], false)).pruned).toBe(0);
+    expect(await storedFor(a)).toContain(`${KEY}:${stored(KEY, ALONE)}`);
+    // a complete report without ALONE drops it (the secret was rotated)
+    expect((await record(a, [{ fingerprint: SHARED, fingerprintKeyId: KEY }, { fingerprint: ROTATED, fingerprintKeyId: KEY }], true)).pruned).toBeGreaterThan(0);
+    expect(await storedFor(a)).toEqual([`${KEY}:${stored(KEY, ROTATED)}`, `${KEY}:${stored(KEY, SHARED)}`].sort());
+    // the tenant key was rotated: rows under the old key id go, even from a report with gaps
+    await record(a, [{ fingerprint: SHARED, fingerprintKeyId: OTHER_KEY }], false);
+    expect(await storedFor(a)).toEqual([`${OTHER_KEY}:${stored(OTHER_KEY, SHARED)}`]);
+    // a complete report with no fingerprints at all leaves nothing
+    await record(a, [], true);
+    expect(await storedFor(a)).toEqual([]);
   });
 
   it("refuses a fingerprint without its key id, and the route is admin-only", async () => {

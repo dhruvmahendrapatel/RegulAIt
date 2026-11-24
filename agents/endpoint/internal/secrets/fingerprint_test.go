@@ -31,3 +31,28 @@ func TestFingerprinter(t *testing.T) {
 		}
 	}
 }
+
+// ADR-0350 §11 (review of #970, R2 [5] and [6]): the credential is fingerprinted, not the field around it, and
+// placeholders and short or uniform values get no fingerprint.
+func TestFingerprintMaterial(t *testing.T) {
+	f, _ := NewFingerprinter(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("m", FingerprintKeyBytes))))
+	pat := "ghp_" + strings.Repeat("Ab3", 12)
+	want := f.Of(pat)
+	if want == "" {
+		t.Fatal("a provider token got no fingerprint")
+	}
+	for _, field := range []string{"Bearer " + pat, "token " + pat, "https://mcp.example.test/sse?key=" + pat, "https://other.example.test/x/" + pat + "/y", `"` + pat + `"`} {
+		if got := f.Of(field); got != want {
+			t.Errorf("%q: the token in a field gives another fingerprint", field)
+		}
+	}
+	// an unrecognised value behind an auth scheme is the value
+	if f.Of("Bearer s3cr3t-Value-99") != f.Of("s3cr3t-Value-99") {
+		t.Error("the auth scheme is part of the fingerprint")
+	}
+	for _, weak := range []string{"", "short", "changeme", "CHANGEME", "your-key-here", "xxxxxxxxxxxx", "aaaabbbbaaaa", "<your-token>", "12345678"} {
+		if f.Of(weak) != "" {
+			t.Errorf("%q got a fingerprint", weak)
+		}
+	}
+}

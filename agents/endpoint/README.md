@@ -101,7 +101,9 @@ needs the built-in tools:
 
 **Credential reuse (ADR-0350 §11).** `regulait-agent credential-reuse-key` prints a tenant key; deploy the same
 `"credentialReuseKey"` in every device's config to have each reported key carry a keyed fingerprint, so the control
-plane can find one credential on several devices without seeing it. Without the key, nothing is fingerprinted.
+plane can find one credential on several devices without seeing it. Without the key, nothing is fingerprinted. The
+key is readable by every local user of an enrolled device, so it is not a secret from them; the control plane keys
+every fingerprint again under its own data key before storing it (ADR-0350 §11).
 
 Registrations (paths are examples; use absolute paths with no shell metacharacters):
 

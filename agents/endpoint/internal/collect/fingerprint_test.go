@@ -40,3 +40,24 @@ func TestKeyFingerprints(t *testing.T) {
 		t.Errorf("mergeKeys dropped a distinct fingerprint: %d", len(got))
 	}
 }
+
+// R2 [5] and [6]: the same token in a header on one device and in an env var on another is one fingerprint, and two
+// distinct secrets under one name in a config file are both kept.
+func TestKeyFingerprintsMatchAcrossFields(t *testing.T) {
+	f, _ := secrets.NewFingerprinter(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("q", 32))))
+	activeFingerprint = f
+	defer func() { activeFingerprint = nil }()
+	pat := "ghp_" + strings.Repeat("Zy9", 12)
+	header := envKeys(map[string]any{"Authorization": "Bearer " + pat})
+	env := envKeys(map[string]any{"GITHUB_TOKEN": pat})
+	if len(header) != 1 || len(env) != 1 || header[0].Fingerprint == "" || header[0].Fingerprint != env[0].Fingerprint {
+		t.Fatalf("header %+v and env %+v differ", header, env)
+	}
+	got := keysIn([]assignment{{name: "a b", value: "sk-" + strings.Repeat("Q1w", 8)}, {name: "c d", value: "sk-" + strings.Repeat("E2r", 8)}}, nil)
+	if len(got) != 2 || got[0].Fingerprint == got[1].Fingerprint {
+		t.Errorf("two (unnamed) secrets collapsed: %+v", got)
+	}
+	if k := envKeys(map[string]any{"API_TOKEN": "changeme"}); len(k) != 1 || k[0].Fingerprint != "" {
+		t.Errorf("a placeholder got a fingerprint: %+v", k)
+	}
+}

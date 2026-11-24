@@ -41,6 +41,8 @@ type LocalConfig struct {
 	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
 	// CredentialReuseKey is the tenant's credential-reuse fingerprint key (ADR-0350 §11), 32 bytes base64url, the
 	// same on every device of the tenant (`regulait-agent credential-reuse-key` makes one). Absent: no fingerprints.
+	// This file is world-readable, so the key is not a secret from local users; the control plane keys every
+	// fingerprint again under its own data key before storing it.
 	CredentialReuseKey string `json:"credentialReuseKey,omitempty"`
 	// ReleaseKeys pins the release pipeline's signer (ADR-0360 §4): the keys a release manifest must be signed by, the
 	// current key and at most one next key. A key of its own, never a device-policy key. With none pinned, the updater

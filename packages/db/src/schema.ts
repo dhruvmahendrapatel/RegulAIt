@@ -19061,8 +19061,10 @@ export type WorkflowTemplateVersionRow = typeof workflowTemplateVersions.$inferS
 // ===== end ADR-0341 =====
 
 // ===== ADR-0350 §11 (lane E31): credential reuse across endpoints (pending migration endpoint_credential_fingerprints) =====
-// A device reports a keyed HMAC of each discovered secret under the tenant's credential-reuse key, never the value; the
-// control plane never holds the key. One row per (agent identity, key id, fingerprint): the identity names the device
+// A device reports a keyed HMAC of each discovered secret under the tenant's credential-reuse key, never the value. The
+// stored `fingerprint` is HMAC(server key, key id ‖ device fingerprint) under a key derived from the gateway's data key,
+// never the device value (the device key is readable on every enrolled laptop). Pruned on report ingest. One row per
+// (agent identity, key id, fingerprint): the identity names the device
 // and its user pseudonym (joined, never copied). The same fingerprint under the same key on two devices or two users
 // is a credential-reuse finding. `reuse_reported_at` marks the row as already reported, so the finding is raised once.
 export const endpointCredentialFingerprints = pgTable(

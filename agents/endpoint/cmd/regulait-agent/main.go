@@ -260,7 +260,8 @@ func resolveExisting(p string) string {
 }
 
 // credentialReuseKey prints a fresh 32-byte tenant key, base64url, and its key id. The key is printed once and never
-// sent anywhere: the control plane compares fingerprints and never needs it.
+// sent anywhere: the control plane compares fingerprints and never needs it. Deployed in the agent config, it is
+// readable by local users of every enrolled device, so it is not a secret from them (ADR-0350 §11).
 func credentialReuseKey() int {
 	raw := make([]byte, secrets.FingerprintKeyBytes)
 	if _, err := rand.Read(raw); err != nil {

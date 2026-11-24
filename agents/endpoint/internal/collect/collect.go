@@ -355,8 +355,10 @@ var activeFingerprint *secrets.Fingerprinter
 // keyFound reports one key, with its credential-reuse fingerprint when a key is configured. value is used only here.
 func keyFound(name, rule, value string) contract.KeyFound {
 	k := contract.KeyFound{KeyName: name, RuleID: rule, Present: true}
-	if activeFingerprint != nil && strings.TrimSpace(value) != "" {
-		k.Fingerprint, k.FingerprintKeyID = activeFingerprint.Of(value), activeFingerprint.KeyID()
+	if activeFingerprint != nil {
+		if fp := activeFingerprint.Of(value); fp != "" {
+			k.Fingerprint, k.FingerprintKeyID = fp, activeFingerprint.KeyID()
+		}
 	}
 	return k
 }

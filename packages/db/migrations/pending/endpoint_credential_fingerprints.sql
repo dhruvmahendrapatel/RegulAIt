@@ -1,7 +1,9 @@
 -- ADR-0350 §11 (lane E31): credential reuse across endpoints. A device reports a keyed HMAC of each discovered secret
--- under the tenant's credential-reuse key (the value never leaves the device, and the control plane never holds the
--- key). One row per agent identity, key id and fingerprint; the device and the user pseudonym are joined through
--- endpoint_agent_identities, never copied. The same fingerprint on two devices or users is a reuse finding.
+-- under the tenant's credential-reuse key (the value never leaves the device). `fingerprint` is NOT that device value:
+-- it is HMAC(server key, key id ‖ device fingerprint) under a key derived from the gateway's data key, so a copy of
+-- this table plus a device's key cannot test guesses. One row per agent identity, key id and fingerprint; the device
+-- and the user pseudonym are joined through endpoint_agent_identities, never copied. The same value on two active
+-- devices or users is a reuse finding. Rows are pruned on report ingest (ADR-0350 §11).
 --
 -- Row-level security, ENABLED and FORCED: an active admin principal and the `system_task` and `migration` reasons
 -- only. The report route writes as the system (the device's own call), like the other endpoint report tables.
