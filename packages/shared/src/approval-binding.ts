@@ -113,10 +113,15 @@ export const APPROVAL_OBJECT_TYPES = [
   "endpoint_addon_removal",
   // ADR-0338: disabling, quarantining or restoring an agent in its vendor platform (stageId = vendor-agent-action:<id>)
   "vendor_agent_control",
+  // ADR-0338 slice 1c: connecting a delegated (named admin) vendor control credential, stored only once a second
+  // administrator approves it (stageId = __vendor_control_delegated__:<request id>)
+  "vendor_control_delegated",
   // ADR-0337 §5 slice 3b: a SaaS entitlement finding raised for a recorded decision (stageId = saas-finding-review:<id>)
   "saas_finding_review",
   // ADR-0366: containing (halting) an agent seen acting outside its declared role (stageId = agent-containment:<id>)
   "agent_containment",
+  // ADR-0361 slice 3: deleting a monitored AI SaaS conversation through the vendor API, run once by the requester
+  "ai_saas_remediation",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -146,8 +151,10 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   robot_version: "robot version review",
   endpoint_addon_removal: "MCP server removal from endpoints",
   vendor_agent_control: "vendor agent disable, quarantine or restore",
+  vendor_control_delegated: "delegated vendor control credential (a named admin account)",
   saas_finding_review: "SaaS entitlement finding (remove the grant, or accept the risk)",
   agent_containment: "rogue-agent containment",
+  ai_saas_remediation: "AI SaaS conversation deletion",
 };
 
 /**

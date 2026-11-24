@@ -112,7 +112,9 @@ const AgentsArea = screen(() => import("./screens/admin-integrations"), "AgentsA
 const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
 const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
 const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
-const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
+// CX slice 11 (INT-002..005): the connector credential and entitlement screen is its own lazy chunk, as the catalogue
+// below is, so its growth stays inside its own ceiling and adds nothing to admin-integrations (ADR-0344)
+const ConnectorsPage = screen(() => import("./views/admin/integrations/ConnectorsPage"), "default");
 // ADR-0255: the governed connector catalogue is its own lazy chunk, loaded only when opened, so it adds nothing to the
 // entry bundle or to admin-integrations (ADR-0344 per-route budgets)
 const ConnectorCataloguePage = screen(() => import("./views/admin/integrations/ConnectorCataloguePage"), "default");

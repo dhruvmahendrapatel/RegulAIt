@@ -501,6 +501,8 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0361 slice 3: a conversation-deletion request's reason
+    "ai_saas_remediations.request_reason",
     // ADR-0187: engine item text and runner revocation
     "engine_run_items.reason",
     "engine_run_items.verdict_note",
@@ -511,6 +513,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "endpoint_addon_removals.reason",
     // ADR-0338: the admin's reason for a vendor agent control action
     "vendor_agent_actions.reason",
+    // ADR-0360 slice 2: the admin's reason for an EDR isolation request
+    "edr_isolation_requests.reason",
     // ADR-0313: the admin's note on a paid-call price
     "paid_call_prices.note",
     // ADR-0337 §5: a SaaS finding review's reason and its rendered rationale; a reader's usage note
@@ -547,6 +551,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0350 (lane E31): per-device command-rule exceptions
     "endpoint_command_exceptions.reason",
     "endpoint_command_exceptions.decision_reason",
+    // ADR-0333 §5b (pending migration `agent_detection_suppressions`)
+    "detection_suppressions.reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",

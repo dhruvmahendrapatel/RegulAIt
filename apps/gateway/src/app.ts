@@ -1,3 +1,4 @@
+import { registerDetectionFeedRoutes } from "./detection-feed.js";
 import Fastify, {
   LogController,
   type FastifyReply,
@@ -389,6 +390,8 @@ export interface BuildAppOptions {
    * both unset, so the real DNS-pinned guarded fetch is used. */
   trainedDetectorResolve?: import("./egress-guard.js").EgressResolver;
   trainedDetectorFetch?: typeof fetch;
+  /** ADR-0360 slice 2: tests only — the EDR connections' egress resolver and fetch (the guard still runs) */
+  edrEgress?: ConnectionEgressDeps;
   /** ADR-0322 test seams: the transport the vendor usage pull's guarded fetch sends through, and its pinned DNS */
   vendorUsageFetch?: typeof fetch;
   vendorUsageResolve?: import("./egress-guard.js").EgressResolver;
@@ -679,6 +682,8 @@ import { registerBudgetAlertRoutes } from "./budget-alerts.js";
 import { registerPaidCallRoutes } from "./paid-calls.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import { registerEndpointFleetRoutes } from "./endpoint-fleet-routes.js";
+import { registerEdrRoutes } from "./edr/routes.js";
+import type { ConnectionEgressDeps } from "./connection-egress.js";
 import { registerEndpointMcpConfigRoutes } from "./endpoint-mcp-config.js";
 import {
   applyEndpointAddonRemovalDecision,
@@ -692,8 +697,15 @@ import {
   precheckVendorAgentControlDecision,
   registerVendorAgentControlRoutes,
   vendorAgentControlApprovalLabels,
+  VendorAgentControlDecideError,
   type VendorAgentControlDeps,
 } from "./vendor-agent-control.js";
+import {
+  applyVendorControlDelegatedDecision,
+  precheckVendorControlDelegatedDecision,
+  vendorControlDelegatedApprovalLabels,
+  VendorControlDelegatedDecideError,
+} from "./vendor-agent-control-delegated.js";
 import {
   applyContainmentDecision,
   containmentApprovalLabels,
@@ -704,6 +716,7 @@ import {
 import { registerManagedSettingsRoutes } from "./managed-settings.js";
 import { registerEndpointDecisionRoutes } from "./endpoint-decisions.js";
 import { registerEndpointAddonInventoryRoutes } from "./endpoint-addon-inventory.js";
+import { registerEndpointCredentialReuseRoutes } from "./endpoint-credential-reuse.js";
 import { registerStateMachineRoutes } from "./state-machines-routes.js"; // ADR-0348
 import { registerEndpointCommandExceptionRoutes } from "./endpoint-command-exceptions.js";
 import { registerProcessAnalyticsRoutes } from "./process-analytics.js";
@@ -712,6 +725,7 @@ import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerVendorUsagePullRoutes } from "./vendor-usage-pull.js";
 import { registerAiSaasMonitorRoutes } from "./ai-saas-monitor.js";
+import { applyAiSaasRemediationDecision, precheckAiSaasRemediationDecision, registerAiSaasRemediationRoutes } from "./ai-saas-remediation.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
@@ -4729,6 +4743,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       db,
       rows.filter((r) => r.objectType === "vendor_agent_control").map((r) => r.stageId),
     );
+    const vendorControlDelegatedLabel = await vendorControlDelegatedApprovalLabels(
+      db,
+      rows.filter((r) => r.objectType === "vendor_control_delegated").map((r) => r.stageId),
+    );
     // ADR-0366: what a rogue-agent containment proposal asks the approver to approve
     const containmentLabel = await containmentApprovalLabels(
       db,
@@ -4816,6 +4834,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         (r.objectType === "compliance_profile" ? complianceVersionLabelFor(r.stageId) : null) ??
         (r.objectType === "endpoint_addon_removal" && r.stageId ? (endpointAddonRemovalLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "vendor_agent_control" && r.stageId ? (vendorAgentControlLabel.get(r.stageId) ?? null) : null) ??
+        (r.objectType === "vendor_control_delegated" && r.stageId ? (vendorControlDelegatedLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "saas_finding_review" && r.stageId ? (saasFindingReviewLabel.get(r.stageId) ?? null) : null) ??
         (r.objectType === "agent_containment" && r.stageId ? (containmentLabel.get(r.stageId) ?? null) : null) ??
         r.toolName ??
@@ -5326,6 +5345,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckVendorAgentControlDecision(db, row, deciderUserId, binaryDecision, input.req);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0338 slice 1c — a delegated vendor control credential: the same four-eyes rule (never the admin who signed
+    // in, only an admin in the pool, no override, an `approval_decide` step-up bound to the digest)
+    if (row.objectType === "vendor_control_delegated") {
+      const refusal = await precheckVendorControlDelegatedDecision(db, row, deciderUserId, binaryDecision, input.req);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0337 §5 slice 3b — a SaaS entitlement finding review: never its requester, only an admin in the pool (no
     // override), and the approval must still bind the review as raised. Nothing executes on either decision.
     if (row.objectType === "saas_finding_review") {
@@ -5349,6 +5374,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // profile change cannot reach its review through delegation or the admin override above.
     if (row.objectType === "compliance_profile") {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0361 slice 3 — `cannot_approve_own_ai_saas_remediation` (keyed on the DECIDER, so the requester cannot reach
+    // their own deletion through delegation or the admin override above) and a fresh `approval_decide` step-up on
+    // every decision, so an API key, a chat tap or a bulk decide cannot decide a conversation deletion.
+    if (row.objectType === "ai_saas_remediation") {
+      const refusal = await precheckAiSaasRemediationDecision(db, row, deciderUserId, binaryDecision, input.req, input.channel);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // ADR-0363 slice 2 — `cannot_approve_own_classifier`, keyed on the DECIDER like the profile check above.
@@ -5744,6 +5776,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "vendor_agent_control") {
         await applyVendorAgentControlDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
       }
+      // ADR-0338 slice 1c: approved = the held refresh token becomes the source's delegated control credential;
+      // denied = the held token is destroyed. The approver's step-up is spent here, with the writes.
+      if (updated.objectType === "vendor_control_delegated") {
+        await applyVendorControlDelegatedDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
       // ADR-0337 §5 slice 3b: approved = remediate in the vendor's console, denied = risk accepted; nothing is sent
       if (updated.objectType === "saas_finding_review") {
         await applySaasFindingReviewDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -5752,6 +5789,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // approved = the containment's own halt is lifted, denied = it stays halted. The step-up is spent here.
       if (updated.objectType === "agent_containment") {
         await applyContainmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId, input.req);
+      }
+      // ADR-0361 slice 3 (#991 S3 [1]): the approver's digest-bound step-up is spent here, with the decision; the
+      // deletion itself follows the approval when its requester next executes it
+      if (updated.objectType === "ai_saas_remediation") {
+        await applyAiSaasRemediationDecision(tx as unknown as Db, updated, binaryDecision, input.req);
       }
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6485,19 +6527,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0331 — the governed removal of flagged MCP servers from endpoints: create (an `endpoint_remediation` step-up,
   // off until the org switch is on), list, read and cancel. Admin-only by default (none is in NON_ADMIN_ROUTES).
   registerEndpointAddonRemovalRoutes(app, db, { signer: opts.directiveSigner });
-  // ADR-0338: governed vendor agent control. No registry offers a control and no control credential resolves in
-  // production until slice 1b; both come only through the code-only test seam below
-  registerVendorAgentControlRoutes(app, db, opts.vendorAgentControl ?? {});
+  // ADR-0338: governed vendor agent control (Copilot Studio quarantine since slice 1b); the control credential is the
+  // source's `platform_write` row. The data key comes from buildApp's own option, never from the test seam
+  registerVendorAgentControlRoutes(app, db, { ...(opts.vendorAgentControl ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
   // ADR-0366 — rogue-agent containment: list, read and release (admin-only by default; release takes a step-up)
   registerContainmentRoutes(app, db);
   // ADR-0360 (lane E41): device groups, the self-update setting (off unless relaxed with a step-up), staged update
   // rollouts and one-line enrolment tokens. Admin-only by default; every write audited.
   registerEndpointFleetRoutes(app, db);
+  // ADR-0360 slice 2 (lane E41): EDR connections (read-only by default), device signals, the verified vendor webhook
+  // (auth-exempt, verified in-route) and two-person, stepped-up isolation requests
+  registerEdrRoutes(app, db, { dataKey: opts.dataKey, ...(opts.edrEgress ? { egress: opts.edrEgress } : {}) });
   registerManagedSettingsRoutes(app, db);
   // ADR-0310 addendum (lane E1): the permission-bypass session view and the managed-file tamper view (admin)
   registerEndpointDecisionRoutes(app, db);
   // ADR-0332 (lane E14): the endpoint AI add-on inventory (admin-only, RLS: admins and system_task)
   registerEndpointAddonInventoryRoutes(app, db);
+  registerEndpointCredentialReuseRoutes(app, db);
   // ADR-0348: the declared lifecycles, read-only, for agents and MCP tools (no record is read)
   registerStateMachineRoutes(app);
   registerEndpointCommandExceptionRoutes(app, db);
@@ -6531,6 +6577,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0361 — read-only monitoring of sanctioned AI SaaS through vendor compliance APIs (off by default, refused when
   // air-gapped). Admin-only by default (none of these routes is in NON_ADMIN_ROUTES); credentials are never returned.
   registerAiSaasMonitorRoutes(app, db, {
+    dataKey: opts.dataKey,
+    deps: {
+      ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
+      ...(opts.aiSaasMonitorResolve ? { resolve: opts.aiSaasMonitorResolve } : {}),
+      ...(opts.aiSaasMonitorConnectors ? { connectors: opts.aiSaasMonitorConnectors } : {}),
+    },
+  });
+  registerAiSaasRemediationRoutes(app, db, {
     dataKey: opts.dataKey,
     deps: {
       ...(opts.aiSaasMonitorFetch ? { fetchImpl: opts.aiSaasMonitorFetch, minSpacingMs: 0 } : {}),
@@ -6674,6 +6728,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecisionReceiptRoutes(app, db, { dataKey: opts.dataKey });
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
+  registerDetectionFeedRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
   registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
@@ -7080,6 +7135,10 @@ export function handleGatewayError(err: unknown, req: FastifyRequest, reply: Fas
     return reply.status(err.status).send(err.body);
   }
   if (err instanceof ExternalEffectBlockedError) {
+    return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+  }
+  // ADR-0338: a vendor control decision refused inside its transaction (the whole decision rolled back)
+  if (err instanceof VendorAgentControlDecideError || err instanceof VendorControlDelegatedDecideError) {
     return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
   }
   // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be

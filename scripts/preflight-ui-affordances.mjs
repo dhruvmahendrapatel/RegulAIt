@@ -68,6 +68,7 @@ export const DELIBERATELY_API_ONLY = new Map([
   // entries when the screen lands
   ["/v1/discovery/agent-identifiers/:x", "removing an agent's declared vendor identifier (audited): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
   ["/v1/discovery/entitlements/apps/:x/agent-link", "unlinking a vendor app from its agent (audited, declared machine): API-only until the entitlement graph screen on #453 (route census KNOWN_UI_GAPS)"],
+  ["/v1/discovery/sources/:x/control-credential", "revoking a source's vendor control credential (free, audited; destroys its stored secret). ADR-0338 slice 1b (lane E19): master brief, API-only; the vendor agent control screen is requested on #453 (route census KNOWN_UI_GAPS). Delete this entry when the screen lands"],
   ["/v1/servers/:x/system-class", "unmarking an SAP business server (settings_relax step-up): API-only until the SAP server screen on #453 (route census KNOWN_UI_GAPS)"],
   // ADR-0312 (lane E2, pilot addendum): removing a person's spend budget (a step-up relaxation) is API-only until the
   // spend-budget screen on #453 lands (route census KNOWN_UI_GAPS holds the same route); delete this entry then.
@@ -96,6 +97,7 @@ export const DELIBERATELY_API_ONLY = new Map([
  */
 export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
+  ["/v1/discovery/sources/:x/edr-connections", "ADR-0360 slice 2: a connection is retired by PUT /v1/edr-connections/:id/settings {enabled: false} (audited); it is kept because its isolation requests and signals are evidence, and it goes with its source (FK cascade)"],
   ["/v1/discovery/sources/:x/update-rollouts", "ADR-0360: a rollout is evidence of what was offered to which devices; it is retired by POST /v1/discovery/update-rollouts/:id/abort (or completes), never deleted"],
   ["/v1/ai-saas-monitoring/connectors/:x/runs", "ADR-0361: an AI SaaS monitor run is the ledger the append-only interaction evidence points at (FK RESTRICT); it is never removed"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],

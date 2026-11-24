@@ -5187,6 +5187,7 @@ export * from "./agent-identity.js";
 export * from "./managed-settings.js";
 export * from "./endpoint-command-exceptions.js";
 export * from "./endpoint-fleet.js";
+export * from "./edr.js";
 export * from "./endpoint-actions.js";
 
 // ADR-0358 (lane E39): AI adoption analytics — the shared contract (pure)
@@ -5222,6 +5223,8 @@ export {
 } from "./behaviour-baseline.js";
 // ADR-0363 slice 1: customer sensitivity labels (Purview first, vendor-neutral provider interface)
 export * from "./sensitivity-labels.js";
+
+export * from "./detection-feed.js";
 
 // ADR-0346: fairness evaluation through the gateway — definitions, the reply mapping and the promotion gate (pure)
 export * from "./fairness-evaluation.js";

@@ -2,7 +2,6 @@
 export { default as AdmissionReviewPage } from "../views/admin/governance/AdmissionReviewPage";
 // ADR-0219: the Agents screen holds the catalogue and the remote (A2A) agents as two tabs
 export { default as AgentsPage } from "../views/admin/integrations/AgentsScreen";
-export { default as ConnectorsPage } from "../views/admin/integrations/ConnectorsPage";
 export { default as CustomProvidersPage } from "../views/admin/integrations/CustomProvidersPage";
 export { default as DeployTargetsPage } from "../views/admin/integrations/DeployTargetsPage";
 export { default as EnginesPage } from "../views/admin/integrations/EnginesPage";

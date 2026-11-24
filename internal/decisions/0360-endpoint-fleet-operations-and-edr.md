@@ -110,13 +110,27 @@ Rollout lifecycle (`endpoint_update_rollouts.state`, declared once as `ENDPOINT_
 
 | Event | From | To | By |
 |---|---|---|---|
-| `start` | `draft` | `running` (stage 1 becomes `active`) | admin; refused while self-update is off |
+| `request_start` | `draft` | `start_requested` | admin; refused while self-update is off (slice 1c) |
+| `approve_start` | `start_requested` | `running` (stage 1 becomes `active`) | a second admin, never the requester, with an `approval_decide` step-up bound to the rollout and the decision (slice 1c) |
+| `reject_start` | `start_requested` | `draft` | a second admin, as above (slice 1c) |
+| `expire_start` | `start_requested` | `draft` | system: undecided for 24 hours (slice 1c) |
 | `advance` | `running` | `running` (the active stage is `done`, the next is `active`) | admin |
 | `complete` | `running` (last stage active) | `completed` | admin |
 | `pause` | `running` | `paused` | admin |
-| `resume` | `paused`, `halted` | `running` | admin; refused while self-update is off |
+| `request_resume` | `paused`, `halted` | `resume_requested` | admin; refused while self-update is off (slice 1c) |
+| `approve_resume` | `resume_requested` | `running` | a second admin, never the requester, with an `approval_decide` step-up (slice 1c) |
+| `reject_resume` | `resume_requested` | `paused` | a second admin, as above (slice 1c) |
+| `expire_resume` | `resume_requested` | `paused` | system: undecided for 24 hours (slice 1c) |
 | `halt` | `running` | `halted` | system: failed installs or rollbacks reached the rollout's halt threshold (strict default 1: the first failure halts) |
-| `abort` | `draft`, `running`, `paused`, `halted` | `aborted` | admin |
+| `abort` | `draft`, `start_requested`, `running`, `paused`, `halted`, `resume_requested` | `aborted` | admin |
+
+**Two people for a start or resume (slice 1c, review lessons of #979).** Starting or resuming a rollout is the step that
+replaces the agent binary across a fleet, so one signed-in admin asks and a different signed-in admin decides. Every
+rollout action needs a person's session (the bootstrap credential and keys get 403 `user_required`). The rollout row
+records the requester and the decider (`approval_requested_by`, `approval_decided_by`; user FKs restrict), and CHECKs
+hold that a waiting rollout names its requester and that the decider is never the requester. `advance` stays a single
+admin's step: it moves through the stages the second admin already approved. Pause, abort and the system's halt only
+stop the offer.
 
 `completed` and `aborted` are terminal. Stage lifecycle (`endpoint_update_rollout_stages.state`): `pending → active →
 done`, `done` terminal. Every write is a guarded `UPDATE … WHERE state IN (sources of the event)`, so a concurrent or
@@ -172,6 +186,75 @@ Every state write is guarded with `whereFrom(column, machine, event)`, and the A
   key never signed. The mitigations are the offline release key, the per-group switch (off by default, a step-up to
   turn on), staged rollouts, and the halt threshold (the first failed install by default, at most 10).
 
+### 4a. Delivery (slice 1c, as built)
+
+The update offer has its own device routes (the config route still answers 503 until the collection pack is signed):
+
+- `GET /v1/endpoint-agent/update` (the device's self token): `{update: null}`, or the device's offer: `attemptId`, the
+  directive, the release manifest, and `{path, os, arch, length, sha256}` of the binary. A device is offered the update
+  only while its source has a `running` rollout, the device is in the set the rollout's start or resume approval
+  captured (below) and still in its stage's group, that stage has been reached (`active` or `done`), the group's
+  self-update is still on (read at every offer), the device does not already run the
+  version, its attempt is not settled, the execution dial is `normal` (the signature is behind the ADR-0338 barrier,
+  `device_policy.sign_payload`) and the release verifies. The device's updater still refuses anything not newer than
+  what runs, so the gateway never orders versions itself.
+- `GET /v1/discovery/update-rollouts/:rolloutId/attempts` (admin): the rollout's per-device attempts, paged under the
+  list contract, each with its declared lifecycle and reported code, so an admin deciding a resume after a halt sees
+  which devices failed and why.
+- `GET /v1/endpoint-agent/update/binary`: the binary of the device's own open offer, nothing else (no parameters).
+- `POST /v1/endpoint-agent/update-results`: the root updater's one outcome. It settles the attempt (a repeat is 409
+  `already_reported`; another device's attempt is 404), and failed or rolled-back attempts reaching the halt threshold
+  halt the rollout in the same transaction.
+
+**The directive** is signed by the rotatable device-policy signer over its own domain
+(`regulait.endpoint-update-directive/1` and a NUL, then the payload: the #1033 rule), so it never verifies as a policy or
+an ADR-0331 directive. Slice 1b's updater verified the bare payload; slice 1c changes both ends to the domain. It lives
+at most 60 minutes and never past its attempt's expiry (the device refuses one longer than 24 hours).
+
+**The approval fixes the devices** (security review of #1248). When a second admin approves a start or resume, the
+gateway captures every unrevoked device then in the stage groups into `endpoint_update_rollout_devices`, each with the
+first stage (in ordinal order) whose group held it; the audit row of the approval records the count. The offer reads
+that set, not the live membership, so adding devices to a stage's group afterwards (one admin, or an enrolment token
+bound to the group) never widens what two people approved: those devices wait for the next resume approval, which
+re-captures the membership. Removing a device from its group, or turning the group's self-update off, still narrows
+the rollout at once.
+
+**Stopping a rollout.** Pause, abort and halt stop new offers at once: the offer route holds the rollout row `FOR SHARE`
+until the directive is signed, and each of those writes takes it `FOR UPDATE`, so no directive is signed for a rollout
+that has already stopped, and the binary route re-checks the offer. A device that already holds a signed directive and
+its binary can still install it until the directive's `notAfter`, at most 60 minutes later; that window is accepted
+(the device still checks the release signature and refuses anything not newer) and is the reason the lifetime is short.
+The halt count is cumulative over the rollout: a resume after a halt does not reset it, so with the strict threshold of
+one the next failure halts again, and an admin who wants more failures tolerated raises the threshold (a step-up).
+Rejecting or letting expire a resume request returns the rollout to `paused`, also when it was asked from `halted`; the
+halt itself stays on the record as its audit row (`endpoint-update-rollout-halt`) and in the failed attempts.
+
+**Releases** come from a read-only directory the operator deploys (`REGULAIT_AGENT_RELEASES_DIR`: `<version>/release.json`
+and `<version>/regulait-agent-<os>-<arch>`). It works air-gapped and adds no upload surface. The release public keys are
+`REGULAIT_AGENT_RELEASE_KEYS`, a JSON file of one or two `{keyId, x}`; they rotate by overlap (add the next key, publish
+releases signed with it, drop the old one), matching the at-most-two keys a device pins. Both are read at every offer.
+The gateway serves the manifest byte for byte, but first checks it against those keys and checks the binary's length
+and SHA-256; a release that does not verify is never offered, and the refusal is audited with a fixed code.
+
+**Attempt lifecycle** (`endpoint_update_attempts.state`, `ENDPOINT_UPDATE_ATTEMPT_MACHINE`): `directed` →
+`installed` | `current` | `refused` | `failed` | `rolled_back` (the device's report), `directed → expired` (no report
+within 24 hours, the `endpoint-update-expiry` job) and `expired → directed` (offered again while the rollout still
+offers it; a late report still settles an expired attempt). One attempt per device and rollout.
+
+**The per-user agent** fetches the offer each sync and writes the spool: the binary first (streamed to a temporary file,
+its length and SHA-256 checked, then renamed), then the manifest, the directive last, so the root updater never sees a
+directive without its binary. It reports `result.json` back with the attempt id, only if the file is root's (a local user
+cannot forge a failure to halt a rollout), and keeps it until the gateway records it. The update sync runs on every
+sync whether or not the collection half (the config route) succeeds, so delivery does not wait for the pack.
+
+**One outcome per directive** (review of #1248). The root updater runs hourly, the per-user agent syncs daily, so the
+root updater consumes the directive as soon as it reads it and never overwrites a result the agent has not reported:
+while `result.json` is pending it does nothing. The agent removes the result once the gateway records it (or refuses
+it for good: a 4xx other than 401, 403, 408 and 429), or, where the sticky spool stops it removing root's file, writes
+`result.ack` holding the result's SHA-256, which the root updater treats as reported. The first real outcome (an
+install, a failure, a rollback) is the one the gateway sees, so a rollback is never re-installed and a failure is never
+replaced by a later `directive_stale`. Every version is at most 32 characters, at both ends.
+
 ### 5. One-line enrolment
 
 `POST /v1/discovery/sources/:sourceId/one-line-enrolments` issues an enrolment token that is:
@@ -190,24 +273,74 @@ process list). The token is consumed on use, so a copy left in shell history is 
 
 ### 6. EDR integration (slice 2)
 
-- **Adapters.** One vendor-neutral interface (`EdrAdapter`): `verifyWebhook`, `listDeviceRisk`, `listAlerts`,
-  `requestIsolation`, `releaseIsolation`, `isolationStatus`. Three implementations: Defender for Endpoint, Falcon,
-  SentinelOne. A connection's credentials are sealed server side (the existing connector-credential store) and are
-  never returned by any route.
-- **Read-only by default.** A new EDR connection can only read. Ingest maps the EDR's device record to a RegulAIt
-  endpoint device by the device pseudonym (the EDR hostname keyed-hashed with the discovery data key; no hostname is
-  stored in clear) and stores a normalised signal (`risk`: `none | low | medium | high | critical`, alert counts by
-  severity, observed at). The signal feeds the device risk shown on the device and is offered to the detection engine
-  (lane E15, PR #865) as an event source.
-- **Isolation (optional).** Turning isolation on for a connection is a `settings_relax` step-up, audited. Each request to
-  isolate a device goes through the Approvals Queue (an approver other than the requester) and a fresh step-up of the
-  approver. It only narrows access: the EDR cuts the device's network, and RegulAIt applies the device quarantine lane
-  E15 builds (its detection responses, PR #865 and its follow-ups), not a parallel one. Releasing isolation is the same flow with a `settings_relax`
-  step-up, because it widens access back.
-- **Isolation lifecycle** (declared table): `requested → approved → submitted → isolated`, `requested → rejected`,
-  `submitted → failed`, `isolated → release_requested → released`, terminal `rejected`, `failed`, `released`.
-- **Webhooks** carry an HMAC-SHA256 signature over `timestamp.body`, verified with a timing-safe compare, a 5-minute
-  window, and a replay table keyed by the vendor's event id.
+- **Adapters.** One vendor-neutral interface (`EdrAdapter`, `apps/gateway/src/edr/adapters.ts`): `listDevices`,
+  `listAlerts`, `requestIsolation`, `releaseIsolation`, `actionStatus`, `verifyWebhook`. Three implementations:
+  Defender for Endpoint (`/api/machines`, `/api/alerts`, `/api/machines/{id}/isolate|unisolate`,
+  `/api/machineactions/{id}`; Entra client credentials), Falcon (`devices-scroll`, `alerts/v2`,
+  `devices-actions/v2?action_name=contain|lift_containment`; OAuth client credentials) and SentinelOne (`agents`,
+  `threats`, `agents/actions/disconnect|connect`; API token). Every answer is zod-validated and reduced to fixed enums
+  and counts; a failure is a fixed code, never the vendor's body.
+- **Credentials stay server side.** A connection's secret and webhook secret are sealed with the data key
+  (`encryptSecret`) and never returned; the webhook secret is shown once, at creation. Both rotate in place without
+  losing the connection's evidence, each behind a `settings_relax` step-up bound to the connection and audited:
+  `POST /v1/edr-connections/:id/credential` replaces the vendor credential, and
+  `POST /v1/edr-connections/:id/webhook-secret/rotate` shows a new webhook secret once and stops the old one at once.
+- **Guarded fetch.** Every call goes through `guardConnectionCall` with a new `edr_connection` surface: the base URL is
+  checked against the egress allow-list and audited, and the returned guarded fetch re-checks every request (DNS
+  pinned, SSRF blocked, no redirects), so Defender's sign-in host must be allow-listed too. A disallowed base URL is
+  refused when the connection is created.
+- **Read-only by default.** A new connection can only read. Sync (every 15 minutes, or on demand) maps each EDR device
+  to an enrolled device of the same source by the device pseudonym (the EDR host name keyed-hashed with the discovery
+  data key; no host name is stored) and replaces its signal (`edr_device_signals`: `risk` none to critical, open alert
+  counts by severity, isolated at the vendor). Falcon has no per-host risk, so a host's risk is its worst open alert.
+  A rise to high or critical writes an `edr-device-risk-raised` audit row (effect `deny`), which the detection engine
+  and the SIEM export read from the audit stream.
+- **Webhooks** are verified before anything is read from the body, with one 401 answer for every refusal:
+  - Falcon: `X-Cs-Primary-Signature` = base64(HMAC-SHA256(secret, body ‖ `X-Cs-Delivery-Timestamp`)), compared in
+    constant time (`constantTimeEqual`), with a 5-minute window against the database clock.
+  - SentinelOne sends no signature: the console is configured to send the RegulAIt-generated token in
+    `x-regulait-webhook-token`, compared in constant time, and the event's own `createdAt` must be within 5 minutes.
+    A slow or retried SentinelOne delivery is therefore refused (401, audited `deny`); the 15-minute sync covers the gap.
+    Whether SentinelOne can send a delivery timestamp to check instead is part of the live-tenant check in the E41
+    pending fragment, item (c).
+  - Defender pushes no webhooks (it streams to Event Hubs), so none is accepted.
+  - Replay: one row per (connection, vendor event id) in `edr_webhook_deliveries`, kept 24 hours.
+- **Isolation (optional, narrowing only).** Turning isolation on for a connection is a `settings_relax` step-up bound to
+  that connection, recorded on the row (CHECK) and audited. A request names one device that EDR has reported, with a
+  reason. **Two people, both signed in:** a request, a release request and every decision need a person's session (the
+  bootstrap credential and keys get 403 `user_required`), the requester column is NOT NULL, and the user FKs restrict so
+  the people stay on the evidence. An admin other than the requester decides (also a CHECK on the row), with a fresh
+  `approval_decide` step-up bound to the request and the decision, before anything is sent to the vendor. Releasing
+  widens access back, so it is the same with a `settings_relax` step-up bound to the request. One open request per
+  device.
+- **Isolation lifecycle** (`EDR_ISOLATION_MACHINE` in `@regulait/shared`'s `edr.ts`, an ADR-0348 `defineMachine` registered in `STATE_MACHINES`): `requested →(approve)
+  submitting →(confirm) isolated →(request_release) release_requested →(approve_release) releasing →(confirm_release)
+  released`; `requested →(reject | expire) rejected`; `submitting →(fail) failed →(vendor_isolated) isolated`;
+  `release_requested →(reject_release | expire_release) isolated`; `releasing →(fail_release) isolated`;
+  `isolated →(vendor_released) released`. `rejected` and `released` are terminal; `failed` is not, but it does not
+  hold the device's one open-request slot. Every write is a guarded UPDATE (`whereFrom`) with its audit row in the
+  same transaction. The system events, every minute and on each sync:
+  - the vendor's action status settles `confirm`, `fail`, `confirm_release` and `fail_release`. Falcon and SentinelOne
+    have no action object, so a host that has not moved yet counts as pending;
+  - an action still pending after 30 minutes (`EDR_ACTION_SETTLE_MINUTES`) fails `vendor_timeout`, and a request left
+    in submitting or releasing with no vendor action id for 10 minutes (a restart mid-call) fails `stranded`, so no
+    row holds a device's slot for good;
+  - a request or release request nobody decides within 24 hours (`EDR_DECISION_TTL_HOURS`, a strict compiled default)
+    expires: `requested → rejected`, `release_requested → isolated`;
+  - each sync reconciles against the vendor's real isolation state when the vendor reports it (MDE may omit it). A
+    `failed` request whose device the vendor did isolate (a timeout, MDE's "already in progress") goes back to
+    `isolated`, so its release is governed again. An `isolated` request whose device the vendor no longer isolates
+    (released in the vendor console) goes to `released`, audited `edr-release-outside-governance` (effect `deny`).
+- **Device quarantine.** Lane E15's detection responses (PR #865) have no device quarantine yet. This lane builds no
+  parallel one: when E15's lands, an `isolated` request applies it too (PENDING).
+
+### As built: why not the Approvals Queue rows
+
+The brief asks for approval and step-up. The Approvals Queue's rows (`approvals`) are bound to a tool call's arguments
+and are spent when the requester re-submits the same call (`spendBoundApproval`). An isolation is not a re-submittable
+call, so the request row carries its own two-person decision under the declared lifecycle, with the same rules: the
+requester never decides, and the approver steps up with `approval_decide`. Listing these requests in the Approvals
+Queue screen is a UI follow-up on #453.
 
 ## Consequences
 
@@ -223,8 +356,9 @@ process list). The token is consumed on use, so a copy left in shell history is 
    enrolment tokens.
 2. **1b (agent):** `regulait-agent enrol` (token on standard input) and the root updater: directive and manifest
    verification, the downgrade refusal, staging, health check and rollback.
-3. **1c (gateway and agent):** the signed directive and release manifest in the config response, the binary download
-   route, the per-user agent's spool writer, and the device's update-result route (which halts a rollout).
+3. **1c (gateway and agent):** the signed directive and release manifest on the device's update route (§4a), the binary
+   download route, the per-user agent's spool writer, the device's update-result route (which halts a rollout), and two
+   people for a rollout's start and resume (§3).
 4. **2 (gateway):** EDR adapters, signal ingest, verified webhooks and governed isolation.
 
 ## Owner questions (answered 2026-11-22, DecisionLog D-2026-11-22-04)

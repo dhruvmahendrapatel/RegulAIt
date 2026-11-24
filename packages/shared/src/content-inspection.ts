@@ -38,7 +38,7 @@ export type ContentKind = (typeof CONTENT_KINDS)[number];
 export const CONTENT_EXTRACT_HARD_LIMITS = {
   maxFileBytes: 16 * 1024 * 1024,
   maxPages: 200,
-  maxTextChars: 2_000_000,
+  maxTextChars: 750_000,
   maxArchiveEntries: 256,
   maxArchiveDepth: 2,
   maxArchiveTotalBytes: 64 * 1024 * 1024,

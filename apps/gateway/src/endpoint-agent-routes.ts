@@ -17,6 +17,9 @@
  *   POST /v1/endpoint-agent/reports             the agent's self token + Content-Digest + report signature
  *   GET  /v1/endpoint-agent/directives          the agent's self token; ADR-0331 signed removal directives (503 unsigned)
  *   POST /v1/endpoint-agent/directive-outcomes  the agent's self token; ADR-0331 outcomes, one per directive
+ *   GET  /v1/endpoint-agent/update            the agent's self token; ADR-0360 slice 1c signed update offer
+ *   GET  /v1/endpoint-agent/update/binary     the agent's self token; the open offer's binary
+ *   POST /v1/endpoint-agent/update-results    the agent's self token; the root updater's one outcome
  *
  *   POST /v1/discovery/sources/:sourceId/enrolment-tokens     admin: issue (capped, 30 days at most; up to 90 only
  *                                                             with a `settings_relax` step-up, ADR-0197 Q13; shown once)
@@ -41,7 +44,9 @@
  * `actorPseudonym`. Every refusal is a fixed code and is audited with fixed
  * fields only.
  */
+import { registerEndpointUpdateRoutes } from "./endpoint-update-delivery.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { recordCredentialFingerprints } from "./endpoint-credential-reuse.js";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { prefixedBearer } from "./prefixed-bearer.js";
@@ -808,6 +813,15 @@ export function registerEndpointAgentRoutes(
       return refuse(reply, 503, "collection_pack_unavailable");
     });
 
+    // -- ADR-0360 slice 1c: the signed agent update offer, its binary and the device's result -----------------------
+    registerEndpointUpdateRoutes(scope, db, {
+      agentOf,
+      audit: (t, sourceId, ruleId, effect, reason, detail) => audit(t, NIL_UUID, "discovery_source", sourceId, ruleId, effect, reason, { adr: "0360", ...detail }),
+      refuse,
+      jsonOf,
+      signer: opts.directiveSigner,
+    });
+
     // -- ADR-0331: signed add-on removal directives and their outcomes (endpoint-addon-removal.ts) ----------------
     registerEndpointDirectiveRoutes(scope, db, {
       agentOf,
@@ -905,6 +919,14 @@ export function registerEndpointAgentRoutes(
         const complete = !report.gaps.some((g) => g.kind === MCP_CONFIG_KIND);
         mcp = await recordMcpServers(db, { sourceId: agent.sourceId, deviceId: agent.deviceId, reportId: row.id, collectedAt: new Date(report.collectedAt), sightings: reduction.mcpServers, complete });
       }
+      // ADR-0350 §11: credential-reuse fingerprints of the facts this report path accepted (never env-name facts, and
+      // MCP facts only while the switch is on); the values themselves never reach here. Stored server-keyed under the
+      // data key, and a report with no gaps replaces the identity's set.
+      const accepted = report.facts.filter((f) => f.kind !== "env_name" && f.matchedOn !== "envName" && (f.kind !== MCP_CONFIG_KIND || mcpConfigEnabled));
+      const reuse = await recordCredentialFingerprints(db, agent.identityId, accepted.flatMap((f) => [...(f.keys ?? []), ...(f.server?.keys ?? [])]), {
+        dataKey: opts.dataKey,
+        complete: report.gaps.length === 0,
+      });
       await db.update(endpointAgentIdentities).set({ lastReportAt: sql`now()` }).where(eq(endpointAgentIdentities.identityId, agent.identityId));
       await audit(db, NIL_UUID, "discovery_source", agent.sourceId, "endpoint-agent-report-accepted", "allow", `an endpoint agent report was accepted: ${report.facts.length} fact(s), ${reduction.sightings.length} catalogue sighting(s) (ADR-0195 SD4b)`, {
         deviceId: agent.deviceId,
@@ -918,6 +940,9 @@ export function registerEndpointAgentRoutes(
         mcpServersRecorded: mcp.upserted,
         mcpServersPruned: mcp.pruned,
         mcpServersAdded: mcp.added,
+        credentialFingerprints: reuse.recorded,
+        credentialReuseRaised: reuse.reused,
+        credentialFingerprintsPruned: reuse.pruned,
         droppedSnapshots: report.droppedSnapshots,
         bodySha256,
       });

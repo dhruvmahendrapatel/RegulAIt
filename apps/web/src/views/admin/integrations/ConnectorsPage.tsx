@@ -11,9 +11,9 @@ import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { Connector, ConnectorCredentialInfo } from "../../../api/adminTypes";
-import { ago, fmtUsd } from "../../../api/format";
+import { ago, errorText, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import {
   RemoveButton,
   connectorOpts,
@@ -55,7 +55,24 @@ export const JSON_CREDENTIAL_FIELDS: Record<string, { required: string[]; option
   teams: { required: ["appId", "appPassword"], optional: ["tenantId", "loginBaseUrl"] },
   outlook: { required: ["appId", "appPassword", "tenantId", "senderUpn"], optional: ["loginBaseUrl"] },
   resend: { required: ["apiKey", "from"], optional: ["fromName"] },
+  // ADR-0255 catalogue pieces whose credential is a document (connector-provider pieces.ts jira/google schemas);
+  // piece_slack and piece_github take a bare token
+  piece_jira_cloud: { required: ["siteUrl", "email", "apiToken"], optional: [] },
+  piece_google_sheets: { required: ["clientId", "clientSecret", "refreshToken"], optional: [] },
+  piece_gmail: { required: ["clientId", "clientSecret", "refreshToken"], optional: [] },
 };
+
+/**
+ * A curated catalogue piece (ADR-0255): it reaches only its vendor's API, and the gateway refuses every call that
+ * carries a base URL override (`piece_base_url_refused`), so its form offers none and sends none.
+ */
+export const isPieceKind = (kind: string | null | undefined): boolean => Boolean(kind?.startsWith("piece_"));
+
+/** a hint for a bare-token adapter whose token has a fixed shape; null when the token is opaque */
+export function credentialTokenHint(kind: string | null | undefined): string | null {
+  if (kind === "jira") return "The jira credential is email:api_token (the account email, a colon, then the API token).";
+  return null;
+}
 
 /** what an optional key is for — shown beside it in the hint */
 const OPTIONAL_KEY_NOTES: Record<string, string> = {
@@ -229,168 +246,285 @@ function CreateConnectorCard() {
 
 // ---- platform credential (write-only; snowflake structured JSON) ----------
 
+/**
+ * What "no credential stored" means for an adapter (INT-003). Most adapters refuse a governed invoke without one, but
+ * a governance-only connector runs no adapter, mock is keyless, and the generic HTTP family sends a token only if one
+ * is stored. The badge says which, instead of warning that every one of them will fail.
+ */
+export function noCredentialStatus(kind: string | null | undefined): { tone?: "warn" | "info"; text: string } {
+  if (!kind) return { text: "no credential needed: governance-only, no adapter runs calls for this connector" };
+  if (kind === "mock") return { tone: "info", text: "no credential needed: the mock adapter is keyless" };
+  if (kind === "http" || kind === "generic" || kind === "webhook") {
+    return { tone: "info", text: "no credential: calls are sent without one. Save a token if the endpoint needs it" };
+  }
+  return { tone: "warn", text: "no credential — governed invokes that need one will fail" };
+}
+
+/**
+ * The base URL a save sends (INT-004). The gateway stores an omitted baseUrl as null, so the field starts with the
+ * stored override and a rotation that leaves it alone keeps it. Clearing the override is its own explicit choice; an
+ * emptied field without that choice is refused here rather than silently dropping the override.
+ */
+export function credentialBaseUrlChoice(
+  stored: string | null | undefined,
+  draft: string,
+  clearOverride: boolean,
+): { baseUrl?: string } | { error: string } {
+  if (stored && clearOverride) return {};
+  const typed = draft.trim();
+  if (typed) return { baseUrl: typed };
+  if (stored) {
+    return { error: "The base URL override is empty. Choose “Clear the override” to remove it, or enter a URL." };
+  }
+  return {};
+}
+
 function CredentialCard(props: { connectors: Connector[] }) {
   const act = useAction();
   const [connectorId, setConnectorId] = useState("");
   const selected = props.connectors.find((c) => c.id === connectorId) ?? null;
-  const isSnowflake = selected?.providerKind === "snowflake";
-  const jsonTemplate = credentialJsonTemplate(selected?.providerKind);
 
   const cred = useQuery({
     queryKey: ["admin", "connector-credential", connectorId],
-    queryFn: () => api.get<ConnectorCredentialInfo>(`/v1/connectors/${connectorId}/credential`),
+    queryFn: () => api.get<ConnectorCredentialInfo>(`/v1/connectors/${encodeURIComponent(connectorId)}/credential`),
     enabled: Boolean(connectorId),
   });
-
-  const [token, setToken] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [sf, setSf] = useState({ account: "", user: "", privateKey: "", passphrase: "" });
-  const setSfF = (k: keyof typeof sf, val: string) => setSf((s) => ({ ...s, [k]: val }));
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  // the connector the remove dialog was opened for, so a later selection change cannot retarget it
+  const [removeFor, setRemoveFor] = useState<string | null>(null);
+  const stored = cred.data?.credential ?? null;
+  const none = noCredentialStatus(selected?.providerKind);
 
   return (
     <Card title="Platform credential — write-only, per connector">
       <div className={a.formRow}>
         <Field label="Connector" grow>
-          <Select value={connectorId} onChange={(e) => setConnectorId(e.target.value)}>
+          <Select
+            value={connectorId}
+            onChange={(e) => {
+              setConnectorId(e.target.value);
+              act.setError(null);
+            }}
+          >
             {optionEls(connectorOpts(props.connectors), "— select a connector —")}
           </Select>
         </Field>
       </div>
       {selected && (
         <div className={v.stack} style={{ marginTop: "var(--s2)" }}>
-          <div className={v.row}>
-            {cred.data?.credential ? (
-              <>
-                <Badge tone="ok">credential configured</Badge>
-                <span className={v.dim}>
-                  since {ago(cred.data.credential.createdAt)} · base URL{" "}
-                  {cred.data.credential.baseUrl ?? "provider default"}
-                </span>
-                <span className={v.grow} />
-                <Button size="sm" variant="danger" onClick={() => setConfirmRemove(true)}>
-                  remove
-                </Button>
-              </>
-            ) : (
-              <Badge tone="warn">no credential — governed invokes that need one will fail</Badge>
-            )}
-          </div>
-          <form
-            className={v.stack}
-            onSubmit={(e) => {
-              e.preventDefault();
-              const body = isSnowflake
-                ? JSON.stringify({
-                    account: sf.account,
-                    user: sf.user,
-                    privateKey: sf.privateKey,
-                    ...(sf.passphrase ? { passphrase: sf.passphrase } : {}),
-                  })
-                : token;
-              void act
-                .run(
-                  () =>
-                    api.post(`/v1/connectors/${connectorId}/credential`, {
-                      token: body,
-                      ...(baseUrl ? { baseUrl } : {}),
-                    }),
-                  "Credential saved (encrypted at rest, never returned)",
-                )
-                .then((ok) => {
-                  if (ok) {
-                    setToken("");
-                    setSf({ account: "", user: "", privateKey: "", passphrase: "" });
-                  }
-                });
-            }}
-          >
-            {isSnowflake ? (
-              <>
-                <div className={a.formRow}>
-                  <Field label="Account">
-                    <Input required value={sf.account} onChange={(e) => setSfF("account", e.target.value)} placeholder="xy12345.eu-west-1" />
-                  </Field>
-                  <Field label="User">
-                    <Input required value={sf.user} onChange={(e) => setSfF("user", e.target.value)} />
-                  </Field>
-                  <Field label="Key passphrase (optional)">
-                    <Input type="password" value={sf.passphrase} onChange={(e) => setSfF("passphrase", e.target.value)} autoComplete="off" />
-                  </Field>
-                </div>
-                <Field label="Private key (PEM)">
-                  <Textarea
-                    required
-                    rows={5}
-                    value={sf.privateKey}
-                    onChange={(e) => setSfF("privateKey", e.target.value)}
-                    placeholder="-----BEGIN PRIVATE KEY-----"
-                    style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
-                  />
-                </Field>
-                <p className={v.faint}>
-                  Snowflake credentials are multi-field: this form assembles the {"{account, user, privateKey, passphrase?}"}{" "}
-                  structured JSON the adapter expects and the server validates the shape at save time — a
-                  malformed credential 400s here with an actionable message instead of failing opaquely at
-                  first invoke.
-                </p>
-              </>
-            ) : jsonTemplate ? (
-              <>
-                <Field label="Credential (JSON — never shown again)">
-                  <Textarea
-                    required
-                    rows={6}
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder={jsonTemplate}
-                    autoComplete="off"
-                    style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
-                  />
-                </Field>
-                <p className={v.faint}>{credentialJsonHint(selected?.providerKind)}</p>
-              </>
-            ) : (
-              <Field label="Token / API key">
-                <Input
-                  required
-                  type="password"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  placeholder="never shown again"
-                  autoComplete="off"
-                />
-              </Field>
-            )}
-            <div className={a.formRow}>
-              <Field label="Base URL (optional)" grow>
-                <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-              </Field>
-              <Button type="submit" variant="primary" disabled={act.busy}>
-                {cred.data?.credential ? "Rotate credential" : "Save credential"}
-              </Button>
-            </div>
-            {act.error && (
-              <div className={v.errLine} role="alert">
-                {act.error}
+          {cred.isPending ? (
+            <SkeletonBlock lines={2} />
+          ) : cred.isError ? (
+            // INT-003: a failed read is not "no credential", and no save form is offered until it is known which
+            // credential and base URL override are stored
+            <ErrorState
+              title="Couldn't read this connector's credential"
+              message={`${errorText(cred.error)}. Whether a credential is stored is unknown, so nothing can be saved until it loads.`}
+              onRetry={() => void cred.refetch()}
+            />
+          ) : (
+            <>
+              <div className={v.row}>
+                {stored ? (
+                  <>
+                    <Badge tone="ok">credential configured</Badge>
+                    <span className={v.dim}>
+                      since {ago(stored.createdAt)} · base URL {stored.baseUrl ?? "provider default"}
+                    </span>
+                    <span className={v.grow} />
+                    <Button size="sm" variant="danger" disabled={act.busy} onClick={() => setRemoveFor(connectorId)}>
+                      remove
+                    </Button>
+                  </>
+                ) : (
+                  <Badge tone={none.tone}>{none.text}</Badge>
+                )}
               </div>
-            )}
-          </form>
+              {act.error && (
+                <div className={v.errLine} role="alert">
+                  {act.error}
+                </div>
+              )}
+              {/* INT-002: keyed on the connector and what is stored, so each connector's form starts clean and a
+                  saved or removed credential re-seeds the base URL from the server */}
+              <CredentialForm
+                key={`${selected.id}:${stored?.id ?? "none"}:${stored?.baseUrl ?? ""}`}
+                connector={selected}
+                stored={stored}
+              />
+            </>
+          )}
         </div>
       )}
       <ConfirmModal
-        open={confirmRemove}
+        open={removeFor !== null}
         title="Remove this connector's credential?"
         body="Governed invokes that need it start failing until a new one is saved."
         danger
         confirmLabel="Remove"
-        onCancel={() => setConfirmRemove(false)}
+        onCancel={() => setRemoveFor(null)}
         onConfirm={() => {
-          setConfirmRemove(false);
-          void act.run(() => api.del(`/v1/connectors/${connectorId}/credential`), "Credential removed");
+          const id = removeFor;
+          setRemoveFor(null);
+          if (id) void act.run(() => api.del(`/v1/connectors/${encodeURIComponent(id)}/credential`), "Credential removed");
         }}
       />
     </Card>
+  );
+}
+
+const EMPTY_SF = { account: "", user: "", privateKey: "", passphrase: "" };
+
+function CredentialForm(props: { connector: Connector; stored: ConnectorCredentialInfo["credential"] }) {
+  const act = useAction();
+  const { connector, stored } = props;
+  const isSnowflake = connector.providerKind === "snowflake";
+  const jsonTemplate = credentialJsonTemplate(connector.providerKind);
+  const [token, setToken] = useState("");
+  // INT-004: starts at the stored override, so a token-only rotation keeps it
+  const [baseUrl, setBaseUrl] = useState(stored?.baseUrl ?? "");
+  const [clearOverride, setClearOverride] = useState(false);
+  const [sf, setSf] = useState(EMPTY_SF);
+  const setSfF = (k: keyof typeof sf, val: string) => setSf((s) => ({ ...s, [k]: val }));
+  const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
+  const overrideStored = Boolean(stored?.baseUrl);
+  const piece = isPieceKind(connector.providerKind);
+  const tokenHint = credentialTokenHint(connector.providerKind);
+
+  return (
+    <form
+      className={v.stack}
+      onSubmit={(e) => {
+        e.preventDefault();
+        // a piece takes no base URL: send none (the gateway stores null), whatever was stored before
+        const choice = piece ? {} : credentialBaseUrlChoice(stored?.baseUrl, baseUrl, clearOverride);
+        if ("error" in choice) {
+          setBaseUrlError(choice.error);
+          return;
+        }
+        setBaseUrlError(null);
+        const body = isSnowflake
+          ? JSON.stringify({
+              account: sf.account,
+              user: sf.user,
+              privateKey: sf.privateKey,
+              ...(sf.passphrase ? { passphrase: sf.passphrase } : {}),
+            })
+          : token;
+        void act
+          .run(
+            () => api.post(`/v1/connectors/${encodeURIComponent(connector.id)}/credential`, { token: body, ...choice }),
+            "Credential saved (encrypted at rest, never returned)",
+          )
+          .then((ok) => {
+            if (ok) {
+              setToken("");
+              setSf(EMPTY_SF);
+            }
+          });
+      }}
+    >
+      {isSnowflake ? (
+        <>
+          <div className={a.formRow}>
+            <Field label="Account">
+              <Input required value={sf.account} onChange={(e) => setSfF("account", e.target.value)} placeholder="xy12345.eu-west-1" />
+            </Field>
+            <Field label="User">
+              <Input required value={sf.user} onChange={(e) => setSfF("user", e.target.value)} />
+            </Field>
+            <Field label="Key passphrase (optional)">
+              <Input type="password" value={sf.passphrase} onChange={(e) => setSfF("passphrase", e.target.value)} autoComplete="off" />
+            </Field>
+          </div>
+          <Field label="Private key (PEM)">
+            <Textarea
+              required
+              rows={5}
+              value={sf.privateKey}
+              onChange={(e) => setSfF("privateKey", e.target.value)}
+              placeholder="-----BEGIN PRIVATE KEY-----"
+              autoComplete="off"
+              spellCheck={false}
+              style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
+            />
+          </Field>
+          <p className={v.faint}>
+            Snowflake credentials are multi-field: this form assembles the {"{account, user, privateKey, passphrase?}"}{" "}
+            structured JSON the adapter expects and the server validates the shape at save time — a
+            malformed credential 400s here with an actionable message instead of failing opaquely at
+            first invoke.
+          </p>
+        </>
+      ) : jsonTemplate ? (
+        <>
+          <Field label="Credential (JSON — never shown again)">
+            <Textarea
+              required
+              rows={6}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder={jsonTemplate}
+              autoComplete="off"
+              spellCheck={false}
+              style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}
+            />
+          </Field>
+          <p className={v.faint}>{credentialJsonHint(connector.providerKind)}</p>
+        </>
+      ) : (
+        <Field label="Token / API key">
+          <Input
+            required
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="never shown again"
+            autoComplete="off"
+          />
+        </Field>
+      )}
+      {!isSnowflake && !jsonTemplate && tokenHint && <p className={v.faint}>{tokenHint}</p>}
+      <div className={a.formRow}>
+        {piece ? (
+          <p className={`${v.faint} ${v.grow}`}>
+            A catalogue connector reaches only its vendor&apos;s API, so it takes no base URL override.
+          </p>
+        ) : (
+          <Field label="Base URL (optional)" grow error={baseUrlError}>
+            <Input
+              value={clearOverride ? "" : baseUrl}
+              disabled={clearOverride}
+              onChange={(e) => {
+                setBaseUrl(e.target.value);
+                setBaseUrlError(null);
+              }}
+              placeholder={connector.baseUrl ?? "provider default"}
+            />
+          </Field>
+        )}
+        <Button type="submit" variant="primary" disabled={act.busy}>
+          {stored ? "Rotate credential" : "Save credential"}
+        </Button>
+      </div>
+      {overrideStored && !piece && (
+        <label className={v.row}>
+          <input
+            type="checkbox"
+            checked={clearOverride}
+            onChange={(e) => {
+              setClearOverride(e.target.checked);
+              setBaseUrlError(null);
+            }}
+          />
+          <span>Clear the override and use the connector's own base URL ({connector.baseUrl ?? "provider default"})</span>
+        </label>
+      )}
+      {act.error && (
+        <div className={v.errLine} role="alert">
+          {act.error}
+        </div>
+      )}
+    </form>
   );
 }
 
@@ -441,23 +575,36 @@ function GrantForm(props: { connectors: Connector[]; users: ReturnType<typeof us
 function EntitlementCard(props: { users: ReturnType<typeof useUsers> }) {
   const act = useAction();
   const [userId, setUserId] = useState("");
-  const [rows, setRows] = useState<Array<Record<string, unknown>> | null>(null);
+  // INT-005: the rows carry the user they were read for, and are shown (and removable) only while that user is still
+  // the one selected, so a Remove can never act on the previous subject's grant
+  const [loaded, setLoaded] = useState<{ userId: string; rows: Array<Record<string, unknown>> } | null>(null);
+  const rows = loaded && loaded.userId === userId ? loaded.rows : null;
+  const load = (forUser: string) =>
+    act.run(async () => {
+      const r = await api.get<{ connectors: Array<Record<string, unknown>> }>(
+        `/v1/users/${encodeURIComponent(forUser)}/connectors`,
+      );
+      setLoaded({ userId: forUser, rows: r.connectors });
+    }, null);
   return (
     <Card title="Per-user entitlement">
       <form
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
-          void act.run(async () => {
-            const r = await api.get<{ connectors: Array<Record<string, unknown>> }>(
-              `/v1/users/${userId}/connectors`,
-            );
-            setRows(r.connectors);
-          }, null);
+          setLoaded(null);
+          void load(userId);
         }}
       >
         <Field label="User" grow>
-          <Select required value={userId} onChange={(e) => setUserId(e.target.value)}>
+          <Select
+            required
+            value={userId}
+            onChange={(e) => {
+              setUserId(e.target.value);
+              setLoaded(null);
+            }}
+          >
             {optionEls(userOpts(props.users.data?.users), "— select —")}
           </Select>
         </Field>
@@ -521,14 +668,7 @@ function EntitlementCard(props: { users: ReturnType<typeof useUsers> }) {
                     </p>
                   }
                   onRemove={() => api.del(`/v1/grants/connectors/${String(r.grantId)}`)}
-                  onDone={() => {
-                    void act.run(async () => {
-                      const again = await api.get<{ connectors: Array<Record<string, unknown>> }>(
-                        `/v1/users/${userId}/connectors`,
-                      );
-                      setRows(again.connectors);
-                    }, null);
-                  }}
+                  onDone={() => void load(userId)}
                 />
               ),
             },

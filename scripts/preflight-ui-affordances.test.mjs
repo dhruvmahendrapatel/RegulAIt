@@ -120,6 +120,7 @@ describe("affordance census: a notBuilt route counts only when the file defines 
       "/v1/governance-policy/layer",
       "/v1/discovery/agent-identifiers/:x",
       "/v1/discovery/entitlements/apps/:x/agent-link",
+      "/v1/discovery/sources/:x/control-credential",
       "/v1/servers/:x/system-class",
       "/v1/users/:x/spend-budget",
       "/v1/paid-call-prices/:x",

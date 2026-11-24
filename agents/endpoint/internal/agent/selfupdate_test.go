@@ -40,10 +40,23 @@ func (k edKey) pin() enforce.PinnedKey {
 	return enforce.PinnedKey{KeyID: k.id, X: base64.RawURLEncoding.EncodeToString(k.key.Public().(ed25519.PublicKey))}
 }
 
+// sign signs the bare payload (a release manifest).
 func (k edKey) sign(t *testing.T, payload any) []byte {
 	t.Helper()
+	return k.signIn(t, nil, payload)
+}
+
+// signDirective signs an update directive over its domain and the payload, as the gateway does (#1033).
+func (k edKey) signDirective(t *testing.T, payload any) []byte {
+	t.Helper()
+	return k.signIn(t, update.DirectiveSignatureDomain, payload)
+}
+
+func (k edKey) signIn(t *testing.T, domain []byte, payload any) []byte {
+	t.Helper()
 	p, _ := json.Marshal(payload)
-	b, _ := json.Marshal(enforce.Envelope{KeyID: k.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(k.key, p))})
+	signed := append(append([]byte{}, domain...), p...)
+	b, _ := json.Marshal(enforce.Envelope{KeyID: k.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(k.key, signed))})
 	return b
 }
 
@@ -110,7 +123,7 @@ func (u *updateFixture) spool(t *testing.T, version string, bin []byte, signedBi
 	h := sha256.Sum256(signedBin)
 	m := update.Manifest{Schema: update.SchemaManifest, Version: version, IssuedAt: now, Targets: []update.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: hex.EncodeToString(h[:]), Length: int64(len(signedBin))}}}
 	sp := u.opts.Paths.SpoolDir
-	os.WriteFile(filepath.Join(sp, SpoolDirective), u.policy.sign(t, d), 0o644)
+	os.WriteFile(filepath.Join(sp, SpoolDirective), u.policy.signDirective(t, d), 0o644)
 	os.WriteFile(filepath.Join(sp, SpoolManifest), u.release.sign(t, m), 0o644)
 	os.WriteFile(filepath.Join(sp, SpoolBinary), bin, 0o644)
 }
@@ -205,6 +218,12 @@ func TestSelfUpdateRefusals(t *testing.T) {
 		"an unsigned directive": {version: "1.1.0", bin: good, signed: good, prep: func(t *testing.T, u *updateFixture) {
 			os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective), []byte(`{"keyId":"x","payload":"","signature":""}`), 0o644)
 		}, outcome: UpdateRefused, code: update.CodeDirectiveInvalid},
+		// #1033: a directive signed over the bare payload (as a policy is) is no update directive
+		"a directive signed over the bare payload": {version: "1.1.0", bin: good, signed: good, prep: func(t *testing.T, u *updateFixture) {
+			now := time.Now().UTC()
+			d := update.Directive{Schema: update.SchemaDirective, DeviceID: u.deviceID, RolloutID: "9a6c1f2e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", TargetVersion: "1.1.0", IssuedAt: now.Add(-time.Minute), NotAfter: now.Add(time.Hour)}
+			os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective), u.policy.sign(t, d), 0o644)
+		}, outcome: UpdateRefused, code: update.CodeDirectiveInvalid},
 	} {
 		t.Run(name, func(t *testing.T) {
 			u := newUpdateFixture(t)
@@ -237,6 +256,162 @@ func TestSelfUpdateRollsBackAnUnhealthyInstall(t *testing.T) {
 	if u.installedVersion(t) != "1.0.0" {
 		t.Fatal("not rolled back")
 	}
+}
+
+// spoolDirectiveOnly writes a directive alone (the manifest and binary stay), valid from issued for an hour.
+func (u *updateFixture) spoolDirectiveOnly(t *testing.T, version string, issued time.Time) {
+	t.Helper()
+	d := update.Directive{Schema: update.SchemaDirective, DeviceID: u.deviceID, RolloutID: "9a6c1f2e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", TargetVersion: version, IssuedAt: issued.Add(-time.Minute), NotAfter: issued.Add(time.Hour)}
+	os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective), u.policy.signDirective(t, d), 0o644)
+}
+
+func (u *updateFixture) resultFile(t *testing.T) UpdateResult {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolResult))
+	if err != nil {
+		t.Fatalf("no result file: %v", err)
+	}
+	var r UpdateResult
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func (u *updateFixture) directiveGone(t *testing.T) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective)); !os.IsNotExist(err) {
+		t.Fatal("the directive was not consumed")
+	}
+}
+
+// ADR-0360 §4: hourly root runs between the per-user agent's syncs. The directive is consumed once and the first
+// outcome stays in the result file until it is reported, so the gateway's automatic halt sees the failure.
+func TestSelfUpdateRunsBetweenSyncsKeepTheFirstOutcome(t *testing.T) {
+	t.Run("a rollback is not re-installed", func(t *testing.T) {
+		u := newUpdateFixture(t)
+		bin := fakeBinary("1.1.0", true)
+		u.spool(t, "1.1.0", bin, bin)
+		if r := u.run(t); r.Outcome != UpdateRolledBack {
+			t.Fatalf("%+v\n%s", r, u.logs)
+		}
+		u.directiveGone(t)
+		// the per-user agent has not synced: the spool still holds the bad binary and the manifest
+		for i := 0; i < 3; i++ {
+			if r := u.run(t); r.Outcome != UpdatePending {
+				t.Fatalf("run %d: %+v", i, r)
+			}
+		}
+		if r := u.resultFile(t); r.Outcome != UpdateRolledBack || r.Code != update.CodeInstalledHealth {
+			t.Fatalf("%+v", r)
+		}
+		if strings.Count(u.logs.String(), "restoring the previous one") != 1 || u.installedVersion(t) != "1.0.0" {
+			t.Fatalf("re-installed:\n%s", u.logs)
+		}
+		// even with the result reported, nothing is installed again without a new directive
+		os.Remove(filepath.Join(u.opts.Paths.SpoolDir, SpoolResult))
+		if r := u.run(t); r.Outcome != UpdateNothing {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("an install stays installed", func(t *testing.T) {
+		u := newUpdateFixture(t)
+		bin := fakeBinary("1.1.0", false)
+		u.spool(t, "1.1.0", bin, bin)
+		if r := u.run(t); r.Outcome != UpdateInstalled {
+			t.Fatalf("%+v\n%s", r, u.logs)
+		}
+		Version = "1.1.0" // the timer now runs the installed binary
+		u.directiveGone(t)
+		for i := 0; i < 3; i++ {
+			if r := u.run(t); r.Outcome != UpdatePending {
+				t.Fatalf("run %d: %+v", i, r)
+			}
+		}
+		if r := u.resultFile(t); r.Outcome != UpdateInstalled || r.ToVersion != "1.1.0" {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a stale directive does not replace a failure", func(t *testing.T) {
+		u := newUpdateFixture(t)
+		bin := fakeBinary("1.0.5", false)
+		u.spool(t, "1.1.0", bin, bin)
+		if r := u.run(t); r.Outcome != UpdateFailed || r.Code != update.CodeStagedUnhealthy {
+			t.Fatalf("%+v\n%s", r, u.logs)
+		}
+		u.spoolDirectiveOnly(t, "1.1.0", time.Now().Add(-3*time.Hour)) // past notAfter
+		if r := u.run(t); r.Outcome != UpdatePending {
+			t.Fatalf("%+v", r)
+		}
+		if r := u.resultFile(t); r.Outcome != UpdateFailed || r.Code != update.CodeStagedUnhealthy {
+			t.Fatalf("the failure was replaced: %+v", r)
+		}
+		if _, err := os.Lstat(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective)); err != nil {
+			t.Fatal("a pending run consumed the next directive")
+		}
+	})
+	t.Run("a reported result lets the next directive through", func(t *testing.T) {
+		for name, report := range map[string]func(u *updateFixture){
+			"removed": func(u *updateFixture) { os.Remove(filepath.Join(u.opts.Paths.SpoolDir, SpoolResult)) },
+			// the sticky spool: the agent cannot remove root's file and acknowledges its exact bytes
+			"acknowledged": func(u *updateFixture) {
+				raw, _ := os.ReadFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolResult))
+				h := sha256.Sum256(raw)
+				os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolResultAck), []byte(hex.EncodeToString(h[:])+"\n"), 0o644)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				u := newUpdateFixture(t)
+				bin := fakeBinary("1.1.0", true)
+				u.spool(t, "1.1.0", bin, bin)
+				if r := u.run(t); r.Outcome != UpdateRolledBack {
+					t.Fatalf("%+v\n%s", r, u.logs)
+				}
+				report(u)
+				good := fakeBinary("1.1.0", false)
+				u.spool(t, "1.1.0", good, good)
+				if r := u.run(t); r.Outcome != UpdateInstalled {
+					t.Fatalf("%+v\n%s", r, u.logs)
+				}
+				if r := u.resultFile(t); r.Outcome != UpdateInstalled {
+					t.Fatalf("%+v", r)
+				}
+				u.directiveGone(t)
+				if _, err := os.Lstat(filepath.Join(u.opts.Paths.SpoolDir, SpoolResultAck)); !os.IsNotExist(err) {
+					t.Fatal("the acknowledgement was left")
+				}
+			})
+		}
+	})
+	t.Run("an acknowledgement of other bytes is no report", func(t *testing.T) {
+		u := newUpdateFixture(t)
+		bin := fakeBinary("1.1.0", true)
+		u.spool(t, "1.1.0", bin, bin)
+		u.run(t)
+		os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolResultAck), []byte(strings.Repeat("0", 64)+"\n"), 0o644)
+		good := fakeBinary("1.1.0", false)
+		u.spool(t, "1.1.0", good, good)
+		if r := u.run(t); r.Outcome != UpdatePending {
+			t.Fatalf("%+v", r)
+		}
+		if r := u.resultFile(t); r.Outcome != UpdateRolledBack {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a linked result file is not root's and does not block", func(t *testing.T) {
+		u := newUpdateFixture(t)
+		outside := filepath.Join(u.dir, "outside.json")
+		os.WriteFile(outside, []byte(`{}`), 0o644)
+		os.Symlink(outside, filepath.Join(u.opts.Paths.SpoolDir, SpoolResult))
+		bin := fakeBinary("1.1.0", false)
+		u.spool(t, "1.1.0", bin, bin)
+		if r := u.run(t); r.Outcome != UpdateInstalled {
+			t.Fatalf("%+v\n%s", r, u.logs)
+		}
+		if b, _ := os.ReadFile(outside); string(b) != `{}` {
+			t.Fatal("the link was followed")
+		}
+	})
 }
 
 func TestEnrolReadsTheTokenFromStandardInput(t *testing.T) {

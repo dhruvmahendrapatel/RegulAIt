@@ -47,6 +47,7 @@ import { entraWriteScope } from "./discovery-wider-scanners.js";
 import { createHash } from "node:crypto";
 import { EgressBlockedError, egressRefusal } from "./egress-guard.js";
 import { errMessage } from "./err-serializer.js";
+import { isUsableVendorRef, type ConnectorRemediation, type RemediationTarget } from "./ai-saas-remediation-contract.js";
 
 /** a stored credential, decrypted for one run */
 export interface ConnectorCredential {
@@ -104,6 +105,24 @@ export interface ComplianceConnector {
   signedRedirectDownload?: { maxBytes: number };
   authorise: (ctx: ConnectorContext) => Promise<ConnectorAuthorisation>;
   listInteractions: (ctx: ConnectorContext, auth: ConnectorAuthorisation, window: { start: Date; end: Date }) => AsyncIterable<InteractionPage>;
+  /** ADR-0361 slice 3: the vendor's documented delete, called only by the approved remediation flow; absent = none */
+  remediation?: ConnectorRemediation;
+}
+
+/** a delete or read whose answer is 200 (done), 404 (already gone) or a fixed error code */
+/** refuse an id that cannot be sent as one exact path segment (#991 S3 [3]); nothing is sent */
+function assertUsableTarget(target: RemediationTarget): void {
+  if (!isUsableVendorRef(target.conversationRef, "conversation") || !isUsableVendorRef(target.actorRef, "actor")) {
+    throw new ConnectorError("bad_response", "the stored conversation or user id is not a usable vendor id; nothing was sent");
+  }
+}
+
+async function vendorDelete(fetchImpl: typeof fetch, url: string, headers: Record<string, string>, signal: AbortSignal): Promise<{ outcome: "deleted" | "absent"; vendorStatus: number }> {
+  const res = await fetchImpl(url, { method: "DELETE", headers: { ...headers, accept: "application/json" }, signal });
+  await res.arrayBuffer().catch(() => undefined);
+  if (res.ok) return { outcome: "deleted", vendorStatus: res.status };
+  if (res.status === 404) return { outcome: "absent", vendorStatus: 404 };
+  throw statusError(res.status, "the conversation delete");
 }
 
 /**
@@ -424,6 +443,23 @@ async function* chatGptListInteractions(ctx: ConnectorContext, auth: ConnectorAu
 }
 
 /**
+ * `DELETE …/users/{user_id}/conversations/{conversation_id}` (the documented, user-scoped route; the workspace-wide
+ * legacy route only when the record carried no user). It needs a key with the compliance_export delete scope: the
+ * connector's separate `remediate` credential, never the read key.
+ */
+const CHATGPT_REMEDIATION: ConnectorRemediation = {
+  kind: "vendor",
+  deleteConversation: async (ctx, target) => {
+    assertUsableTarget(target);
+    const base = chatGptLogsBase(ctx.config).replace(/\/logs$/, "");
+    const url = target.actorRef
+      ? `${base}/users/${encodeURIComponent(target.actorRef)}/conversations/${encodeURIComponent(target.conversationRef)}`
+      : `${base}/conversations/${encodeURIComponent(target.conversationRef)}`;
+    return vendorDelete(connectorFetch(ctx), url, { authorization: `Bearer ${ctx.credential.secret}` }, ctx.signal);
+  },
+};
+
+/**
  * ChatGPT: any change of principal is a different population (another workspace, or a workspace to the whole API
  * Platform organization), so it is a widening, as is a longer backfill. Defaults apply as the schema applies them.
  */
@@ -437,6 +473,7 @@ export function chatGptConfigWidens(before: unknown, after: unknown): boolean {
 
 export const CHATGPT_ENTERPRISE_CONNECTOR: ComplianceConnector = {
   vendor: "chatgpt_enterprise",
+  remediation: CHATGPT_REMEDIATION,
   // 100 requests a minute per workspace per route (OpenAPI info): one request every 700 ms stays under it
   minSpacingMs: 700,
   validateConfig: zodValidator(chatGptEnterpriseConfigSchema),
@@ -534,6 +571,32 @@ async function* claudeListInteractions(ctx: ConnectorContext, auth: ConnectorAut
   }
 }
 
+/** `DELETE /v1/compliance/apps/chats/{id}` with a `delete:compliance_user_data` key; deletes are permanent */
+const CLAUDE_REMEDIATION: ConnectorRemediation = {
+  kind: "vendor",
+  deleteConversation: async (ctx, target) => {
+    assertUsableTarget(target);
+    return vendorDelete(
+      connectorFetch(ctx),
+      `${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(target.conversationRef)}`,
+      { "x-api-key": ctx.credential.secret, "anthropic-version": ANTHROPIC_COMPLIANCE_VERSION },
+      ctx.signal,
+    );
+  },
+  conversationGone: async (ctx, target) => {
+    assertUsableTarget(target);
+    const res = await connectorFetch(ctx)(`${ANTHROPIC_ORIGIN}/v1/compliance/apps/chats/${encodeURIComponent(target.conversationRef)}/messages`, {
+      method: "GET",
+      headers: { "x-api-key": ctx.credential.secret, "anthropic-version": ANTHROPIC_COMPLIANCE_VERSION, accept: "application/json" },
+      signal: ctx.signal,
+    });
+    await res.arrayBuffer().catch(() => undefined);
+    if (res.status === 404) return true;
+    if (res.ok) return false;
+    throw statusError(res.status, "the chat's messages");
+  },
+};
+
 /** Claude: an empty organization list is org-wide, so narrowed → org-wide or an added organization widens; so does a longer backfill */
 export function claudeConfigWidens(before: unknown, after: unknown): boolean {
   const b = asRecord(before);
@@ -547,6 +610,7 @@ export function claudeConfigWidens(before: unknown, after: unknown): boolean {
 
 export const CLAUDE_ENTERPRISE_CONNECTOR: ComplianceConnector = {
   vendor: "claude_enterprise",
+  remediation: CLAUDE_REMEDIATION,
   // 600 requests a minute per parent organization, shared by every key: one every 150 ms leaves room for others
   minSpacingMs: 150,
   validateConfig: zodValidator(claudeEnterpriseConfigSchema),
