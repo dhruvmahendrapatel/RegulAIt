@@ -1,0 +1,41 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "finding": "CXR-MCP-001",
+  "checks": [
+    {
+      "width": 1440,
+      "descriptionCharacters": 572,
+      "onlyChangedTailHidden": true,
+      "bothValuesTruncated": true,
+      "fullValueAvailableInExistingMockedResponse": true,
+      "fullValueExpansionControls": 0,
+      "reapprovalEnabledAfterSelectionAndReason": true,
+      "writeRequests": 0,
+      "realApproval": false
+    },
+    {
+      "width": 375,
+      "descriptionCharacters": 572,
+      "onlyChangedTailHidden": true,
+      "bothValuesTruncated": true,
+      "fullValueAvailableInExistingMockedResponse": true,
+      "fullValueExpansionControls": 0,
+      "reapprovalEnabledAfterSelectionAndReason": true,
+      "writeRequests": 0,
+      "realApproval": false
+    }
+  ],
+  "probes_passed": 2,
+  "duration_seconds": 3.3,
+  "scope": "Mocked browser GETs only; no reapproval POST/proof submitted",
+  "source": [
+    "mcpPinningModel.ts:65-69,108-109",
+    "McpDefinitionPins.tsx:194-201",
+    "gateway/mcp-definition-pins.ts:370-372"
+  ],
+  "limits": [
+    "No actual upstream or approval",
+    "No server digest bypass",
+    "No native accessibility result"
+  ]
+}

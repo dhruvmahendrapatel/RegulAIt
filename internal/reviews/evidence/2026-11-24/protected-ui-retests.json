@@ -1,0 +1,18 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "specs": [
+    "codex-step-up-journeys.mock.spec.ts",
+    "mcp-tool-sync.mock.spec.ts"
+  ],
+  "passed": 13,
+  "failed": 0,
+  "skipped": 0,
+  "flaky": 0,
+  "duration_ms": 34125.803,
+  "scope": "Desktop Chromium, mocked gateway/proof/provider; existing merged suites independently rerun",
+  "limits": [
+    "No real role/team removal or server ownership write",
+    "No provider/device proof assurance",
+    "Not a whole admission/definition-pin security verdict"
+  ]
+}

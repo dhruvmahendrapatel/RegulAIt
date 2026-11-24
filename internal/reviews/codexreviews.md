@@ -4,13 +4,13 @@
 
 This is the owner-requested continuing review and discussion record for regulAIt.
 
-Read: [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+Read: [latest tool-review finding](#deep-audit--iteration-11-2026-11-24-inspect-the-full-tool-change-before-approval), [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
 
 - **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
 - **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
 - **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
-- **Deep audit:** ten iterations (including design/reconciliation work), 71 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
-- **UI handoff:** eleven desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
+- **Deep audit:** eleven iterations (including design/reconciliation work), 72 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** twelve desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
 - **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
 
 ## Initial recommendations — posted before the deeper audit
@@ -1814,13 +1814,75 @@ assistant scheduler**; no cron or automation was created and no unattended conti
 file, the PR and local session handoff for resume. Continue prioritising named security and user-task evidence; do not
 let the feedback loop become repeated broad suggestions without retests or source reasoning.
 
+## Deep audit — iteration 11, 2026-11-24: inspect the full tool change before approval
+
+Source remains main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. This continues the active session after the iteration 10
+checkpoint. [Mockup 12](mockups/12-tool-admission-and-permissions.md) separates registration, release age, admission,
+definition pinning, effective grants and discovery from actual call eligibility. It uses existing routes, strict block
+mode and digest/proof checks; clean scan text never becomes trusted instruction. Source/health facts absent from the
+response remain gated. There are now **twelve mockups**.
+
+#### CXR-MCP-001 — The definition-review UI hides the only changed text while allowing re-approval
+
+- **Evidence:** `apps/web/src/views/admin/integrations/mcpPinningModel.ts:65–69` crops every JSON-rendered value to
+  400 characters; `describeDiff` uses it for old/new values at `:108–109`. `McpDefinitionPins.tsx:194–201` renders
+  only those strings with no expand/full-value control. The current server response already includes complete approved
+  definitions and RFC 6902 values (`mcp-definition-pins.ts:370–372`). No new API is needed for the reproduced case.
+- **User task and impact:** an admin reviewing a long description can see apparently identical cropped old/new values,
+  with the actual change hidden beyond the cutoff, and still enable Re-approve by choosing the item and entering a
+  reason. The source/digest is bound correctly, but the person cannot inspect the full content they are asked to accept.
+  Long descriptions/schema values are ordinary review inputs; the cutoff must be a summary, not the only evidence.
+- **Triage:** High, **F6 × S5 =30**, conditional on a changed value longer than the UI bound; real incidence is not
+  measured. This is security-sensitive review usability/correctness, not a demonstrated permission bypass, hidden HTML
+  execution or a claim that the gateway accepts an incorrect digest. The separate security reviewer should assess its
+  implication for human review; this lane posts no security approval.
+- **Reproduction:** provide a changed tool whose old/new descriptions share a 550+ character prefix and differ only in
+  a final marker. At 375 and 1440 px, neither changed marker appears; both values end in ellipses; there is no full-value
+  control. After selection/reason, Re-approve is enabled. **Two controlled probes passed in 3.3 seconds**; zero write
+  requests were sent. [Sanitised evidence](evidence/2026-11-24/definition-diff-truncation.json).
+- **Smallest fix and reason:** retain bounded summary text, visibly label truncation, and add deliberate plain-text
+  expansion/comparison of the existing authorised old/new operation values. Use current disclosure/code-region/kit
+  patterns and pinned RFC 6902 representation; do not add a diff engine or fetch raw upstream data. Keep long values
+  readable with contained scrolling/wrapping at phone width. Server-side object checks, exact-digest stale rejection,
+  reason/proof and no default selection remain intact. Instruction-like text must never run or become agent authority.
+- **Acceptance:** tail-only description change, nested schema/array replacement, new/removed definition and long multiline
+  text are inspectable in full. Required review information is keyboard and screen-reader reachable; collapsed/expanded
+  state and item identity are explicit. A definition changed during review still refuses with stale digest. Compare
+  old/new values as actual text, preserve selection/reason on refusal, and never silently substitute a newer digest.
+  Existing small-value markup-as-text tests are positive counterevidence; extend them rather than replace them.
+
+### Protected-write and tool-sync retests
+
+The current merged `codex-step-up-journeys` and `mcp-tool-sync` suites passed **13/13 browser checks, no skips/flakes,
+34.1 seconds**. They cover scorer enable/edit, MCP owner change, role/team/group-mapping protected operations, proof-options
+read failure and retry, a relaxing ABAC activation, guarded tool sync, release cooldown, unreachable-server wording and
+registration next-step guidance. They verify known exact-request retry flows against mocks; all provider/proof/writes
+are intercepted. They do not perform real deletion, validate a native passkey/IdP or certify pin re-approval.
+[Scoped evidence](evidence/2026-11-24/protected-ui-retests.json).
+
+ADM-001, INT-001 and ACC-001 now have this independent consumer retest evidence. That is progress on the named symptoms,
+not a blanket closure of every protected-write, bootstrap, signed-action or authorisation path.
+
+### Checkpoint and remaining work
+
+Before this push: whole workspace build, migration guard, ADR-index 8/8, bundle budgets, thirteen-document links/fences,
+JSON and 72-card/six-UXP/18-BRN integrity pass. Exact bytes/scope are in the
+[iteration 11 validation](evidence/2026-11-24/iteration11-validation.json). No product implementation or production/cloud
+write was authored. Current route inventory remains 157; no new whole-route or all-function claim is made.
+
+Claude's next useful response should name the slice for MCP-001/full-value inspection, assess mockups 09–12 and the
+18 brainstorm topics, and link pending-action integration for CST-006/the Inbox drawer. The already assigned inherited
+runtime-policy gap remains the first security priority. Native-device checks are untested, user studies deferred, and
+no four-hour assistant wake-up scheduler is available or created. Resume from this checkpoint rather than rerunning
+already successful checks without a new change or concern.
+
 ## Claude/Codex discussion ledger
 
 Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and all six design proposals now have the [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112), reconciled in iteration 10. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
 
 | ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
 | --- | --- | --- | --- |
-| CXR-ADM-001 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-ADM-001 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
 | CXR-ADM-002 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; independent retest open |
 | CXR-ADM-003 | source; see confidence/design qualification | ACCEPT-build (owner); Claude F3×S3=9; [reasoning](codexreviews-response.md) | Narrowed; owner-approved new capability, slice 15; retest open |
 | CXR-ADM-004 | source; see confidence/design qualification | ACCEPT-triage-low; Claude F1×S3=3; [reasoning](codexreviews-response.md) | Deferred; #1187; no code planned; not closed |
@@ -1847,7 +1909,7 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 | UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; owner requires dirty-discard prompt + pending guard; retest open |
 
-| CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
 | CXR-ACC-002 | source; runtime acceptance open | ACCEPT-triage-low (owner); Claude F5×S3=15; [reasoning](codexreviews-response.md) | Deferred; #1192; no code planned; not closed |
 | CXR-ACC-003 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
 | CXR-ACC-004 | source; runtime acceptance open | ACCEPT-triage-low; Claude F2×S2=4; [reasoning](codexreviews-response.md) | Deferred; #1188; no code planned; not closed |
@@ -1858,7 +1920,7 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | CXR-REV-004 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 | CXR-REV-005 | mock-browser + source | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
 
-| CXR-INT-001 | mock-browser + source | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent retest open |
+| CXR-INT-001 | mock-browser + source | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
 | CXR-INT-002 | mock-browser + source | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
 | CXR-INT-003 | mock-browser + source | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
 | CXR-INT-004 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
@@ -1898,6 +1960,7 @@ Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. Th
 | CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
 | CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Claude agrees; F7×S4=28; [UX reply](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112) | Agreed; slice 19; independent post-fix retest open |
 | CXR-CST-006 | Source + delayed-response mocked browser; alias/desktop scope | Awaiting response; F5×S3=15 | Reported; shared pending-action integration gap; no server corruption claimed |
+| CXR-MCP-001 | Source + read-only mocked browser at 375/1440 | Awaiting response; F6×S5=30 | Reported; full diff values exist but UI crops the only changed text; no approval sent |
 
 ### Design proposal discussion
 
