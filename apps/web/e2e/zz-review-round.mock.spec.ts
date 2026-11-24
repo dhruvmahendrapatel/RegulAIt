@@ -922,16 +922,16 @@ test.describe("the registry", () => {
     await expect(status.locator('option[value="recertification"]')).toHaveText("Re-review (1)");
     await status.selectOption("recertification");
     await expect(status).toHaveValue("recertification");
-    // clickable rows are links named "<name>, <status> — open preview"
-    const rows = page.getByRole("link", { name: /— open preview$/ });
+    // clickable rows carry a button named "<name>, <status> — open preview" (UIS-04)
+    const rows = page.getByRole("button", { name: /— open preview$/ });
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAccessibleName("Fraud scoring model, Re-review — open preview");
-    await expect(rows.first().getByRole("cell").nth(1)).toHaveText("Re-review");
+    await expect(page.getByRole("row").filter({ has: rows.first() }).getByRole("cell").nth(1)).toHaveText("Re-review");
     await checkScreen(page, "registry re-review filter", "registry-re-review");
     // control: All shows every row, the recertification still reading Re-review
     await status.selectOption("all");
     await expect(rows).toHaveCount(3);
-    await expect(page.getByRole("link", { name: `${NAME}, Under review — open preview` })).toBeVisible();
+    await expect(page.getByRole("button", { name: `${NAME}, Under review — open preview` })).toBeVisible();
     await status.selectOption("recertification");
     await rows.first().click();
     await expect(page.getByRole("dialog", { name: "Fraud scoring model" })).toContainText("Re-review");
@@ -940,7 +940,7 @@ test.describe("the registry", () => {
   test("the preview of a use case sent back offers Update and resubmit with the reason", async ({ page }) => {
     await mockGateway(page, { status: "needs_info", resubmission: true, reviews: [] });
     await page.goto("/ui/admin/use-cases");
-    await page.getByRole("link", { name: `${NAME}, Needs information — open preview` }).click();
+    await page.getByRole("button", { name: `${NAME}, Needs information — open preview` }).click();
     const preview = page.getByRole("dialog", { name: NAME });
     await expect(preview.getByRole("link", { name: "Update and resubmit" })).toHaveAttribute("href", `/ui/admin/governance/intake?resubmit=${UC}`);
     await expect(preview.getByRole("note")).toContainText(`Sent back by Avery Approver: ${REASON}`);

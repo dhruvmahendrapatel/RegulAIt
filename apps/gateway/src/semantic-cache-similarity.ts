@@ -47,6 +47,7 @@ import {
 } from "@regulait/shared";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { classifyAddressLan, createGuardedFetch, egressRefusal, type EgressResolver } from "./egress-guard.js";
+import { errMessage } from "./err-serializer.js";
 import { decryptSecret } from "./secrets.js";
 import type { NativeCacheConfig, NativeCacheRequest, SemanticCacheHit } from "./semantic-cache-shared.js";
 
@@ -143,7 +144,7 @@ export async function embedText(
   embedder: LocalEmbedder,
   text: string,
   timeoutMs = EMBED_TIMEOUT_MS,
-): Promise<{ vector: number[]; model: string }> {
+): Promise<{ vector: number[]; model: string; truncated: boolean }> {
   let res: Response;
   try {
     res = await embedder.fetchImpl(embedder.baseUrl, {
@@ -267,10 +268,26 @@ export interface SimilarityProbe {
   readonly vector: number[];
 }
 
+/** Why the tier did not serve, as a fixed vocabulary (the metrics label, R3 #969
+ * finding 2). `missReason` carries the detail for the log. */
+export const SIMILARITY_MISS_CODES = [
+  "no_match",
+  "input_too_long",
+  "input_truncated",
+  "embedder_unavailable",
+  "embedder_error",
+] as const;
+export type SimilarityMissCode = (typeof SIMILARITY_MISS_CODES)[number];
+
 /**
  * The whole miss-path probe: resolve the embedder, embed, look up. Returns the hit
  * (if any) and the probe for the store side; a failure is reported as `missReason`
  * and is never thrown, because a cache failure must not fail the call.
+ *
+ * An input the encoder cut to its window (R3 #969 finding 1) is a miss AND is never
+ * indexed (`probe` is null): its vector stands for a prefix only, so a different
+ * prompt sharing that prefix would match at cosine 1.0 and be served another
+ * prompt's answer. Such inputs use the exact tier only.
  */
 export async function probeSimilar(
   db: Db,
@@ -284,15 +301,20 @@ export async function probeSimilar(
     ttlSeconds: number;
   },
   deps: { resolve?: EgressResolver } = {},
-): Promise<{ hit: SimilarHit | null; probe: SimilarityProbe | null; missReason?: string }> {
-  if (args.request.input.length > EMBED_INPUT_MAX_CHARS) return { hit: null, probe: null, missReason: "input too long to embed" };
+): Promise<{ hit: SimilarHit | null; probe: SimilarityProbe | null; missCode?: SimilarityMissCode; missReason?: string }> {
+  if (args.request.input.length > EMBED_INPUT_MAX_CHARS) {
+    return { hit: null, probe: null, missCode: "input_too_long", missReason: "input too long to embed" };
+  }
   const resolved = await resolveLocalEmbedder(db, dataKey, args.embedderId, deps);
-  if (!resolved.ok) return { hit: null, probe: null, missReason: resolved.reason };
-  let embedded: { vector: number[]; model: string };
+  if (!resolved.ok) return { hit: null, probe: null, missCode: "embedder_unavailable", missReason: resolved.reason };
+  let embedded: { vector: number[]; model: string; truncated: boolean };
   try {
     embedded = await embedText(resolved.embedder, args.request.input);
   } catch (err) {
-    return { hit: null, probe: null, missReason: err instanceof Error ? err.message : "embed failed" };
+    return { hit: null, probe: null, missCode: "embedder_error", missReason: errMessage(err) };
+  }
+  if (embedded.truncated) {
+    return { hit: null, probe: null, missCode: "input_truncated", missReason: "input exceeds the embedder's window" };
   }
   const probe: SimilarityProbe = {
     partitionKey: similarityPartitionKey(args.userId, args.request, args.config),
@@ -310,5 +332,5 @@ export async function probeSimilar(
     min: args.min,
     ttlSeconds: args.ttlSeconds,
   });
-  return { hit, probe };
+  return hit ? { hit, probe } : { hit, probe, missCode: "no_match" };
 }

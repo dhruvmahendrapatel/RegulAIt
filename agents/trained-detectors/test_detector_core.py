@@ -151,8 +151,10 @@ class Embedding(unittest.TestCase):
                 core.mean_pool_normalise(vectors, mask)
 
     def test_reply_has_numbers_and_the_model_only(self):
-        out = core.embed("secret text", lambda t: [1.0, 0.0], "m@rev")
-        self.assertEqual(out, {"embedding": [1.0, 0.0], "dims": 2, "model": "m@rev"})
+        out = core.embed("secret text", lambda t: ([1.0, 0.0], False), "m@rev")
+        self.assertEqual(out, {"embedding": [1.0, 0.0], "dims": 2, "model": "m@rev", "truncated": False})
+        # R3 #969 finding 1: an input cut to the window is reported, never hidden
+        self.assertTrue(core.embed("long text", lambda t: ([1.0, 0.0], True), "m@rev")["truncated"])
         self.assertNotIn("secret", str(out))
 
     def test_supported_lists_the_embedding_kind(self):

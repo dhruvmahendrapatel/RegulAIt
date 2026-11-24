@@ -1,0 +1,57 @@
+/* ADR-0334: the extension's own UI (block page and on-page notices). Tokens only: tokens.css from apps/web is copied
+   beside this file at build time (and adopted into the notice's shadow root), so no colour or spacing is written here. */
+.rg-page {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--rg-canvas);
+  color: var(--rg-ink-body);
+  font-family: var(--rg-font);
+}
+.rg-card {
+  max-width: 560px;
+  margin: var(--s3);
+  padding: var(--s4);
+  background: var(--rg-surface);
+  border: 1px solid var(--rg-line);
+  border-radius: var(--rg-r-card);
+  box-shadow: var(--rg-shadow-md);
+}
+.rg-card:focus { outline: none; }
+.rg-kicker { margin: 0 0 var(--s1); font-family: var(--rg-font-mono); color: var(--rg-ink-muted); }
+.rg-title { margin: 0 0 var(--s2); font-family: var(--rg-font-display); color: var(--rg-ink); }
+.rg-body { margin: 0 0 var(--s2); }
+.rg-meta { margin: 0; color: var(--rg-ink-muted); }
+.rg-mono { font-family: var(--rg-font-mono); }
+.rg-notice {
+  position: fixed;
+  right: var(--s2);
+  bottom: var(--s2);
+  z-index: 2147483647;
+  max-width: 420px;
+  padding: var(--s2);
+  background: var(--rg-surface);
+  color: var(--rg-ink-body);
+  border: 1px solid var(--rg-line-strong);
+  border-radius: var(--rg-r-md);
+  box-shadow: var(--rg-shadow-lg);
+  font-family: var(--rg-font);
+}
+#rg-capture { bottom: auto; top: var(--s2); }
+.rg-notice-critical { border-color: var(--rg-critical); background: var(--rg-critical-tint); color: var(--rg-critical-deep); }
+.rg-notice-title { margin: 0 0 var(--s0); font-weight: 600; color: inherit; }
+.rg-notice-body { margin: 0 0 var(--s1); color: inherit; }
+.rg-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: var(--s0) var(--s2);
+  border: 1px solid var(--rg-line-strong);
+  border-radius: var(--rg-r-sm);
+  background: var(--rg-surface);
+  color: var(--rg-ink);
+  font: inherit;
+  cursor: pointer;
+}
+.rg-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

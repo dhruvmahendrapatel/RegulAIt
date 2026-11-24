@@ -54,8 +54,8 @@ describe("hashToken only ever sees high-entropy, server-generated tokens", () =>
     });
   }
 
-  it("passwords use scrypt, not hashToken", () => {
-    const stored = hashPassword("Rg1-correct horse");
+  it("passwords use scrypt, not hashToken", async () => {
+    const stored = await hashPassword("Rg1-correct horse");
     expect(stored.startsWith("scrypt$")).toBe(true);
     expect(stored).not.toContain(hashToken("Rg1-correct horse"));
   });

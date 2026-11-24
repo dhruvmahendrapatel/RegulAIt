@@ -583,7 +583,8 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
       ...(tools.length ? { services: tools.map((t) => ({ "bom-ref": aiBomRef.tool(m.id, t.id), name: t.name, ...withProps([prop("regulait:tool:kind", t.kind)]) })) } : {}),
       ...withProps([
         // ADR-0190 decision 3/9: a remote server runs on the upstream's host (`external`); a stdio one only on an executor
-        prop("regulait:execution:placement", m.transport === "stdio" ? "executor" : "external"),
+        // ADR-0364: a first-party server runs inside the gateway process
+        prop("regulait:execution:placement", m.transport === "stdio" ? "executor" : m.transport === "first_party" ? "gateway" : "external"),
         prop("regulait:mcp:transport", m.transport), prop("regulait:mcp:releaseDigest", m.releaseDigest ?? "not_recorded"),
         prop("regulait:mcp:admissionManifestDigest", m.admissionManifestDigest ?? "not_recorded"),
         prop("regulait:admission:state", m.admissionState), prop("regulait:identity:propagation", m.identityPropagation),

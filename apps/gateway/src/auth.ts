@@ -2,8 +2,9 @@ import {
   createHash,
   createHmac,
   randomBytes,
-  scryptSync,
+  scrypt,
 } from "node:crypto";
+import pLimit from "p-limit";
 import { oidcEmailVerifiedVia } from "./oidc-email-verified.js";
 import { deploymentBaseUrl } from "./public-url.js";
 import { bootstrapAfterAdminRelaxed, bootstrapRetired } from "./dev-secrets.js";
@@ -129,7 +130,7 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp" | "endpoint-agent";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp" | "endpoint-agent" | "browser-extension";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
    *  ADR-0066's model surfaces; ADR-0187 'engine' is the compat model routes,
    *  pinned to one project. 'pdp' is retired (ADR-0188 S7, migration 0195: no
@@ -199,6 +200,8 @@ export const AUTH_REFUSALS = [
   "engine_enrollment_invalid",
   "virtual_key_revoked",
   "virtual_key_expired",
+  // ADR-0366 slice 2: a rogue-agent containment halted the key (reversible by an approved release)
+  "virtual_key_halted",
   "api_key_expired",
   "api_key_revoked",
   // ADR-0167 amendment (S-02): the bootstrap token once an active admin exists
@@ -220,6 +223,7 @@ export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
     "this enrolment token is unknown, already used or expired — mint a new one on the Engines page",
   virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
   virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
+  virtual_key_halted: "this virtual key is halted by a containment — an administrator can release it after review",
   api_key_expired:
     "this API key has expired and authenticates nothing — an admin must issue a new one (an expiry cannot be extended)",
   api_key_revoked: "this API key has been revoked and authenticates nothing",
@@ -286,6 +290,7 @@ export async function authenticate(
     if (!resolved.ok) {
       if (resolved.reason === "revoked") return "virtual_key_revoked";
       if (resolved.reason === "expired") return "virtual_key_expired";
+      if (resolved.reason === "halted") return "virtual_key_halted";
       return null;
     }
     // ADR-0022: a deactivated owner's virtual keys stop authenticating for the
@@ -451,55 +456,87 @@ async function auditKeyRefusal(
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 // --- passwords (scrypt via node:crypto — memory-hard, zero deps) ------------
-// Parameters recorded in ADR-0025: N=2^14, r=8, p=1 → 16 MiB per verification,
-// interactive-login grade per the scrypt paper/OWASP; 64-byte derived key.
-// The format string carries the parameters so they can be raised later and
-// old hashes keep verifying (and can be flagged for rehash-on-login).
-const SCRYPT_N = 16384;
+// Parameters (ADR-0025 addendum, 2026-11-22, Codex review S-08; owner's
+// choice): N=2^17, r=8, p=1 → 128 MiB per derivation, OWASP's Password Storage
+// Cheat Sheet first recommendation. The earlier N=2^14, p=1 was below every
+// OWASP equivalent. Derivation is asynchronous (libuv thread pool), so a login
+// never blocks the event loop, and at most SCRYPT_CONCURRENCY derivations run
+// at once (p-limit; default 4 per the owner, 2026-11-22), so a login burst
+// peaks at 512 MiB. The image sets UV_THREADPOOL_SIZE=8 so four derivations
+// still leave libuv threads for file and DNS work; the rest queue. The format string carries the
+// parameters: hashes written with older parameters keep verifying and are
+// re-hashed on the next successful password sign-in (`passwordNeedsRehash`).
+const SCRYPT_N = 131072;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
+/** concurrent password derivations per gateway process: an integer 1..8 in the
+ * environment, else 4. Never unbounded (each one holds 128 MiB). */
+export const PASSWORD_HASH_CONCURRENCY_ENV = "REGULAIT_PASSWORD_HASH_CONCURRENCY";
+export function passwordHashConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PASSWORD_HASH_CONCURRENCY_ENV]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return 4;
+  const n = Number(raw);
+  return n >= 1 && n <= 8 ? n : 4;
+}
+const SCRYPT_CONCURRENCY = passwordHashConcurrency();
+const scryptSlots = pLimit(SCRYPT_CONCURRENCY);
+/** derivations running now and waiting for a slot (tests and diagnostics) */
+export function passwordHashingLoad(): { active: number; pending: number; limit: number } {
+  return { active: scryptSlots.activeCount, pending: scryptSlots.pendingCount, limit: SCRYPT_CONCURRENCY };
+}
 const SCRYPT_KEYLEN = 64;
+/** a stored hash is server-written, but refuse absurd parameters anyway so a
+ * corrupted row cannot make one verification allocate unbounded memory */
+const SCRYPT_MAX_N = 1 << 20;
+const SCRYPT_MAX_RP = 64;
 
-export function hashPassword(password: string): string {
+function scryptAsync(password: string, salt: Buffer | string, keylen: number, N: number, r: number, p: number): Promise<Buffer> {
+  // maxmem: scrypt needs 128·N·r bytes; twice that leaves room for its working buffers
+  return scryptSlots(
+    () =>
+      new Promise<Buffer>((resolve, reject) => {
+        scrypt(password, salt, keylen, { N, r, p, maxmem: 128 * N * r * 2 }, (err, key) => (err ? reject(err) : resolve(key)));
+      }),
+  );
+}
+
+export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
-  const key = scryptSync(password, salt, SCRYPT_KEYLEN, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    maxmem: 128 * SCRYPT_N * SCRYPT_R * 2,
-  });
+  const key = await scryptAsync(password, salt, SCRYPT_KEYLEN, SCRYPT_N, SCRYPT_R, SCRYPT_P);
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+
+/** true when a stored hash was written with parameters other than the current
+ * ones and should be replaced after a successful verify */
+export function passwordNeedsRehash(stored: string | null | undefined): boolean {
+  const parts = stored?.split("$") ?? [];
+  if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+  return Number(parts[1]) !== SCRYPT_N || Number(parts[2]) !== SCRYPT_R || Number(parts[3]) !== SCRYPT_P;
 }
 
 /** constant-time verify; a null/malformed stored hash still burns a scrypt so
  * response timing cannot distinguish "no such user / no password" from "wrong
  * password". */
-export function verifyPassword(password: string, stored: string | null | undefined): boolean {
+export async function verifyPassword(password: string, stored: string | null | undefined): Promise<boolean> {
   const parts = stored?.split("$") ?? [];
-  if (parts.length !== 6 || parts[0] !== "scrypt") {
+  const burn = async (): Promise<false> => {
     // dummy derivation against a fixed salt — same cost, always false
-    scryptSync(password, "regulait-dummy-salt", SCRYPT_KEYLEN, {
-      N: SCRYPT_N,
-      r: SCRYPT_R,
-      p: SCRYPT_P,
-      maxmem: 128 * SCRYPT_N * SCRYPT_R * 2,
-    });
+    await scryptAsync(password, "regulait-dummy-salt", SCRYPT_KEYLEN, SCRYPT_N, SCRYPT_R, SCRYPT_P);
     return false;
-  }
+  };
+  if (parts.length !== 6 || parts[0] !== "scrypt") return burn();
   const [, nStr, rStr, pStr, saltB64, hashB64] = parts;
   const N = Number(nStr);
   const r = Number(rStr);
   const p = Number(pStr);
   const expected = Buffer.from(hashB64!, "base64");
-  if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || expected.length === 0) {
-    return false;
+  if (
+    !Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || expected.length === 0 ||
+    N < 2 || N > SCRYPT_MAX_N || (N & (N - 1)) !== 0 || r < 1 || r > SCRYPT_MAX_RP || p < 1 || p > SCRYPT_MAX_RP
+  ) {
+    return burn();
   }
-  const actual = scryptSync(password, Buffer.from(saltB64!, "base64"), expected.length, {
-    N,
-    r,
-    p,
-    maxmem: 128 * N * r * 2,
-  });
+  const actual = await scryptAsync(password, Buffer.from(saltB64!, "base64"), expected.length, N, r, p);
   return constantTimeEqual(actual, expected);
 }
 
@@ -1350,15 +1387,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!user) {
       // ADR-0030: the unknown-USERNAME path burns the same scrypt as the
       // unknown-email and wrong-password paths — one branch, no shortcut.
-      verifyPassword(body.password, null); // burn the same scrypt cost
+      await verifyPassword(body.password, null); // burn the same scrypt cost
       return fail(kind === "username" ? "unknown_username" : "unknown_email");
     }
     if (user.disabledAt) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return fail("user_disabled");
     }
     if (user.lockedUntil && user.lockedUntil.getTime() > now.getTime()) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return fail("locked_out");
     }
     // ADR-0174 (security review, finding 3): in break-glass mode only a
@@ -1371,21 +1408,33 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // resets it (which would let a correct guess wipe a brute-force trail) nor
     // advances it (password sign-in is closed to this account anyway).
     if (!localSignInAllowed(org, user)) {
-      verifyPassword(body.password, user.passwordHash); // same cost, result unused
+      await verifyPassword(body.password, user.passwordHash); // same cost, result unused
       await auditAuth(db, null, user.id, "local-sign-in-refused", "deny",
         `password sign-in refused for '${user.email}': local sign-in is break-glass only and this account is not a designated break-glass admin`,
         { phase: "login", email: user.email, method: "password", localSignIn: org.localSignIn, identifierKind: kind });
       return reply.status(401).send(UNIFORM_LOGIN_401);
     }
-    if (!verifyPassword(body.password, user.passwordHash)) {
+    if (!(await verifyPassword(body.password, user.passwordHash))) {
       return fail(user.passwordHash ? "wrong_password" : "no_password_set");
     }
 
-    // success: reset lockout state
-    await db
-      .update(users)
-      .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
-      .where(eq(users.id, user.id));
+    // success: reset lockout state, and upgrade a hash written with older
+    // scrypt parameters while the plaintext is in hand (ADR-0025 addendum).
+    // passwordUpdatedAt is left alone: the password itself did not change.
+    // The rehash runs before any TOTP step on purpose: the password is already
+    // proven, and the stored value changes only in cost, never in meaning.
+    await db.update(users).set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null }).where(eq(users.id, user.id));
+    if (user.passwordHash && passwordNeedsRehash(user.passwordHash)) {
+      const rehash = await hashPassword(body.password);
+      // Compare-and-set (R3 #1194): `user` was read before the slow derivation,
+      // so a password change or admin reset may have landed meanwhile. Write the
+      // upgraded hash only if the stored hash is still the one just verified;
+      // otherwise the newer password wins and nothing is written.
+      await db
+        .update(users)
+        .set({ passwordHash: rehash })
+        .where(and(eq(users.id, user.id), eq(users.passwordHash, user.passwordHash)));
+    }
 
     if (user.totpEnabled) {
       // two-step: password accepted → short-lived pending-MFA token, no cookie
@@ -1679,7 +1728,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       if (body.currentPassword === undefined) {
         // burn the same scrypt cost as a wrong password so the two are
         // indistinguishable by timing
-        verifyPassword("", null);
+        await verifyPassword("", null);
         await auditAuth(db, userId, userId, "password-change-rejected", "deny",
           `user '${user.email}' omitted the current password on a change attempt that requires it`,
           { phase: "change-password", email: user.email, why: "current_password_required", sessionOrigin: origin ?? null });
@@ -1688,7 +1737,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
           detail: "this account's current password must be supplied to set a new one",
         });
       }
-      if (!verifyPassword(body.currentPassword, user.passwordHash)) {
+      if (!(await verifyPassword(body.currentPassword, user.passwordHash))) {
         await auditAuth(db, userId, userId, "password-change-rejected", "deny",
           `user '${user.email}' failed the current-password check on a change attempt`,
           { phase: "change-password", email: user.email });
@@ -1703,7 +1752,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     await db
       .update(users)
-      .set({ passwordHash: hashPassword(body.newPassword), passwordUpdatedAt: new Date(), mustChangePassword: false })
+      .set({ passwordHash: await hashPassword(body.newPassword), passwordUpdatedAt: new Date(), mustChangePassword: false })
       .where(eq(users.id, userId));
     // revoke every OTHER session — a stolen session dies with the password.
     // (When the caller authenticated with an API key there is no current
@@ -1869,7 +1918,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(409).send({ error: "totp_not_enabled" });
     }
     // disabling MFA re-proves BOTH factors
-    if (!verifyPassword(body.password, user.passwordHash)) {
+    if (!(await verifyPassword(body.password, user.passwordHash))) {
       return reply.status(401).send({ error: "invalid_password_or_code" });
     }
     const secret = decryptSecret(opts.dataKey, user.totpSecretCiphertext);
@@ -1922,7 +1971,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await db
       .update(users)
       .set({
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPassword(password),
         passwordUpdatedAt: new Date(),
         mustChangePassword: true,
         failedLoginCount: 0,
@@ -2647,14 +2696,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(401).send(LINK_PROOF_401);
     };
     if (!user || user.disabledAt) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return failProof("user_unavailable");
     }
     if (user.lockedUntil && user.lockedUntil.getTime() > now.getTime()) {
-      verifyPassword(body.password, null);
+      await verifyPassword(body.password, null);
       return failProof("locked_out");
     }
-    if (!verifyPassword(body.password, user.passwordHash)) return failProof("wrong_password");
+    if (!(await verifyPassword(body.password, user.passwordHash))) return failProof("wrong_password");
     let totpStepUsed: number | null = null;
     if (user.totpEnabled) {
       if (!body.code || !user.totpSecretCiphertext || !opts.dataKey) return failProof("code_missing");

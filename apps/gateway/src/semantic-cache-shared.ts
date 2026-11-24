@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { agents, and, customModelProviders, eq, gte, semanticCache, type Db } from "@regulait/db";
 import { canonicalJson } from "@regulait/shared";
 import { loadVersions, resolveAgentPromptVersion } from "./config-versions.js";
+import { recordCacheLookup } from "./metrics.js";
 import { probeSimilar, type SimilarityProbe } from "./semantic-cache-similarity.js";
 
 export interface SemanticCacheKey {
@@ -235,6 +236,7 @@ export async function lookupSemanticCache(
     .limit(1);
   // the collision guard — never skip this (a colliding row is a miss)
   if (!hit || hit.normalizedInput !== args.key.norm) {
+    recordCacheLookup("exact", "miss", "no_match");
     if (!args.similarity) return null;
     const sim = args.similarity;
     const probed = await probeSimilar(db, sim.dataKey, {
@@ -247,8 +249,10 @@ export async function lookupSemanticCache(
     });
     sim.state.probe = probed.probe;
     if (probed.missReason) sim.state.missReason = probed.missReason;
+    recordCacheLookup("similarity", probed.hit ? "hit" : "miss", probed.missCode ?? "no_match");
     return probed.hit ? { ...probed.hit, tier: "similarity" } : null;
   }
+  recordCacheLookup("exact", "hit");
   return {
     tier: "exact",
     outputText: hit.outputText,

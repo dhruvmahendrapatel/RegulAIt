@@ -42,6 +42,11 @@ export interface EmbeddingReply {
   readonly vector: number[];
   /** the model identity the service reported (repository and revision) */
   readonly model: string;
+  /** true when the encoder cut the input to its window: the vector then stands for a
+   * prefix only, so two inputs sharing that prefix would match at cosine 1.0 (R3 #969
+   * finding 1). Required, so an embedder that cannot say it saw the whole input is
+   * outside the contract (a miss). */
+  readonly truncated: boolean;
 }
 
 /** Validate an /embed reply. Throws on anything outside the contract; it never
@@ -54,14 +59,15 @@ export function parseEmbeddingReply(text: string): EmbeddingReply {
     throw new Error("embedder reply is not JSON");
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) throw new Error("embedder reply is not an object");
-  const { embedding, model } = body as { embedding?: unknown; model?: unknown };
+  const { embedding, model, truncated } = body as { embedding?: unknown; model?: unknown; truncated?: unknown };
   if (!Array.isArray(embedding)) throw new Error("embedder reply has no `embedding` array");
   if (embedding.length < EMBEDDING_DIMS_MIN || embedding.length > EMBEDDING_DIMS_MAX) {
     throw new Error(`embedding width ${embedding.length} is outside ${EMBEDDING_DIMS_MIN}..${EMBEDDING_DIMS_MAX}`);
   }
   if (!embedding.every((x) => typeof x === "number" && Number.isFinite(x))) throw new Error("embedding holds a non-finite value");
   if (typeof model !== "string" || !/^[\x21-\x7e]{1,200}$/.test(model)) throw new Error("embedder reply has no valid `model`");
-  return { vector: normalise(embedding as number[]), model };
+  if (typeof truncated !== "boolean") throw new Error("embedder reply has no `truncated` flag");
+  return { vector: normalise(embedding as number[]), model, truncated };
 }
 
 export function normalise(v: readonly number[]): number[] {

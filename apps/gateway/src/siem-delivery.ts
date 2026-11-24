@@ -30,8 +30,10 @@
  * table (plus an audit row on a state change). A sender failure cannot roll back, delay or block a governance
  * decision, and a success writes no audit row, so delivery never feeds itself.
  *
- * ADAPTERS (point 4). One adapter: a signed JSON batch over HTTPS, the contract this file defines and its receiver
- * test pins. Azure Monitor, Security Lake, Splunk, Sentinel, Datadog or LogScale are not claimed.
+ * ADAPTERS (point 4). Two adapters: a signed JSON batch over HTTPS, the contract this file defines and its receiver
+ * test pins; and (ADR-0351 slice 1, `siem-syslog.ts`) the same events as RFC 5424 messages over TLS (RFC 5425), with
+ * the same cursor, ordering, backoff and dead-letter. Azure Monitor, Security Lake, Splunk, Sentinel, Datadog or
+ * LogScale are not claimed.
  */
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -54,6 +56,15 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, egressRefusal, type EgressResolver } from "./egress-guard.js";
 import { requireStepUp } from "./step-up.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import {
+  canonicalSyslogUrl,
+  caPemProblem,
+  localSyslogHostname,
+  parseSyslogUrl,
+  sendSyslogBatch,
+  syslogMessagesForBatch,
+  type SyslogSendDeps,
+} from "./siem-syslog.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -91,7 +102,9 @@ export type SiemErrorCode =
   | "network"
   | "egress_blocked"
   | "no_data_key"
-  | "secret_unreadable";
+  | "secret_unreadable"
+  /** ADR-0351: a syslog receiver's certificate or TLS handshake was refused */
+  | "tls_handshake";
 
 /** the ONE allow-list of what an audit row contributes to a SIEM event (ADR-0135 point 1) */
 type AuditRow = typeof auditLog.$inferSelect;
@@ -142,6 +155,8 @@ function statusCode(status: number): SiemErrorCode {
 export interface SiemDeliveryDeps {
   resolve?: EgressResolver | undefined;
   fetchImpl?: typeof fetch | undefined;
+  /** ADR-0351: the syslog sender's test seams (TLS connect) and the HOSTNAME it reports */
+  syslog?: Omit<SyslogSendDeps, "resolve"> | undefined;
 }
 
 type SendResult = { ok: true } | { ok: false; code: SiemErrorCode; retryAfter: number | null };
@@ -155,6 +170,7 @@ async function sendBatch(
   deps: SiemDeliveryDeps,
 ): Promise<SendResult> {
   if (!dataKey) return { ok: false, code: "no_data_key", retryAfter: null };
+  if (!dest.secretCiphertext) return { ok: false, code: "secret_unreadable", retryAfter: null };
   let secret: string;
   try {
     secret = decryptSecret(dataKey, dest.secretCiphertext);
@@ -280,21 +296,24 @@ export async function deliverSiemDestinationOnce(
     if (rows.length === 0) break;
     const fromSeq = rows[0]!.seq!;
     const toSeq = rows[rows.length - 1]!.seq!;
-    const body = JSON.stringify({
-      schema: SIEM_ENVELOPE_SCHEMA,
-      destinationId,
-      batch: {
-        afterSeq: cursor,
-        fromSeq,
-        toSeq,
-        count: rows.length,
-        // rows between the cursor and this batch were pruned (audit retention) before they were delivered
-        gap: fromSeq !== cursor + 1,
-      },
-      events: rows.map((r) => siemEventFromAuditRow(r as Parameters<typeof siemEventFromAuditRow>[0])),
-    });
-    const messageId = `siem_${destinationId}_${cursor}_${toSeq}`;
-    const sent = await sendBatch(db, claimed, dataKey, messageId, body, deps);
+    const batch = {
+      afterSeq: cursor,
+      fromSeq,
+      toSeq,
+      count: rows.length,
+      // rows between the cursor and this batch were pruned (audit retention) before they were delivered
+      gap: fromSeq !== cursor + 1,
+    };
+    const events = rows.map((r) => siemEventFromAuditRow(r as Parameters<typeof siemEventFromAuditRow>[0]));
+    let sent: SendResult;
+    if (claimed.kind === "syslog_tls") {
+      const messages = syslogMessagesForBatch(SIEM_ENVELOPE_SCHEMA, events, batch, deps.syslog?.hostname ?? localSyslogHostname());
+      sent = await sendSyslogBatch(db, claimed, messages, { ...deps.syslog, resolve: deps.resolve });
+    } else {
+      const body = JSON.stringify({ schema: SIEM_ENVELOPE_SCHEMA, destinationId, batch, events });
+      const messageId = `siem_${destinationId}_${cursor}_${toSeq}`;
+      sent = await sendBatch(db, claimed, dataKey, messageId, body, deps);
+    }
     batches += 1;
     if (!sent.ok) {
       const failures = claimed.consecutiveFailures + 1;
@@ -392,8 +411,12 @@ const destParam = z.object({ destinationId: z.string().uuid() });
 const createBody = z
   .object({
     name: z.string().trim().min(1).max(120),
+    /** ADR-0351: "webhook" (default) or "syslog_tls" (url `syslog+tls://host[:port]`, RFC 5424 over RFC 5425 TLS) */
+    kind: z.enum(["webhook", "syslog_tls"]).optional(),
     url: z.string().min(1).max(2048),
     allowPlaintextHttp: z.boolean().optional(),
+    /** syslog_tls only: the PEM of the CA(s) that issued the receiver's certificate; absent = the system trust store */
+    tlsCaPem: z.string().min(1).max(65_536).optional(),
     /** "now" (default): deliver rows written from now on; "beginning": the whole chained audit log */
     startFrom: z.enum(["now", "beginning"]).optional(),
   })
@@ -428,6 +451,8 @@ function destinationView(d: SiemDestinationRow, head: number) {
     kind: d.kind,
     url: d.url,
     allowPlaintextHttp: d.allowPlaintextHttp,
+    /** ADR-0351: syslog_tls only, whether the receiver is verified against the destination's own CA bundle */
+    customCa: d.tlsCaPem != null,
     enabled: d.enabled,
     state: d.state,
     cursorSeq: d.cursorSeq,
@@ -439,7 +464,7 @@ function destinationView(d: SiemDestinationRow, head: number) {
     lastSuccessAt: d.lastSuccessAt,
     lastErrorCode: d.lastErrorCode,
     deliveredEvents: d.deliveredEvents,
-    secretRotatedAt: d.secretRotatedAt,
+    secretRotatedAt: d.kind === "webhook" ? d.secretRotatedAt : null,
     createdAt: d.createdAt,
     envelope: SIEM_ENVELOPE_SCHEMA,
   };
@@ -476,18 +501,43 @@ export function registerSiemDeliveryRoutes(app: FastifyInstance, db: Db, opts: {
         schema: SIEM_ENVELOPE_SCHEMA,
         fields: ["id", "seq", "at", "scope.deployMode", "effect", "ruleId", "object.type", "object.id", "chain.prevHash", "chain.rowHash", "chain.version"],
         note: "Verify each POST with any Standard Webhooks library and the destination's whsec_ secret; deduplicate on the event id.",
+        // ADR-0351: the same events, one RFC 5424 message each, octet-counted over TLS
+        syslog: {
+          url: "syslog+tls://host[:port] (port 6514 by default)",
+          message: "<PRI>1 TIMESTAMP HOSTNAME regulait - audit|audit-gap - {json event}",
+          pri: "facility 13 (log audit); severity 4 for deny, 6 otherwise",
+          note: "RFC 5425 has no application ack: a batch counts as delivered once written to the verified TLS session and closed cleanly; deduplicate on the event id.",
+        },
       },
     };
   });
 
   app.post("/v1/siem/destinations", async (req, reply) => {
     const b = createBody.safeParse(req.body ?? {});
-    if (!b.success) return refuse(reply, 400, "invalid_request", "send {name, url, allowPlaintextHttp?, startFrom?: 'now' | 'beginning'}");
+    if (!b.success) {
+      return refuse(reply, 400, "invalid_request", "send {name, kind?: 'webhook' | 'syslog_tls', url, allowPlaintextHttp?, tlsCaPem?, startFrom?: 'now' | 'beginning'}");
+    }
+    const kind = b.data.kind ?? "webhook";
     const allowPlaintextHttp = b.data.allowPlaintextHttp ?? false;
-    const problem = urlProblem(b.data.url, allowPlaintextHttp);
-    if (problem) return refuse(reply, 400, "invalid_url", problem);
-    if (!opts.dataKey) return refuse(reply, 503, "no_data_key", "REGULAIT_DATA_KEY is not set, so the signing secret cannot be stored");
-    const secret = newSiemSecret();
+    let url: string;
+    if (kind === "syslog_tls") {
+      // ADR-0180: syslog leaves only over verified TLS; there is no plaintext, UDP or plain-TCP mode to relax into
+      if (allowPlaintextHttp) return refuse(reply, 400, "invalid_request", "a syslog destination is TLS only; allowPlaintextHttp does not apply");
+      const t = parseSyslogUrl(b.data.url);
+      if (!t.ok) return refuse(reply, 400, "invalid_url", t.problem);
+      if (b.data.tlsCaPem != null) {
+        const pemProblem = caPemProblem(b.data.tlsCaPem);
+        if (pemProblem) return refuse(reply, 400, "invalid_ca", pemProblem);
+      }
+      url = canonicalSyslogUrl(t);
+    } else {
+      if (b.data.tlsCaPem != null) return refuse(reply, 400, "invalid_request", "tlsCaPem applies to a syslog_tls destination only");
+      const problem = urlProblem(b.data.url, allowPlaintextHttp);
+      if (problem) return refuse(reply, 400, "invalid_url", problem);
+      if (!opts.dataKey) return refuse(reply, 503, "no_data_key", "REGULAIT_DATA_KEY is not set, so the signing secret cannot be stored");
+      url = new URL(b.data.url).toString();
+    }
+    const secret = kind === "webhook" ? newSiemSecret() : null;
     const startFrom = b.data.startFrom ?? "now";
     const created = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
@@ -498,14 +548,18 @@ export function registerSiemDeliveryRoutes(app: FastifyInstance, db: Db, opts: {
         .insert(siemDestinations)
         .values({
           name: b.data.name,
-          url: new URL(b.data.url).toString(),
+          kind,
+          url,
           allowPlaintextHttp,
-          secretCiphertext: encryptSecret(opts.dataKey!, secret),
+          secretCiphertext: secret ? encryptSecret(opts.dataKey!, secret) : null,
+          tlsCaPem: kind === "syslog_tls" ? (b.data.tlsCaPem ?? null) : null,
           cursorSeq,
           createdBy: req.authCtx.userId ?? null,
         })
         .returning();
-      await auditState(t, actor(req), row!, SIEM_RULE_IDS.created, "allow", `SIEM destination '${row!.name}' created, off until enabled (ADR-0303)`, {
+      await auditState(t, actor(req), row!, SIEM_RULE_IDS.created, "allow", `SIEM destination '${row!.name}' (${kind}) created, off until enabled (ADR-0303)`, {
+        kind,
+        customCa: row!.tlsCaPem != null,
         url: row!.url,
         startFrom,
         cursorSeq,
@@ -516,7 +570,7 @@ export function registerSiemDeliveryRoutes(app: FastifyInstance, db: Db, opts: {
     if (!created) return refuse(reply, 409, "destination_name_taken");
     return reply.status(201).send({
       destination: destinationView(created, await headSeq(db)),
-      // shown once: configure it in the receiver's Standard Webhooks verifier
+      // shown once: configure it in the receiver's Standard Webhooks verifier (null for syslog: TLS authenticates it)
       secret,
     });
   });
@@ -560,6 +614,7 @@ export function registerSiemDeliveryRoutes(app: FastifyInstance, db: Db, opts: {
   app.post("/v1/siem/destinations/:destinationId/rotate-secret", async (req, reply) => {
     const dest = await load(reply, req.params);
     if (!dest) return reply;
+    if (dest.kind !== "webhook") return refuse(reply, 409, "not_applicable", "a syslog destination has no signing secret; its receiver is verified by its TLS certificate");
     if (!opts.dataKey) return refuse(reply, 503, "no_data_key", "REGULAIT_DATA_KEY is not set, so the signing secret cannot be stored");
     const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { siem: "rotate_secret", destinationId: dest.id } });
     if (!su.ok) return reply;

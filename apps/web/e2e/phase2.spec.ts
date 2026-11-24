@@ -187,7 +187,7 @@ test("users: create a user, issue a one-time password and an API key (one-time r
   await shot(page, "phase2-02-users-created");
 
   // open the detail panel and issue a one-time password
-  await page.getByRole("link", { name: "Manage E2E User" }).click();
+  await page.getByRole("button", { name: "Manage E2E User" }).click();
   await page.getByRole("button", { name: "Set one-time password" }).click();
   // B4S-02: issuing someone else's password is a settings_relax step-up — Ada confirms with her authenticator
   await settleWithStepUp(page, page.getByTestId("revealed-secret"));
@@ -217,14 +217,16 @@ test("roles: create a role and inspect a seeded role's grants + holders", async 
   await nav("Roles", "Roles");
   await page.getByLabel("Role name").fill("e2e-role");
   await page.getByRole("button", { name: "Create role" }).click();
-  await expect(page.getByRole("cell", { name: "e2e-role", exact: true })).toBeVisible();
+  // UIS-04: a role row selects in place through a real button in its primary cell, named "Open grants for <name>"
+  await expect(page.getByRole("button", { name: "Open grants for e2e-role", exact: true })).toBeVisible();
 
   // open the seeded analyst role — holders and grants load
-  const analystRow = page.locator("tbody tr[role='link']").filter({ hasText: "data-analyst" }).first();
+  const openGrants = page.locator("tbody").getByRole("button", { name: /^Open grants for / });
+  const analystRow = openGrants.filter({ hasText: "data-analyst" }).first();
   if (await analystRow.count()) {
     await analystRow.click();
   } else {
-    await page.locator("tbody tr[role='link']").first().click();
+    await openGrants.first().click();
   }
   await expect(page.getByText("What this role provisions")).toBeVisible();
   await shot(page, "phase2-06-roles-grants");
@@ -507,7 +509,7 @@ test("connectors: create a snowflake connector + save its structured multi-field
 test("mcp servers: tool inventory + tool grant", async () => {
   await nav("MCP servers", "MCP servers");
   // open the seeded server's tools
-  await page.locator("tbody tr[role='link']").first().click();
+  await page.locator("tbody").getByRole("button", { name: /^Show tools on / }).first().click();
   await expect(page.getByText(/Tools on /)).toBeVisible();
 
   // register a tool on it
@@ -526,7 +528,7 @@ test("mcp servers: set a per-tool price override and see it persist (O10)", asyn
   // open it only if it is not already open, so this test is order-independent
   const openTools = async () => {
     if (!(await toolsCard.isVisible())) {
-      await page.locator("tbody tr[role='link']").first().click();
+      await page.locator("tbody").getByRole("button", { name: /^Show tools on / }).first().click();
     }
     await expect(toolsCard).toBeVisible();
   };
@@ -598,7 +600,7 @@ test("cost dashboard: fleet meters, project rollup with charts, Unattributed buc
   await expect(page.getByText("Projects — fleet spend")).toBeVisible();
   await expect(page.getByText("Unattributed spend", { exact: false }).first()).toBeVisible();
 
-  await page.getByRole("link", { name: "Open cost rollup for demo-project" }).click();
+  await page.getByRole("button", { name: "Open cost rollup for demo-project" }).click();
   // scope to the rollup card: the fleet table ABOVE it also has a "Budget vs
   // actual" column, so an unscoped text match is ambiguous the moment the
   // rollup query resolves. This assertion only ever passed by racing that

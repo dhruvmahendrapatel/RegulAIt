@@ -36,7 +36,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { DecisionEffect } from "@regulait/policy-kernel";
-import { constantTimeEqual, type McpUpstreamTransport } from "@regulait/shared";
+import { constantTimeEqual, type McpServerTransport } from "@regulait/shared";
 import {
   MeterProvider,
   MetricReader,
@@ -72,7 +72,7 @@ export interface DecisionMetricLabels {
 export interface UpstreamMetricLabels {
   /** the `mcp_servers.id` (a uuid, bounded by the registry — never a URL) */
   serverId: string;
-  transport: McpUpstreamTransport;
+  transport: McpServerTransport;
   outcome: MetricUpstreamOutcome;
 }
 
@@ -94,12 +94,24 @@ export const METRICS_PATH = "/metrics";
 
 const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const DECISION_EFFECTS = ["allow", "deny", "require_approval"] as const satisfies readonly DecisionEffect[];
-const UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio"] as const satisfies readonly McpUpstreamTransport[];
+const UPSTREAM_TRANSPORTS = ["streamable_http", "sse", "stdio", "first_party"] as const satisfies readonly McpServerTransport[];
 const JOB_OUTCOMES = ["ok", "failed", "skipped"] as const;
 /** how one ADR-0301 OTLP metrics push ended */
 export const METRIC_OTLP_PUSH_OUTCOMES = ["ok", "rejected", "failed", "egress_blocked"] as const;
 export type MetricOtlpPushOutcome = (typeof METRIC_OTLP_PUSH_OUTCOMES)[number];
 const LISTENERS = ["separate", "main"] as const;
+/** ADR-0352 (R3 #969 finding 2): the semantic cache's lookups, per tier. The miss
+ * reason is a fixed vocabulary (never the free-text detail, which stays in the log). */
+export const METRIC_CACHE_TIERS = ["exact", "similarity"] as const;
+export const METRIC_CACHE_RESULTS = ["hit", "miss"] as const;
+export const METRIC_CACHE_MISS_REASONS = [
+  "none",
+  "no_match",
+  "input_too_long",
+  "input_truncated",
+  "embedder_unavailable",
+  "embedder_error",
+] as const;
 /** a server id is a uuid — never a name, never a URL */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** a Fastify route template's alphabet: no query, no spaces, no '@' */
@@ -131,7 +143,10 @@ export type MetricLabelKind =
   | "job"
   | "job_outcome"
   | "listener"
-  | "push_outcome";
+  | "push_outcome"
+  | "cache_tier"
+  | "cache_result"
+  | "cache_miss_reason";
 
 function oneOf<T extends string>(vocab: readonly T[], value: unknown, fallback: string): string {
   return typeof value === "string" && (vocab as readonly string[]).includes(value) ? value : fallback;
@@ -169,6 +184,12 @@ export function safeLabel(kind: MetricLabelKind, value: unknown): string {
       return oneOf(LISTENERS, value, "other");
     case "push_outcome":
       return oneOf(METRIC_OTLP_PUSH_OUTCOMES, value, "other");
+    case "cache_tier":
+      return oneOf(METRIC_CACHE_TIERS, value, "other");
+    case "cache_result":
+      return oneOf(METRIC_CACHE_RESULTS, value, "other");
+    case "cache_miss_reason":
+      return oneOf(METRIC_CACHE_MISS_REASONS, value, "other");
   }
 }
 
@@ -241,6 +262,7 @@ const INSTRUMENT_KEYS = {
   regulait_scheduler_job_runs_total: ["job", "outcome"],
   regulait_metrics_unauthorized_total: ["listener"],
   regulait_metrics_otlp_pushes_total: ["outcome"],
+  regulait_semantic_cache_lookups_total: ["tier", "result", "reason"],
 } as const;
 
 /**
@@ -275,6 +297,7 @@ interface Meter {
   /** present only when a scrape surface is on, or something scraped (ADR-0301 second review, item 1) */
   exporter: PrometheusExporter | null;
   otlpPushes: Counter;
+  cacheLookups: Counter;
 }
 
 let meter: Meter | null = null;
@@ -404,6 +427,9 @@ function buildMeter(): Meter {
     otlpPushes: m.createCounter("regulait_metrics_otlp_pushes_total", {
       description: "OTLP metrics pushes (ADR-0301), by outcome",
     }),
+    cacheLookups: m.createCounter("regulait_semantic_cache_lookups_total", {
+      description: "Semantic cache lookups (ADR-0352), by tier, hit or miss, and miss reason",
+    }),
   };
 }
 
@@ -471,6 +497,15 @@ export function collectForOtlpPush(): Promise<CollectionResult> {
 /** ADR-0301: count one OTLP push by how it ended */
 export function recordOtlpPush(outcome: MetricOtlpPushOutcome): void {
   getMeter().otlpPushes.add(1, { outcome: safeLabel("push_outcome", outcome) });
+}
+
+/** ADR-0352: one semantic-cache tier lookup and how it ended (a hit's reason is "none") */
+export function recordCacheLookup(tier: "exact" | "similarity", result: "hit" | "miss", reason = "none"): void {
+  getMeter().cacheLookups.add(1, {
+    tier: safeLabel("cache_tier", tier),
+    result: safeLabel("cache_result", result),
+    reason: safeLabel("cache_miss_reason", result === "hit" ? "none" : reason),
+  });
 }
 
 /** one scheduler job run (scheduler.ts) */

@@ -1,0 +1,10 @@
+{
+  "adr": "ADR-0314",
+  "lane": "E3",
+  "tracking": "ADR-0314 (G6, lane E3): master brief for lane E3 (2026-11-15): new routes are API-only with a KNOWN_UI_GAPS entry pointing at #453; the registry import screen (staged records, import form) is posted on #453 for the Governed Designer. RAISED for the master's review",
+  "gaps": {
+    "GET /v1/agent-registry/records": "pages the agents staged from vendor agent registries (Entra Agent ID, Agent 365, Gemini Enterprise, Bedrock AgentCore), open, imported or absent",
+    "GET /v1/agent-registry/records/:recordId": "one staged registry agent with its provenance (source, run, vendor id) and import state",
+    "POST /v1/agent-registry/records/:recordId/import": "imports a staged registry agent into the inventory, disabled and proposed with no grants (settings_relax step-up, audited)"
+  }
+}

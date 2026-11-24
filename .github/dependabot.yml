@@ -80,6 +80,48 @@ updates:
       spikee-minor-patch:
         update-types: ["minor", "patch"]
 
+  - package-ecosystem: "pip" # mcpscanner engine image (hash-pinned requirements, ADR-0242)
+    directory: "/engines/mcpscanner"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      mcpscanner-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "pip" # skillscanner engine image (hash-pinned requirements, ADR-0242)
+    directory: "/engines/skillscanner"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      skillscanner-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "pip" # contentextract engine image (hash-pinned requirements, ADR-0362)
+    directory: "/engines/contentextract"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: "chore(engines)"
+    groups:
+      contentextract-minor-patch:
+        update-types: ["minor", "patch"]
+
   - package-ecosystem: "pip" # modelscan engine image
     directory: "/engines/modelscan"
     schedule:
@@ -129,8 +171,11 @@ updates:
       - "/packages/sandbox-executor/stdio-base"
       - "/engines/garak"
       - "/engines/spikee"
+      - "/engines/mcpscanner"
+      - "/engines/skillscanner"
       - "/engines/promptfoo"
       - "/engines/modelscan"
+      - "/engines/contentextract"
     schedule:
       interval: "weekly"
       day: "monday"
