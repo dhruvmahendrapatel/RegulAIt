@@ -135,12 +135,12 @@ export function detectionFeedJobDefinitions(): SchedulerJobDefinition[] {
 /** Default global admin gate applies; none of these routes is public or non-admin. */
 export function registerDetectionFeedRoutes(app:FastifyInstance,db:Db):void {
   // Startup health warning: an enabled feed that no longer verifies blocks every governed call, so say so loudly.
+  // Never awaited: readiness must not wait on the database (an exhausted pool must still answer /health).
   app.addHook("onReady",async()=>{
-    try {
-      const h=await runDetectionFeedHealthCheck(db,{write:false});
+    void runDetectionFeedHealthCheck(db,{write:false}).then(h=>{
       if(h.unavailable) app.log.warn({code:h.code},"detection feed is enabled but does not verify: every governed call is blocked (feed_unavailable)");
       else if(h.stale) app.log.warn(`detection feed is older than ${DETECTION_FEED_MAX_AGE_DAYS} days; import a newer signed feed`);
-    } catch (err) { app.log.warn({err},"detection feed health check could not run"); }
+    },(err:unknown)=>{app.log.warn({err},"detection feed health check could not run");});
   });
   app.get("/v1/detection-content/feed",async()=>status(await readFeed(db),detectionFeedKeyring()));
   app.post("/v1/detection-content/feed/import",{bodyLimit:DETECTION_FEED_MAX_BYTES*2+65536,onError:async(req)=>{
