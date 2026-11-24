@@ -125,6 +125,8 @@ export const SCHEDULER_JOB_NAMES = {
   discoveryScanSweep: "discovery-scan-sweep",
   // ADR-0195 SD4b: merges accepted endpoint agent reports into the findings (endpoint-agent-routes.ts)
   endpointAgentIngest: "endpoint-agent-ingest",
+  // ADR-0367: daily verify/staleness check of the enabled signed detection feed
+  detectionFeedHealth: "detection-feed-health-sweep",
   // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints (oauth/spiffe-bundle-endpoint.ts)
   spiffeBundleRefresh: "spiffe-bundle-refresh",
   // ADR-0222 (P13(a)): deletes fairness dataset rows past retention (fairness.ts)
@@ -886,6 +888,7 @@ import { engineJobDefinitions } from "./engine-runs.js";
 import { modelArtifactJobDefinitions, type ArtifactStore } from "./model-artifacts.js";
 import { discoveryJobDefinitions } from "./discovery-worker.js";
 import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
+import { detectionFeedJobDefinitions } from "./detection-feed.js";
 import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 import { fairnessJobDefinitions } from "./fairness.js";
 import { siemJobDefinitions } from "./siem-delivery.js";
@@ -918,6 +921,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...edrJobDefinitions({ dataKey: opts.dataKey }), // ADR-0360 slice 2: edr-sync, edr-isolation-poll
     ...endpointUpdateJobDefinitions(), // ADR-0360 slice 1c: endpoint-update-expiry
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
+    ...detectionFeedJobDefinitions(), // ADR-0367: detection-feed-health-sweep
     ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
     ...fairnessJobDefinitions(), // ADR-0222 (P13(a)): fairness-dataset-retention-sweep
     ...siemJobDefinitions({ dataKey: opts.dataKey }), // ADR-0303: siem-delivery-sweep
