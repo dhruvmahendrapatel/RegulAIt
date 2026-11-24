@@ -38,7 +38,7 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -63,7 +63,7 @@ RUN --network=none PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLI
     /opt/garak/venv/bin/python -I preseed-hf.py verify hf-preseed.json /opt/garak/hf
 
 # ---- stage 2: the runner and worker shim --------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./

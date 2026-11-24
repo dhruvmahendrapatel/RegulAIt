@@ -191,6 +191,9 @@ import {
   BEHAVIOUR_MODES,
   BEHAVIOUR_SIGNAL_NAMES,
   BEHAVIOUR_SUBJECT_KINDS,
+  // ADR-0360 (migration endpoint_fleet_operations): the rollout and stage lifecycles, ADR-0348 machines
+  ENDPOINT_ROLLOUT_STATES,
+  ENDPOINT_ROLLOUT_STAGE_STATES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -2050,6 +2053,11 @@ export const auditLog = pgTable(
         // ADR-0261 (P37): a third-party ingest source (created, enabled, disabled, its write-only credential issued or
         // revoked) and each accepted or refused batch of third-party evidence. Plain text column — no DDL.
         "third_party_ingest_source",
+        "ai_saas_monitor_policy",
+        "ai_saas_monitor_connector",
+        "ai_saas_monitor_credential",
+        "ai_saas_monitor_run",
+        "ai_saas_interaction",
         // ADR-0303: a SIEM destination (created, enabled, disabled, secret rotated, dead-lettered, recovered). Plain
         // text column — no DDL.
         "siem_destination",
@@ -4868,6 +4876,13 @@ export const orgSettings = pgTable(
     editVsRewriteEnabled: boolean("edit_vs_rewrite_enabled").notNull().default(true),
     filePreprocessingEnabled: boolean("file_preprocessing_enabled").notNull().default(true),
     lazyToolLoadingEnabled: boolean("lazy_tool_loading_enabled").notNull().default(true),
+    /** ADR-0353 part 2: the registered ADR-0088 scorer (kind `routing_complexity`) that picks a dispatch's complexity
+     * for `routeModel`. NULL = off (the default): the built-in `classifyComplexity` heuristic. Setting it sends prompt
+     * text to that scorer, so it is a strictness relaxation (`settings_relax` step-up, audited). A deleted scorer turns
+     * the classifier off (the heuristic), never on. */
+    routingClassifierScorerId: uuid("routing_classifier_scorer_id").references((): AnyPgColumn => externalScorers.id, {
+      onDelete: "set null",
+    }),
     /** the org DEFAULT for users with no per-user routingMode. A user's own
      * setting still wins either way (it can only narrow, and 'automatic' is
      * only reachable when the technique toggles above allow it). */
@@ -8615,8 +8630,20 @@ export const endpointEnrolmentTokens = pgTable(
     expiryRelaxationStepUp: text("expiry_relaxation_step_up"),
     /** the `endpoint-enrolment-token-expiry-relaxed` audit row the issue wrote (no foreign key: retention may prune it) */
     expiryRelaxationAuditId: uuid("expiry_relaxation_audit_id"),
+    /** ADR-0360 §5: a one-line enrolment token: device cap 1 and at most 60 minutes (CHECKs below) */
+    singleUse: boolean("single_use").notNull().default(false),
+    /**
+     * ADR-0360 §5: the ADR-0350 device group a redeemed device joins. A group only narrows a device's policy, so joining
+     * one at enrolment is never a relaxation. ON DELETE SET NULL: deleting the group (a step-up) leaves the token usable
+     * without it.
+     */
+    deviceGroupId: uuid("device_group_id").references(() => endpointDeviceGroups.id, { onDelete: "set null" }),
   },
   (t) => [
+    check(
+      "endpoint_enrolment_tokens_single_use_check",
+      sql`NOT ${t.singleUse} OR (${t.deviceCap} = 1 AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes')`,
+    ),
     unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
     check("endpoint_enrolment_tokens_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
@@ -20721,6 +20748,105 @@ export const paidCallHolds = pgTable(
 export type PaidCallHoldRow = typeof paidCallHolds.$inferSelect;
 // ===== end ADR-0313 =================================================================================================
 
+// ===== ADR-0360 (lane E41): endpoint agent fleet operations =====
+// The per-device-group self-update setting (owner decision D-2026-11-22-04; off unless relaxed with a recorded step-up)
+// and staged update rollouts whose
+// stages are ADR-0350 device groups (lane E31's table, reused: no second group concept). A device may be in several
+// groups; it is offered an update by the first stage, in ordinal order, whose group holds it. The lifecycles are
+// ENDPOINT_ROLLOUT_MACHINE and ENDPOINT_ROLLOUT_STAGE_MACHINE (@regulait/shared, ADR-0348, in STATE_MACHINES);
+// every state write is a guarded UPDATE over the event's source states (`whereFrom`).
+
+/** one ADR-0350 device group's fleet settings; absent row = every setting at its strict default (self-update off) */
+export const endpointDeviceGroupFleetSettings = pgTable(
+  "endpoint_device_group_fleet_settings",
+  {
+    groupId: uuid("group_id")
+      .primaryKey()
+      .references(() => endpointDeviceGroups.id, { onDelete: "cascade" }),
+    selfUpdate: boolean("self_update").notNull().default(false),
+    /** the admin who relaxed self-update on, the step-up method, and the audit row the relaxation wrote */
+    selfUpdateRelaxedBy: uuid("self_update_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    selfUpdateStepUp: text("self_update_step_up"),
+    selfUpdateAuditId: uuid("self_update_audit_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "endpoint_device_group_fleet_settings_self_update_check",
+      sql`NOT ${t.selfUpdate} OR (${t.selfUpdateStepUp} IS NOT NULL AND ${t.selfUpdateAuditId} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointDeviceGroupFleetSettingsRow = typeof endpointDeviceGroupFleetSettings.$inferSelect;
+
+export const endpointUpdateRollouts = pgTable(
+  "endpoint_update_rollouts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    targetVersion: text("target_version").notNull(),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STATES }).notNull().default("draft"),
+    /**
+     * failed installs or rollbacks that halt the rollout (D-2026-11-22-04): strict default 1, bounded 1 to 10. Raising
+     * it is a relaxation, recorded with its step-up method and audit row (the CHECK below); lowering it is free.
+     */
+    haltThreshold: integer("halt_threshold").notNull().default(1),
+    haltThresholdStepUp: text("halt_threshold_step_up"),
+    haltThresholdAuditId: uuid("halt_threshold_audit_id"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("endpoint_update_rollouts_version_check", sql`${t.targetVersion} ~ '^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$'`),
+    check("endpoint_update_rollouts_state_check", sql`${t.state} IN ('draft', 'running', 'paused', 'halted', 'completed', 'aborted')`),
+    check("endpoint_update_rollouts_halt_threshold_check", sql`${t.haltThreshold} BETWEEN 1 AND 10`),
+    check(
+      "endpoint_update_rollouts_halt_relaxed_check",
+      sql`${t.haltThreshold} = 1 OR (${t.haltThresholdStepUp} IS NOT NULL AND ${t.haltThresholdAuditId} IS NOT NULL)`,
+    ),
+    // at most one open rollout per source
+    uniqueIndex("endpoint_update_rollouts_open_uq").on(t.sourceId).where(sql`${t.state} NOT IN ('completed', 'aborted')`),
+    index("endpoint_update_rollouts_source_idx").on(t.sourceId, t.createdAt),
+  ],
+);
+export type EndpointUpdateRolloutRow = typeof endpointUpdateRollouts.$inferSelect;
+
+export const endpointUpdateRolloutStages = pgTable(
+  "endpoint_update_rollout_stages",
+  {
+    rolloutId: uuid("rollout_id")
+      .notNull()
+      .references(() => endpointUpdateRollouts.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    /**
+     * the ADR-0350 device group this stage offers the update to. ON DELETE SET NULL: deleting a group (an ADR-0350
+     * step-up) is never blocked by a rollout; the stage then offers the update to no device.
+     */
+    groupId: uuid("group_id").references(() => endpointDeviceGroups.id, { onDelete: "set null" }),
+    /** point-in-time snapshot (ADR-0200 exception): the group's name when the stage was created, kept as evidence after a delete */
+    groupName: text("group_name").notNull(),
+    state: text("state", { enum: ENDPOINT_ROLLOUT_STAGE_STATES }).notNull().default("pending"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ name: "endpoint_update_rollout_stages_pk", columns: [t.rolloutId, t.ordinal] }),
+    unique("endpoint_update_rollout_stages_group_uq").on(t.rolloutId, t.groupId),
+    index("endpoint_update_rollout_stages_group_idx").on(t.groupId),
+    check("endpoint_update_rollout_stages_ordinal_check", sql`${t.ordinal} BETWEEN 1 AND 20`),
+    check("endpoint_update_rollout_stages_state_check", sql`${t.state} IN ('pending', 'active', 'done')`),
+    check(
+      "endpoint_update_rollout_stages_times_check",
+      sql`(${t.state} = 'pending') = (${t.startedAt} IS NULL) AND (${t.state} = 'done') = (${t.completedAt} IS NOT NULL)`,
+    ),
+  ],
+);
+export type EndpointUpdateRolloutStageRow = typeof endpointUpdateRolloutStages.$inferSelect;
+// ===== end ADR-0360 =====
+
 // ===== ADR-0358 (lane E39): AI adoption analytics =====
 /**
  * The adoption-analytics privacy policy: one row (id `singleton`), read before every adoption read. Strict by default
@@ -20940,3 +21066,185 @@ export const mcpCallerCancellations = pgTable(
   ],
 );
 export type McpCallerCancellationRow = typeof mcpCallerCancellations.$inferSelect;
+
+// ===== ADR-0361 (lane E42): monitoring sanctioned AI SaaS through vendor compliance APIs ==========================
+// Migration `pending/ai_saas_monitoring.sql` (numbered at merge, ADR-0252). Every table is RLS admin/system only.
+export const AI_SAAS_MONITOR_VENDOR_VALUES = ["m365_copilot", "chatgpt_enterprise", "claude_enterprise"] as const;
+export const AI_SAAS_MONITOR_RUN_STATUS_VALUES = ["running", "succeeded", "failed", "refused"] as const;
+
+/** the one org switch (off) and the content-capture mode (`none`: text is scanned in memory, never stored) */
+export const aiSaasMonitorPolicy = pgTable(
+  "ai_saas_monitor_policy",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    enabled: boolean("enabled").notNull().default(false),
+    contentCapture: text("content_capture", { enum: ["none", "redacted"] }).notNull().default("none"),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_saas_monitor_policy_singleton_check", sql`${t.id} = 'singleton'`),
+    check("ai_saas_monitor_policy_capture_check", sql`${t.contentCapture} IN ('none', 'redacted')`),
+  ],
+);
+
+export const aiSaasMonitorConnectors = pgTable(
+  "ai_saas_monitor_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor", { enum: AI_SAAS_MONITOR_VENDOR_VALUES }).notNull(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    /** a schema-validated configuration document (ADR-0200 exception), validated per vendor in @regulait/shared */
+    publicConfig: jsonb("public_config").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    /** the end of the last successful run's window; the next run resumes here */
+    monitoredThrough: timestamp("monitored_through", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_saas_monitor_connectors_vendor_check", sql`${t.vendor} IN ('m365_copilot', 'chatgpt_enterprise', 'claude_enterprise')`),
+    check("ai_saas_monitor_connectors_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    check(
+      "ai_saas_monitor_connectors_public_config_check",
+      sql`jsonb_typeof(${t.publicConfig}) = 'object' AND octet_length(${t.publicConfig}::text) <= 65536`,
+    ),
+    uniqueIndex("ai_saas_monitor_connectors_name_uq").on(sql`lower(${t.name})`),
+    index("ai_saas_monitor_connectors_enabled_idx").on(t.enabled).where(sql`${t.enabled}`),
+  ],
+);
+export type AiSaasMonitorConnectorRow = typeof aiSaasMonitorConnectors.$inferSelect;
+
+/** a connector's compliance tags: they drive its retention and PII mode through the §8.3 cascade */
+export const aiSaasMonitorConnectorTags = pgTable(
+  "ai_saas_monitor_connector_tags",
+  {
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => aiSaasMonitorConnectors.id, { onDelete: "cascade" }),
+    profileTag: text("profile_tag")
+      .notNull()
+      .references(() => complianceProfiles.tag, { onDelete: "restrict", onUpdate: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.connectorId, t.profileTag] }), index("ai_saas_monitor_connector_tags_tag_idx").on(t.profileTag)],
+);
+
+export const aiSaasMonitorCredentials = pgTable(
+  "ai_saas_monitor_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => aiSaasMonitorConnectors.id, { onDelete: "cascade" }),
+    /** a data-key envelope (CIPHERTEXT_COLUMNS); never returned by any route, destroyed on revoke */
+    secretCiphertext: text("secret_ciphertext"),
+    /** what the last token check found; `refused` is never used again */
+    scopePosture: text("scope_posture", { enum: ["unverified", "read_only", "refused"] }).notNull().default("unverified"),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("ai_saas_monitor_credentials_scope_check", sql`${t.scopePosture} IN ('unverified', 'read_only', 'refused')`),
+    check("ai_saas_monitor_credentials_live_secret_check", sql`${t.revokedAt} IS NOT NULL OR ${t.secretCiphertext} IS NOT NULL`),
+    check("ai_saas_monitor_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.secretCiphertext} IS NULL`),
+    uniqueIndex("ai_saas_monitor_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+  ],
+);
+
+export const aiSaasMonitorRuns = pgTable(
+  "ai_saas_monitor_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => aiSaasMonitorConnectors.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: ["schedule", "manual"] }).notNull(),
+    status: text("status", { enum: AI_SAAS_MONITOR_RUN_STATUS_VALUES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    windowEnd: timestamp("window_end", { withTimezone: true }),
+    usersRead: integer("users_read").notNull().default(0),
+    pages: integer("pages").notNull().default(0),
+    interactionsSeen: integer("interactions_seen").notNull().default(0),
+    interactionsNew: integer("interactions_new").notNull().default(0),
+    findingsCreated: integer("findings_created").notNull().default(0),
+    /** one of AI_SAAS_MONITOR_ERROR_CODES; `error_detail` is a sentence RegulAIt wrote, never vendor text */
+    errorCode: text("error_code"),
+    errorDetail: text("error_detail"),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    check("ai_saas_monitor_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    check("ai_saas_monitor_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
+    check("ai_saas_monitor_runs_error_detail_check", sql`${t.errorDetail} IS NULL OR char_length(${t.errorDetail}) <= 500`),
+    check("ai_saas_monitor_runs_outcome_check", sql`(${t.status} = 'failed' OR ${t.status} = 'refused') = (${t.errorCode} IS NOT NULL)`),
+    check("ai_saas_monitor_runs_finished_check", sql`(${t.status} = 'running') = (${t.finishedAt} IS NULL)`),
+    uniqueIndex("ai_saas_monitor_runs_live_uq").on(t.connectorId).where(sql`${t.status} = 'running'`),
+    index("ai_saas_monitor_runs_connector_idx").on(t.connectorId, t.startedAt.desc(), t.id.desc()),
+  ],
+);
+export type AiSaasMonitorRunRow = typeof aiSaasMonitorRuns.$inferSelect;
+
+/**
+ * APPEND-ONLY EVIDENCE: one row per vendor interaction (guard trigger; TRUNCATE refused; DELETE only past the
+ * retention sweep's cutoff). `content_ciphertext` is NULL unless the policy captured an ADR-0140-redacted copy.
+ */
+export const aiSaasInteractions = pgTable(
+  "ai_saas_interactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => aiSaasMonitorConnectors.id, { onDelete: "restrict" }),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => aiSaasMonitorRuns.id, { onDelete: "restrict" }),
+    vendorInteractionId: text("vendor_interaction_id").notNull(),
+    conversationRef: text("conversation_ref"),
+    kind: text("kind", { enum: ["prompt", "response", "other"] }).notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    actorRef: text("actor_ref"),
+    appRef: text("app_ref"),
+    contentSha256: text("content_sha256").notNull(),
+    contentChars: integer("content_chars").notNull(),
+    truncated: boolean("truncated").notNull().default(false),
+    /** a data-key envelope of the redacted text (CIPHERTEXT_COLUMNS); NULL unless captured */
+    contentCiphertext: text("content_ciphertext"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_saas_interactions_kind_check", sql`${t.kind} IN ('prompt', 'response', 'other')`),
+    check("ai_saas_interactions_sha_check", sql`${t.contentSha256} ~ '^[0-9a-f]{64}$'`),
+    uniqueIndex("ai_saas_interactions_dedup_uq").on(t.connectorId, t.vendorInteractionId),
+    index("ai_saas_interactions_connector_occurred_idx").on(t.connectorId, t.occurredAt.desc(), t.id.desc()),
+    index("ai_saas_interactions_received_idx").on(t.receivedAt),
+    index("ai_saas_interactions_run_idx").on(t.runId),
+  ],
+);
+export type AiSaasInteractionRow = typeof aiSaasInteractions.$inferSelect;
+
+/** counts only, never matched text; one row per (interaction, detector, category) */
+export const aiSaasInteractionFindings = pgTable(
+  "ai_saas_interaction_findings",
+  {
+    interactionId: uuid("interaction_id")
+      .notNull()
+      .references(() => aiSaasInteractions.id, { onDelete: "cascade" }),
+    detector: text("detector").notNull(),
+    category: text("category").notNull(),
+    hitCount: integer("hit_count").notNull(),
+    action: text("action", { enum: ["block", "warn", "log"] }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.interactionId, t.detector, t.category] }),
+    check("ai_saas_interaction_findings_count_check", sql`${t.hitCount} >= 1`),
+    check("ai_saas_interaction_findings_action_check", sql`${t.action} IN ('block', 'warn', 'log')`),
+    index("ai_saas_interaction_findings_detector_idx").on(t.detector, t.category),
+  ],
+);
+// ===== end ADR-0361 block ========================================================================================

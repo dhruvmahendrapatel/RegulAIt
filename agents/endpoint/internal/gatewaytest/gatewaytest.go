@@ -176,7 +176,7 @@ func (g *Gateway) tickets(w http.ResponseWriter, r *http.Request, body []byte) {
 	t := fmt.Sprintf("ticket-%d-%s", g.Devices, randomish())
 	exp := time.Now().Add(7 * 24 * time.Hour).UTC()
 	g.Tickets[t] = exp
-	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("tkt_%d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8})
+	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("00000000-0000-4000-8000-%012d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8}) // a device id is a uuid, as the gateway's
 }
 
 func (g *Gateway) register(w http.ResponseWriter, r *http.Request, body []byte) {

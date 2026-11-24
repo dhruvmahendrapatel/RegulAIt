@@ -9,6 +9,7 @@ import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
+import { ENDPOINT_ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE } from "./endpoint-fleet.js";
 import { CLASSIFIER_VERSION_STATUSES } from "./custom-classifiers.js";
 import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE } from "./vendor-agent-control.js";
@@ -656,6 +657,39 @@ export const BROWSER_DEVICE_MACHINE = defineMachine({
   },
 });
 
+/** `ai_saas_monitor_runs.status` (ADR-0361). A run opens `running`, or is written already `refused` when another run of
+ * the same connector is in progress. A running run ends exactly once: every page of the window was written, a vendor
+ * call or a write failed (the window is not advanced), or a precondition refused it before any request. */
+export const AI_SAAS_MONITOR_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export type AiSaasMonitorRunStatus = (typeof AI_SAAS_MONITOR_RUN_STATUSES)[number];
+export const AI_SAAS_MONITOR_RUN_MACHINE = defineMachine({
+  id: "ai_saas_monitor_run",
+  stored: "ai_saas_monitor_runs.status",
+  states: AI_SAAS_MONITOR_RUN_STATUSES,
+  initial: ["running", "refused"],
+  terminal: ["succeeded", "failed", "refused"],
+  transitions: {
+    succeed: {
+      from: ["running"],
+      to: "succeeded",
+      by: ["system"],
+      summary: "Every page of the window was written and the connector's monitored-through time advanced with it.",
+    },
+    fail: {
+      from: ["running"],
+      to: "failed",
+      by: ["system"],
+      summary: "A vendor call, a bound or a write failed, or the process died; the pages written are kept and the window is not advanced.",
+    },
+    refuse: {
+      from: ["running"],
+      to: "refused",
+      by: ["system"],
+      summary: "A precondition failed before any vendor request: monitoring or the connector is off, no usable credential, no data key, or air-gapped.",
+    },
+  },
+});
+
 /** `vendor_usage_pull_runs.status` (ADR-0322). A run opens `running`, or is written already `refused` when another
  * pull of the same connector holds the lease. A running run ends exactly once: the batch committed, the vendor or
  * the write failed, or a precondition (policy off, no credential, air-gapped) refused it. */
@@ -1098,11 +1132,15 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [DECISION_TABLE_VERSION_MACHINE.def.id]: DECISION_TABLE_VERSION_MACHINE,
   [RULE_STEP_SWITCH_MACHINE.def.id]: RULE_STEP_SWITCH_MACHINE,
   [VENDOR_USAGE_PULL_RUN_MACHINE.def.id]: VENDOR_USAGE_PULL_RUN_MACHINE,
+  [AI_SAAS_MONITOR_RUN_MACHINE.def.id]: AI_SAAS_MONITOR_RUN_MACHINE,
   [ENDPOINT_ADDON_REMOVAL_MACHINE.def.id]: ENDPOINT_ADDON_REMOVAL_MACHINE,
   [ENDPOINT_ADDON_TARGET_MACHINE.def.id]: ENDPOINT_ADDON_TARGET_MACHINE,
   [PIPELINE_RUN_MACHINE.def.id]: PIPELINE_RUN_MACHINE,
   // ADR-0338: a governed disable, quarantine or restore of an agent inside its vendor platform
   [VENDOR_ACTION_MACHINE.def.id]: VENDOR_ACTION_MACHINE,
+  // ADR-0360 §3 (lane E41): a staged endpoint agent update rollout and its stages
+  [ENDPOINT_ROLLOUT_MACHINE.def.id]: ENDPOINT_ROLLOUT_MACHINE,
+  [ENDPOINT_ROLLOUT_STAGE_MACHINE.def.id]: ENDPOINT_ROLLOUT_STAGE_MACHINE,
   [SHADOW_AI_FINDING_MACHINE.def.id]: SHADOW_AI_FINDING_MACHINE,
   [USE_CASE_MACHINE.def.id]: USE_CASE_MACHINE,
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,

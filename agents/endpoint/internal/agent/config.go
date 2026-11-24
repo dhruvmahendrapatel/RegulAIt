@@ -23,6 +23,11 @@ import (
 // Secure by default (ADR-0180): it holds nothing that can relax the agent. Every limit is compiled in; the file can
 // only name the gateway, pin a CA bundle and turn collectors off. Relaxations (a longer buffer, self-update) are
 // server-side, audited step-ups that later slices deliver through the gateway, never through this file.
+//
+// Self-update in particular (ADR-0360 §2, §4): this file has no member that turns it on. The admin relaxes it per
+// ADR-0350 device group on the gateway (a settings_relax step-up, audited), and the device acts only on a directive the device-policy
+// signer signed for it, for a release the release keys signed. Pinning those keys here says whose signatures count; it
+// turns nothing on.
 type LocalConfig struct {
 	Schema        string          `json:"schema"`
 	Issuer        string          `json:"issuer"`
@@ -33,6 +38,10 @@ type LocalConfig struct {
 	// Pinning authorises policies signed by these keys, and so whatever they allow; a pin never overrides a compiled
 	// key, and nothing here relaxes the agent without such a signed policy.
 	DevicePolicyKeys []enforce.PinnedKey `json:"devicePolicyKeys,omitempty"`
+	// ReleaseKeys pins the release pipeline's signer (ADR-0360 §4): the keys a release manifest must be signed by, the
+	// current key and at most one next key. A key of its own, never a device-policy key. With none pinned, the updater
+	// never installs anything.
+	ReleaseKeys []enforce.PinnedKey `json:"releaseKeys,omitempty"`
 }
 
 // Config is the validated local config.
@@ -42,6 +51,8 @@ type Config struct {
 	Disabled map[contract.Kind]bool
 	// DevicePolicyKeys is the validated pinned device-policy keyring (empty when none is pinned).
 	DevicePolicyKeys enforce.Keyring
+	// ReleaseKeys is the validated pinned release keyring (empty when none is pinned).
+	ReleaseKeys enforce.Keyring
 }
 
 // LoadConfig reads and validates the config file and its CA bundle.
@@ -65,7 +76,16 @@ func LoadConfig(path string, owner int) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}, DevicePolicyKeys: keys}
+	releaseKeys, err := enforce.KeyringFrom(lc.ReleaseKeys)
+	if err != nil {
+		return nil, fmt.Errorf("config: release keys: %w", err)
+	}
+	for id := range releaseKeys {
+		if _, shared := keys[id]; shared {
+			return nil, errors.New("config: a key is pinned as both a device-policy key and a release key (one key per purpose)")
+		}
+	}
+	cfg := &Config{Issuer: issuer, Disabled: map[contract.Kind]bool{}, DevicePolicyKeys: keys, ReleaseKeys: releaseKeys}
 	for _, k := range lc.DisabledKinds {
 		known := false
 		for _, kk := range contract.Kinds {

@@ -263,6 +263,17 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "internal", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "internal", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "internal", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "internal", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "internal", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "internal", // ADR-0361 (D-2026-11-22-06 guided setup)
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "internal", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "internal", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "internal",
   "POST /v1/cost-imports/roster": "internal",
   "DELETE /v1/cost-imports/:importId": "internal",
@@ -1216,6 +1227,14 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/discovery/sources/:sourceId/endpoint-devices": "internal",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "internal",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "internal",
+  "GET /v1/endpoint-device-groups/:groupId/fleet-settings": "internal",
+  "PUT /v1/endpoint-device-groups/:groupId/fleet-settings": "internal",
+  "GET /v1/discovery/sources/:sourceId/update-rollouts": "internal",
+  "POST /v1/discovery/sources/:sourceId/update-rollouts": "internal",
+  "GET /v1/discovery/update-rollouts/:rolloutId": "internal",
+  "POST /v1/discovery/update-rollouts/:rolloutId/:action": "internal",
+  "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "internal",
+  "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "internal",
   // ADR-0259 (P35): the MCP servers enrolled devices' host configs name, and the admin's links to approved servers
   "GET /v1/discovery/endpoint-mcp-servers": "internal",
   "POST /v1/discovery/endpoint-mcp-server-links": "internal",
@@ -1954,6 +1973,17 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "cost-imports", // ADR-0322
   "POST /v1/vendor-usage/connectors/:connectorId/pull": "cost-imports", // ADR-0322
   "GET /v1/vendor-usage/connectors/:connectorId/runs": "cost-imports", // ADR-0322
+  "GET /v1/ai-saas-monitoring": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/policy": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/config": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "DELETE /v1/ai-saas-monitoring/connectors/:connectorId/credential": "shadow-ai", // ADR-0361
+  "PUT /v1/ai-saas-monitoring/connectors/:connectorId/enabled": "shadow-ai", // ADR-0361
+  "POST /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/setup": "shadow-ai", // ADR-0361 (D-2026-11-22-06 guided setup)
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/runs": "shadow-ai", // ADR-0361
+  "GET /v1/ai-saas-monitoring/connectors/:connectorId/interactions": "shadow-ai", // ADR-0361
   "GET /v1/cost-imports/reconciliation": "cost-imports",
   "POST /v1/cost-imports/roster": "cost-imports",
   "DELETE /v1/cost-imports/:importId": "cost-imports",
@@ -2828,6 +2858,14 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PUT /v1/adoption/policy": "adoption",
   "GET /v1/discovery/sources/:sourceId/endpoint-devices/export.xlsx": "shadow-ai",
   "POST /v1/discovery/endpoint-devices/:deviceId/revoke": "shadow-ai",
+  "GET /v1/endpoint-device-groups/:groupId/fleet-settings": "shadow-ai",
+  "PUT /v1/endpoint-device-groups/:groupId/fleet-settings": "shadow-ai",
+  "GET /v1/discovery/sources/:sourceId/update-rollouts": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/update-rollouts": "shadow-ai",
+  "GET /v1/discovery/update-rollouts/:rolloutId": "shadow-ai",
+  "POST /v1/discovery/update-rollouts/:rolloutId/:action": "shadow-ai",
+  "PUT /v1/discovery/update-rollouts/:rolloutId/halt-threshold": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/one-line-enrolments": "shadow-ai",
   "GET /v1/content-trust": "content-provenance",
   "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "content-provenance",
   "PUT /v1/content-trust/settings": "content-provenance",
