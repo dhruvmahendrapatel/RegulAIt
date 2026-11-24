@@ -1,6 +1,7 @@
 /** Offline pinned-Ed25519 bundles, extracted from ADR-0256 for ADR-0367. No network or supplied trust roots. */
 import { createHash, createPublicKey, verify, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { z } from "zod";
 const keyringSchema = z
   .array(z.object({ keyId: z.string().min(1).max(128), publicKeyPem: z.string().min(1).max(4096) }).strict())
@@ -20,12 +21,18 @@ export function loadSignedBundleKeyring(inlineName: string, fileName: string, la
     if (inline) raw = JSON.parse(inline) as unknown;
     else if (file) {
       const st = statSync(file);
-      if (!st.isFile() || st.size > 256 * 1024) return { error: `${fileName} is not a readable keyring file` };
+      if (!st.isFile() || st.size > KEYRING_FILE_MAX_BYTES) return { error: `${fileName} is not a readable keyring file` };
       raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
     }
   } catch {
     return { error: `the ${label} keyring is not valid JSON` };
   }
+  return parseSignedBundleKeyring(raw, label);
+}
+const KEYRING_FILE_MAX_BYTES = 256 * 1024;
+
+/** Build a keyring from already-parsed JSON (null = none configured). Same whole-ring refusal rules as above. */
+export function parseSignedBundleKeyring(raw: unknown, label: string): Map<string, KeyObject> | { error: string } {
   const out = new Map<string, KeyObject>();
   if (raw === null) return out;
   const parsed = keyringSchema.safeParse(raw);
@@ -42,6 +49,54 @@ export function loadSignedBundleKeyring(inlineName: string, fileName: string, la
     out.set(k.keyId, key);
   }
   return out;
+}
+
+/** A stable identity for a keyring's trust: its sorted key ids and public keys. Any add, removal or swap changes it. */
+export function signedBundleKeyringFingerprint(keyring: SignedBundleKeyring): string {
+  const h = createHash("sha256");
+  if (!(keyring instanceof Map)) return h.update(`error\0${keyring.error}`).digest("hex");
+  for (const id of [...keyring.keys()].sort()) h.update(id).update("\0").update(keyring.get(id)!.export({ format: "der", type: "spki" })).update("\0");
+  return h.digest("hex");
+}
+
+export interface CachedSignedBundleKeyring { keyring: SignedBundleKeyring; fingerprint: string }
+/**
+ * The keyring for a hot path: parsed once per configuration, never per call. The inline variable is keyed by its
+ * value; the file by an asynchronous stat (inode, size, mtime), so the event loop never blocks on file I/O and a
+ * rotated file takes effect at the next call. `env` is read on every call, so changing it also takes effect.
+ */
+export function cachedSignedBundleKeyring(inlineName: string, fileName: string, label: string, env: NodeJS.ProcessEnv = process.env): () => Promise<CachedSignedBundleKeyring> {
+  let memo: { source: string; value: CachedSignedBundleKeyring } | undefined;
+  const remember = (source: string, keyring: SignedBundleKeyring) => {
+    memo = { source, value: { keyring, fingerprint: signedBundleKeyringFingerprint(keyring) } };
+    return memo.value;
+  };
+  return async () => {
+    const inline = env[inlineName]?.trim();
+    const file = env[fileName]?.trim();
+    if (inline && file) return remember("both", { error: `set one of ${inlineName} and ${fileName}, not both` });
+    if (!file) {
+      const source = `inline\0${inline ?? ""}`;
+      if (memo?.source === source) return memo.value;
+      let raw: unknown = null;
+      try { if (inline) raw = JSON.parse(inline) as unknown; } catch { return remember(source, { error: `the ${label} keyring is not valid JSON` }); }
+      return remember(source, parseSignedBundleKeyring(raw, label));
+    }
+    let source: string;
+    try {
+      const st = await stat(file);
+      if (!st.isFile() || st.size > KEYRING_FILE_MAX_BYTES) return remember(`file\0${file}\0bad`, { error: `${fileName} is not a readable keyring file` });
+      source = `file\0${file}\0${st.ino}\0${st.size}\0${st.mtimeMs}`;
+    } catch {
+      return remember(`file\0${file}\0missing`, { error: `${fileName} is not a readable keyring file` });
+    }
+    if (memo?.source === source) return memo.value;
+    try {
+      return remember(source, parseSignedBundleKeyring(JSON.parse(await readFile(file, "utf8")) as unknown, label));
+    } catch {
+      return remember(source, { error: `the ${label} keyring is not valid JSON` });
+    }
+  };
 }
 
 

@@ -1,4 +1,4 @@
-import type { DetectionFeedRule } from "./detection-feed.js";
+import type { CompiledDetectionFeedRule, DetectionFeedRule } from "./detection-feed.js";
 import { normaliseForInjection } from "./detection-content/index.js";
 /**
  * ADR-0042 — the GUARDRAIL ENGINE's pure half.
@@ -123,7 +123,7 @@ export interface GuardrailDetector {
 /** ADR-0186 V: the deployment facts a detector may consult. Absent = the
  * strict default (every vendored pack on). */
 export interface GuardrailDetectContext {
-  detectionFeedRules?: readonly DetectionFeedRule[] | undefined;
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
   /** `org_settings.vendored_detection_packs` */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }
@@ -708,7 +708,7 @@ export function evaluateGuardrails(args: {
   exclude?: readonly GuardrailDetectorId[] | undefined;
   /** ADR-0186 V: `org_settings.vendored_detection_packs`; absent = all on */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
-  detectionFeedRules?: readonly DetectionFeedRule[] | undefined;
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
   /**
    * ADR-0363 slice 2: the org's PUBLISHED customer classifiers. Each runs with its OWN mode (an approved publish is
    * the admin's explicit act, so it does not wait on the `semantic_dlp` switch) and reports as a `semantic_dlp`

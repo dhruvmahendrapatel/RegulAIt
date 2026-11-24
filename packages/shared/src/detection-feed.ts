@@ -4,6 +4,10 @@ import { RE2JS } from "re2js";
 
 export const DETECTION_FEED_FORMAT = "regulait.detection-feed/v1";
 export const DETECTION_FEED_MAX_BYTES = 256 * 1024;
+/** Freeze signal: an installed feed older than this is reported stale (status and a daily audit row), not blocked. */
+export const DETECTION_FEED_MAX_AGE_DAYS = 30;
+/** A signed issue time more than this far ahead of the gateway clock is refused, so it cannot pre-empt later feeds. */
+export const DETECTION_FEED_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const id = z.string().regex(/^[a-z][a-z0-9_.-]{0,79}$/);
 export const detectionFeedRuleSchema = z.object({
   id,
@@ -23,6 +27,8 @@ export const detectionFeedSchema = z.object({
   format: z.literal(DETECTION_FEED_FORMAT),
   feedId: id,
   version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  // Signed issue time (UTC, RFC 3339). Monotonic with `version`; its age is the freeze/staleness signal.
+  issuedAt: z.string().datetime({offset:false}),
   source: z.object({id, licence:z.enum(["MIT","Apache-2.0","BSD-2-Clause","BSD-3-Clause","ISC"])}).strict(),
   kind: z.literal("prompt_injection"),
   rules: z.array(detectionFeedRuleSchema).min(1).max(64),
@@ -35,3 +41,9 @@ export const detectionFeedEnvelopeSchema = z.object({bundle:z.string().min(1).ma
 export type DetectionFeed = z.infer<typeof detectionFeedSchema>;
 export type DetectionFeedRule = z.infer<typeof detectionFeedRuleSchema>;
 export type DetectionFeedEnvelope = z.infer<typeof detectionFeedEnvelopeSchema>;
+
+/** Feed rules with their RE2 programs compiled once per verified snapshot, never per call. */
+export type CompiledDetectionFeedRule = DetectionFeedRule & { readonly compiled: readonly RE2JS[] };
+export function compileDetectionFeedRules(rules: readonly DetectionFeedRule[]): readonly CompiledDetectionFeedRule[] {
+  return Object.freeze(rules.map(r=>Object.freeze({...r,compiled:Object.freeze(r.patterns.map(p=>RE2JS.compile(p,r.caseInsensitive?RE2JS.CASE_INSENSITIVE:0)))})));
+}

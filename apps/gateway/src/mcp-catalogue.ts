@@ -111,20 +111,18 @@ export type BundleVerdict =
 
 /** Verify FIRST, parse second: nothing in an unverified bundle is read beyond its byte length. */
 export function verifyBundle(body: z.infer<typeof importBundleBodySchema>, keyring: Map<string, KeyObject> | { error: string }): BundleVerdict {
-  if (!(keyring instanceof Map)) return { ok: false, code: "keyring_invalid", detail: keyring.error };
-  if (keyring.size === 0) {
-    return {
-      ok: false,
-      code: "no_keyring",
-      detail: `no MCP catalogue bundle key is configured (${MCP_CATALOGUE_BUNDLE_KEYS_ENV}); every bundle is refused until one is`,
-    };
-  }
-  const bytes = Buffer.from(body.bundle, "utf8");
-  if (bytes.length > MCP_CATALOGUE_BUNDLE_MAX_BYTES) return { ok: false, code: "too_large", detail: `the bundle exceeds ${MCP_CATALOGUE_BUNDLE_MAX_BYTES} bytes` };
-  const key = keyring.get(body.keyId);
-  if (!key) return { ok: false, code: "unknown_key", detail: `key '${body.keyId}' is not in the MCP catalogue bundle keyring` };
+  // the shared verifier owns the keyring, size, key-id and signature checks; only the messages are catalogue-specific
   const signatureVerdict = verifySignedBundle(body, keyring, MCP_CATALOGUE_BUNDLE_MAX_BYTES);
-  if (!signatureVerdict.ok) return { ok: false, code: "bad_signature", detail: `the bundle does not verify under key '${body.keyId}'` };
+  if (!signatureVerdict.ok) {
+    const detail: Record<typeof signatureVerdict.code, string> = {
+      keyring_invalid: keyring instanceof Map ? "the MCP catalogue bundle keyring is invalid" : keyring.error,
+      no_keyring: `no MCP catalogue bundle key is configured (${MCP_CATALOGUE_BUNDLE_KEYS_ENV}); every bundle is refused until one is`,
+      too_large: `the bundle exceeds ${MCP_CATALOGUE_BUNDLE_MAX_BYTES} bytes`,
+      unknown_key: `key '${body.keyId}' is not in the MCP catalogue bundle keyring`,
+      bad_signature: `the bundle does not verify under key '${body.keyId}'`,
+    };
+    return { ok: false, code: signatureVerdict.code, detail: detail[signatureVerdict.code] };
+  }
   let json: unknown;
   try {
     json = JSON.parse(body.bundle) as unknown;
@@ -133,7 +131,7 @@ export function verifyBundle(body: z.infer<typeof importBundleBodySchema>, keyri
   }
   const parsed = mcpCatalogueBundleSchema.safeParse(json);
   if (!parsed.success) return { ok: false, code: "malformed", detail: `the signed bundle is not a ${MCP_CATALOGUE_BUNDLE_FORMAT} document` };
-  return { ok: true, bundle: parsed.data, digest: createHash("sha256").update(bytes).digest("hex"), keyId: body.keyId };
+  return { ok: true, bundle: parsed.data, digest: signatureVerdict.digest, keyId: body.keyId };
 }
 
 // ---------------------------------------------------------------------------
