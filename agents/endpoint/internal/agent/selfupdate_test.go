@@ -40,10 +40,23 @@ func (k edKey) pin() enforce.PinnedKey {
 	return enforce.PinnedKey{KeyID: k.id, X: base64.RawURLEncoding.EncodeToString(k.key.Public().(ed25519.PublicKey))}
 }
 
+// sign signs the bare payload (a release manifest).
 func (k edKey) sign(t *testing.T, payload any) []byte {
 	t.Helper()
+	return k.signIn(t, nil, payload)
+}
+
+// signDirective signs an update directive over its domain and the payload, as the gateway does (#1033).
+func (k edKey) signDirective(t *testing.T, payload any) []byte {
+	t.Helper()
+	return k.signIn(t, update.DirectiveSignatureDomain, payload)
+}
+
+func (k edKey) signIn(t *testing.T, domain []byte, payload any) []byte {
+	t.Helper()
 	p, _ := json.Marshal(payload)
-	b, _ := json.Marshal(enforce.Envelope{KeyID: k.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(k.key, p))})
+	signed := append(append([]byte{}, domain...), p...)
+	b, _ := json.Marshal(enforce.Envelope{KeyID: k.id, Payload: base64.StdEncoding.EncodeToString(p), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(k.key, signed))})
 	return b
 }
 
@@ -110,7 +123,7 @@ func (u *updateFixture) spool(t *testing.T, version string, bin []byte, signedBi
 	h := sha256.Sum256(signedBin)
 	m := update.Manifest{Schema: update.SchemaManifest, Version: version, IssuedAt: now, Targets: []update.Target{{OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: hex.EncodeToString(h[:]), Length: int64(len(signedBin))}}}
 	sp := u.opts.Paths.SpoolDir
-	os.WriteFile(filepath.Join(sp, SpoolDirective), u.policy.sign(t, d), 0o644)
+	os.WriteFile(filepath.Join(sp, SpoolDirective), u.policy.signDirective(t, d), 0o644)
 	os.WriteFile(filepath.Join(sp, SpoolManifest), u.release.sign(t, m), 0o644)
 	os.WriteFile(filepath.Join(sp, SpoolBinary), bin, 0o644)
 }
@@ -204,6 +217,12 @@ func TestSelfUpdateRefusals(t *testing.T) {
 		}, outcome: UpdateRefused, code: update.CodeWrongDevice},
 		"an unsigned directive": {version: "1.1.0", bin: good, signed: good, prep: func(t *testing.T, u *updateFixture) {
 			os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective), []byte(`{"keyId":"x","payload":"","signature":""}`), 0o644)
+		}, outcome: UpdateRefused, code: update.CodeDirectiveInvalid},
+		// #1033: a directive signed over the bare payload (as a policy is) is no update directive
+		"a directive signed over the bare payload": {version: "1.1.0", bin: good, signed: good, prep: func(t *testing.T, u *updateFixture) {
+			now := time.Now().UTC()
+			d := update.Directive{Schema: update.SchemaDirective, DeviceID: u.deviceID, RolloutID: "9a6c1f2e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", TargetVersion: "1.1.0", IssuedAt: now.Add(-time.Minute), NotAfter: now.Add(time.Hour)}
+			os.WriteFile(filepath.Join(u.opts.Paths.SpoolDir, SpoolDirective), u.policy.sign(t, d), 0o644)
 		}, outcome: UpdateRefused, code: update.CodeDirectiveInvalid},
 	} {
 		t.Run(name, func(t *testing.T) {

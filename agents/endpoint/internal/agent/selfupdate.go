@@ -36,16 +36,8 @@ const (
 	UpdateAlreadyAtTop = "up_to_date"
 )
 
-// UpdateResult is the root updater's outcome.
-type UpdateResult struct {
-	Schema      string `json:"schema"`
-	Outcome     string `json:"outcome"`
-	Code        string `json:"code,omitempty"`
-	RolloutID   string `json:"rolloutId,omitempty"`
-	FromVersion string `json:"fromVersion"`
-	ToVersion   string `json:"toVersion,omitempty"`
-	At          string `json:"at"`
-}
+// UpdateResult is the root updater's outcome (the wire type, so the result file and the report are one shape).
+type UpdateResult = contract.UpdateResult
 
 // HealthReport is what `regulait-agent health` prints: the binary starts, reads its config and knows its version.
 type HealthReport struct {

@@ -40,7 +40,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { ENDPOINT_ROLLOUT_MACHINE as ROLLOUT_MACHINE, ENDPOINT_ROLLOUT_STAGE_MACHINE as ROLLOUT_STAGE_MACHINE, STATE_MACHINES } from "@regulait/shared";
-import { haltThresholdRelaxStepUp, selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
+import { haltThresholdRelaxStepUp, rolloutDecisionStepUp, selfUpdateRelaxStepUp } from "./endpoint-fleet-routes.js";
 import { hashToken } from "./token-hash.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
@@ -63,6 +63,7 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let memberKey: { authorization: string };
 let adminId: string;
+let admin2Id: string;
 const restores: Array<() => Promise<void>> = [];
 const sourceIds: string[] = [];
 const groupIds: string[] = [];
@@ -95,7 +96,16 @@ async function selfUpdateOn(groupId: string) {
   expect(r.statusCode, r.body).toBe(200);
 }
 const settingsUrl = (groupId: string) => `/v1/endpoint-device-groups/${groupId}/fleet-settings`;
-const act = (rolloutId: string, action: string) => inject("POST", `/v1/discovery/update-rollouts/${rolloutId}/${action}`, AUTH, {});
+/** a rollout action by a signed-in admin (slice 1c: a person, never the bootstrap credential) */
+const act = async (rolloutId: string, action: string, who?: string) => {
+  const g = await grantStepUpForTest(db, who ?? adminId, haltThresholdRelaxStepUp(randomUUID(), 2));
+  return app.inject({ method: "POST", url: `/v1/discovery/update-rollouts/${rolloutId}/${action}`, ...sessionRequest(g), payload: {} });
+};
+/** a start or resume decision by the second admin, with the step-up bound to it */
+const decide = async (rolloutId: string, decision: "approve_start" | "reject_start" | "approve_resume" | "reject_resume", who?: string) => {
+  const g = await grantStepUpForTest(db, who ?? admin2Id, rolloutDecisionStepUp(rolloutId, decision));
+  return app.inject({ method: "POST", url: `/v1/discovery/update-rollouts/${rolloutId}/${decision}`, ...stepUpRequest(g), payload: {} });
+};
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -117,6 +127,9 @@ beforeAll(async () => {
   expect(a.statusCode, a.body).toBe(201);
   adminId = a.json().id as string;
   await db.update(users).set({ isAdmin: true }).where(eq(users.id, adminId));
+  const a2 = await inject("POST", "/v1/users", AUTH, { email: `e41-admin2-${RUN}@example.com`, displayName: "e41 admin 2" });
+  admin2Id = a2.json().id as string;
+  await db.update(users).set({ isAdmin: true }).where(eq(users.id, admin2Id));
 }, 120_000);
 
 afterAll(async () => {
@@ -137,9 +150,14 @@ describe("ADR-0360: the declared lifecycles", () => {
     // ADR-0348: registered, so GET /v1/state-machines lists them and the CHECK-equality test covers both columns
     expect(STATE_MACHINES[ROLLOUT_MACHINE.def.id]).toBe(ROLLOUT_MACHINE);
     expect(STATE_MACHINES[ROLLOUT_STAGE_MACHINE.def.id]).toBe(ROLLOUT_STAGE_MACHINE);
-    expect(ROLLOUT_MACHINE.sourcesOf("start")).toEqual(["draft"]);
-    expect(ROLLOUT_MACHINE.sourcesOf("resume")).toEqual(["paused", "halted"]);
-    expect(ROLLOUT_MACHINE.sourcesOf("abort")).toEqual(["draft", "running", "paused", "halted"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("request_start")).toEqual(["draft"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("approve_start")).toEqual(["start_requested"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("request_resume")).toEqual(["paused", "halted"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("approve_resume")).toEqual(["resume_requested"]);
+    // slice 1c: the decisions are a second person's, and an undecided request expires on its own
+    for (const e of ["approve_start", "reject_start", "approve_resume", "reject_resume"] as const) expect(ROLLOUT_MACHINE.def.transitions[e].by).toEqual(["approver"]);
+    for (const e of ["expire_start", "expire_resume", "halt"] as const) expect(ROLLOUT_MACHINE.def.transitions[e].by).toEqual(["system"]);
+    expect(ROLLOUT_MACHINE.sourcesOf("abort")).toEqual(["draft", "start_requested", "running", "paused", "halted", "resume_requested"]);
     expect(ROLLOUT_STAGE_MACHINE.sourcesOf("finish")).toEqual(["active"]);
     const d = ROLLOUT_MACHINE.describe("completed");
     expect(d.terminal).toBe(true);
@@ -159,7 +177,7 @@ describe("ADR-0360: the fleet routes", () => {
       ["GET", `/v1/discovery/sources/${s}/update-rollouts`],
       ["POST", `/v1/discovery/sources/${s}/update-rollouts`],
       ["GET", `/v1/discovery/update-rollouts/${id}`],
-      ["POST", `/v1/discovery/update-rollouts/${id}/start`],
+      ["POST", `/v1/discovery/update-rollouts/${id}/request_start`],
       ["POST", `/v1/discovery/sources/${s}/one-line-enrolments`],
     ] as const) {
       expect((await inject(m, u, memberKey, m === "GET" ? undefined : {})).statusCode, `${m} ${u}`).toBe(403);
@@ -212,23 +230,29 @@ describe("ADR-0360: staged rollouts", () => {
     expect(c.json().rollout.state).toBe("draft");
     expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.3.0", stages: [g1] })).json().error).toBe("rollout_open");
     // self-update off in both stage groups: start is blocked, and names them
-    const blocked = await act(id, "start");
+    const blocked = await act(id, "request_start");
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toMatchObject({ error: "transition_blocked" });
     expect(blocked.json().detail).toMatch(/self-update is off for device groups 'e41-canary-.*', 'e41-broad-/);
     expect((await act(id, "pause")).json().error).toBe("illegal_transition");
     // on in one group only: still blocked, naming the other
     await selfUpdateOn(g1);
-    const half = await act(id, "start");
+    const half = await act(id, "request_start");
     expect(half.json().error).toBe("transition_blocked");
     expect(half.json().detail).toMatch(/self-update is off for device group 'e41-broad-/);
     await selfUpdateOn(g2);
-    const started = await act(id, "start");
+    const asked = await act(id, "request_start");
+    expect(asked.statusCode, asked.body).toBe(200);
+    expect(asked.json().rollout).toMatchObject({ state: "start_requested", approval: { requestedBy: adminId, decidedBy: null } });
+    expect(asked.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["pending", "pending"]);
+    const started = await decide(id, "approve_start");
     expect(started.statusCode, started.body).toBe(200);
+    expect(started.json().rollout).toMatchObject({ state: "running", approval: { requestedBy: adminId, decidedBy: admin2Id } });
     expect(started.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["active", "pending"]);
     expect((await act(id, "complete")).json().error).toBe("transition_blocked");
     expect((await act(id, "pause")).json().rollout.state).toBe("paused");
-    expect((await act(id, "resume")).json().rollout.state).toBe("running");
+    expect((await act(id, "request_resume")).json().rollout.state).toBe("resume_requested");
+    expect((await decide(id, "approve_resume")).json().rollout.state).toBe("running");
     const adv = await act(id, "advance");
     expect(adv.json().rollout.stages.map((x: { state: string }) => x.state)).toEqual(["done", "active"]);
     expect((await act(id, "advance")).json().error).toBe("transition_blocked");
@@ -240,7 +264,16 @@ describe("ADR-0360: staged rollouts", () => {
     expect((await act(id, "halt")).statusCode).toBe(400);
     const audited = await db.select({ ruleId: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'rolloutId' = ${id}`);
     expect(new Set(audited.map((a) => a.ruleId))).toEqual(
-      new Set(["endpoint-update-rollout-created", "endpoint-update-rollout-start", "endpoint-update-rollout-pause", "endpoint-update-rollout-resume", "endpoint-update-rollout-advance", "endpoint-update-rollout-complete"]),
+      new Set([
+        "endpoint-update-rollout-created",
+        "endpoint-update-rollout-request-start",
+        "endpoint-update-rollout-approve-start",
+        "endpoint-update-rollout-pause",
+        "endpoint-update-rollout-request-resume",
+        "endpoint-update-rollout-approve-resume",
+        "endpoint-update-rollout-advance",
+        "endpoint-update-rollout-complete",
+      ]),
     );
     // a new rollout may open once the last one is terminal
     expect((await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "0.3.0", stages: [g2] })).statusCode).toBe(201);
@@ -377,5 +410,63 @@ describe("ADR-0360: one-line enrolment", () => {
     await db.delete(endpointDeviceGroups).where(eq(endpointDeviceGroups.id, g));
     const [after] = await db.select({ g: endpointEnrolmentTokens.deviceGroupId }).from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, token.id));
     expect(after?.g).toBeNull();
+  });
+});
+
+describe("ADR-0360 slice 1c: a start or resume is decided by two signed-in people", () => {
+  it("refuses the bootstrap credential, the requester deciding, and a write that skips the requester", async () => {
+    const s = await agentSource();
+    const g = await group("two-people");
+    await selfUpdateOn(g);
+    const id = (await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "2.0.0", stages: [g] })).json().rollout.id as string;
+    // no person behind the bootstrap credential: nothing to compare a decider with
+    const boot = await inject("POST", `/v1/discovery/update-rollouts/${id}/request_start`, AUTH, {});
+    expect(boot.statusCode).toBe(403);
+    expect(boot.json().error).toBe("user_required");
+    expect((await act(id, "request_start")).json().rollout.state).toBe("start_requested");
+    // the requester cannot approve, even with a step-up bound to the decision; nothing moves
+    const self = await decide(id, "approve_start", adminId);
+    expect(self.statusCode).toBe(403);
+    expect(self.json().error).toBe("caller_cannot_decide");
+    // a step-up for the other decision is refused
+    const g2 = await grantStepUpForTest(db, admin2Id, rolloutDecisionStepUp(id, "reject_start"));
+    expect((await app.inject({ method: "POST", url: `/v1/discovery/update-rollouts/${id}/approve_start`, ...stepUpRequest(g2), payload: {} })).statusCode).toBe(422);
+    const [still] = await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id));
+    expect(still).toMatchObject({ state: "start_requested", approvalRequestedBy: adminId, approvalDecidedBy: null });
+    // the CHECKs: the decider is never the requester; a waiting rollout names its requester
+    await expect(db.update(endpointUpdateRollouts).set({ approvalDecidedBy: adminId }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    await expect(db.update(endpointUpdateRollouts).set({ approvalRequestedBy: null }).where(eq(endpointUpdateRollouts.id, id))).rejects.toThrow();
+    // the second admin rejects: back to draft, nothing was offered
+    const rej = await decide(id, "reject_start");
+    expect(rej.statusCode, rej.body).toBe(200);
+    expect(rej.json().rollout).toMatchObject({ state: "draft", approval: { requestedBy: adminId, decidedBy: admin2Id } });
+    expect(rej.json().rollout.stages[0].state).toBe("pending");
+    expect((await act(id, "abort")).statusCode).toBe(200);
+  });
+
+  it("expires a start or resume nobody decides, back to where it was asked from", async () => {
+    const { expireEndpointUpdates } = await import("./endpoint-update-delivery.js");
+    const s = await agentSource();
+    const g = await group("expiry");
+    await selfUpdateOn(g);
+    const id = (await inject("POST", `/v1/discovery/sources/${s}/update-rollouts`, AUTH, { targetVersion: "2.1.0", stages: [g] })).json().rollout.id as string;
+    expect((await act(id, "request_start")).statusCode).toBe(200);
+    // a fresh request is left alone
+    await runWithRlsSystem("system_task", "test", () => expireEndpointUpdates(db));
+    expect((await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id)))[0]!.state).toBe("start_requested");
+    await db.update(endpointUpdateRollouts).set({ approvalRequestedAt: sql`now() - interval '25 hours'` }).where(eq(endpointUpdateRollouts.id, id));
+    await runWithRlsSystem("system_task", "test", () => expireEndpointUpdates(db));
+    expect((await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id)))[0]!.state).toBe("draft");
+    // resume: running → paused → resume_requested → (expired) paused
+    expect((await act(id, "request_start")).statusCode).toBe(200);
+    expect((await decide(id, "approve_start")).statusCode).toBe(200);
+    expect((await act(id, "pause")).statusCode).toBe(200);
+    expect((await act(id, "request_resume")).json().rollout.state).toBe("resume_requested");
+    await db.update(endpointUpdateRollouts).set({ approvalRequestedAt: sql`now() - interval '25 hours'` }).where(eq(endpointUpdateRollouts.id, id));
+    await runWithRlsSystem("system_task", "test", () => expireEndpointUpdates(db));
+    expect((await db.select().from(endpointUpdateRollouts).where(eq(endpointUpdateRollouts.id, id)))[0]!.state).toBe("paused");
+    const rules = (await db.select({ r: auditLog.ruleId }).from(auditLog).where(sql`${auditLog.detail}->>'rolloutId' = ${id}`)).map((x) => x.r);
+    expect(rules).toEqual(expect.arrayContaining(["endpoint-update-rollout-expire-start", "endpoint-update-rollout-expire-resume"]));
+    expect((await act(id, "abort")).statusCode).toBe(200);
   });
 });

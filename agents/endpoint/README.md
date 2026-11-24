@@ -68,6 +68,19 @@ written to the spool's `result.json`. On macOS the binary is universal, so a rel
 `darwin/amd64` with the same digest. A package-managed binary replaced this way differs from the package database until
 the next package upgrade; fleets upgraded by MDM can leave self-update off (the default).
 
+The directive is signed over its own domain (`regulait.endpoint-update-directive/1` and a NUL, then the payload, #1033),
+so a policy or a removal directive signed by the same device-policy key never verifies as an update directive.
+
+**Delivery (slice 1c).** Each `run-once` cycle of the per-user agent, only when both keyrings are pinned, first reports
+the spool's `result.json` (root's 0644 file only: a link, another owner, more than 4 KiB or an unknown member is refused)
+to `POST /v1/endpoint-agent/update-results` as `{attemptId, result}`, with the attempt id kept in its own state dir
+(`update-attempt.json`), and removes it on `200` or `409 already_reported` (the digest is remembered, since the sticky
+spool may not let it remove root's file). While a result waits to be reported, no new offer is taken. It then fetches
+`GET /v1/endpoint-agent/update`; an offer's binary is streamed from `/v1/endpoint-agent/update/binary` into a temporary
+spool file, checked against the offered length and SHA-256 and renamed into place, then the release manifest and the
+directive (byte for byte as received) are written, the directive last. It verifies no signature (the root updater
+does), writes only the three spool names, never through a link, and logs fixed codes only.
+
 ## On-device enforcement hooks (ADR-0298, ADR-0330; default off)
 
 `regulait-agent hook AGENT -policy FILE` answers one MCP tool-call hook for AGENT = `claude-code`, `cursor`,

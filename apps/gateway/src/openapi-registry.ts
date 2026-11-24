@@ -1160,6 +1160,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0331: the agent's signed add-on removal directives and their outcomes
   "GET /v1/endpoint-agent/directives": "internal",
   "POST /v1/endpoint-agent/directive-outcomes": "internal",
+  "GET /v1/endpoint-agent/update": "internal",
+  "GET /v1/endpoint-agent/update/binary": "internal",
+  "POST /v1/endpoint-agent/update-results": "internal",
   // ADR-0261 (P37): third-party security telemetry ingest. Internal: an admin surface plus an exporter-shaped route.
   "GET /v1/third-party-ingest/sources": "internal",
   "POST /v1/third-party-ingest/sources": "internal",
@@ -2798,6 +2801,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/endpoint-agent/decisions": "shadow-ai",
   "GET /v1/endpoint-agent/directives": "shadow-ai",
   "POST /v1/endpoint-agent/directive-outcomes": "shadow-ai",
+  "GET /v1/endpoint-agent/update": "shadow-ai",
+  "GET /v1/endpoint-agent/update/binary": "shadow-ai",
+  "POST /v1/endpoint-agent/update-results": "shadow-ai",
   "GET /v1/third-party-ingest/sources": "shadow-ai",
   "POST /v1/third-party-ingest/sources": "shadow-ai",
   "PUT /v1/third-party-ingest/sources/:sourceId/enabled": "shadow-ai",

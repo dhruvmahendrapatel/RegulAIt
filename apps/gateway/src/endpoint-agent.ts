@@ -53,6 +53,10 @@ export const ENDPOINT_AGENT_PATHS = {
   // ADR-0331: the agent fetches its signed removal directives and reports each one's outcome
   directives: "/v1/endpoint-agent/directives",
   directiveOutcomes: "/v1/endpoint-agent/directive-outcomes",
+  // ADR-0360 slice 1c: the signed agent update offer, its binary and the root updater's result (endpoint-update-delivery.ts)
+  update: "/v1/endpoint-agent/update",
+  updateBinary: "/v1/endpoint-agent/update/binary",
+  updateResults: "/v1/endpoint-agent/update-results",
 } as const;
 
 /** the routes an endpoint agent's self token reaches, and nothing else (`via: "endpoint-agent"`) */
@@ -63,6 +67,9 @@ export const ENDPOINT_AGENT_TOKEN_ROUTES: ReadonlySet<string> = new Set([
   `POST ${ENDPOINT_AGENT_PATHS.credentials}`,
   `GET ${ENDPOINT_AGENT_PATHS.directives}`,
   `POST ${ENDPOINT_AGENT_PATHS.directiveOutcomes}`,
+  `GET ${ENDPOINT_AGENT_PATHS.update}`,
+  `GET ${ENDPOINT_AGENT_PATHS.updateBinary}`,
+  `POST ${ENDPOINT_AGENT_PATHS.updateResults}`,
 ]);
 
 /** the two routes that take no access token: a bulk enrolment token, then a device ticket, checked in-route */

@@ -61,6 +61,8 @@ type Result struct {
 	Rotated  bool
 	// Directives is the add-on removal sync (ADR-0331); nil when it did not run.
 	Directives *DirectiveRun
+	// Update is the self-update spool sync (ADR-0360 §4); its Offer is not_configured unless both keyrings are pinned.
+	Update *UpdateRun
 }
 
 func clampInterval(seconds int) time.Duration {
@@ -236,6 +238,8 @@ func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *Sta
 	} else {
 		out.Directives = run
 	}
+	// ADR-0360 §4: carry the update offer into the spool and the root updater's result back; never fails the cycle
+	out.Update = c.syncUpdate(ctx, cl, cfg)
 	return out, nil
 }
 

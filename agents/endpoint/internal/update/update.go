@@ -4,7 +4,8 @@
 // the installed binary's health check fails.
 //
 // Trust. Both documents are the device-policy signer's envelope ({keyId, payload, signature}: Ed25519 over the exact
-// payload bytes), verified by enforce.VerifyEnvelope against a pinned keyring: the directive against the device-policy
+// payload bytes, and for the directive over DirectiveSignatureDomain first), verified by enforce.VerifyEnvelope(InDomain)
+// against a pinned keyring: the directive against the device-policy
 // keys, the manifest against the separate release keys (one key per purpose; the release key stays with the release
 // pipeline). The files arrive through a spool any local user can write, so nothing here trusts them until verified, and
 // the binary is hashed only after it is copied to a root-only path, so a later change to the spool cannot change what
@@ -148,13 +149,19 @@ func Newer(candidate, current string) bool {
 	return semver.Compare("v"+candidate, "v"+current) > 0
 }
 
-// VerifyDirective verifies a directive envelope against the device-policy keys and checks that it names this device
-// and is fresh.
+// DirectiveSignatureDomain is what an update directive's signature covers before the payload bytes: its schema and a
+// NUL (#1033: every directive the device-policy key signs is signed over its own domain, so a policy or an ADR-0331
+// removal directive never verifies as an update directive, nor the reverse). The gateway signs the same bytes
+// (apps/gateway/src/endpoint-update-delivery.ts: UPDATE_DIRECTIVE_SIGNATURE_DOMAIN).
+var DirectiveSignatureDomain = []byte(SchemaDirective + "\x00")
+
+// VerifyDirective verifies a directive envelope, signed over DirectiveSignatureDomain and the payload, against the
+// device-policy keys and checks that it names this device and is fresh.
 func VerifyDirective(raw []byte, keys enforce.Keyring, deviceID string, now time.Time) (*Directive, error) {
 	if len(raw) > MaxDirectiveBytes {
 		return nil, fail(CodeDirectiveInvalid, "directive too large")
 	}
-	payload, err := enforce.VerifyEnvelope(raw, keys)
+	payload, err := enforce.VerifyEnvelopeInDomain(raw, keys, DirectiveSignatureDomain)
 	if err != nil {
 		return nil, fail(CodeDirectiveInvalid, "%v", err)
 	}

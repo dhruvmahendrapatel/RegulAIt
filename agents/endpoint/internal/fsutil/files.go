@@ -99,15 +99,55 @@ func WriteAtomic(path string, data []byte, mode os.FileMode, gid int, sync bool)
 	return nil
 }
 
-// WriteTemp writes data to a new exclusive temporary file beside path, with its mode (and group, where gid >= 0)
-// set before it is closed, and returns its name; the caller renames or links it into place. sync flushes it to disk
-// first. On any error the temporary file is removed.
-func WriteTemp(path string, data []byte, mode os.FileMode, gid int, sync bool) (string, error) {
+// StreamAtomic is WriteAtomic for content too large to hold in memory: write fills a new exclusive temporary file
+// beside path (created without following a link), which is synced, given mode and renamed into place only when
+// write succeeds. A rename replaces a link at path rather than following it. On any error the temporary file is
+// removed and path is unchanged.
+func StreamAtomic(path string, mode os.FileMode, write func(io.Writer) error) error {
+	tmp, err := tempName(path)
+	if err != nil {
+		return err
+	}
+	f, err := createExclusive(tmp, mode)
+	if err != nil {
+		return err
+	}
+	err = write(f)
+	if err == nil {
+		err = f.Sync()
+	}
+	if err == nil {
+		err = setOwnership(f, -1, mode)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func tempName(path string) (string, error) {
 	var r [8]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		return "", err
 	}
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"."+hex.EncodeToString(r[:])+".tmp")
+	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"."+hex.EncodeToString(r[:])+".tmp"), nil
+}
+
+// WriteTemp writes data to a new exclusive temporary file beside path, with its mode (and group, where gid >= 0)
+// set before it is closed, and returns its name; the caller renames or links it into place. sync flushes it to disk
+// first. On any error the temporary file is removed.
+func WriteTemp(path string, data []byte, mode os.FileMode, gid int, sync bool) (string, error) {
+	tmp, err := tempName(path)
+	if err != nil {
+		return "", err
+	}
 	f, err := createExclusive(tmp, mode)
 	if err != nil {
 		return "", err
