@@ -372,18 +372,31 @@ is faster and loses less.
        - { name: work, emptyDir: { sizeLimit: 20Gi } }
        - { name: ca, configMap: { name: rds-ca } }
    EOF
-   kubectl -n regulait wait --for=condition=Ready pod/db-restore
+   kubectl -n regulait wait --for=condition=Ready pod/db-restore --timeout=5m   # the first image pull can be slow
    kubectl -n regulait cp regulait.dump db-restore:/work/regulait.dump
    ```
 
    Run step 3's checks in the pod (`kubectl -n regulait exec db-restore -- pg_restore --list /work/regulait.dump`
-   and so on). Then stop the gateway, so nothing writes while the data is replaced, and restore:
+   and so on). Then stop the gateway, so nothing writes while the data is replaced, and restore.
+
+   Stop it through the installation, not the Deployment. The operator owns the gateway Deployment and resets its
+   replica count from `spec.replicas` on every reconcile, so `kubectl scale` would bring the gateway back during the
+   restore. Use your installation's name if it is not `regulait`:
 
    ```bash
-   kubectl -n regulait scale deploy/regulait-gateway --replicas=0
+   kubectl -n regulait patch regulaitinstallation regulait --type=merge -p '{"spec":{"replicas":0}}'
+   kubectl -n regulait wait --for=delete pod \
+     -l app.kubernetes.io/instance=regulait,app.kubernetes.io/component=gateway --timeout=5m
    kubectl -n regulait exec db-restore -- sh -c \
      'pg_restore --clean --if-exists --no-owner --single-transaction -d "$DATABASE_URL" /work/regulait.dump'
    ```
+
+   - **Same version.** Restore with the RegulAIt version that took the dump. `--clean` drops only the objects in the
+     dump, so tables that a later migration added would stay behind while the migration history goes back. If the
+     dump is older than the running release, roll the release back first (*Upgrades and rollback*).
+   - **The nightly backup.** If the backup CronJob fires during the restore, it dumps the database as it was before
+     the restore, because the restore runs in one transaction. That is harmless, but restoring outside the
+     schedule (`17 2 * * *` UTC by default) keeps the bucket's history easy to read.
 
    `--single-transaction` means a failed restore changes nothing. To rehearse first, restore into a scratch database
    on the same instance (`createdb` one, put its name in the URL, drop it afterwards) and leave the gateway running.
@@ -391,11 +404,12 @@ is faster and loses less.
    was in the `regulait` Secret when the dump was taken. If the Secret still holds that key, change nothing. If it
    was recreated, put the recorded `DATA_KEY` (6.3) back under `data-key` before the gateway starts. Under a
    different key the gateway starts, but no stored credential decrypts, and they cannot be recovered.
-6. **Start and clean up.** Scale the gateway back up, check sign-in and one stored connector, then delete the pod,
-   the ConfigMap and the local copy of the dump:
+6. **Start and clean up.** Start the gateway again through the installation, check sign-in and one stored
+   connector, then delete the pod, the ConfigMap and the local copy of the dump:
 
    ```bash
-   kubectl -n regulait scale deploy/regulait-gateway --replicas=<previous count>
+   kubectl -n regulait patch regulaitinstallation regulait --type=merge -p '{"spec":{"replicas":1}}'
+   kubectl -n regulait rollout status deploy/regulait-gateway --timeout=10m
    kubectl -n regulait delete pod db-restore && kubectl -n regulait delete configmap rds-ca
    shred -u regulait.dump 2>/dev/null || rm -f regulait.dump
    ```
