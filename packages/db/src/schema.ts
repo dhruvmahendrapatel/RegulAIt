@@ -1614,6 +1614,11 @@ export const auditLog = pgTable(
         // needed.
         "git_connection",
         "pm_connection",
+        // ADR-0356: work handed to RegulAIt from the PM tool — a trigger's lifecycle, a PM identity link, a
+        // connection's trigger settings. Plain text column — no DDL needed.
+        "pm_work_trigger",
+        "pm_identity_link",
+        "pm_trigger_settings",
         // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
         // write time (the 400 on POST/PATCH /v1/servers) or at connect time
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
@@ -21361,6 +21366,111 @@ export const adoptionAnalyticsPolicy = pgTable(
 );
 export type AdoptionAnalyticsPolicyRow = typeof adoptionAnalyticsPolicy.$inferSelect;
 // ===== end ADR-0358 (lane E39) adoption analytics =====
+
+// ===== ADR-0356: work assigned from the PM tool (migration `pm_work_triggers`, numbered at merge) =====
+/**
+ * One row per PM connection that may start work from the PM tool. Admin-managed, OFF by default (ADR-0180): no row,
+ * or `enabled = false`, and every trigger signal on the connection is ignored. `agent_id` is the registry agent the work
+ * runs on (the triggering person must be entitled to it); `project_id` is the project the started workflow bills to.
+ */
+export const pmTriggerSettings = pgTable("pm_trigger_settings", {
+  connectionId: uuid("connection_id")
+    .primaryKey()
+    .references(() => pmConnections.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  agentId: uuid("agent_id")
+    .notNull()
+    .references(() => agents.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+  // ADR-0200 3NF exception (schema-validated configuration document): the agent's PM identities, the mechanisms and the
+  // change attributes, validated by @regulait/pm-provider's pmTriggerSettingsSchema on every write and read.
+  config: jsonb("config").notNull(),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type PmTriggerSettingsRow = typeof pmTriggerSettings.$inferSelect;
+
+/**
+ * The trust artifact (the ADR-0061 identity-link pattern): a PM identity is an ASSERTION until an admin binds it to an
+ * EXISTING enabled RegulAIt user. One PM identity per connection maps to one user and one user is reachable through
+ * one PM identity, so "who triggered it?" has one answer. Matched case-insensitively.
+ */
+export const pmIdentityLinks = pgTable(
+  "pm_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    // ADR-0200 3NF exception (verbatim external payload): the PM tool's own identity (a Jira accountId, an Azure DevOps
+    // identity id or unique name). It is the tool's key, not a RegulAIt reference.
+    pmUserId: text("pm_user_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    verifiedSource: text("verified_source", { enum: ["idp", "scim", "admin_asserted"] }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_identity_links_pm_user_uq").on(t.connectionId, sql`lower(${t.pmUserId})`),
+    uniqueIndex("pm_identity_links_user_uq").on(t.connectionId, t.userId),
+    index("pm_identity_links_user_idx").on(t.userId),
+    check("pm_identity_links_source_ck", sql`${t.verifiedSource} IN ('idp', 'scim', 'admin_asserted')`),
+  ],
+);
+export type PmIdentityLinkRow = typeof pmIdentityLinks.$inferSelect;
+
+/**
+ * One row per trigger: an item handed to RegulAIt from the PM tool. `state` moves only along
+ * @regulait/pm-provider's PM_TRIGGER_TRANSITIONS, by a compare-and-set update; the CHECK holds the same states. One
+ * item has at most one open trigger (received, accepted, running).
+ */
+export const pmWorkTriggers = pgTable(
+  "pm_work_triggers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    // ADR-0200 3NF exception (verbatim external payload): the PM tool's id for the item, as pm_links stores it.
+    externalId: text("external_id").notNull(),
+    mechanism: text("mechanism", { enum: ["assignment", "mention", "rule"] }).notNull(),
+    // ADR-0200 3NF exception (point-in-time evidence): the actor's PM identity AS THE DELIVERY ASSERTED IT, kept even
+    // when no link maps it (the denial's evidence). `user_id` is the mapped user, when there is one.
+    actorPmUserId: text("actor_pm_user_id"),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    state: text("state", {
+      enum: ["received", "accepted", "denied", "running", "written_back", "failed"],
+    })
+      .notNull()
+      .default("received"),
+    /** a short code for a denial or failure: not_linked, user_disabled, not_entitled, no_workflow, … */
+    outcomeCode: text("outcome_code"),
+    /** the plain-words explanation, written by the gateway (never PM-supplied text) */
+    outcomeDetail: text("outcome_detail"),
+    instanceId: uuid("instance_id").references(() => workflowInstances.id, { onDelete: "set null" }),
+    /** the S-03 delivery this trigger came from (pm_webhook_deliveries.content_sha256) */
+    deliveryContentSha256: text("delivery_content_sha256").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_work_triggers_open_item_uq")
+      .on(t.connectionId, t.externalId)
+      .where(sql`${t.state} IN ('received', 'accepted', 'running')`),
+    index("pm_work_triggers_conn_created_idx").on(t.connectionId, t.createdAt),
+    index("pm_work_triggers_instance_idx").on(t.instanceId),
+    index("pm_work_triggers_user_idx").on(t.userId),
+    check(
+      "pm_work_triggers_state_ck",
+      sql`${t.state} IN ('received', 'accepted', 'denied', 'running', 'written_back', 'failed')`,
+    ),
+    check("pm_work_triggers_mechanism_ck", sql`${t.mechanism} IN ('assignment', 'mention', 'rule')`),
+  ],
+);
+export type PmWorkTriggerRow = typeof pmWorkTriggers.$inferSelect;
+// ===== end ADR-0356 =====
 
 // ===== ADR-0366 (lane E52): rogue-agent containment =====
 import {

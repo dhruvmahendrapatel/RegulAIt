@@ -55,6 +55,11 @@ test.describe("UIS-01: the phone drawer", () => {
       expect(await inRail(), `Tab ${i + 1} landed in the closed rail`).toBe(false);
     }
 
+    // #1273: where the 25th Tab lands depends on how many home cards have rendered, so it is sometimes the skip link,
+    // which while focused is shown over the hamburger and takes the click. The hamburger is clicked as a pointer user
+    // does: first a neutral click moves keyboard focus off whatever the Tab loop reached.
+    await page.locator("body").click({ position: { x: 300, y: 700 } });
+    await expect(page.locator(".rg-skip-link")).not.toBeFocused();
     await hamburger.click();
     await expect(hamburger).toHaveAttribute("aria-expanded", "true");
     await expect(rail).not.toHaveAttribute("inert", "");
