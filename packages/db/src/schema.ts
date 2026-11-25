@@ -172,6 +172,8 @@ import {
   AGENT_RISK_PROOF_OUTCOMES,
   AGENT_RISK_PROOF_TRIGGERS,
   type ModalitySplit,
+  // ADR-0349: the one declared list of terminal workflow statuses (the open-instance index predicates below)
+  WORKFLOW_TERMINAL_STATUSES_SQL_LIST,
   // ADR-0322: the vendor usage pull run states, declared with their machine (ADR-0348)
   VENDOR_USAGE_PULL_RUN_STATUSES,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
@@ -3529,6 +3531,11 @@ export const workflowInstances = pgTable(
      * re-open. An executor captures it with its claim and commits its result
      * only if it is still current. */
     stageEntry: integer("stage_entry").notNull().default(0),
+    /** ADR-0349 slice 2 (start conflict): the PM tool's key for the work item this instance runs for, as the client
+     * gave it at start (at most 200 characters, CHECK). A verbatim external identifier (ADR-0200 exception: not a
+     * reference to a row we own). With template_ids and change->>'targetSystem' it is the start key: at most one
+     * OPEN instance per key (`workflow_instances_open_start_uq`). Null = no work item, no deduplication. */
+    workItemRef: text("work_item_ref"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3537,7 +3544,13 @@ export const workflowInstances = pgTable(
     // ADR-0283: built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), not by a migration statement
     index("workflow_instances_project_open_idx")
       .on(t.projectId)
-      .where(sql`${t.status} NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`),
+      .where(sql`${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
+    // ADR-0349 slice 2: one open instance per template SET (order-independent: regulait_workflow_template_set sorts
+    // the ids) + target + work item. Built CONCURRENTLY by runMigrations (CONCURRENT_INDEXES), NULLS NOT DISTINCT (a
+    // missing target is a value), only where a work item is set.
+    uniqueIndex("workflow_instances_open_start_uq")
+      .on(sql`regulait_workflow_template_set(${t.templateIds})`, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
+      .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
   ],
 );
 
@@ -4868,6 +4881,8 @@ export const LOCAL_SIGN_IN_MODES = ["enabled", "break_glass_only"] as const;
 export type LocalSignInMode = (typeof LOCAL_SIGN_IN_MODES)[number];
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
+/** ADR-0349 slice 2: a start whose template set + target + work item already has an open instance */
+export const WORKFLOW_START_CONFLICT_POLICIES = ["refuse", "use_existing"] as const;
 /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
  * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
  * the floor. There is deliberately no value that lowers it. */
@@ -5145,6 +5160,12 @@ export const orgSettings = pgTable(
      * is taken for whatever round is current when it is applied. A person in
      * the console (session) may always omit it. */
     checkReportsAllowUnbound: boolean("check_reports_allow_unbound").notNull().default(false),
+    /** ADR-0349 slice 2: what a start does when an OPEN instance already has its template set + target + work
+     * item. 'refuse' (default, ADR-0180) = 409 `workflow_start_conflict` naming the existing instance; 'use_existing'
+     * = the start answers with that instance instead. Relaxing it is a `settings_relax` step-up, audited. */
+    workflowStartConflictPolicy: text("workflow_start_conflict_policy", { enum: WORKFLOW_START_CONFLICT_POLICIES })
+      .notNull()
+      .default("refuse"),
     /** ADR-0022: master switch for approver delegation. ON = active
      * delegation windows widen the delegate's inbox and let them decide
      * on-behalf-of. OFF (the ADR-0181 default, migration 0156; was ON) =

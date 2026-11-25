@@ -46,6 +46,7 @@ import {
   type ApprovalTargetRef,
   type ConsentRetirementReason,
   type PreparedPiiApproval,
+  WORKFLOW_TERMINAL_STATUSES,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import {
@@ -221,7 +222,7 @@ export interface RetiredApproval {
 
 /** the workflow statuses under which attributed work is still "landing on" its
  * deploy targets — terminal instances no longer bind a mode context */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+const TERMINAL_INSTANCE_STATUSES: readonly string[] = WORKFLOW_TERMINAL_STATUSES;
 
 /**
  * A4 (ADR-0027): derive the SERVER-SIDE deploy context of an attributed call —

@@ -58,6 +58,7 @@ import {
   invokeAgentSchema,
   invokeConnectorSchema,
   reportChecksSchema,
+  startInstanceSchema,
   retireTemplateSchema,
 } from "@regulait/shared";
 import { routeAuthClass, type RouteAuthClass } from "./route-classes.js";
@@ -297,7 +298,11 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   },
 
   "GET /v1/workflows/instances": { summary: "Workflow instances." },
-  "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },
+  "POST /v1/workflows/instances": {
+    summary:
+      "Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.",
+    body: startInstanceSchema,
+  },
   "POST /v1/workflows/templates/:templateId/retire": {
     summary:
       "Retire a workflow template; the reason is recorded. Retiring the template that decides use-case sign-off " +

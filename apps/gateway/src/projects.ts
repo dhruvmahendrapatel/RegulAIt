@@ -64,6 +64,7 @@ import {
   type PiiHit,
   MODALITIES,
   type Modality,
+  WORKFLOW_TERMINAL_STATUSES,
   runContextId,
 } from "@regulait/shared";
 import { z } from "zod";
@@ -689,7 +690,7 @@ export async function requiredTemplateIdsFor(db: Db, projectId: string): Promise
 //     applied and never silently dropped.
 // ---------------------------------------------------------------------------
 
-const O1_TERMINAL_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+const O1_TERMINAL_STATUSES: readonly string[] = WORKFLOW_TERMINAL_STATUSES;
 
 export async function reapplyReclassificationToInFlight(
   db: Db,
