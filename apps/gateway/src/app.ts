@@ -659,6 +659,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerPmImportRoutes } from "./pm-import.js";
 import { handlePmTriggers, registerPmTriggerRoutes } from "./pm-triggers.js";
+import { syncPmWriteBacks } from "./pm-write-back.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
@@ -5015,6 +5016,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    * outcome rather than an exception: a bulk decision keeps deciding the other
    * items, and a chat decision writes its refusal audit row.
    */
+  /** ADR-0356 PR 2: after a sign-off decision, write a PM-triggered instance's progress back (post-commit; never fails
+   * the decision — a failure is logged and the scheduler sweep retries it) */
+  async function pmWriteBackAfterDecide(instanceId: string): Promise<void> {
+    await syncPmWriteBacks(db, opts.dataKey, instanceId).catch((err: unknown) =>
+      app.log.warn({ instanceId, err }, "PM write-back after a sign-off decision failed; the sweep retries it"));
+  }
   async function decideOneApproval(input: Parameters<typeof decideOneApprovalUnguarded>[0]): ReturnType<typeof decideOneApprovalUnguarded> {
     // ADR-0234 batch 2: the decision is authorized by the gateway's own decision logic below (named approver,
     // approver role, ADR-0168 review role, delegation, quorum, separation of duties), and a review-role member is not
@@ -5131,6 +5138,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         const finalDecision = decided.finalized.status === "approved" ? "approved" : "denied";
         await resumeBuilderStepsFor(db, decided.finalized, finalDecision, deciderUserId);
         pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
+        if (decided.finalized.instanceId) await pmWriteBackAfterDecide(decided.finalized.instanceId);
       }
       return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
     }
@@ -5875,6 +5883,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
     const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, outcome.updated, deciderUserId);
+    if (outcome.updated.instanceId) await pmWriteBackAfterDecide(outcome.updated.instanceId);
     return {
       ok: true as const,
       body: {
@@ -6308,7 +6317,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // approvals transaction above.
     // ADR-0189 R25: the one mirror (use-cases.ts), shared with the executor runs
     // no route mirrors; a use-case approval refused there is reported, not thrown
-    onInstanceTransition: (d, instanceId, actorUserId) => mirrorInstanceTransition(d, instanceId, actorUserId, app.log),
+    onInstanceTransition: async (d, instanceId, actorUserId) => {
+      const extra = await mirrorInstanceTransition(d, instanceId, actorUserId, app.log);
+      // ADR-0356 PR 2: a PM-triggered instance's progress, written back to its item (post-commit; never fails the move)
+      await syncPmWriteBacks(d, opts.dataKey, instanceId).catch((err: unknown) =>
+        app.log.warn({ instanceId, err }, "PM write-back after a workflow transition failed; the sweep retries it"));
+      return extra;
+    },
     // ADR-0189 R25 item 6: a submission or advance that would approve a use case
     // whose snapshot cannot be signed is refused 409 before anything commits.
     // Item 13 prevention: the executors call it too, with the status a stage
