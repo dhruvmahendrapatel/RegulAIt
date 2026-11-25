@@ -39,6 +39,9 @@ import {
   type CsvWindow,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { databaseNow } from "./db-clock.js";
+import { expiresAtSql, governMemoryWrite, resolveRunProvenance } from "./memory-governance.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
@@ -61,6 +64,7 @@ import {
   type PiiHit,
   MODALITIES,
   type Modality,
+  runContextId,
 } from "@regulait/shared";
 import { z } from "zod";
 import {
@@ -262,7 +266,7 @@ export function periodStart(now: Date = new Date()): Date {
 }
 
 /** True when a project's budget window is the current calendar month. */
-function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
+export function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
   return project.budgetPeriod === "monthly";
 }
 
@@ -270,7 +274,7 @@ function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
  * lifetime ('none') budget, but under a 'monthly' budget only while the latch's
  * period matches the current one — on a new month the latch is inert and
  * enforcement resumes. */
-function overageActive(project: ProjectRow, periodKey: string): boolean {
+export function overageActive(project: ProjectRow, periodKey: string): boolean {
   if (!project.overageApproved) return false;
   if (!isMonthly(project)) return true;
   return project.overageApprovedPeriod === periodKey;
@@ -301,7 +305,7 @@ export async function meteredSpendUsdBy(
 /** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
  * budget only spend within the current calendar-month window counts; otherwise
  * it is lifetime-cumulative (default, back-compat). */
-async function projectSpendUsd(
+export async function projectSpendUsd(
   db: Db,
   projectId: string,
   opts?: { monthly?: boolean; now?: Date },
@@ -310,7 +314,7 @@ async function projectSpendUsd(
   return (await meteredSpendUsdBy(db, "project_id", [projectId], since)).get(projectId) ?? 0;
 }
 
-async function escalateProjectBudget(
+export async function escalateProjectBudget(
   db: Db,
   project: ProjectRow,
   userId: string,
@@ -440,6 +444,11 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         : null,
     // ADR-0045 amendment 2026-11-14: model risk management is required if ANY framework requires it (OR: strictest wins)
     mrmRequiredBy: profiles.filter((p) => p.mrmRequired === true).map((p) => p.tag).sort(),
+    // ADR-0347: the agent memory lifetime CEILING — MIN composes (the shortest framework lifetime wins)
+    memoryTtlHours: profiles.reduce<number | null>(
+      (m, p) => (p.memoryTtlHours == null ? m : m == null ? p.memoryTtlHours : Math.min(m, p.memoryTtlHours)),
+      null,
+    ),
   };
 }
 
@@ -453,6 +462,13 @@ export async function projectMrmRequiredBy(db: Db, projectId: string | null | un
   const tags = await projectClassifications(db, projectId);
   if (tags.length === 0) return [];
   return effectiveCompliancePolicy(await profilesForTags(db, tags)).mrmRequiredBy;
+}
+
+/** ADR-0347: the shortest agent memory lifetime any classification on the project sets (null = none sets one) */
+export async function projectMemoryTtlHours(db: Db, projectId: string): Promise<number | null> {
+  const tags = await projectClassifications(db, projectId);
+  if (tags.length === 0) return null;
+  return effectiveCompliancePolicy(await profilesForTags(db, tags)).memoryTtlHours;
 }
 
 /** Exported for the pillar-3 infra layer (§8.3 cascade consumption): the
@@ -523,19 +539,27 @@ export type PiiMode = "block" | "warn" | "log" | "redact";
  * relaxation) maps to null = no enforcement. And the org default still never
  * overrides a matched compliance framework — it is the floor under the
  * frameworks, not a ceiling over them. */
+/**
+ * The PII mode the project's EXPLICIT compliance profiles give it: null when the dispatch is unattributed, the project
+ * is unknown or unclassified, or no profile matches its tags (where `projectPiiMode` falls back to the org default).
+ * ADR-0362's content-inspection floor reads this, so the org default never forces inspection on.
+ */
+export async function projectProfilePiiMode(db: Db, projectId: string | null | undefined): Promise<PiiMode | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return effectiveCompliancePolicy(profiles).piiMode;
+}
+
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
 ): Promise<PiiMode | null> {
-  const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
-  if (!projectId) return fallback();
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-  if (!project) return fallback();
-  const tags = (project.classifications ?? []) as string[];
-  if (tags.length === 0) return fallback();
-  const profiles = await profilesForTags(db, tags);
-  if (profiles.length === 0) return fallback();
-  return effectiveCompliancePolicy(profiles).piiMode;
+  return (await projectProfilePiiMode(db, projectId)) ?? orgDefaultPiiMode(await loadOrgSettings(db));
 }
 
 // --- §8.3 mcpDefaultMode enforcement (ADR-0023) ----------------------------
@@ -809,6 +833,24 @@ export type ProjectGate =
   | { ok: true; project: ProjectRow | null; spentUsd: number }
   | { ok: false; status: number; error: string; detail?: string };
 
+/** The project's effective budget: min(project budget, the compliance cascade's ceiling), the ceiling capping an
+ * unbudgeted project too (O2, ADR-0027). Shared by the pre-dispatch gate and the ADR-0313 paid-call reservation. */
+export async function effectiveProjectBudget(
+  db: Db,
+  project: ProjectRow,
+): Promise<{ tags: string[]; cascade: ReturnType<typeof effectiveCompliancePolicy>; ceilingUsd: number | null; effectiveBudgetUsd: number | null }> {
+  const tags = (project.classifications ?? []) as string[];
+  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
+  const ceilingUsd = cascade.maxProjectBudgetUsd ?? null;
+  const effectiveBudgetUsd =
+    project.budgetUsd == null
+      ? ceilingUsd
+      : ceilingUsd == null
+        ? project.budgetUsd
+        : Math.min(project.budgetUsd, ceilingUsd);
+  return { tags, cascade, ceilingUsd, effectiveBudgetUsd };
+}
+
 /** Pre-dispatch gate (pillar 5 enforcement): once a project's MEASURED spend
  * reaches its budget, further attributed dispatches are blocked until the
  * named approver sanctions the overage — same first-crossing-allowed
@@ -856,15 +898,7 @@ export async function preDispatchProjectGate(
   // when the org says warn_only — strictest wins; the org can never be
   // relaxed by a profile. Unclassified projects: cascade is empty, the gate
   // is byte-identical to before.
-  const tags = (project.classifications ?? []) as string[];
-  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
-  const ceilingUsd = cascade.maxProjectBudgetUsd;
-  const effectiveBudgetUsd =
-    project.budgetUsd == null
-      ? ceilingUsd
-      : ceilingUsd == null
-        ? project.budgetUsd
-        : Math.min(project.budgetUsd, ceilingUsd);
+  const { tags, cascade, ceilingUsd, effectiveBudgetUsd } = await effectiveProjectBudget(db, project);
   if (effectiveBudgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
@@ -1194,31 +1228,43 @@ export async function applyProjectPatch(
   return { ok: true, row: row!, changed };
 }
 
+export type ProjectRole = "viewer" | "contributor" | "owner";
+
+/**
+ * The object-level gate of the per-project routes: an admin passes; anyone else must hold a membership of at least
+ * `minRole` on the project, or is refused 403 `forbidden`. Exported so a per-project route outside this file (ADR-0362
+ * content-inspection settings) applies exactly the same check.
+ */
+export async function projectRoleGate(
+  db: Db,
+  req: { authCtx: { userId: string | null; isAdmin: boolean } },
+  projectId: string,
+  minRole: ProjectRole,
+): Promise<
+  | { ok: true; membership: typeof projectMembers.$inferSelect | null }
+  | { ok: false; status: number; error: string }
+> {
+  if (req.authCtx.isAdmin) return { ok: true, membership: null };
+  if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
+  const [membership] = await db
+    .select()
+    .from(projectMembers)
+    .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)));
+  if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  return { ok: true, membership };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
    * membership row for provenance defaults. */
-  async function requireRole(
+  const requireRole = (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     projectId: string,
-    minRole: "viewer" | "contributor" | "owner",
-  ): Promise<
-    | { ok: true; membership: typeof projectMembers.$inferSelect | null }
-    | { ok: false; status: number; error: string }
-  > {
-    if (req.authCtx.isAdmin) return { ok: true, membership: null };
-    if (!req.authCtx.userId) return { ok: false, status: 403, error: "forbidden" };
-    const [membership] = await db
-      .select()
-      .from(projectMembers)
-      .where(
-        and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
-      );
-    if (!membership || ROLE_RANK[membership.role]! < ROLE_RANK[minRole]!) {
-      return { ok: false, status: 403, error: "forbidden" };
-    }
-    return { ok: true, membership };
-  }
+    minRole: ProjectRole,
+  ) => projectRoleGate(db, req, projectId, minRole);
 
   /** Display enrichment (same discipline as the approvals list): resolve user
    * and team ids to names in one pass. Provenance ids are FK-free by design,
@@ -1868,6 +1914,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       /** ADR-0050: the run/node that produced this write, when declared */
       producedByRunId?: string | undefined;
       producedByNodeId?: string | undefined;
+      /** ADR-0347: a shorter lifetime than the policy's, in hours */
+      expiresInHours?: number | undefined;
     },
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -1890,6 +1938,36 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(teamMembers.teamId, args.teamId), eq(teamMembers.userId, userId)));
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
     }
+    // ADR-0347: provenance of the producing run (checked, never caller-asserted), then the memory scan and the
+    // mandatory expiry. Both run before the transaction: a refused write stores nothing but its deny audit row.
+    const provenance = await resolveRunProvenance(db, {
+      runId: args.producedByRunId,
+      nodeId: args.producedByNodeId,
+      projectId,
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    if (!provenance.ok) return reply.status(provenance.status).send(provenance.body);
+    // ADR-0193 addendum (E50, ASI06): shared context is read back into later runs, so it is held to the same
+    // content-trust floor as a write tool call. Its causal context is the producing run, and only once the check
+    // above has confirmed that run is the caller's, in this project. The floor is categorical, so it runs first.
+    const trust = await memoryTrustFloor(db, {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+      contextId: provenance.runId ? runContextId(provenance.runId) : null,
+      target: { kind: "shared_context", projectId, key: args.key },
+    });
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
+    const memoryGate = await governMemoryWrite(db, {
+      store: "project_context",
+      text: `${args.key}\n${args.content}`,
+      classificationTtlHours: await projectMemoryTtlHours(db, projectId),
+      requestedHours: args.expiresInHours,
+      userId,
+      objectType: "project",
+      objectId: projectId,
+    });
+    if (!memoryGate.ok) return reply.status(memoryGate.status).send(memoryGate.body);
 
     // The read (maxRevision/latestAccepted) + insert run inside ONE
     // transaction, and (project_id, key, revision) is UNIQUE (migration 0019).
@@ -1939,6 +2017,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             contributedByUserId: userId,
             contributedByTeamId: teamId,
             sourceArtifactId: args.sourceArtifactId ?? null,
+            producedByRunId: provenance.runId,
+            producedByNodeId: provenance.nodeId,
+            producedByAgentId: provenance.agentId,
+            expiresAt: expiresAtSql(memoryGate.ttlHours),
           })
           .returning();
 
@@ -1968,6 +2050,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             conflicting,
             teamId,
             ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
+            ...(provenance.runId
+              ? { producedByRunId: provenance.runId, producedByNodeId: provenance.nodeId, producedByAgentId: provenance.agentId }
+              : {}),
+            ttlHours: memoryGate.ttlHours,
+            expiresAt: item!.expiresAt,
+            ...(memoryGate.hits.length ? { memoryScanHits: memoryGate.hits } : {}),
           },
           effect: conflicting ? "require_approval" : "allow",
           ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
@@ -1983,6 +2071,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
             key: args.key,
             revision,
             accepted: !conflicting,
+            expiresAt: item!.expiresAt,
             ...(conflicting ? { conflict: true, approvalId } : {}),
           },
         };
@@ -2084,6 +2173,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .from(projectContextItems)
         .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
         .orderBy(projectContextItems.revision);
+      const histNow = await databaseNow(db);
       const [names, pendingMap] = await Promise.all([
         nameMaps(
           rows.map((r) => r.contributedByUserId),
@@ -2100,6 +2190,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           byName: names.userName.get(r.contributedByUserId) ?? null,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           pendingApprovalId: pendingMap.get(r.id) ?? null,
+          // ADR-0347: history keeps expired revisions for inspection, marked so
+          expired: r.expiresAt <= histNow,
         })),
       };
     }
@@ -2132,6 +2224,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
+    // ADR-0347: a key whose accepted head has expired is absent. An older revision is never resurrected in its place.
+    const now = await databaseNow(db);
+    for (const [k, row] of latest) if (row.expiresAt <= now) latest.delete(k);
     const pendingMap = await pendingConflictApprovals(
       projectId,
       retained.map((r) => r.id),
@@ -2154,7 +2249,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           teamId: r.contributedByTeamId,
           teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           sourceArtifactId: r.sourceArtifactId,
+          // ADR-0347: which run, node and agent produced it, and when it stops being read
+          producedByRunId: r.producedByRunId,
+          producedByNodeId: r.producedByNodeId,
+          producedByAgentId: r.producedByAgentId,
           at: r.createdAt,
+          expiresAt: r.expiresAt,
         },
       })),
       pending: pendingItems.map((r) => ({
@@ -2204,6 +2304,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       ),
     ]);
 
+    // ADR-0347 (#905 security review [2]): every node says whether it has expired, as history does
+    const graphNow = await databaseNow(db);
     // accepted head per key = highest accepted revision (rows are asc by rev)
     const currentByKey = new Map<string, number>();
     for (const r of rows) if (r.accepted) currentByKey.set(r.key, r.revision);
@@ -2218,6 +2320,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         baseRevision: r.baseRevision,
         accepted: r.accepted,
         pending: pendingMap.has(r.id),
+        expired: r.expiresAt <= graphNow,
+        expiresAt: r.expiresAt,
         content:
           r.content.length > PREVIEW_LEN ? `${r.content.slice(0, PREVIEW_LEN)}…` : r.content,
         contributor: {
@@ -2275,6 +2379,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       minIsolationClass: body.minIsolationClass ?? null,
       // ADR-0045 amendment 2026-11-14: the framework requires model risk management (OR-composed; null = no requirement)
       mrmRequired: body.mrmRequired ?? null,
+      // ADR-0347: the longest agent memory lifetime on this tag's projects (MIN-composed; null = no opinion)
+      memoryTtlHours: body.memoryTtlHours ?? null,
     };
     // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
     // silent no-op for enforcement.

@@ -76,6 +76,8 @@ RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nolog
 COPY --from=closure /venv /venv
 COPY --from=export --chown=root:root /opt/models/prompt-injection /opt/models/prompt-injection
 COPY --from=export --chown=root:root /opt/models/harm /opt/models/harm
+# ADR-0352: the embedder is used as published (no export stage), verified by sha256 in `weights`
+COPY --from=weights --chown=root:root /opt/models/embedding /opt/models/embedding
 COPY agents/trained-detectors/detector_core.py agents/trained-detectors/server.py /app/
 ENV PATH=/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0364",
+  "lane": "E45",
+  "tracking": "ADR-0364 S3 (lane E45): API-only by the master brief (2026-11-19); the test-run panel and run view of the Robots detail screen are for the design builder on #453",
+  "gaps": {
+    "POST /v1/robots/:robotId/versions/:version/test-runs": "runs a robot version once in its robot_browser sandbox with the test secrets, attributed to one of the author's projects with a budget",
+    "GET /v1/robots/:robotId/runs/:runId": "reads one robot run (status, failure code, steps, timing) and its evidence list (kind, sha256, size)"
+  }
+}

@@ -567,7 +567,8 @@ export default function ShadowAiPage() {
           <div className={v.row} role="group" aria-label="Filter by status">
             {(["all", "open", "confirmed", "closed"] as const).map((g) => (
               <button key={g} type="button" className={sh.chip} aria-pressed={statusFilter === g} onClick={() => setStatusFilter(g)}>
-                {STATUS_GROUP_LABEL[g]} {statusCounts[g] ?? 0}
+                {/* unknown is not zero: an unread or failed summary shows "—", never "0" */}
+                {STATUS_GROUP_LABEL[g]} {summary ? (statusCounts[g] ?? 0) : "—"}
               </button>
             ))}
           </div>

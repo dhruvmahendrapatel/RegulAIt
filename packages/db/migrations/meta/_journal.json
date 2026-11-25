@@ -1723,6 +1723,601 @@
       "when": 1785261000000,
       "tag": "0326_upstream_token_exchange",
       "breakpoints": true
+    },
+    {
+      "idx": 327,
+      "version": "7",
+      "when": 1785262000000,
+      "tag": "0327_a2a_role_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 328,
+      "version": "7",
+      "when": 1785263000000,
+      "tag": "0328_abac_agent_responses",
+      "breakpoints": true
+    },
+    {
+      "idx": 329,
+      "version": "7",
+      "when": 1785264000000,
+      "tag": "0329_admission_scan_subject_target",
+      "breakpoints": true
+    },
+    {
+      "idx": 330,
+      "version": "7",
+      "when": 1785265000000,
+      "tag": "0330_admission_scan_subject_target_input_sha",
+      "breakpoints": true
+    },
+    {
+      "idx": 331,
+      "version": "7",
+      "when": 1785266000000,
+      "tag": "0331_adoption_analytics_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 332,
+      "version": "7",
+      "when": 1785267000000,
+      "tag": "0332_agent_credential_audiences",
+      "breakpoints": true
+    },
+    {
+      "idx": 333,
+      "version": "7",
+      "when": 1785268000000,
+      "tag": "0333_agent_detection",
+      "breakpoints": true
+    },
+    {
+      "idx": 334,
+      "version": "7",
+      "when": 1785269000000,
+      "tag": "0334_agent_detection_device_quarantine",
+      "breakpoints": true
+    },
+    {
+      "idx": 335,
+      "version": "7",
+      "when": 1785270000000,
+      "tag": "0335_agent_identity_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 336,
+      "version": "7",
+      "when": 1785271000000,
+      "tag": "0336_agent_memory_governance",
+      "breakpoints": true
+    },
+    {
+      "idx": 337,
+      "version": "7",
+      "when": 1785272000000,
+      "tag": "0337_agent_registry_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 338,
+      "version": "7",
+      "when": 1785273000000,
+      "tag": "0338_agent_risk_proofs",
+      "breakpoints": true
+    },
+    {
+      "idx": 339,
+      "version": "7",
+      "when": 1785274000000,
+      "tag": "0339_agent_risk_proofs_jurisdictions",
+      "breakpoints": true
+    },
+    {
+      "idx": 340,
+      "version": "7",
+      "when": 1785275000000,
+      "tag": "0340_agent_risk_scores",
+      "breakpoints": true
+    },
+    {
+      "idx": 341,
+      "version": "7",
+      "when": 1785276000000,
+      "tag": "0341_approval_task_priority",
+      "breakpoints": true
+    },
+    {
+      "idx": 342,
+      "version": "7",
+      "when": 1785277000000,
+      "tag": "0342_behaviour_baselines",
+      "breakpoints": true
+    },
+    {
+      "idx": 343,
+      "version": "7",
+      "when": 1785278000000,
+      "tag": "0343_browser_governance",
+      "breakpoints": true
+    },
+    {
+      "idx": 344,
+      "version": "7",
+      "when": 1785279000000,
+      "tag": "0344_builder_agent_autonomy_enforcement",
+      "breakpoints": true
+    },
+    {
+      "idx": 345,
+      "version": "7",
+      "when": 1785280000000,
+      "tag": "0345_chatops_campaign_deadline_notify",
+      "breakpoints": true
+    },
+    {
+      "idx": 346,
+      "version": "7",
+      "when": 1785281000000,
+      "tag": "0346_compliance_profile_mrm_required",
+      "breakpoints": true
+    },
+    {
+      "idx": 347,
+      "version": "7",
+      "when": 1785282000000,
+      "tag": "0347_connector_catalogue",
+      "breakpoints": true
+    },
+    {
+      "idx": 348,
+      "version": "7",
+      "when": 1785283000000,
+      "tag": "0348_connector_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 349,
+      "version": "7",
+      "when": 1785284000000,
+      "tag": "0349_copilot_redteam_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 350,
+      "version": "7",
+      "when": 1785285000000,
+      "tag": "0350_cost_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 351,
+      "version": "7",
+      "when": 1785286000000,
+      "tag": "0351_custom_classifiers",
+      "breakpoints": true
+    },
+    {
+      "idx": 352,
+      "version": "7",
+      "when": 1785287000000,
+      "tag": "0352_decision_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 353,
+      "version": "7",
+      "when": 1785288000000,
+      "tag": "0353_drift_ingest_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 354,
+      "version": "7",
+      "when": 1785289000000,
+      "tag": "0354_endpoint_addon_inventory",
+      "breakpoints": true
+    },
+    {
+      "idx": 355,
+      "version": "7",
+      "when": 1785290000000,
+      "tag": "0355_endpoint_addon_removal",
+      "breakpoints": true
+    },
+    {
+      "idx": 356,
+      "version": "7",
+      "when": 1785291000000,
+      "tag": "0356_endpoint_command_exceptions",
+      "breakpoints": true
+    },
+    {
+      "idx": 357,
+      "version": "7",
+      "when": 1785292000000,
+      "tag": "0357_endpoint_decision_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 358,
+      "version": "7",
+      "when": 1785293000000,
+      "tag": "0358_external_portal_mfa",
+      "breakpoints": true
+    },
+    {
+      "idx": 359,
+      "version": "7",
+      "when": 1785294000000,
+      "tag": "0359_fairness_evaluation",
+      "breakpoints": true
+    },
+    {
+      "idx": 360,
+      "version": "7",
+      "when": 1785295000000,
+      "tag": "0360_governance_policy_layers",
+      "breakpoints": true
+    },
+    {
+      "idx": 361,
+      "version": "7",
+      "when": 1785296000000,
+      "tag": "0361_incident_clock_regimes_gdpr_nis2_dora_cra",
+      "breakpoints": true
+    },
+    {
+      "idx": 362,
+      "version": "7",
+      "when": 1785297000000,
+      "tag": "0362_managed_settings_bundles",
+      "breakpoints": true
+    },
+    {
+      "idx": 363,
+      "version": "7",
+      "when": 1785298000000,
+      "tag": "0363_mcp_caller_cancellations",
+      "breakpoints": true
+    },
+    {
+      "idx": 364,
+      "version": "7",
+      "when": 1785299000000,
+      "tag": "0364_mcp_catalogue_seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 365,
+      "version": "7",
+      "when": 1785300000000,
+      "tag": "0365_mcp_server_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 366,
+      "version": "7",
+      "when": 1785301000000,
+      "tag": "0366_model_artifact_lineage",
+      "breakpoints": true
+    },
+    {
+      "idx": 367,
+      "version": "7",
+      "when": 1785302000000,
+      "tag": "0367_model_call_approvals",
+      "breakpoints": true
+    },
+    {
+      "idx": 368,
+      "version": "7",
+      "when": 1785303000000,
+      "tag": "0368_paid_call_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 369,
+      "version": "7",
+      "when": 1785304000000,
+      "tag": "0369_pm_webhook_secret_rotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 370,
+      "version": "7",
+      "when": 1785305000000,
+      "tag": "0370_pm_work_item_import",
+      "breakpoints": true
+    },
+    {
+      "idx": 371,
+      "version": "7",
+      "when": 1785306000000,
+      "tag": "0371_process_analytics",
+      "breakpoints": true
+    },
+    {
+      "idx": 372,
+      "version": "7",
+      "when": 1785307000000,
+      "tag": "0372_repetitive_asks",
+      "breakpoints": true
+    },
+    {
+      "idx": 373,
+      "version": "7",
+      "when": 1785308000000,
+      "tag": "0373_report_definition_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 374,
+      "version": "7",
+      "when": 1785309000000,
+      "tag": "0374_resource_rate_reservations",
+      "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1785310000000,
+      "tag": "0375_risk_score_capability_marks",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1785311000000,
+      "tag": "0376_rls_batch7a_system_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1785312000000,
+      "tag": "0377_rls_batch7b_runtime_cutover",
+      "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
+      "when": 1785313000000,
+      "tag": "0378_rls_pm_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 379,
+      "version": "7",
+      "when": 1785314000000,
+      "tag": "0379_rls_pm_tables_followon",
+      "breakpoints": true
+    },
+    {
+      "idx": 380,
+      "version": "7",
+      "when": 1785315000000,
+      "tag": "0380_robot_browser_isolation",
+      "breakpoints": true
+    },
+    {
+      "idx": 381,
+      "version": "7",
+      "when": 1785316000000,
+      "tag": "0381_robots",
+      "breakpoints": true
+    },
+    {
+      "idx": 382,
+      "version": "7",
+      "when": 1785317000000,
+      "tag": "0382_robots_s3_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 383,
+      "version": "7",
+      "when": 1785318000000,
+      "tag": "0383_rogue_agent_containment",
+      "breakpoints": true
+    },
+    {
+      "idx": 384,
+      "version": "7",
+      "when": 1785319000000,
+      "tag": "0384_rogue_agent_containment_b_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 385,
+      "version": "7",
+      "when": 1785320000000,
+      "tag": "0385_rule_step_detection",
+      "breakpoints": true
+    },
+    {
+      "idx": 386,
+      "version": "7",
+      "when": 1785321000000,
+      "tag": "0386_rule_step_shadow",
+      "breakpoints": true
+    },
+    {
+      "idx": 387,
+      "version": "7",
+      "when": 1785322000000,
+      "tag": "0387_rule_step_switch",
+      "breakpoints": true
+    },
+    {
+      "idx": 388,
+      "version": "7",
+      "when": 1785323000000,
+      "tag": "0388_rule_step_switch_decision_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 389,
+      "version": "7",
+      "when": 1785324000000,
+      "tag": "0389_saas_entitlement_graph",
+      "breakpoints": true
+    },
+    {
+      "idx": 390,
+      "version": "7",
+      "when": 1785325000000,
+      "tag": "0390_saas_entitlement_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 391,
+      "version": "7",
+      "when": 1785326000000,
+      "tag": "0391_saas_finding_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 392,
+      "version": "7",
+      "when": 1785327000000,
+      "tag": "0392_sap_business_servers",
+      "breakpoints": true
+    },
+    {
+      "idx": 393,
+      "version": "7",
+      "when": 1785328000000,
+      "tag": "0393_sensitivity_labels",
+      "breakpoints": true
+    },
+    {
+      "idx": 394,
+      "version": "7",
+      "when": 1785329000000,
+      "tag": "0394_shared_context_graph",
+      "breakpoints": true
+    },
+    {
+      "idx": 395,
+      "version": "7",
+      "when": 1785330000000,
+      "tag": "0395_siem_delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 396,
+      "version": "7",
+      "when": 1785331000000,
+      "tag": "0396_siem_syslog_tls",
+      "breakpoints": true
+    },
+    {
+      "idx": 397,
+      "version": "7",
+      "when": 1785332000000,
+      "tag": "0397_third_party_evidence_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 398,
+      "version": "7",
+      "when": 1785333000000,
+      "tag": "0398_user_spend_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 399,
+      "version": "7",
+      "when": 1785334000000,
+      "tag": "0399_vendor_agent_control",
+      "breakpoints": true
+    },
+    {
+      "idx": 400,
+      "version": "7",
+      "when": 1785335000000,
+      "tag": "0400_vendor_agent_platform_components",
+      "breakpoints": true
+    },
+    {
+      "idx": 401,
+      "version": "7",
+      "when": 1785336000000,
+      "tag": "0401_vendor_agent_platform_components_agentforce",
+      "breakpoints": true
+    },
+    {
+      "idx": 402,
+      "version": "7",
+      "when": 1785337000000,
+      "tag": "0402_vendor_agent_platform_components_openai_n8n",
+      "breakpoints": true
+    },
+    {
+      "idx": 403,
+      "version": "7",
+      "when": 1785338000000,
+      "tag": "0403_vendor_agent_platform_config_secrets",
+      "breakpoints": true
+    },
+    {
+      "idx": 404,
+      "version": "7",
+      "when": 1785339000000,
+      "tag": "0404_vendor_usage_pull",
+      "breakpoints": true
+    },
+    {
+      "idx": 405,
+      "version": "7",
+      "when": 1785340000000,
+      "tag": "0405_workflow_instances_project_open_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 406,
+      "version": "7",
+      "when": 1785341000000,
+      "tag": "0406_workflow_stage_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 407,
+      "version": "7",
+      "when": 1785342000000,
+      "tag": "0407_workflow_stage_queue_deadline",
+      "breakpoints": true
+    },
+    {
+      "idx": 408,
+      "version": "7",
+      "when": 1785343000000,
+      "tag": "0408_workflow_template_builder",
+      "breakpoints": true
+    },
+    {
+      "idx": 409,
+      "version": "7",
+      "when": 1785344000000,
+      "tag": "0409_workflow_template_pipeline_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 410,
+      "version": "7",
+      "when": 1785345000000,
+      "tag": "0410_workflow_template_version_origin_apply",
+      "breakpoints": true
+    },
+    {
+      "idx": 411,
+      "version": "7",
+      "when": 1785346000000,
+      "tag": "0411_ai_saas_monitoring",
+      "breakpoints": true
     }
   ]
 }

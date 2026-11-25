@@ -67,6 +67,12 @@ export interface SandboxHandle {
   readonly stdio?: SandboxStdio;
   /** resolves when the sandbox has ended, with how */
   readonly ended: Promise<"completed" | "failed" | "killed" | "limit_exceeded">;
+  /**
+   * ADR-0364 S3: a robot_browser placement's per-run Smokescreen log, its egress evidence (§7), at most
+   * `ROBOT_EGRESS_LOG_MAX_BYTES` (the head, then a truncation marker). Captured before the proxy is removed; after
+   * `ended` it is the final log. Absent on every sandbox without an egress proxy.
+   */
+  egressLog?(): Promise<string>;
 }
 
 export interface SandboxBackend {

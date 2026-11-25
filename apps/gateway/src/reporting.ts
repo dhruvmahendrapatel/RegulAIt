@@ -48,7 +48,7 @@
  *     the exact overstatement this project refuses.
  */
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { wantsListContract, type ListSpec } from "./list-contract.js";
 import { answerListExport, answerListPage, regenerableBy, type ContractList } from "./list-contract-route.js";
 import {
@@ -91,6 +91,7 @@ import {
   scheduleIsDue,
   updateReportScheduleSchema,
   REPORT_ESTIMATE_DISCLAIMER,
+  REPORT_DEFINITION_MACHINE,
   type ReportAccessDecision,
   type ReportPayload,
   type ReportSection,
@@ -102,6 +103,7 @@ import { resolveLicense } from "./licensing.js";
 import { packControlsSection } from "./compliance-packs.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 import { databaseNow } from "./db-clock.js";
+import { whereFrom } from "./state-transition.js";
 
 /** the audit row's actor when the caller is the identity-less bootstrap token */
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -256,9 +258,11 @@ export async function computeReport(db: Db, input: ComputeReportInput): Promise<
       ...(projectIds === null
         ? []
         : [
-            sql`${auditLog.detail} ->> 'projectId' = ANY(${sql.raw(
-              `ARRAY[${(projectIds.length ? projectIds : [ZERO_UUID]).map((p) => `'${assertUuid(p)}'`).join(",")}]::text[]`,
-            )})`,
+            // bound parameters, still uuid-validated (Codex review S-10)
+            sql`${auditLog.detail} ->> 'projectId' = ANY(ARRAY[${sql.join(
+              (projectIds.length ? projectIds : [ZERO_UUID]).map((p) => sql`${assertUuid(p)}`),
+              sql`, `,
+            )}]::text[])`,
           ]),
     );
     const [counts, denies] = await Promise.all([
@@ -408,8 +412,12 @@ export async function generateReport(
   },
 ): Promise<GenerateResult | GenerateRefusal> {
   // M-075: the period is compared with audit_log.at and usage rows (database clock)
-  const now = args.now ?? (await databaseNow(db));
   const def = args.definition;
+  // CXR-REV-002: an archived definition generates nothing more; the runs it already produced stay readable
+  if (def.status === "archived") {
+    return { ok: false, status: 409, error: "report_definition_archived", detail: REPORT_DEFINITION_ARCHIVED_DETAIL };
+  }
+  const now = args.now ?? (await databaseNow(db));
   const scopeProjectIds = await resolveScopeProjectIds(db, def);
   const decision = evaluateReportAccess({
     isAdmin: args.actor.isAdmin,
@@ -543,6 +551,24 @@ export async function canReadRun(
 // The schedule sweep
 // ---------------------------------------------------------------------------
 
+export const REPORT_DEFINITION_ARCHIVED_DETAIL =
+  "This report definition is archived: it generates no new report and its schedules do not fire. The runs it " +
+  "already generated are kept and stay readable.";
+
+/** the schedule list's note, stated for THIS deployment (CXR-REV-001: it used to say nothing fires, always) */
+export function reportSchedulesNote(schedulerPresent: boolean): string {
+  return schedulerPresent
+    ? "ADR-0064's in-process scheduler is switched on here and drives these; POST /v1/reports/schedules/run-due " +
+        "runs the same sweep on demand. Schedules of archived definitions never fire."
+    : "No scheduler is switched on in this deployment (REGULAIT_SCHEDULER is off), so these fire only when an " +
+        "operator or an external cron calls POST /v1/reports/schedules/run-due. Schedules of archived definitions never fire.";
+}
+
+/** the definition's lifecycle as the UI and agents read it (ADR-0348) */
+export function reportDefinitionLifecycle(status: ReportDefinitionRow["status"]) {
+  return REPORT_DEFINITION_MACHINE.describe(status);
+}
+
 export const REPORT_SCHEDULE_SWEEP_NOTE =
   "ADR-0064's in-process scheduler drives this when it is switched on (REGULAIT_SCHEDULER=on); this " +
   "endpoint is the manual/on-demand path and calls exactly the same function. A deployment running " +
@@ -558,7 +584,8 @@ export const REPORT_SCHEDULE_SWEEP_NOTE =
  *
  * NOTE ON AUTHORITY. `generateReport` takes the ACTOR, and the actor's
  * entitlement decides the effective scope of what is produced. Driven by the
- * scheduler there is no human caller, so `isAdmin` defaults to true — a
+ * scheduler there is no human caller, so the scheduler passes `isAdmin: true`
+ * explicitly (there is no default, ADR-0180) — a
  * schedule is an admin-authored object (authoring one is not in
  * NON_ADMIN_ROUTES) and generating it at the definition's declared scope is
  * precisely what the admin who authored it asked for. Driven by the endpoint,
@@ -567,15 +594,22 @@ export const REPORT_SCHEDULE_SWEEP_NOTE =
  */
 export async function runDueReportSchedules(
   db: Db,
-  opts: { actorUserId: string | null; isAdmin?: boolean; now?: Date },
+  opts: { actorUserId: string | null; isAdmin: boolean; now?: Date },
 ): Promise<{
   generated: Array<{ scheduleId: string; runId: string; definition: string }>;
   skipped: Array<{ scheduleId: string; reason: string }>;
 }> {
   // M-075: schedules are due by the database clock, as the rows they read are stamped
   const now = opts.now ?? (await databaseNow(db));
-  const isAdmin = opts.isAdmin ?? true;
-  const due = await db.select().from(reportSchedules).where(eq(reportSchedules.enabled, true));
+  const isAdmin = opts.isAdmin;
+  // CXR-REV-002: a schedule of an ARCHIVED definition is never swept (archiving also disabled it)
+  const due = (
+    await db
+      .select({ s: reportSchedules })
+      .from(reportSchedules)
+      .innerJoin(reportDefinitions, eq(reportDefinitions.id, reportSchedules.definitionId))
+      .where(and(eq(reportSchedules.enabled, true), eq(reportDefinitions.status, "active")))
+  ).map((r) => r.s);
   const generated: Array<{ scheduleId: string; runId: string; definition: string }> = [];
   const skipped: Array<{ scheduleId: string; reason: string }> = [];
   for (const s of due) {
@@ -679,9 +713,20 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     return reply.status(201).send({ definition: row });
   });
 
-  app.get("/v1/reports/definitions", async () => {
-    const rows = await db.select().from(reportDefinitions).orderBy(desc(reportDefinitions.createdAt));
-    return { definitions: rows };
+  // CXR-REV-002: an archived definition is hidden unless `?include=archived` asks for it (this surface is
+  // admin-only through the default gate)
+  const includeQuery = z.object({ include: z.enum(["archived"]).optional() }).passthrough();
+  const definitionsVisible = (include: "archived" | undefined) =>
+    include === "archived" ? undefined : eq(reportDefinitions.status, "active");
+
+  app.get("/v1/reports/definitions", async (req) => {
+    const q = includeQuery.parse(req.query ?? {});
+    const rows = await db
+      .select()
+      .from(reportDefinitions)
+      .where(definitionsVisible(q.include))
+      .orderBy(desc(reportDefinitions.createdAt));
+    return { definitions: rows.map((d) => ({ ...d, lifecycle: reportDefinitionLifecycle(d.status) })) };
   });
 
   app.get("/v1/reports/definitions/:id", async (req, reply) => {
@@ -693,25 +738,76 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
       .select()
       .from(reportSchedules)
       .where(eq(reportSchedules.definitionId, id));
-    return { definition: row, scopeProjectIds, schedules };
+    return { definition: row, lifecycle: reportDefinitionLifecycle(row.status), scopeProjectIds, schedules };
   });
 
-  app.delete("/v1/reports/definitions/:id", async (req, reply) => {
+  /**
+   * CXR-REV-002 (owner decision 2026-11-22, ADR-0047 addendum): ARCHIVE, never delete. ADR-0047 calls a run "one
+   * immutable row per generation", and deleting the definition used to cascade its runs away. Archiving moves the
+   * definition active -> archived (REPORT_DEFINITION_MACHINE, guarded by `whereFrom`), DISABLES its schedules in the
+   * same transaction (and the sweep skips them regardless), and keeps every run readable. Admin-only through the
+   * default gate, as delete was. `DELETE` is kept as the same act, so an older client cannot delete through it.
+   */
+  async function archiveDefinition(req: FastifyRequest, reply: FastifyReply) {
     const { id } = idParam.parse(req.params);
-    const [row] = await db.select().from(reportDefinitions).where(eq(reportDefinitions.id, id));
-    if (!row) return reply.status(404).send({ error: "unknown_report_definition" });
-    await db.delete(reportDefinitions).where(eq(reportDefinitions.id, id));
-    await audit(
-      req.authCtx.userId ?? null,
-      id,
-      "report-definition-deleted",
-      `admin deleted report definition '${row.name}' — its generated runs cascade with it; the LEDGERS ` +
-        `it read (usage_events, audit_log, approvals) are untouched, so the same report is reproducible`,
-      { name: row.name, kind: row.kind },
-      "deny",
-    );
-    return { deleted: true };
-  });
+    const actor = req.authCtx.userId ?? null;
+    const out = await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(reportDefinitions).where(eq(reportDefinitions.id, id)).for("update");
+      if (!row) return { status: 404 as const };
+      if (!REPORT_DEFINITION_MACHINE.can(row.status, "archive")) return { status: 409 as const, state: row.status };
+      const [archived] = await tx
+        .update(reportDefinitions)
+        .set({ status: "archived", archivedAt: sql`now()`, archivedByUserId: actor })
+        .where(and(eq(reportDefinitions.id, id), whereFrom(reportDefinitions.status, REPORT_DEFINITION_MACHINE, "archive")))
+        .returning();
+      if (!archived) return { status: 409 as const, state: row.status };
+      const disabled = await tx
+        .update(reportSchedules)
+        .set({ enabled: false })
+        .where(and(eq(reportSchedules.definitionId, id), eq(reportSchedules.enabled, true)))
+        .returning({ id: reportSchedules.id });
+      const [runs] = await tx.select({ n: count() }).from(reportRuns).where(eq(reportRuns.definitionId, id));
+      const runsKept = Number(runs?.n ?? 0);
+      await tx.insert(auditLog).values({
+        userId: actor ?? NO_IDENTITY,
+        objectType: "report",
+        objectId: id,
+        detail: {
+          name: row.name,
+          kind: row.kind,
+          from: row.status,
+          to: archived.status,
+          schedulesDisabled: disabled.map((d) => d.id),
+          runsKept,
+        },
+        effect: "allow",
+        ruleId: "report-definition-archived",
+        ruleChain: [],
+        reason:
+          `admin archived report definition '${row.name}': ${disabled.length} schedule(s) disabled and no new ` +
+          `report is generated from it; its ${runsKept} generated run(s) are kept and stay readable as evidence`,
+      });
+      return { status: 200 as const, archived, schedulesDisabled: disabled.length, runsKept };
+    });
+    if (out.status === 404) return reply.status(404).send({ error: "unknown_report_definition" });
+    if (out.status === 409) {
+      return reply.status(409).send({
+        error: "report_definition_already_archived",
+        detail: "This report definition is already archived; archiving is final.",
+        lifecycle: reportDefinitionLifecycle(out.state),
+      });
+    }
+    return {
+      definition: out.archived,
+      lifecycle: reportDefinitionLifecycle(out.archived.status),
+      archived: true,
+      deleted: false,
+      schedulesDisabled: out.schedulesDisabled,
+      runsKept: out.runsKept,
+    };
+  }
+  app.post("/v1/reports/definitions/:id/archive", archiveDefinition);
+  app.delete("/v1/reports/definitions/:id", archiveDefinition);
 
   // --- schedules (admin-only) — DEFINITIONS ONLY, nothing fires -----------
 
@@ -720,6 +816,9 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     const body = createReportScheduleSchema.parse(req.body);
     const [def] = await db.select().from(reportDefinitions).where(eq(reportDefinitions.id, id));
     if (!def) return reply.status(404).send({ error: "unknown_report_definition" });
+    if (def.status === "archived") {
+      return reply.status(409).send({ error: "report_definition_archived", detail: REPORT_DEFINITION_ARCHIVED_DETAIL });
+    }
     const [row] = await db
       .insert(reportSchedules)
       .values({
@@ -753,7 +852,8 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     const rows = await db.select().from(reportSchedules).orderBy(desc(reportSchedules.createdAt));
     return {
       schedules: rows,
-      note: "Nothing in this codebase fires these. POST /v1/reports/schedules/run-due is the driver.",
+      schedulerPresent: resolveSchedulerConfig().enabled,
+      note: reportSchedulesNote(resolveSchedulerConfig().enabled),
     };
   });
 
@@ -762,6 +862,15 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     const body = updateReportScheduleSchema.parse(req.body);
     const [row] = await db.select().from(reportSchedules).where(eq(reportSchedules.id, id));
     if (!row) return reply.status(404).send({ error: "unknown_report_schedule" });
+    if (body.enabled === true) {
+      const [def] = await db
+        .select({ status: reportDefinitions.status })
+        .from(reportDefinitions)
+        .where(eq(reportDefinitions.id, row.definitionId));
+      if (def?.status === "archived") {
+        return reply.status(409).send({ error: "report_definition_archived", detail: REPORT_DEFINITION_ARCHIVED_DETAIL });
+      }
+    }
     const [updated] = await db
       .update(reportSchedules)
       .set({
@@ -1047,8 +1156,13 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
 
   /** the read-side rollup the admin SPA's Reports page renders: definitions,
    * their latest run, and the honest "nothing drives these" note */
-  app.get("/v1/reports/overview", async () => {
-    const defs = await db.select().from(reportDefinitions).orderBy(desc(reportDefinitions.createdAt));
+  app.get("/v1/reports/overview", async (req) => {
+    const q = includeQuery.parse(req.query ?? {});
+    const defs = await db
+      .select()
+      .from(reportDefinitions)
+      .where(definitionsVisible(q.include))
+      .orderBy(desc(reportDefinitions.createdAt));
     const schedules = await db.select().from(reportSchedules);
     const latest = await db
       .select({
@@ -1062,6 +1176,7 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
     return {
       definitions: defs.map((d) => ({
         ...d,
+        lifecycle: reportDefinitionLifecycle(d.status),
         schedules: schedules.filter((s) => s.definitionId === d.id),
         lastGeneratedAt: byDef.get(d.id)?.generatedAt ?? null,
         runCount: byDef.get(d.id)?.runs ?? 0,
@@ -1069,6 +1184,7 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
       // ADR-0064: whether a scheduler is actually DRIVING the schedules in this
       // deployment, reported rather than hard-coded false.
       schedulerPresent: resolveSchedulerConfig().enabled,
+      archivedHidden: q.include !== "archived",
       note: `${REPORT_SCHEDULE_SWEEP_NOTE} Spend figures are list-price ESTIMATES.`,
     };
   });

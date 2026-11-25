@@ -89,7 +89,12 @@ class ModelLock(unittest.TestCase):
             self.assertFalse(any(n.endswith(".py") for n in m["files"]), m["repo"])
 
     def test_every_classifier_has_a_known_export_head(self):
+        # ADR-0352: the embedder is the one entry used as published, without an export stage
         for m in LOCK["models"]:
+            if m["dir"] == "embedding":
+                self.assertNotIn("export", m)
+                self.assertTrue(any(name.endswith(".onnx") for name in m["files"]))
+                continue
             self.assertIn(m["export"]["head"], {"sequence_classification", "deberta_v2_cls_linear"})
             self.assertIsInstance(m["export"]["multiLabel"], bool)
 
@@ -97,7 +102,7 @@ class ModelLock(unittest.TestCase):
 class VariantSelection(unittest.TestCase):
     def test_default_is_piguard_and_each_dir_once(self):
         chosen = fetch_models.selected(LOCK)
-        self.assertEqual(sorted(m["dir"] for m in chosen), ["harm", "prompt-injection"])
+        self.assertEqual(sorted(m["dir"] for m in chosen), ["embedding", "harm", "prompt-injection"])
         self.assertEqual(next(m for m in chosen if m["dir"] == "prompt-injection")["repo"], "leolee99/PIGuard")
 
     def test_the_alternative_swaps_only_the_injection_model(self):

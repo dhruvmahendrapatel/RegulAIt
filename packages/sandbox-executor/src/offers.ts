@@ -154,8 +154,10 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       return { kind: "unconfirmed", why };
     }
     // I5: an engine task is an I4 stdio session (its `start` carries the task secret); one without stdio never runs
-    const session = (offer.workloadKind === "mcp_stdio" && handle.stdio) || offer.workloadKind === "engine_worker";
-    if (offer.workloadKind === "engine_worker" && !handle.stdio) {
+    // ADR-0364 S3: a robot run is one too (its runner reaches the gateway only over this task bridge)
+    const bridged = offer.workloadKind === "engine_worker" || offer.workloadKind === "robot_browser";
+    const session = (offer.workloadKind === "mcp_stdio" && handle.stdio) || bridged;
+    if (bridged && !handle.stdio) {
       await handle.kill();
       ctx.sandboxes.delete(offer.id);
       try {
@@ -163,7 +165,7 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       } catch (e) {
         ctx.log?.(`offer ${offer.id}: end (killed) not delivered: ${(e as Error).message}`);
       }
-      ctx.log?.(`offer ${offer.id}: an engine task's sandbox has no stdio channel; sandbox killed`);
+      ctx.log?.(`offer ${offer.id}: a bridged task's sandbox has no stdio channel; sandbox killed`);
       return { kind: "unconfirmed", why: "engine_task_no_stdio" };
     }
     if (session && !answer.stdioSecret) {
@@ -189,8 +191,17 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
     }
     const ended = await handle.ended;
     ctx.sandboxes.delete(offer.id);
+    // ADR-0364 S3: a robot run's egress log (read before its proxy was removed) is its egress evidence
+    let egressLog: string | undefined;
+    if (offer.workloadKind === "robot_browser" && handle.egressLog) {
+      try {
+        egressLog = await handle.egressLog();
+      } catch (e) {
+        ctx.log?.(`offer ${offer.id}: the egress log could not be read: ${(e as Error).message}`);
+      }
+    }
     try {
-      await ctx.client.end(offer.id, ended);
+      await ctx.client.end(offer.id, ended, egressLog);
     } catch (e) {
       ctx.log?.(`offer ${offer.id}: end (${ended}) not delivered: ${(e as Error).message}`);
     }

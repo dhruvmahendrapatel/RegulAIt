@@ -1,2 +1,0 @@
-<!-- fold: pending -->
-- **E45 Robots S2 follow-ups (ADR-0364):** S3 adds the runner, the evidence table and the run columns S2 left out (`mcp_call_audit_id`, `placement_id`, `proposed_version_id`), and writes the passing test runs the submit gate needs. A review that expires leaves its version `in_review` until the robot is retired; S3 should move it back on expiry. Still open with the owner: the free-form browsing budget requirement and the maximum run time.

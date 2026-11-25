@@ -122,6 +122,7 @@ import {
   resolveVendorAccount,
   rosterIngestRequestSchema,
   vendorAliasRequestSchema,
+  costResolutionRuleRemovalSchema,
   vendorDomainRuleRequestSchema,
   type AccountResolution,
   type CostImportAdapterInput,
@@ -951,11 +952,14 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
 
   app.delete("/v1/cost-imports/mappings/:aliasId", async (req, reply) => {
     const { aliasId } = z.object({ aliasId: z.string().uuid() }).parse(req.params);
+    // CXR-CST-005: the reason is validated BEFORE anything is deleted, so a reasonless DELETE is a 400 that changes nothing
+    const body = costResolutionRuleRemovalSchema.parse(req.body ?? {});
     const [row] = await db.delete(vendorAccountAliases).where(eq(vendorAccountAliases.id, aliasId)).returning();
     if (!row) return reply.status(404).send({ error: "unknown_alias" });
     const impact = await reresolveAll();
     await audit(req.authCtx.userId, "vendor_account_alias", aliasId, COST_IMPORT_RULE_IDS.aliasDeleted, "allow",
-      `removed the alias mapping '${row.accountKey}' (vendor '${row.vendor}') — ${impact.changed} stored line(s) re-attributed`,
+      `removed the alias mapping '${row.accountKey}' (vendor '${row.vendor}'): ${body.reason}` +
+        ` — ${impact.changed} stored line(s) re-attributed`,
       { accountKey: row.accountKey, vendor: row.vendor, userId: row.userId, ...impact });
     return { deleted: true, id: aliasId, reresolved: impact };
   });
@@ -993,11 +997,14 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
 
   app.delete("/v1/cost-imports/domain-rules/:ruleId", async (req, reply) => {
     const { ruleId } = z.object({ ruleId: z.string().uuid() }).parse(req.params);
+    // CXR-CST-005: as for an alias, the reason is checked before the rule is touched
+    const body = costResolutionRuleRemovalSchema.parse(req.body ?? {});
     const [row] = await db.delete(vendorDomainRules).where(eq(vendorDomainRules.id, ruleId)).returning();
     if (!row) return reply.status(404).send({ error: "unknown_domain_rule" });
     const impact = await reresolveAll();
     await audit(req.authCtx.userId, "vendor_domain_rule", ruleId, COST_IMPORT_RULE_IDS.domainRuleDeleted, "allow",
-      `removed the domain rule '${row.fromDomain}' -> '${row.toDomain}' — ${impact.changed} stored line(s) re-attributed`,
+      `removed the domain rule '${row.fromDomain}' -> '${row.toDomain}': ${body.reason}` +
+        ` — ${impact.changed} stored line(s) re-attributed`,
       { fromDomain: row.fromDomain, toDomain: row.toDomain, vendor: row.vendor, ...impact });
     return { deleted: true, id: ruleId, reresolved: impact };
   });

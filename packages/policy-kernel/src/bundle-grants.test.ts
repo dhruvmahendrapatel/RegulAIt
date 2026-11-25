@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { BUNDLE_DANGEROUS_RULE_ID, DEFAULT_DENY_RULE_ID, evaluate, visibleTools, type BundleToolGrant, type EvaluationInput, type Revocation, type ToolRef } from "./index.js";
+import { cedarApprovalRuleEvaluator } from "./approval-rule-cedar.js";
 
 const EXEC = { mode: "normal" } as const;
 const USER = "user-a";
@@ -115,6 +116,8 @@ describe("ADR-0236 bundle grants in the kernel", () => {
       input(readTool, {
         bundleToolGrants: [bundleGrant()],
         approvalRules: [{ id: "ar-1", userId: USER, serverId: SERVER, toolName: readTool.name, writeOnly: false, approverUserId: "approver" }],
+        // P8a: approval rules need an engine (the hand-written default is gone); the one the gateway injects
+        approvalRuleEvaluator: cedarApprovalRuleEvaluator,
       }),
     );
     expect(d.effect).toBe("require_approval");

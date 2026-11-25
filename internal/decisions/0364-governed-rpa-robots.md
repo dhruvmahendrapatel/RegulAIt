@@ -469,3 +469,155 @@ S2 ships §2, §3 (review), §6 and §8 as written, with these recorded differen
   newest 20 versions, with older pages by `?versionsBefore=`, and reads each page's sites, bindings, editors and test
   runs in four batched queries.
 - **Open with the owner (S3/S4, not built in S2):** the free-form browsing budget requirement and the maximum run time.
+
+## As built: S3 (the browser runner, 2026-11-19)
+
+S3 ships §5 and the §7 egress, secret and evidence controls for scripted (`steps_v1`) runs. Free-form browsing (§4) is
+**not** built and stays off. Recorded differences and decisions:
+
+- **Workload kind and floor.** `robot_browser` is an isolable workload kind. Its floor is a new org setting,
+  `isolationFloorRobotBrowser`, strict default `user_space_kernel`. Lowering it is the existing audited step-up
+  relaxation, and a CHECK keeps it at `hardened_container` or above. The shipped `robot-browser` profile has:
+  - read-only root and a 1 GiB `/work` tmpfs;
+  - `task_scoped` secrets and no persistence;
+  - 2 CPU and 2 GiB;
+  - a 420 s wall clock (the 5-minute run plus margin).
+
+  Its network mode is a new **`egress_proxy`**, which only a robot_browser-only profile may use.
+- **The offer carries the run's egress** (`egress: { runId, targets: [{host, port}] }`, `robotEgressSchema`). It is
+  required for robot_browser and refused for every other kind, by the schema, a gateway check and row CHECKs. The
+  executor generates the Smokescreen ACL from the targets in one place (`smokescreenAclForTargets` → `smokescreenAcl`):
+  one `default` rule, `action: enforce`, the version's hosts only.
+- **The executor, per run:**
+  - It creates an `--internal` Docker network and writes the ACL file (0600).
+  - It starts Smokescreen on that network, never as root and with an empty environment, then connects it to the
+    uplink network.
+  - The sandbox joins the internal network only. The proxy URL and the run id reach the runner as environment through
+    the sandbox init's release line.
+  - On end, kill or start failure, it collects the proxy log (a 128 KiB head and tail) and removes the proxy, the network and the
+    ACL.
+  - It refuses to place a robot run unless `REGULAIT_ROBOT_EGRESS_IMAGE` (by digest) and the ACL directory and volume
+    are configured. Under gVisor it also needs a second runsc runtime registered with `--network=sandbox`. Fail closed.
+- **Smokescreen settings, verified against v0.1.0 by running it:**
+  - Image flags: `--config-file` (`allow_missing_role: true`, because a role only comes from a client certificate, and
+    the metadata `deny_ranges`), plus `--disable-acl-policy-action open` and `--disable-acl-policy-action report`.
+  - Per-run flags: `--egress-acl-file`, `--listen-ip` and `--listen-port 4750`.
+- **Ports: an ADR-0176 exception, a first-party hook on Smokescreen** (review round, 2026-11-20). Smokescreen v0.1.0
+  has no port setting: its ACL matches host names only, and an allowed host was dialled on another port. The §7 CONNECT
+  filter is therefore built **inside** Smokescreen (and, since D-2026-11-22-07, also in front of it: below). `engines/robot-egress/portfilter` is
+  Smokescreen's own `main` with one `Config.PostDecisionRequestHandler`. That handler parses with Smokescreen's own
+  `hostport.New` and refuses any request that is not a CONNECT, or whose `host:port` is not in the run's targets file
+  (`ports.txt`). The executor writes that file next to the ACL from the offer's targets, with the same 0600 mode, mount
+  and cleanup, and the proxy exits before it listens if the file is missing or invalid. Smokescreen is used unmodified,
+  as a library. The unmet requirement is a per-host port limit. Re-check this exception when Smokescreen adds a port
+  option.
+- **MPL-2.0 in the egress image: an ADR-0176 exception (owner, D-2026-11-22-07).** `hashicorp/golang-lru` v1.0.2 is
+  linked into Smokescreen through `stripe/goproxy`. It is admitted pinned and unmodified (the ADR-0187 decision 194
+  condition). The unmet requirement is that no permissive replacement can be linked without forking goproxy or
+  Smokescreen. Re-check it when either drops the module. Recorded in `engines/robot-egress/THIRD_PARTY.md`.
+- **Front CONNECT filter (owner, D-2026-11-22-07: defence in depth).** The sandbox no longer reaches Smokescreen.
+  `portfilter/front.go` listens on the flags' address (`--listen-ip`, `--listen-port 4750`, unchanged for the
+  executor). It admits only a CONNECT whose authority is exactly one run target, parsed with its own strict parser,
+  and re-writes the request before handing it to Smokescreen on a loopback listener in the same process. Its refusals
+  answer 403 with `X-Regulait-Egress-Front` (Smokescreen's answer 407). The in-Smokescreen hook above stays as the
+  second layer. It is built on the Go standard library; the comparison (goproxy, tinyproxy, Envoy) is in
+  `engines/robot-egress/README.md`.
+- **No runner credential.** The gateway holds the run's stdio session (the ADR-0190 I4 pattern). The runner's four
+  requests (plan, heartbeat, evidence, result) are `http` frames the gateway answers in-process (`RobotRunController`).
+  The session, behind the executor's MACed window, is the authority, and no frame carries a key.
+- **Secrets are sealed in the plan.** Stdin frames are relayed through a table (migration 0204), so a secret value is
+  never in a frame in the clear. Values are AES-256-GCM sealed under a fresh run key, with the run id and the secret's
+  ref as associated data. The key reaches the sandbox only through the task-scoped release on fd 3. The runner opens
+  values in memory and fills each one only on its own origin.
+- **Evidence:**
+  - Screenshots are JPEG, masked over every filled selector, taken after each step.
+  - Downloads are capped at 10 MiB.
+  - The egress log comes from the executor's end call.
+  - Items are uploaded in 256 KiB chunks, reassembled, and their sha256 re-checked.
+  - The canary rule refuses any item whose bytes contain a secret value or the run key.
+  - Items are stored content-addressed in the existing artifact store and recorded in `robot_run_evidence`, which is
+    append-only.
+  - Traces stay off in S3.
+- **Test runs** (`POST /v1/robots/:robotId/versions/:version/test-runs`) are owner or admin only:
+  - They run on one of the requester's own projects, which must have a budget.
+  - They use the robot's test secrets by name.
+  - They record the digest a submit would bind, so a passing test run unlocks submit for exactly that content.
+  - Runs are refused under `read_only`, `halted` and (for test runs) `require_approval`.
+- **Agent runs** start from the Robots server's tools/call. The proxy now passes the governed call's context (person,
+  project, agent, grant) to first-party servers as it does to stdio ones. Outputs are validated against the output
+  schema and returned as untrusted tool output; they are never stored.
+- **Images.** `engines/robot-runner` (playwright-core 1.65.1 and Chrome Headless Shell r1255, sha256-checked at build;
+  Playwright's LGPL ffmpeg removed) and `engines/robot-egress` (Smokescreen v0.1.0 at commit 609eb893, built with
+  Go 1.27.4 on distroless) are registered as **unpublished** engine images. They are built twice and compared in CI,
+  and never pushed until published. `robotRunnerImage()` reads the images lock, so a robot run is refused
+  `robot_runner_unavailable` until the first publish.
+- **Free-form limits** are set to the owner's values (addendum below):
+  - `org_settings.freeform_browser_session_budget_usd` defaults to 2, and `freeform_browser_max_run_minutes` to 30.
+  - `projects.freeform_browser_budget_usd` is the per-project override.
+  - The admin route that sets the override, as an audited settings change, ships with free-form browsing in S4.
+- **Follow-ups:**
+  - Link the run's placement to the governed decision (the I4/I8 contract; S3 places an unlinked one).
+  - Add the evidence retention sweep.
+  - An expired review still leaves its version `in_review` (from S2).
+
+- **S3 review round (2026-11-20; the code and security reviews at 4dbc10e4):**
+  - **No host address on the run network.** The network is created `--internal --ipv6=false` with
+    `com.docker.network.bridge.inhibit_ipv4=true`, so the host keeps no address on it, and `--internal` alone left the
+    bridge's `.1` reachable. This was chosen over host firewall rules because it needs no host firewall change. The
+    executor re-reads the network after creating it and refuses a run unless the network is internal, has no IPv6,
+    has the option set and has no gateway. Chromium runs with `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`
+    and `--disable-quic`. A Docker-gated integration test (`robot-egress.integration.test.ts`) proves, from inside a
+    real sandbox (runc; gVisor not verified), that these are refused: a host not on the ACL, an IP literal,
+    169.254.169.254, the gateway, a wrong port, plain HTTP and direct TCP/UDP.
+  - **Accepted risk: Chromium's own sandbox is off** (`chromiumSandbox: false`, now explicit). The boundary is the
+    robot_browser sandbox: gVisor, no capabilities, no-new-privileges and seccomp. A renderer exploit would hold the
+    run's opened secrets, and the output canary below is then the last stop.
+  - **Secrets never reach the model.** The canary checks every output in its raw, JSON-escaped, percent-encoded,
+    form-encoded, UTF-16LE and base64 forms. On a hit the run fails `secret_in_output` and returns no outputs. Values
+    under 4 characters are not checked.
+  - **PII mode.** The run takes its project's PII mode through the compliance cascade, and an unresolved mode falls
+    back to the org floor (`block`, ADR-0181). Under `block` there are no screenshots, and a download keeps only its
+    sha256 and size (`robot_run_evidence.bytes_withheld`). Every other mode stores masked screenshots.
+    **Owner decision (2026-11-21):** the strict default stays. An unclassified project gets `block` (no
+    screenshots). An admin relaxes it per project through the project's compliance classification
+    (`POST /v1/projects/:projectId/classifications`). A first classification is audited (`project-classified`); a
+    change to an existing one needs a named reviewer's approval of the cascade diff.
+  - **Bundle (owner decision, 2026-11-21):** the `all JS` ceiling is not raised for S3. After merging `main` (whose
+    owner-approved 1160 → 1170 kB raise, `7ef39d0f`, was for another screen), S3's +129 B leaves `all JS` at
+    1,169,571 B, under the ceiling, so no lazy-loading was needed.
+  - **Bounds and lifecycle.**
+    - In-flight evidence is capped at 16 MiB per run and 64 MiB across runs.
+    - The egress-log evidence keeps a 128 KiB head and a 128 KiB tail with a dropped-byte marker.
+    - The end audit row carries the ordered `[{item, kind, sha256}]` list.
+    - Every status write checks that its row moved, and a lost race writes no audit.
+    - `robot-run-stale-sweep` ends stale runs as `timed_out` / `stale_run`.
+    - The executor reconciles orphaned proxies, sandboxes, networks and ACL folders at start-up and every 5 minutes.
+      This assumes one executor per Docker daemon.
+  - **Budget and deadline.**
+    - `preDispatchProjectGate` refuses a project that is over budget.
+    - Each run writes a `robot_run` usage row with a NULL cost. A robot run has no price yet, and no figure is invented.
+    - A robot tools/call gets a deadline that covers placement, the run and its margin, with one attempt and no retry.
+    - The call's abort signal cancels the run (`caller_aborted`).
+    - **Cancel on any replica (owner, D-2026-11-22-07).** A `notifications/cancelled` that lands on a replica not
+      serving the call is written to `mcp_caller_cancellations` (pending migration `mcp_caller_cancellations`). The
+      row is keyed by a scrypt hash of the caller's scope and request id, so no credential id is stored and a caller can
+      name only its own calls. Every replica with calls in flight reads the table each second and aborts a call whose
+      key appears after the call started (`apps/gateway/src/caller-cancel.ts`).
+    - **Fail closed.** Each heartbeat of a run with a caller confirms that shared state. It accepts a read from the
+      last 3 s, or makes a fresh read bounded at 2 s. When it cannot confirm, the heartbeat answers `{cancel:true}`
+      and the run ends `cancelled` / `cancel_unconfirmed`. A test run has no caller and does not depend on the table.
+
+## Addendum: free-form browsing limits (owner decision, 2026-11-19)
+
+This closes the two §4 questions left open with the owner:
+
+- **Maximum run time:** 30 minutes per free-form session. The existing ends still apply: the end of the agent's turn
+  and 5 minutes idle. Recorded as `org_settings.freeform_browser_max_run_minutes`, default 30, CHECK 1 to 30.
+- **Budget:** $2 per session by default, counted against the project's budget. An admin may change it per project
+  (`projects.freeform_browser_budget_usd`; NULL means the org default). The change is audited as a settings change, a
+  `settings_relax` step-up when it raises the amount. Recorded as `org_settings.freeform_browser_session_budget_usd`,
+  default 2.
+- **Unchanged:** free-form browsing stays **off by default**, with the per-user admin opt-in (`freeformBrowserUsers`,
+  empty by default), the high-risk class, quorum approval and the authorised-targets egress of §4.
+- **Where it lands:** the limits are stored in S3. The free-form server, which enforces them, and the per-project admin
+  route land together in S4.

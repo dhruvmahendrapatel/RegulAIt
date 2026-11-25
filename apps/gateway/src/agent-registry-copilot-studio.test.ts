@@ -6,13 +6,16 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
-import { COPILOT_STUDIO_ENDPOINTS, COPILOT_STUDIO_SCANNER, COPILOT_STUDIO_SELECTS, copilotStudioOrgs, copilotStudioTargetProblem } from "./agent-registry-copilot-studio.js";
+import { COPILOT_STUDIO_ENDPOINTS, COPILOT_STUDIO_SCANNED, COPILOT_STUDIO_SCANNER, COPILOT_STUDIO_SELECTS, copilotStudioOrgs, copilotStudioTargetProblem } from "./agent-registry-copilot-studio.js";
+import { checkObservations } from "./discovery-worker.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000336";
 const CLIENT = "00000000-0000-4000-8000-000000000337";
 const USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BOT_1 = "b0000000-0000-4000-8000-000000000001";
+/** ADR-0338 slice 1b: the environment's Power Platform id (the quarantine's locator) */
+const ENV_ID = "e1000000-0000-4000-8000-000000000338";
 const BOT_2 = "b0000000-0000-4000-8000-000000000002";
 const REF = "c0000000-0000-4000-8000-000000000001";
 const ORG = "https://contoso.crm4.dynamics.com";
@@ -24,6 +27,10 @@ const urlOf = (input: string | URL | Request) => new URL(typeof input === "strin
 const FMT = "@OData.Community.Display.V1.FormattedValue";
 /** a field a careless adapter might keep: it must never be requested or staged */
 const SECRET_TEXT = "INSTRUCTIONS-never-stored-sk_live_example";
+/** a real-shaped credential (built at run time, so no scanner sees a token in this file) */
+const TOKEN = ["gh", "p_", "A1b2C3d4".repeat(4), "E5f6"].join("");
+const TOPIC = "d0000000-0000-4000-8000-000000000009";
+const GPT = "d0000000-0000-4000-8000-000000000015";
 
 interface FakeOpts {
   privileges?: string[];
@@ -32,6 +39,8 @@ interface FakeOpts {
   botsNextLink?: string;
   /** this many knowledge sources on the first agent, in one page */
   manyComponents?: number;
+  /** ADR-0338 slice 1b: the organization detail answers this status instead (its environment id unreadable) */
+  orgDetailStatus?: number;
 }
 
 function fakeDataverse(opts: FakeOpts = {}) {
@@ -60,6 +69,11 @@ function fakeDataverse(opts: FakeOpts = {}) {
     if (url.origin === ORG) {
       const p = url.pathname;
       if (p === "/api/data/v9.2/WhoAmI") return json({ UserId: USER, BusinessUnitId: CLIENT, OrganizationId: TENANT });
+      if (p === "/api/data/v9.2/RetrieveCurrentOrganization(AccessType=@p1)") {
+        if (opts.orgDetailStatus) return json({ error: { message: "no" } }, opts.orgDetailStatus);
+        if (url.searchParams.get("@p1") !== "Microsoft.Dynamics.CRM.EndpointAccessType'Default'") return json({}, 400);
+        return json({ Detail: { OrganizationId: TENANT, EnvironmentId: ENV_ID.toUpperCase(), UrlName: "contoso" } });
+      }
       if (p === `/api/data/v9.2/systemusers(${USER})/Microsoft.Dynamics.CRM.RetrieveUserPrivileges()`) {
         if (opts.privilegesStatus) return json({ error: { message: "no" } }, opts.privilegesStatus);
         return json({ RolePrivileges: (opts.privileges ?? ["prvReadbot", "prvReadbotcomponent", "prvReadconnectionreference"]).map((n) => ({ PrivilegeName: n, Depth: "Global" })) });
@@ -92,6 +106,16 @@ function fakeDataverse(opts: FakeOpts = {}) {
       }
       if (p === "/api/data/v9.2/connectionreferences") {
         return json({ value: [{ connectionreferenceid: REF, connectionreferencedisplayname: "Contoso mail", connectorid: "/providers/Microsoft.PowerApps/apis/shared_office365", statecode: 0 }] });
+      }
+      // slice 5: the scanned listing (topic and generative-instruction YAML), told apart by its $select
+      if (p === "/api/data/v9.2/botcomponents" && (url.searchParams.get("$select") ?? "").split(",").includes("data")) {
+        return json({
+          value: [
+            { botcomponentid: TOPIC, componenttype: 9, _parentbotid_value: BOT_1, data: `kind: AdaptiveDialog\nactions:\n  - kind: HttpRequestAction\n    headers:\n      Authorization: Bearer ${TOKEN}` },
+            { botcomponentid: GPT, componenttype: 15, _parentbotid_value: BOT_1, data: "instructions: be helpful" },
+            { botcomponentid: "d0000000-0000-4000-8000-0000000000ff", componenttype: 9, _parentbotid_value: "b0000000-0000-4000-8000-0000000000ff", data: `other ${TOKEN}` },
+          ],
+        });
       }
       if (p === "/api/data/v9.2/botcomponents") {
         if (opts.manyComponents) {
@@ -164,12 +188,13 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
     const { promise, calls, dv } = run();
     const res = await promise;
     expect(res.credentialWriteScope).toBe("read_only");
-    expect(res.observations).toEqual([]);
+    // the one planted plaintext credential (slice 5); its shape is pinned in the slice 5 test below
+    expect(res.observations).toHaveLength(1);
     expect(res.registriesComplete).toEqual(["copilot_studio"]);
     const [hr, invoice] = res.registryAgents!;
     expect(hr!.externalId).toBe(`contoso.crm4.dynamics.com/${BOT_1}`);
     expect(hr!.displayName).toBe("HR helper");
-    expect(hr!.attributes).toMatchObject({ environment: "contoso.crm4.dynamics.com", botId: BOT_1, state: "active", language: "English", authenticationMode: "custom_entra_id", accessControlPolicy: "group_membership" });
+    expect(hr!.attributes).toMatchObject({ environment: "contoso.crm4.dynamics.com", environmentId: ENV_ID, botId: BOT_1, state: "active", language: "English", authenticationMode: "custom_entra_id", accessControlPolicy: "group_membership" });
     expect(invoice!.attributes).toMatchObject({ state: "inactive", authenticationMode: "integrated", accessControlPolicy: "any_multi_tenant" });
     expect(hr!.components).toEqual([
       { kind: "knowledge", vendorRef: "d0000000-0000-4000-8000-000000000001", displayName: "HR handbook", enabled: true, providedBy: null },
@@ -192,6 +217,16 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
     expect(calls.secrets).toContain(dv.accessToken);
     // the worker's own check accepts what the adapter produced
     expect(checkRegistryAgents("agent_registry_copilot_studio", res.registryAgents, res.registriesComplete).records).toHaveLength(2);
+  });
+
+  it("ADR-0338 slice 1b: an unreadable environment id still stages the agents, without the locator (so no control)", async () => {
+    const { promise } = run({ orgDetailStatus: 403 });
+    const res = await promise;
+    expect(res.registryAgents).toHaveLength(2);
+    for (const r of res.registryAgents!) expect(r.attributes!.environmentId ?? null).toBeNull();
+    expect(res.readOutcomes).toContainEqual(expect.objectContaining({ read: "environment id of contoso.crm4.dynamics.com", status: "denied" }));
+    // the inventory read is unaffected: the registry still reads as complete
+    expect(res.registriesComplete).toEqual(["copilot_studio"]);
   });
 
   it("decision 4, pinned: the exact columns read, and no content column among them", () => {
@@ -246,5 +281,27 @@ describe("ADR-0336 agent_registry_copilot_studio: the read", () => {
   it("an include list keeps only the named agents", async () => {
     const res = await run({}, { scope: { orgLevel: false, include: [BOT_2.toUpperCase()] } }).promise;
     expect(res.registryAgents!.map((r) => r.attributes!.botId)).toEqual([BOT_2]);
+  });
+});
+
+describe("ADR-0336 slice 5: plaintext credentials in a Copilot Studio agent's YAML, by location only", () => {
+  it("scans topic and generative-instruction data in its own listing; reports subject, path and rule id only", async () => {
+    const { promise, calls } = run();
+    const res = await promise;
+    expect(res.observations).toEqual([
+      { evidenceKind: "agent_config", subjectKind: "system", subject: `contoso.crm4.dynamics.com/${BOT_1}`, location: { path: `bots/${BOT_1}/components/${TOPIC}/data` }, secretRule: "pipelock.secrets.github_token" },
+    ]);
+    const out = JSON.stringify(res);
+    for (let i = 0; i + 8 <= TOKEN.length; i++) expect(out).not.toContain(TOKEN.slice(i, i + 8));
+    expect(checkObservations("agent_registry_copilot_studio", res.observations!, "2026-11-21T00:00:00.000Z")[0]).toMatchObject({ configSecret: { rule: "pipelock.secrets.github_token", vendor: "microsoft" } });
+    // the scan listing asks for its pinned columns and the two component types, on an allow-listed path
+    const scan = calls.urls.map((u) => new URL(u)).find((u) => u.pathname.endsWith("/botcomponents") && (u.searchParams.get("$select") ?? "").includes("data"));
+    expect(scan!.searchParams.get("$select")).toBe(COPILOT_STUDIO_SCANNED.botcomponents.join(","));
+    expect(scan!.searchParams.get("$filter")).toBe("_parentbotid_value ne null and (componenttype eq 9 or componenttype eq 15)");
+  });
+
+  it("the kept columns still exclude the scanned text", () => {
+    expect(COPILOT_STUDIO_SELECTS.botcomponents).not.toContain("data");
+    expect(COPILOT_STUDIO_SCANNED).toEqual({ botcomponents: ["botcomponentid", "componenttype", "_parentbotid_value", "data"], componentTypes: [9, 15] });
   });
 });

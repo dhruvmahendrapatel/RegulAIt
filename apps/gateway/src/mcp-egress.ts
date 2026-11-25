@@ -557,7 +557,7 @@ export async function guardedMcpConnect(
   if (stored.transport === "first_party") {
     transportLabel = "first_party";
     try {
-      const client = await connectFirstPartyServer(db, stored, deps.connectDeadlineMs ?? timeouts().mcpConnectMs);
+      const client = await connectFirstPartyServer(db, stored, deps.connectDeadlineMs ?? timeouts().mcpConnectMs, deps.placement ?? null);
       if (!client) {
         await refuseUpstream(
           db,

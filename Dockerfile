@@ -27,7 +27,7 @@
 # of the same Node 22 line carried none. Digest of node:22-trixie-slim as
 # published 2026-10-21T11:36Z (linux/amd64 + arm64 index): Node 22.23.4, for
 # the Node.js 2026-10-21 security release (CVE-2026-111497 and others).
-FROM node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS build
+FROM node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS build
 
 RUN corepack enable
 WORKDIR /app
@@ -59,13 +59,16 @@ COPY apps ./apps
 # tests) stays in the build context, because every workspace install must resolve it (a context without it fails
 # with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND), and is deleted here, after the production install, so it never reaches the
 # runtime image. Engine images take only `pnpm deploy --prod` of their own package and never contain it.
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
- && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build \
+#
+# The gateway type-check needs about 5 GB, so the build stage gets the same 6 GB heap the CI jobs that build the
+# gateway use (055f7fe6). Build stage only; the runtime image's heap is set where it runs.
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
+ && NODE_OPTIONS=--max-old-space-size=6144 pnpm -r build \
  && rm -rf node_modules apps/*/node_modules packages/*/node_modules \
  && pnpm install --frozen-lockfile --prod --offline --filter "@regulait/gateway..." \
  && rm -rf packages/mcp-vuln-fixtures
 
-FROM node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS runtime
+FROM node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS runtime
 LABEL org.regulait.build-stage="runtime (production dependencies only)"
 
 # ADR-0184 / ADR-0200 (patch, never allow-list): CVE-2026-76844 and CVE-2026-85091 (zlib1g, HIGH).
@@ -89,6 +92,10 @@ WORKDIR /app
 COPY --from=build /app /app
 
 ENV PORT=3000
+# ADR-0025 addendum (Codex review S-08): up to four 128 MiB password derivations
+# run on libuv's thread pool at once (REGULAIT_PASSWORD_HASH_CONCURRENCY), so the
+# pool is raised from 4 to 8 to keep threads free for file and DNS work.
+ENV UV_THREADPOOL_SIZE=8
 EXPOSE 3000
 
 # ADR-0167 (CFG-07): the serving process is NOT root. The image's `node` user
