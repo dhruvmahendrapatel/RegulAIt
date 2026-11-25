@@ -4,7 +4,7 @@
  *   `@regulait/pm-provider` triggers.ts   signal extraction, the settings schema, the lifecycle table. Pure.
  *   THIS FILE                              the admin API (settings, identity links, the trigger list) and
  *                                          `handlePmTriggers`, which the PM webhook route calls.
- *   `workflows.ts`                         owns `startWorkflowForChange`. THIS FILE STARTS NOTHING ITSELF: it calls
+ *   `workflows.ts`                         owns `startGovernedWorkflow`. THIS FILE STARTS NOTHING ITSELF: it calls
  *                                          that function, exactly as `POST /v1/workflows/instances` does.
  *
  * THE WALLS A TRIGGER PASSES, IN ORDER
@@ -19,7 +19,7 @@
  *     Unlinked → denied. Disabled → denied.
  *  5. ENTITLED. The mapped user's own agent decision (`agentDecision`, the invoke path's check, in `execute` mode)
  *     must allow the connection's configured agent. Run as that user, never as an admin.
- *  6. THE ONE START. `startWorkflowForChange` as that user with that user's own `is_admin`: the template assignment
+ *  6. THE ONE START. `startGovernedWorkflow` as that user with that user's own `is_admin`: the template assignment
  *     picks the workflow (Intake, then forced Plan come from the template).
  * A denial is explained on the item in plain words. Every step writes an audit row.
  */
@@ -58,7 +58,7 @@ import {
 } from "@regulait/pm-provider";
 import { agentDecision } from "./copilot.js";
 import { providerFor } from "./pm.js";
-import { startWorkflowForChange } from "./workflows.js";
+import { startGovernedWorkflow } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { whereFrom } from "./state-transition.js";
@@ -315,19 +315,15 @@ async function handleOne(
 
   // wall 6: the one start, as the person, with the person's own is_admin
   const started = await runWithRlsPrincipal({ userId: user.id }, () =>
-    startWorkflowForChange(db, dataKey, {
-      userId: user.id,
-      isAdmin: user.isAdmin,
-      body: {
-        change: {
-          description,
-          paths: [],
-          changeType: settings.change.changeType,
-          environment: settings.change.environment,
-          ...(settings.change.targetSystem ? { targetSystem: settings.change.targetSystem } : {}),
-        },
-        projectId: row.projectId ?? undefined,
+    startGovernedWorkflow(db, dataKey, { userId: user.id, isAdmin: user.isAdmin }, {
+      change: {
+        description,
+        paths: [],
+        changeType: settings.change.changeType,
+        environment: settings.change.environment,
+        ...(settings.change.targetSystem ? { targetSystem: settings.change.targetSystem } : {}),
       },
+      ...(row.projectId ? { projectId: row.projectId } : {}),
     }),
   );
   if (started.status !== 201) {

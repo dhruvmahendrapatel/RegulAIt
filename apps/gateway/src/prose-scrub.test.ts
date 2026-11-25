@@ -678,6 +678,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",
+    // ADR-0349 slice 4
+    "workflow_schedules.pause_note",
     // ADR-0359 (lane E40)
     "behaviour_anomaly_findings.explanation",
   ];

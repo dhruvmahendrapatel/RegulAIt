@@ -79,7 +79,7 @@ we extend our own adapters. The repository search found the pieces above to reus
    The bot never becomes the actor and no admin authority is borrowed: the start runs as the mapped user, with that
    user's own `is_admin`, inside that user's row-level-security scope.
 5. **The normal start.** An accepted trigger starts the workflow through the same function the
-   `POST /v1/workflows/instances` route now calls (`startWorkflowForChange`, extracted, behaviour unchanged): the
+   `POST /v1/workflows/instances` route now calls (`startGovernedWorkflow`, shared with ADR-0349 workflow schedules, behaviour unchanged): the
    assignment rules choose the template from the change and the server-derived roles and classifications, so the
    Intake and forced Plan stages come from the template, not from this path. The change's description is the item's
    own text read through the adapter at start time (`getWorkItem`); RegulAIt stores no copy (pillar 8). The project the

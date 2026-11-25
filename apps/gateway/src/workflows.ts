@@ -3528,28 +3528,19 @@ export function withCascadeTemplates(templateIds: readonly string[], cascadeTemp
 }
 
 /**
- * ADR-0356: the one workflow start for a change, shared by `POST /v1/workflows/instances` and the PM trigger path
- * (pm-triggers.ts), so a work item handed over from the PM tool starts exactly as the same person starting it in the
- * portal would: assignment rules from the change and the SERVER-derived initiator roles and project classifications
- * (resolveServerChange), the project's required templates unioned in, an explicit template for admins only. Extracted
- * from the route unchanged; the route maps the result onto its reply.
+ * THE governed workflow start (POST /v1/workflows/instances), as a function so a workflow schedule (ADR-0349 slice 4)
+ * starts exactly as a person does: server-resolved roles and data sensitivity (`resolveServerChange`), the shadow-AI
+ * remediation rules, assignment-rule routing (or an admin's explicit template), the compliance cascade, project
+ * attribution, the start conflict policy and the audit rows. Answers the HTTP status and body the route sends.
  */
-export async function startWorkflowForChange(
+export async function startGovernedWorkflow(
   db: Db,
   dataKey: string | undefined,
-  args: {
-    userId: string;
-    isAdmin: boolean;
-    body: {
-      change: z.infer<typeof startInstanceSchema>["change"];
-      projectId?: string | undefined;
-      templateId?: string | undefined;
-      workItem?: z.infer<typeof startInstanceSchema>["workItem"] | undefined;
-    };
-  },
+  caller: { userId: string; isAdmin: boolean },
+  body: z.infer<typeof startInstanceSchema>,
 ): Promise<{ status: number; body: unknown }> {
-  const { userId, isAdmin, body } = args;
-  const result = (status: number, payload: unknown) => ({ status, body: payload });
+  const answer = (status: number, out: unknown) => ({ status, body: out });
+  const userId = caller.userId;
 
   // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
   // start path (resolveServerChange)
@@ -3560,7 +3551,7 @@ export async function startWorkflowForChange(
   if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
     const environment = change.environment.trim();
     if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
-      return result(422, {
+      return answer(422, {
         error: "environment_unstated",
         detail:
           "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
@@ -3570,7 +3561,7 @@ export async function startWorkflowForChange(
     // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
     const allowed = await allowedRemediationEnvironments(db);
     if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
-      return result(422, {
+      return answer(422, {
         error: "environment_not_allowed",
         allowed,
         detail: "name one of the environments a deploy target or workflow assignment rule already uses",
@@ -3579,11 +3570,11 @@ export async function startWorkflowForChange(
     // the install runs only once this start's own checks pass, so a refused start installs nothing
     if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
       if (body.projectId) {
-        const attribution = await assertProjectAttribution(db, body.projectId, userId, isAdmin);
-        if (!attribution.ok) return result(attribution.status, { error: attribution.error });
+        const attribution = await assertProjectAttribution(db, body.projectId, userId, caller.isAdmin);
+        if (!attribution.ok) return answer(attribution.status, { error: attribution.error });
       }
       if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
-        return result(422, secondApproverUnavailable());
+        return answer(422, secondApproverUnavailable());
       }
       await ensureShadowAiRemediationDefault(db, userId);
     }
@@ -3591,8 +3582,8 @@ export async function startWorkflowForChange(
 
   let templateIds: string[];
   if (body.templateId) {
-    if (!isAdmin) {
-      return result(403, { error: "explicit_template_is_admin_only" });
+    if (!caller.isAdmin) {
+      return answer(403, { error: "explicit_template_is_admin_only" });
     }
     templateIds = [body.templateId];
   } else {
@@ -3610,7 +3601,7 @@ export async function startWorkflowForChange(
   if (templateIds.length === 0) {
     // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
     // rule, installed above): say who can fix it
-    return result(422, {
+    return answer(422, {
       error: "no_workflow_matches_change",
       changeType: change.changeType,
       detail:
@@ -3624,13 +3615,13 @@ export async function startWorkflowForChange(
     initiatorUserId: userId,
     change,
     projectId: body.projectId ?? null,
-    isAdmin: isAdmin,
+    isAdmin: caller.isAdmin,
     workItemRef: body.workItem ?? null,
   });
-  if (!started.ok) return result(started.status, started.body);
+  if (!started.ok) return answer(started.status, started.body);
   // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
-  if (started.reused) return result(200, { ...started.instance, reused: true });
-  return result(201, started.instance);
+  if (started.reused) return answer(200, { ...started.instance, reused: true });
+  return answer(201, started.instance);
 }
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
@@ -4070,8 +4061,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const body = startInstanceSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-    const started = await startWorkflowForChange(db, opts.dataKey, { userId, isAdmin: req.authCtx.isAdmin, body });
-    return reply.status(started.status).send(started.body);
+    // ADR-0349 slice 4: the one governed start, shared with workflow schedules
+    const out = await startGovernedWorkflow(db, opts.dataKey, { userId, isAdmin: req.authCtx.isAdmin }, body);
+    return reply.status(out.status).send(out.body);
   });
 
   type LoadResult =
