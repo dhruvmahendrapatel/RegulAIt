@@ -346,6 +346,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   budgetHardBlockPct: atMost(100),
   approvalQuorum: notEqual("all"),
   checkReportsAllowUnbound: notEqual(false),
+  // ADR-0349 slice 2: use_existing hands a second start the open instance instead of refusing it
+  workflowStartConflictPolicy: notEqual("refuse"),
   // ADR-0046: a larger bulk cap lets one action decide more approvals at once; the fence off lets bulk reach
   // approvals on PII-blocking projects (U3: writable through this PUT, judged like every other key)
   approvalBulkMaxItems: atMost(25),
