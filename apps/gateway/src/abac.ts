@@ -28,6 +28,7 @@
  * server clock evaluated in the POLICY'S declared zone; a client clock is never
  * read at all.
  */
+import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
@@ -95,7 +96,7 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 /** the workflow statuses under which attributed work still binds a deploy
  * target — mirrors governed-evaluate.ts's TERMINAL_INSTANCE_STATUSES exactly,
  * because the two derivations must never disagree about "in flight". */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+const TERMINAL_INSTANCE_STATUSES: readonly string[] = WORKFLOW_TERMINAL_STATUSES;
 
 // ---------------------------------------------------------------------------
 // Loading the active policy set
