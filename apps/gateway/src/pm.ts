@@ -397,7 +397,14 @@ function pmSyncRoute<R>(path: string, handler: (req: FastifyRequest, reply: Fast
   return (req: FastifyRequest, reply: FastifyReply): Promise<R> => asPmSync(path, () => handler(req, reply));
 }
 
-export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string }) {
+/** ADR-0356: what the webhook route hands a verified, recorded delivery to for its trigger signals (pm-triggers.ts's
+ * handlePmTriggers, injected by app.ts so this file does not import it: no import cycle) */
+export type PmTriggerHandler = (
+  conn: typeof pmConnections.$inferSelect,
+  delivery: { rawBody: string; query: Record<string, string | undefined>; contentSha256: string },
+) => Promise<unknown[]>;
+
+export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string; triggers?: PmTriggerHandler }) {
   // Read-only widening for the PM strip's GETs, mirroring loadRunFor /
   // loadInstanceFor: the named approver of a PENDING approval on a run or
   // workflow instance may read its links/decisions (200 with [] when there is
@@ -1395,8 +1402,21 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, recorded.id));
         throw err;
       }
+      // ADR-0356: the trigger signals of this verified, recorded delivery (work handed to RegulAIt from the PM tool).
+      // Each trigger records and audits its own outcome; a database failure propagates like the drift processing's
+      // (the record is released so the provider retries) — the open-trigger index keeps a retry from starting twice.
+      let triggers: unknown[] = [];
+      try {
+        triggers = opts.triggers ? await opts.triggers(conn, { rawBody, query, contentSha256: key.contentSha256 }) : [];
+      } catch (err) {
+        await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, recorded.id));
+        throw err;
+      }
       // single-event payloads keep the original ADR-0010 response shape;
       // multi-event payloads (asana batches) report per-event outcomes
+      if (triggers.length > 0) {
+        return reply.status(202).send({ received: results.length, results, triggers });
+      }
       return reply
         .status(202)
         .send(results.length === 1 ? results[0] : { received: results.length, results });

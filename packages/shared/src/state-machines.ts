@@ -18,6 +18,7 @@ import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE, VENDOR_CONTROL_DELEGATED_MACHINE } from "./vendor-agent-control.js";
 import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 import { APPROVAL_SLA_MACHINE } from "./workbench.js";
+import { PM_WORK_TRIGGER_MACHINE } from "./pm-trigger-machine.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -1212,6 +1213,8 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [APPROVAL_MACHINE.def.id]: APPROVAL_MACHINE,
   [REDTEAM_LIBRARY_MACHINE.def.id]: REDTEAM_LIBRARY_MACHINE,
   [CMDB_SYNC_RUN_MACHINE.def.id]: CMDB_SYNC_RUN_MACHINE,
+  // ADR-0356 (lane E37)
+  [PM_WORK_TRIGGER_MACHINE.def.id]: PM_WORK_TRIGGER_MACHINE,
   // ADR-0180 addendum (lane E51): an unmet autonomy floor blocks dispatch unless an admin relaxed it
   [AUTONOMY_ENFORCEMENT_MACHINE.def.id]: AUTONOMY_ENFORCEMENT_MACHINE,
   [REPETITIVE_ASK_CLUSTER_MACHINE.def.id]: REPETITIVE_ASK_CLUSTER_MACHINE,
