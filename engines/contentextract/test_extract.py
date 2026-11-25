@@ -47,16 +47,7 @@ def docx(*paragraphs: str, extra: dict[str, bytes] | None = None) -> bytes:
     return zip_bytes({"[Content_Types].xml": CT, "word/document.xml": doc, **(extra or {})})
 
 
-def pdf_with_text(text: str | None, pages: int = 1) -> bytes:
-    """A minimal PDF of `pages` identical pages; `None` = no text layer (what a scan looks like)."""
-    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode() if text else b""
-    objs = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"3 0 R" for _ in range(pages)), pages),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
+def assemble_pdf(objs: list[bytes]) -> bytes:
     out = io.BytesIO()
     out.write(b"%PDF-1.4\n")
     offsets = []
@@ -69,6 +60,81 @@ def pdf_with_text(text: str | None, pages: int = 1) -> bytes:
         out.write(b"%010d 00000 n \n" % off)
     out.write(b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref))
     return out.getvalue()
+
+
+def pdf_with_text(text: str | None, pages: int = 1, font_size: int = 12) -> bytes:
+    """A minimal PDF of `pages` identical pages; `None` = no content at all (a blank page)."""
+    stream = f"BT /F1 {font_size} Tf 72 700 Td ({text}) Tj ET".encode() if text else b""
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"3 0 R" for _ in range(pages)), pages),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    return assemble_pdf(objs)
+
+
+def png_chunk(kind: bytes, body: bytes) -> bytes:
+    import zlib
+    return len(body).to_bytes(4, "big") + kind + body + zlib.crc32(kind + body).to_bytes(4, "big")
+
+
+def png_header(width: int, height: int) -> bytes:
+    """A PNG signature and IHDR only: enough for the header check, which must refuse before any decoder runs."""
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 0, 0, 0, 0])
+    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr)
+
+
+def png_gray(width: int, height: int, pixels: bytes) -> bytes:
+    import zlib
+    raw = b"".join(b"\x00" + pixels[r * width:(r + 1) * width] for r in range(height))
+    return png_header(width, height) + png_chunk(b"IDAT", zlib.compress(raw)) + png_chunk(b"IEND", b"")
+
+
+def jpeg_header(width: int, height: int) -> bytes:
+    sof = b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big") + b"\x03" + b"\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+    return b"\xff\xd8" + b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + sof
+
+
+class no_tesseract:
+    def __enter__(self):
+        self.saved = extract.TESSERACT
+        extract.TESSERACT = "/nonexistent/tesseract"
+
+    def __exit__(self, *exc):
+        extract.TESSERACT = self.saved
+
+
+HAVE_OCR = extract.ocr_available()
+if not HAVE_OCR and os.environ.get("REGULAIT_REQUIRE_OCR") == "1":
+    raise RuntimeError("REGULAIT_REQUIRE_OCR=1 but no Tesseract at " + extract.TESSERACT)
+
+
+def text_page_gray(text: str) -> tuple[int, int, bytes]:
+    """A real page of text rendered by PDFium to greyscale pixels (what a scanner produces)."""
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(pdf_with_text(text, font_size=28))
+    page = pdf[0]
+    bm = page.render(scale=2, grayscale=True)
+    w, h, stride, buf = bm.width, bm.height, bm.stride, bytes(bm.buffer)
+    bm.close(); page.close(); pdf.close()
+    return w, h, b"".join(buf[r * stride:r * stride + w] for r in range(h))
+
+
+def pdf_with_image(width: int, height: int, gray: bytes) -> bytes:
+    """A one-page PDF whose only content is a greyscale image: a scan, with no text layer."""
+    import zlib
+    img = zlib.compress(gray)
+    content = b"q 612 0 0 792 0 0 cm /Im0 Do Q"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+        b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n" % (width, height, len(img)) + img + b"\nendstream",
+    ]
+    return assemble_pdf(objs)
 
 
 def run_one(data: bytes, media_type: str = "application/octet-stream", limits: dict | None = None) -> dict:
@@ -222,8 +288,17 @@ class TypeAndLimitTests(unittest.TestCase):
         mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         self.assertEqual(run_one(data, mt)["reason"], "type_mismatch")
 
-    def test_image_needs_ocr(self):
-        self.assertEqual(run_one(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")["reason"], "needs_ocr")
+    def test_image_without_ocr_engine_needs_ocr(self):
+        with no_tesseract():
+            self.assertEqual(run_one(png_gray(4, 4, b"\xff" * 16), "image/png")["reason"], "needs_ocr")
+
+    def test_image_header_checked_before_ocr(self):
+        self.assertEqual(run_one(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")["reason"], "malformed")
+        self.assertEqual(run_one(png_header(50_000, 50_000), "image/png")["reason"], "too_large")
+        self.assertEqual(run_one(png_header(10_000, 5_000), "image/png")["reason"], "too_large")  # 50 MP
+        self.assertEqual(run_one(b"\xff\xd8\xff\xe0\x00", "image/jpeg")["reason"], "malformed")
+        self.assertEqual(run_one(jpeg_header(30_000, 10), "image/jpeg")["reason"], "too_large")
+        self.assertEqual(extract.image_size(jpeg_header(640, 480)), (640, 480))
 
     def test_file_size_limit(self):
         self.assertEqual(run_one(b"a" * 2000, limits={"maxFileBytes": 1000})["reason"], "too_large")
@@ -299,8 +374,9 @@ class PdfTests(unittest.TestCase):
         self.assertEqual((r["status"], r["type"], r["pages"], r["scannedPages"]), ("extracted", "pdf", 1, 0))
         self.assertIn("123-45-6789", r["text"])
 
-    def test_scanned_pdf_needs_ocr(self):
-        self.assertEqual(run_one(pdf_with_text(None))["reason"], "needs_ocr")
+    def test_scanned_pdf_without_ocr_engine_needs_ocr(self):
+        with no_tesseract():
+            self.assertEqual(run_one(pdf_with_text(None))["reason"], "needs_ocr")
 
     def test_page_limit(self):
         self.assertEqual(run_one(pdf_with_text("x", 3), limits={"maxPages": 3})["status"], "extracted")
@@ -308,6 +384,45 @@ class PdfTests(unittest.TestCase):
 
     def test_corrupt_pdf(self):
         self.assertEqual(run_one(b"%PDF-1.4\nnot really")["reason"], "malformed")
+
+
+@unittest.skipUnless(HAVE_PDFIUM and HAVE_OCR, "pypdfium2 and Tesseract are not both installed here; the image build runs these")
+class OcrTests(unittest.TestCase):
+    PHRASE = "Account 4111 1111 1111 1111"
+
+    def test_image_ocr(self):
+        w, h, gray = text_page_gray(self.PHRASE)
+        r = run_one(png_gray(w, h, gray), "image/png")
+        self.assertEqual((r["status"], r["type"]), ("extracted", "image"))
+        self.assertIn("4111 1111 1111 1111", r["text"])
+
+    def test_scanned_pdf_ocr(self):
+        w, h, gray = text_page_gray(self.PHRASE)
+        r = run_one(pdf_with_image(w, h, gray), "application/pdf")
+        self.assertEqual((r["status"], r["pages"], r["scannedPages"]), ("extracted", 1, 1))
+        self.assertIn("4111 1111 1111 1111", r["text"])
+
+    def test_blank_page_is_read_not_refused(self):
+        r = run_one(pdf_with_text(None))
+        self.assertEqual((r["status"], r["scannedPages"]), ("extracted", 1))
+
+    def test_ocr_page_cap_across_files(self):
+        img = png_gray(8, 8, b"\xff" * 64)
+        files = [{"id": f"i{n}", "path": "x"} for n in range(extract.OCR_LIMITS["maxOcrPages"] + 1)]
+        res = extract.run({"files": files}, lambda spec, cap: img)["files"]
+        self.assertTrue(all(f["status"] == "extracted" for f in res[:-1]))
+        self.assertEqual(res[-1]["reason"], "page_limit")
+
+    def test_ocr_respects_the_deadline(self):
+        b = extract.Budget(extract.merge_limits(None))
+        b.deadline = 0
+        with self.assertRaises(extract.Refused) as e:
+            extract.ocr_image(png_gray(8, 8, b"\xff" * 64), b)
+        self.assertEqual(e.exception.reason, "timeout")
+
+    def test_corrupt_image_body(self):
+        bad = png_header(8, 8) + png_chunk(b"IDAT", b"not zlib") + png_chunk(b"IEND", b"")
+        self.assertEqual(run_one(bad, "image/png")["reason"], "malformed")
 
 
 if __name__ == "__main__":

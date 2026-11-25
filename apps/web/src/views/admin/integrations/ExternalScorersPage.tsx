@@ -46,7 +46,9 @@ import { EditExternalScorerButton } from "../editForms";
 /** the judge-backed kinds an instrument may claim, plus (ADR-0220) the three
  * guardrail kinds a trained-detector service serves on the Guardrails page —
  * the registration schema refuses anything else, so the lexical metrics are
- * not even expressible; ADR-0353 adds `routing_complexity` (a routing classifier) */
+ * not even expressible; ADR-0353 adds `routing_complexity` (a routing classifier), and
+ * ADR-0352 adds the local text embedder for the meaning-based cache tier, which
+ * the server refuses unless it is claimed alone. */
 const CLAIMABLE_KINDS = [
   "llm_as_judge",
   "groundedness_judge",
@@ -56,6 +58,8 @@ const CLAIMABLE_KINDS = [
   "guardrail_harm",
   // ADR-0353: the pluggable routing classifier's kind
   "routing_complexity",
+  // ADR-0352: the meaning-based cache tier's local embedder (claimed alone)
+  "text_embedding",
 ] as const;
 
 const useExternalScorers = () =>

@@ -40,6 +40,7 @@
 import { z } from "zod";
 import { JUDGE_BACKED_SCORER_KINDS } from "./evals.js";
 import { GUARDRAIL_SCORER_KINDS } from "./trained-detectors.js";
+import { TEXT_EMBEDDING_SCORER_KIND, embeddingClaimRefusal } from "./semantic-cache-similarity.js";
 import {
   EXTERNAL_SCORER_ADAPTERS,
   vendorAdapterOptionsSchema,
@@ -242,6 +243,8 @@ export const EXTERNAL_SCORER_CLAIMABLE_KINDS = [
   ...JUDGE_BACKED_SCORER_KINDS,
   ...GUARDRAIL_SCORER_KINDS,
   ...ROUTING_SCORER_KINDS,
+  // ADR-0352: a local embedder for the meaning-based cache tier (claimed alone)
+  TEXT_EMBEDDING_SCORER_KIND,
 ] as const;
 
 /**
@@ -295,6 +298,8 @@ export const createExternalScorerSchema = z
       options: b.adapterOptions,
     });
     if (refusal) ctx.addIssue({ code: "custom", path: ["adapter"], message: refusal });
+    const embedding = embeddingClaimRefusal(b.scorerKinds);
+    if (embedding) ctx.addIssue({ code: "custom", path: ["scorerKinds"], message: embedding });
   });
 export type CreateExternalScorer = z.infer<typeof createExternalScorerSchema>;
 

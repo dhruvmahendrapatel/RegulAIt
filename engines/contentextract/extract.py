@@ -15,8 +15,8 @@ result.json:   {"version": 1, "files": [{"id", "status", "type", "reason"?, "tex
 
 What it reads, and with what:
   - PDF: pypdfium2 (Apache-2.0 / BSD-3-Clause; PDFium, the PDF engine Chrome ships). Text per page. A page with
-    no text layer is counted in `scannedPages`; a PDF with no text at all is refused `needs_ocr` until the OCR
-    slice (ADR-0362 slice 2) reads it.
+    no text layer is rendered (PDFium, greyscale PGM) and read by OCR; `scannedPages` counts them. With no OCR
+    engine such a page fails closed (`needs_ocr`): it is never passed as if it were blank.
   - DOCX, XLSX, PPTX: the Python standard library only (zipfile + xml.etree). Office Open XML is a zip of XML
     parts; no maintained, permissively licensed reader beats reading the parts directly (ADR-0362 comparison).
     A part that declares a DOCTYPE or an ENTITY is refused `malformed`, checked inside the XML parser so no
@@ -26,7 +26,7 @@ What it reads, and with what:
   - ZIP archives: the standard library, each entry detected and read recursively, bounded by entry count,
     nesting depth, total and per-entry uncompressed bytes and the compression ratio. Sizes in headers are never
     trusted: every read stops one byte past its limit.
-  - Images: refused `needs_ocr` until the OCR slice.
+  - Images (PNG, JPEG): Tesseract OCR (slice 2), after a header check against the pixel caps (OCR_LIMITS).
 
 The type is decided from the bytes (magic numbers), never from the declared name or media type. A declared media
 type of a different family is refused `type_mismatch`. Anything else is `unknown_type`.
@@ -42,6 +42,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import zipfile
@@ -111,6 +112,7 @@ class Budget:
     def __init__(self, limits: dict):
         self.limits = limits
         self.chars = 0
+        self.ocr_pages = 0
         self.deadline = time.monotonic() + limits["deadlineMs"] / 1000.0
 
     def tick(self) -> None:
@@ -376,6 +378,7 @@ def extract_ooxml(zf: zipfile.ZipFile, kind: str, limits: dict, arch: ArchiveBud
 
 
 def extract_pdf(data: bytes, limits: dict, budget: Budget) -> tuple[str, int, int]:
+    """(text, pages, pages read by OCR). A page with no text layer is OCR'd; with no OCR engine, it fails closed."""
     try:
         import pypdfium2 as pdfium  # noqa: PLC0415 (imported only when a PDF arrives)
     except ImportError:  # the image always has it; a bare interpreter in a unit test may not
@@ -389,7 +392,7 @@ def extract_pdf(data: bytes, limits: dict, budget: Budget) -> tuple[str, int, in
         if n > limits["maxPages"]:
             raise Refused("page_limit")
         pages: list[str] = []
-        scanned = 0
+        scanned: list[int] = []
         for i in range(n):
             budget.tick()
             page = pdf[i]
@@ -404,12 +407,142 @@ def extract_pdf(data: bytes, limits: dict, budget: Budget) -> tuple[str, int, in
             if text:
                 pages.append(budget.take(text))
             else:
-                scanned += 1
-        if n > 0 and not pages:
-            raise Refused("needs_ocr")
-        return "\n\f".join(pages), n, scanned
+                scanned.append(i)
+        if scanned:
+            # a page with no text layer is what a scan looks like; it is never passed as if it were blank
+            if not ocr_available():
+                raise Refused("needs_ocr")
+            if len(scanned) + budget.ocr_pages > OCR_LIMITS["maxOcrPages"]:
+                raise Refused("page_limit")
+            for i in scanned:
+                budget.tick()
+                page = pdf[i]
+                try:
+                    image = render_page_pgm(page)
+                finally:
+                    page.close()
+                budget.ocr_pages += 1
+                text = ocr_image(image, budget).strip()
+                if text:
+                    pages.append(budget.take(text))
+        return "\n\f".join(pages), n, len(scanned)
     finally:
         pdf.close()
+
+
+def render_page_pgm(page) -> bytes:
+    """One PDF page as an 8-bit greyscale PGM at OCR_LIMITS["dpi"], scaled down to stay under maxImagePixels."""
+    w_pt, h_pt = page.get_size()
+    scale = OCR_LIMITS["dpi"] / 72.0
+    area = max(w_pt * h_pt, 1.0)
+    if area * scale * scale > OCR_LIMITS["maxImagePixels"]:
+        scale = (OCR_LIMITS["maxImagePixels"] / area) ** 0.5
+    bitmap = page.render(scale=scale, grayscale=True)
+    try:
+        width, height, stride = bitmap.width, bitmap.height, bitmap.stride
+        if width <= 0 or height <= 0 or width * height > OCR_LIMITS["maxImagePixels"]:
+            raise Refused("too_large")
+        buf = bytes(bitmap.buffer)
+        rows = b"".join(buf[r * stride : r * stride + width] for r in range(height))
+    finally:
+        bitmap.close()
+    return b"P5\n%d %d\n255\n" % (width, height) + rows
+
+
+# ---- OCR (ADR-0362 slice 2) --------------------------------------------------------------------------------
+# Tesseract 5 (Apache-2.0), the Debian package of the image, with its language data baked in: nothing is downloaded,
+# so OCR works air-gapped. It runs as a child process with no shell, a fixed environment (one thread, the baked
+# tessdata), the request's remaining deadline as its timeout and a bounded output. The image is checked BEFORE
+# Tesseract sees it: only PNG and JPEG, and never more than maxImagePixels (a decompression bomb is refused by its
+# header). These caps are not request-tunable.
+
+OCR_LIMITS = {
+    "maxImagePixels": 40_000_000,  # one image or one rendered page
+    "maxImageSide": 20_000,  # pixels, either side
+    "maxOcrPages": 20,  # images plus scanned PDF pages, per request
+    "maxOcrOutputBytes": 4 * 1024 * 1024,  # what one Tesseract run may print
+    "dpi": 200,  # scanned PDF pages are rendered at this resolution
+}
+TESSERACT = os.environ.get("REGULAIT_TESSERACT", "/usr/bin/tesseract")
+TESSERACT_LANG = "eng"
+
+
+def ocr_available() -> bool:
+    return os.path.isfile(TESSERACT) and os.access(TESSERACT, os.X_OK)
+
+
+def image_size(data: bytes) -> tuple[int, int]:
+    """(width, height) from a PNG or JPEG header; anything else, or a header that does not parse, is refused."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(data) < 24 or data[12:16] != b"IHDR":
+            raise Refused("malformed")
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data.startswith(b"\xff\xd8"):
+        i = 2
+        while i + 4 <= len(data):
+            if data[i] != 0xFF:
+                raise Refused("malformed")
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # markers with no length
+                i += 2
+                continue
+            seg = int.from_bytes(data[i + 2 : i + 4], "big")
+            if seg < 2:
+                raise Refused("malformed")
+            # SOF0..SOF15, except DHT (C4), JPG (C8) and DAC (CC)
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                if i + 9 > len(data):
+                    raise Refused("malformed")
+                return int.from_bytes(data[i + 7 : i + 9], "big"), int.from_bytes(data[i + 5 : i + 7], "big")
+            if marker == 0xDA:  # start of scan before any frame header
+                break
+            i += 2 + seg
+        raise Refused("malformed")
+    raise Refused("unknown_type")
+
+
+def check_image(data: bytes) -> None:
+    width, height = image_size(data)
+    if width <= 0 or height <= 0:
+        raise Refused("malformed")
+    if width > OCR_LIMITS["maxImageSide"] or height > OCR_LIMITS["maxImageSide"] or width * height > OCR_LIMITS["maxImagePixels"]:
+        raise Refused("too_large")
+
+
+def ocr_image(data: bytes, budget: Budget) -> str:
+    """Tesseract on one PNG, JPEG or PGM, bounded by the request's remaining deadline."""
+    remaining = budget.deadline - time.monotonic()
+    if remaining <= 0:
+        raise Refused("timeout")
+    env = {"PATH": "/usr/bin:/bin", "OMP_THREAD_LIMIT": "1", "LANG": "C.UTF-8"}
+    try:
+        run = subprocess.run(
+            [TESSERACT, "stdin", "stdout", "-l", TESSERACT_LANG, "--psm", "3"],
+            input=data,
+            capture_output=True,
+            timeout=remaining,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise Refused("timeout")
+    except OSError:
+        raise Refused("needs_ocr")
+    if run.returncode != 0:
+        raise Refused("malformed")
+    if len(run.stdout) > OCR_LIMITS["maxOcrOutputBytes"]:
+        raise Refused("text_limit")
+    return run.stdout.decode("utf-8", errors="replace")
+
+
+def extract_image(data: bytes, budget: Budget) -> str:
+    check_image(data)
+    if not ocr_available():
+        raise Refused("needs_ocr")
+    if budget.ocr_pages + 1 > OCR_LIMITS["maxOcrPages"]:
+        raise Refused("page_limit")
+    budget.ocr_pages += 1
+    return budget.take(ocr_image(data, budget).strip())
 
 
 # ---- dispatch ----------------------------------------------------------------------------------------------
@@ -425,7 +558,7 @@ def extract_bytes(data: bytes, limits: dict, budget: Budget, depth: int, arch: A
     if kind == "text":
         return kind, budget.take(decode_text(data))
     if kind == "image":
-        raise Refused("needs_ocr")
+        return kind, extract_image(data, budget)
     if kind == "zip":
         if depth > limits["maxArchiveDepth"]:
             raise Refused("depth_limit")

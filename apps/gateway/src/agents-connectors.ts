@@ -190,7 +190,11 @@ import {
   loadNativeCacheConfig,
   lookupSemanticCache,
   semanticCacheNativeKey,
+  semanticCacheTierDetail,
   storeSemanticCache,
+} from "./semantic-cache-shared.js";
+import { storeSimilarEmbedding, type SimilarityProbe } from "./semantic-cache-similarity.js";
+import {
   type NativeCacheRequest,
   type SemanticCacheKey,
   type SemanticCacheHit,
@@ -4455,6 +4459,8 @@ export function registerAgentConnectorRoutes(
       // dispatch and refuse to store if the two disagree.
       let cacheKey: SemanticCacheKey | null = null;
       let cacheRequest: NativeCacheRequest | null = null;
+      // ADR-0352: the lookup-time embedding, reused by the store side (no second embed call)
+      let similarityProbe: SimilarityProbe | null = null;
       const cacheConfig =
         wantCache && body.input ? await loadNativeCacheConfig(db, { agentId: agent.id, userId }) : null;
       if (wantCache && body.input && cacheConfig) {
@@ -4486,12 +4492,31 @@ export function registerAgentConnectorRoutes(
           },
         };
         cacheKey = semanticCacheNativeKey(cacheRequest, cacheConfig);
+        // ADR-0352: the meaning-based tier rides inside the lookup (only on an exact miss, only
+        // when the org turned it on), so the hit below is governed exactly like an exact one
+        const similarityState: { probe: SimilarityProbe | null; missReason?: string } = { probe: null };
         const hit = await lookupSemanticCache(db, {
           userId,
           agentId: agent.id,
           key: cacheKey,
           ttlSeconds: org.semanticCacheTtlSeconds,
+          ...(org.semanticCacheSimilarityEnabled && org.semanticCacheEmbedderId
+            ? {
+                similarity: {
+                  dataKey: opts.dataKey,
+                  embedderId: org.semanticCacheEmbedderId,
+                  min: org.semanticCacheSimilarityMin,
+                  request: cacheRequest,
+                  config: cacheConfig,
+                  state: similarityState,
+                },
+              }
+            : {}),
         });
+        similarityProbe = similarityState.probe;
+        if (similarityState.missReason) {
+          req.log.warn({ semanticCacheTier: "similarity", reason: similarityState.missReason }, "similarity tier miss");
+        }
         if (hit) {
           const governed = await executeGovernedDispatch(db, opts.dataKey, {
             principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
@@ -4548,11 +4573,17 @@ export function registerAgentConnectorRoutes(
             estimatedTokensOut: hit.outputTokens,
             estimatedTokensSaved: savedTokens,
             estimatedCostSavedUsd,
-            estimationBasis:
-              "semantic-caching: whole call served from the per-(user,agent) exact-match cache — full cached input+output tokens saved at the invoked agent's list price",
-            ruleId: "semantic-cache-hit",
+            estimationBasis: hit.tier === "similarity"
+              ? "semantic-caching: whole call served by the meaning-based tier (ADR-0352) from the per-(user,agent,partition) cache — full cached input+output tokens saved at the invoked agent's list price"
+              : "semantic-caching: whole call served from the per-(user,agent) exact-match cache — full cached input+output tokens saved at the invoked agent's list price",
+            ruleId: hit.tier === "similarity" ? "semantic-cache-similar-hit" : "semantic-cache-hit",
             projectId,
-            detail: { model: hit.model, cachedAt: hit.createdAt, mode: body.mode },
+            detail: {
+              model: hit.model,
+              cachedAt: hit.createdAt,
+              mode: body.mode,
+              ...semanticCacheTierDetail(hit),
+            },
           });
           const cachedDispatch = { ...governed.result, cached: true as const };
           await db.insert(auditLog).values({
@@ -4562,7 +4593,12 @@ export function registerAgentConnectorRoutes(
             detail: {
               mode: body.mode,
               servedAgentId: agent.id,
-              semanticCache: { hit: true, model: hit.model, cachedAt: hit.createdAt },
+              semanticCache: {
+                hit: true,
+                model: hit.model,
+                cachedAt: hit.createdAt,
+                ...semanticCacheTierDetail(hit),
+              },
               ...(contentInspectionNote ?? {}),
               receiptClass: "decision",
             },
@@ -5177,7 +5213,7 @@ export function registerAgentConnectorRoutes(
           return;
         }
         // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
-        await storeSemanticCache(db, {
+        const storedId = await storeSemanticCache(db, {
           userId,
           agentId: agent.id,
           key: cacheKey,
@@ -5186,6 +5222,9 @@ export function registerAgentConnectorRoutes(
           inputTokens: r.usage.inputTokens,
           outputTokens: r.usage.outputTokens,
         });
+        // ADR-0352: index the row for the meaning-based tier with the vector computed at
+        // lookup. The key check above makes the probe's partition the current one.
+        if (storedId && similarityProbe) await storeSimilarEmbedding(db, { cacheId: storedId, ...similarityProbe });
       };
 
       // MODEL DISPATCH: real execution, strictly after governance + routing —
