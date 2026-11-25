@@ -22,12 +22,17 @@ import {
   eq,
   governanceAlerts,
   initiatives,
+  agents,
   pmConnections,
+  pmIdentityLinks,
   pmImportedWorkItems,
   pmLinks,
   pmProjectInitiatives,
   pmSyncEvents,
+  pmTriggerSettings,
   pmWebhookDeliveries,
+  pmWorkTriggers,
+  pmWriteBacks,
   runMigrations,
   runWithRlsPrincipal,
   runWithRlsPrincipalStep,
@@ -52,11 +57,15 @@ const urlFor = (name: string) => {
 
 const PM_TABLES = [
   "pm_connections",
+  "pm_identity_links",
   "pm_imported_work_items",
   "pm_links",
   "pm_project_initiatives",
   "pm_sync_events",
+  "pm_trigger_settings",
   "pm_webhook_deliveries",
+  "pm_work_triggers",
+  "pm_write_backs",
 ] as const;
 
 let admin: Db;
@@ -121,6 +130,15 @@ beforeAll(async () => {
   await db.insert(initiatives).values({ id: ids.initiative, name: `rlspm-${ids.initiative}` });
   await db.insert(pmProjectInitiatives).values({ connectionId: ids.conn, initiativeId: ids.initiative });
   await db.insert(pmImportedWorkItems).values({ connectionId: ids.conn, externalId: "1", externalUrl: "https://pm.example/1", itemType: "Task" });
+  // ADR-0356: the trigger settings, an identity link and a trigger record
+  const [agent] = await db.insert(agents).values({ name: `rlspm-agent-${ids.conn}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+  await db.insert(pmTriggerSettings).values({ connectionId: ids.conn, agentId: agent!.id, config: {} });
+  await db.insert(pmIdentityLinks).values({ connectionId: ids.conn, pmUserId: "pm-alice", userId: ids.alice, verifiedSource: "admin_asserted" });
+  const [trigger] = await db
+    .insert(pmWorkTriggers)
+    .values({ connectionId: ids.conn, externalId: "1", mechanism: "assignment", deliveryContentSha256: "a".repeat(64) })
+    .returning({ id: pmWorkTriggers.id });
+  await db.insert(pmWriteBacks).values({ triggerId: trigger!.id, kind: "started", sourceKey: "instance" });
 }, 180_000);
 
 afterAll(async () => {
@@ -172,11 +190,15 @@ describe("what each scope reaches, with no application filter", () => {
     await runWithRlsPrincipalStep({ userId: ids.alice }, "pm_sync", "test.pm-sync", async () => {
       expect(await visible()).toEqual({
         pm_connections: 1,
+        pm_identity_links: 0,
         pm_imported_work_items: 0,
         pm_links: 1,
         pm_project_initiatives: 0,
         pm_sync_events: 1,
+        pm_trigger_settings: 1,
         pm_webhook_deliveries: 0,
+        pm_work_triggers: 1,
+        pm_write_backs: 0,
       });
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "commented", payload: {} }).returning({ id: pmSyncEvents.id });
       expect(ev?.id).toBeTruthy();
@@ -194,6 +216,9 @@ describe("what each scope reaches, with no application filter", () => {
     await runWithRlsSystem("approval_maintenance", "test.pm-webhook", async () => {
       const v = await visible();
       expect(v).toMatchObject({ pm_connections: 1, pm_links: 1, pm_webhook_deliveries: 2, pm_imported_work_items: 0, pm_project_initiatives: 0 });
+      // ADR-0356: the webhook reads the trigger settings and the identity links, and records the triggers
+      expect(v).toMatchObject({ pm_trigger_settings: 1, pm_identity_links: 1, pm_work_triggers: 1 });
+      expect(await db.update(pmTriggerSettings).set({ enabled: true }).where(eq(pmTriggerSettings.connectionId, ids.conn)).returning({ id: pmTriggerSettings.connectionId })).toEqual([]);
       const [d] = await db.insert(pmWebhookDeliveries).values({ connectionId: ids.conn, contentSha256: "e".repeat(64) }).returning({ id: pmWebhookDeliveries.id });
       expect(await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, d!.id)).returning({ id: pmWebhookDeliveries.id })).toEqual([{ id: d!.id }]);
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "updated", payload: {} }).returning({ id: pmSyncEvents.id });

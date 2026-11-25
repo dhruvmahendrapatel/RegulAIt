@@ -149,6 +149,8 @@ export const SCHEDULER_JOB_NAMES = {
   paidCallHoldSweeper: "paid-call-hold-sweeper",
   // ADR-0302 (P37 follow-up): deletes third-party ingest evidence past the audit floor (third-party-ingest-retention.ts)
   thirdPartyEvidenceRetentionSweep: "third-party-evidence-retention-sweep",
+  // ADR-0356 PR 2: writes PM-triggered workflows' progress back to their work items (pm-write-back.ts)
+  pmWriteBackSweep: "pm-write-back-sweep",
   // ADR-0360 slice 2 (lane E41): EDR signal sync and isolation polling (edr/routes.ts)
   edrSync: "edr-sync",
   edrIsolationPoll: "edr-isolation-poll",
@@ -901,6 +903,7 @@ import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { paidCallJobDefinitions } from "./paid-calls.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { pmWriteBackJobDefinitions } from "./pm-write-back.js";
 import { workflowScheduleJobDefinitions } from "./workflow-schedules.js";
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
@@ -933,6 +936,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
     ...paidCallJobDefinitions(), // ADR-0313: paid-call-hold-sweeper
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...pmWriteBackJobDefinitions({ dataKey: opts.dataKey }), // ADR-0356 PR 2: pm-write-back-sweep
     ...workflowScheduleJobDefinitions({ dataKey: opts.dataKey }), // ADR-0349 slice 4: workflow-schedules
     ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
     ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
