@@ -3381,7 +3381,8 @@ export async function startWorkflowInstanceWithTemplates(
   const merged = mergeDefinitions(resolved.map((r) => r.definition));
 
   // ADR-0195 A4: a sign-off owed by an admin other than the initiator needs one to exist, or the stage could never
-  // be decided: refused before anything is written
+  // be decided: refused before the instance is written. (A template with no version yet has had its `baseline`
+  // recorded by resolveTemplateVersions above; that is harmless, as the next start reuses it.)
   if (await secondApproverMissing(db, merged, initiatorUserId)) {
     return { ok: false, status: 422, body: secondApproverUnavailable() };
   }

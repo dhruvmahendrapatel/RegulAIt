@@ -20,9 +20,9 @@ import {
 import { BATCH4_STRICT_DEFAULTS, canonicalJson, sha256Hex } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { PUBLISH_STEP_UP_OP } from "./workflow-builder.js";
-import { TEMPLATE_VERSION_RULE_IDS } from "./workflow-template-versions.js";
+import { CANARY_ROLLBACK_STEP_UP_OP, TEMPLATE_VERSION_RULE_IDS } from "./workflow-template-versions.js";
 import { WORKFLOW_MIGRATION_RULE_IDS } from "./workflow-migrations.js";
-import { grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
+import { grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 /**
@@ -248,11 +248,44 @@ describe("ADR-0340 slice 3: pinning, canary and governed migration on workflow_t
     expect((await post(`/v1/workflows/builder/templates/${canaryTpl}/canary/end`, { outcome: "promote", reason: "looks good to me" }, pia.auth)).statusCode).toBe(403);
   });
 
-  it("a rollback publishes the stable definition again as the next version; every new instance gets it", async () => {
-    expect((await post(`/v1/workflows/builder/templates/${canaryTpl}/canary/end`, { outcome: "rollback", reason: "short" })).statusCode).toBe(400);
-    const ended = await post(`/v1/workflows/builder/templates/${canaryTpl}/canary/end`, { outcome: "rollback", reason: "the e2e stage is flaky on this runner" });
+  it("a rollback is a publish: it must accept what it weakens and carry the settings_relax step-up bound to it", async () => {
+    const url = `/v1/workflows/builder/templates/${canaryTpl}/canary/end`;
+    const reason = "the e2e stage is flaky on this runner";
+    // rolling back removes the canary's e2e stage: that weakens the live template, so it must be accepted
+    const unaccepted = await post(url, { outcome: "rollback", reason });
+    expect(unaccepted.statusCode, unaccepted.body).toBe(409);
+    expect(unaccepted.json().error).toBe("relaxation_not_accepted");
+    expect(unaccepted.json().relaxations.length).toBeGreaterThan(0);
+    // a proof for a publish of the same bytes does not roll a canary back
+    const [open] = await db.select().from(workflowTemplateCanaries).where(and(eq(workflowTemplateCanaries.templateId, canaryTpl), eq(workflowTemplateCanaries.status, "open")));
+    const wrong = await grantStepUpForTest(db, adminA.id, {
+      kind: "settings_relax",
+      facts: { op: PUBLISH_STEP_UP_OP, templateId: canaryTpl, fromVersion: 2, contentHash: hashOf(builderDef()) },
+    });
+    // accepted, but from a session with no step-up: refused, and nothing is written
+    const noProof = await app.inject({ method: "POST", url, ...sessionRequest(wrong), payload: { outcome: "rollback", reason, acceptRelaxations: true } });
+    expect([401, 403, 422], noProof.body).toContain(noProof.statusCode);
+    const misbound = await app.inject({ method: "POST", url, ...stepUpRequest(wrong), payload: { outcome: "rollback", reason, acceptRelaxations: true } });
+    expect([403, 422], misbound.body).toContain(misbound.statusCode);
+    expect((await versionsOf(canaryTpl)).at(-1)!.version).toBe(2);
+    expect(open).toMatchObject({ status: "open" });
+    const [still] = await db.select().from(workflowTemplateCanaries).where(eq(workflowTemplateCanaries.id, open!.id));
+    expect(still!.status).toBe("open");
+    // the bound proof rolls it back, and the audit row records the accepted relaxations and the step-up
+    const grant = await grantStepUpForTest(db, adminA.id, {
+      kind: "settings_relax",
+      facts: { op: CANARY_ROLLBACK_STEP_UP_OP, templateId: canaryTpl, canaryId: open!.id, fromVersion: 2, contentHash: hashOf(builderDef()) },
+    });
+    const ended = await app.inject({ method: "POST", url, ...stepUpRequest(grant), payload: { outcome: "rollback", reason, acceptRelaxations: true } });
     expect(ended.statusCode, ended.body).toBe(200);
     expect(ended.json()).toMatchObject({ outcome: "rollback", version: 3 });
+    const [rolled] = await db.select().from(auditLog).where(and(eq(auditLog.objectId, canaryTpl), eq(auditLog.ruleId, TEMPLATE_VERSION_RULE_IDS.canaryRolledBack)));
+    expect(rolled!.detail).toMatchObject({ stepUpKind: "settings_relax", relaxationReason: reason, relaxations: unaccepted.json().relaxations });
+    expect((rolled!.detail as { stepUp: string }).stepUp).toBeTruthy();
+  });
+
+  it("the rollback published the stable definition again as the next version; every new instance gets it", async () => {
+    expect((await post(`/v1/workflows/builder/templates/${canaryTpl}/canary/end`, { outcome: "rollback", reason: "short" })).statusCode).toBe(400);
     const v3 = (await versionsOf(canaryTpl)).at(-1)!;
     expect(v3).toMatchObject({ version: 3, origin: "canary_rollback", contentHash: hashOf(builderDef()) });
     const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, canaryTpl));

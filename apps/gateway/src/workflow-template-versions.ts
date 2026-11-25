@@ -3,13 +3,16 @@
  * template serves a NEW instance, the pin that records it, and the canary over new instances.
  *
  *   GET  /v1/workflows/builder/templates/:templateId/canary       the open canary (or none) and what it has served
- *   POST /v1/workflows/builder/templates/:templateId/canary/end   {outcome: promote | rollback, reason}
+ *   POST /v1/workflows/builder/templates/:templateId/canary/end   {outcome: promote | rollback, reason, acceptRelaxations?}
  *
  * A canary is opened by a builder publish that names `canaryPercent` (workflow-builder.ts): the new version is the
  * canary, the version it replaced is the stable one, and `percent` (1 to 50) of NEW instances, chosen by instance id,
  * get the canary. While it is open no other publish is accepted (builder or governance apply), so the two versions
  * cannot move under it. It ends once: promoted (every new instance gets the canary) or rolled back (the stable
- * definition is published again as the next version, origin `canary_rollback`). Running instances never change
+ * definition is published again as the next version, origin `canary_rollback`). A rollback is a publish like any other
+ * (ADR-0341 §4.5 and §4.6): what it weakens against the live definition must be accepted with the reason, and it needs
+ * the `settings_relax` step-up bound to the template, the canary, the version it replaces and the bytes it restores.
+ * Running instances never change
  * version through a canary: only a governed migration (workflow-migrations.ts) moves one.
  *
  * Both routes are admin routes (the default route class, as for every builder route).
@@ -32,8 +35,19 @@ import {
   type WorkflowTemplateVersionRow,
 } from "@regulait/db";
 import { canaryBucket, canonicalJson, sha256Hex, WORKFLOW_TEMPLATE_CANARY_MACHINE } from "@regulait/shared";
-import type { WorkflowDefinition } from "@regulait/workflow-kernel";
+import { findRelaxations, workflowDefinitionSchema, type Relaxation, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import type { DbOrTx } from "./orchestration.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+
+/** the step-up op a canary rollback is bound to (kind `settings_relax`, as a publish is: ADR-0341 §4.6) */
+export const CANARY_ROLLBACK_STEP_UP_OP = "workflow_template_canary_rollback";
+
+/** what restoring `restored` over the live definition weakens (ADR-0341 §4.5); none when either does not parse */
+function relaxationsOf(live: unknown, restored: unknown): Relaxation[] {
+  const a = workflowDefinitionSchema.safeParse(live);
+  const b = workflowDefinitionSchema.safeParse(restored);
+  return a.success && b.success ? findRelaxations(a.data, b.data) : [];
+}
 
 /** the audit identity of a system actor (audit_log.user_id is NOT NULL) */
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -212,6 +226,8 @@ const endBody = z
   .object({
     outcome: z.enum(["promote", "rollback"]),
     reason: z.string().trim().min(10).max(500),
+    /** a rollback that weakens the live template must accept it, as a publish does (ADR-0341 §4.5) */
+    acceptRelaxations: z.boolean().optional(),
   })
   .strict();
 
@@ -267,6 +283,30 @@ export function registerWorkflowTemplateVersionRoutes(app: FastifyInstance, db: 
     const { templateId } = templateParam.parse(req.params);
     const body = endBody.parse(req.body ?? {});
     const actor = req.authCtx.userId ?? null;
+    // a rollback is a publish: decide its relaxations and step-up on what is there now, then write only if it still is
+    let planned: { canaryId: string; latestId: string; relaxations: Relaxation[]; stepUp: string } | null = null;
+    if (body.outcome === "rollback") {
+      const [t] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
+      if (!t) return reply.status(404).send({ error: "unknown_template" });
+      const c = await openCanary(db, templateId);
+      if (!c) return reply.status(409).send({ error: "no_open_canary" });
+      const stable = (await versionById(db, c.stableVersionId))!;
+      const latest = (await latestVersionOf(db, templateId))!;
+      const relaxations = relaxationsOf(t.definition, stable.definition);
+      if (relaxations.length > 0 && body.acceptRelaxations !== true) {
+        return reply.status(409).send({
+          error: "relaxation_not_accepted",
+          detail: "this rollback weakens the template: accept the relaxations (the reason is recorded with them)",
+          relaxations,
+        });
+      }
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: CANARY_ROLLBACK_STEP_UP_OP, templateId, canaryId: c.id, fromVersion: latest.version, contentHash: stable.contentHash },
+      });
+      if (!su.ok) return reply;
+      planned = { canaryId: c.id, latestId: latest.id, relaxations, stepUp: su.method };
+    }
     const out = await db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Db;
       const [locked] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
@@ -277,6 +317,10 @@ export function registerWorkflowTemplateVersionRoutes(app: FastifyInstance, db: 
         .where(and(eq(workflowTemplateCanaries.templateId, templateId), eq(workflowTemplateCanaries.status, "open")))
         .for("update");
       if (!c) return { status: 409, body: { error: "no_open_canary" } } as const;
+      // fail closed: the rollback's step-up was decided on this canary and this latest version (ADR-0186 A, Class A)
+      if (planned && (c.id !== planned.canaryId || (await latestVersionOf(tx, templateId))?.id !== planned.latestId)) {
+        return CHANGED_CONCURRENTLY;
+      }
       // ADR-0348: the canary moves only as WORKFLOW_TEMPLATE_CANARY_MACHINE allows, from the states it names (a guarded UPDATE)
       const status = WORKFLOW_TEMPLATE_CANARY_MACHINE.next(c.status, body.outcome);
       const moved = await tx
@@ -309,6 +353,14 @@ export function registerWorkflowTemplateVersionRoutes(app: FastifyInstance, db: 
           stableVersion: stable.version,
           percent: c.percent,
           ...(restored ? { version: restored.version, contentHash: restored.contentHash } : {}),
+          ...(planned
+            ? {
+                relaxations: planned.relaxations,
+                ...(planned.relaxations.length > 0 ? { relaxationReason: body.reason } : {}),
+                stepUp: planned.stepUp,
+                stepUpKind: "settings_relax",
+              }
+            : {}),
         },
         effect: "allow",
         ruleId: body.outcome === "promote" ? TEMPLATE_VERSION_RULE_IDS.canaryPromoted : TEMPLATE_VERSION_RULE_IDS.canaryRolledBack,
@@ -316,7 +368,9 @@ export function registerWorkflowTemplateVersionRoutes(app: FastifyInstance, db: 
         reason:
           body.outcome === "promote"
             ? `workflow template '${locked.name}': canary version ${canary.version} now serves every new instance: ${body.reason}`
-            : `workflow template '${locked.name}': canary version ${canary.version} rolled back; version ${stable.version}'s definition is live again as version ${restored!.version}: ${body.reason}`,
+            : `workflow template '${locked.name}': canary version ${canary.version} rolled back; version ${stable.version}'s definition is live again as version ${restored!.version}` +
+              (planned!.relaxations.length > 0 ? ` with ${planned!.relaxations.length} accepted relaxation(s)` : "") +
+              `: ${body.reason}`,
       });
       return { status: 200, body: { outcome: body.outcome, canaryId: c.id, ...(restored ? { version: restored.version } : {}) } } as const;
     });

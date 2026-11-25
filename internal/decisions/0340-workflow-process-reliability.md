@@ -212,8 +212,12 @@ What changes against decisions 13 to 15:
     **rolled back** (the stable definition is published again as the next version, `origin` `canary_rollback`, and
     becomes the live definition; a restore is a publish, ADR-0341 §5). Ending needs a reason (10 to 500 characters)
     and is audited (`workflow-template-canary-promoted` / `-rolled-back`); opening is audited
-    (`workflow-template-canary-started`). Ending takes no second step-up: promoting widens a version whose bytes were
-    already stepped up at publish, and rolling back returns to a version that was live before.
+    (`workflow-template-canary-started`). A promote takes no second step-up: it widens a version whose bytes were
+    already stepped up at publish. A rollback is a publish like any other (R3 review, 2026-11-25): what it weakens
+    against the live definition (a stage the canary added, for example) must be accepted (`acceptRelaxations`,
+    ADR-0341 §4.5; refused `relaxation_not_accepted` otherwise), and it needs the `settings_relax` step-up
+    (ADR-0341 §4.6) bound to the template, the canary, the version it replaces and the content hash it restores
+    (op `workflow_template_canary_rollback`). Its audit row records the relaxations, the reason and the step-up.
     While a canary is open `workflow_templates.definition` is the canary version (the builder's publish wrote it);
     the stable side is read from its version row.
 

@@ -345,7 +345,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   },
   "POST /v1/workflows/builder/templates/:templateId/canary/end": {
     summary:
-      "End the open canary once: `promote` (every new instance gets the canary version) or `rollback` (the stable definition is published again as the next version). Needs a `reason`. Audited.",
+      "End the open canary once: `promote` (every new instance gets the canary version) or `rollback` (the stable definition is published again as the next version). Needs a `reason`. A rollback is a publish: what it weakens must be accepted (`acceptRelaxations`) and it needs the `settings_relax` step-up bound to it. Audited.",
   },
   "POST /v1/workflows/instances/:instanceId/migrations": {
     summary:

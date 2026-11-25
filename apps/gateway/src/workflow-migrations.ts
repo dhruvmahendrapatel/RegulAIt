@@ -243,7 +243,15 @@ export async function applyWorkflowMigrationDecision(
   }
   const [instance] = await tx.select().from(workflowInstances).where(eq(workflowInstances.id, m.instanceId)).for("update");
   const [version] = await tx.select().from(workflowTemplateVersions).where(eq(workflowTemplateVersions.id, m.targetVersionId));
-  if (!instance || !version) return;
+  if (!instance || !version) {
+    // the request cannot hold any more: close it, so it neither stays pending nor blocks the next one (one-pending index)
+    await close("approve_stale");
+    await audit(WORKFLOW_MIGRATION_RULE_IDS.stale, "deny", "the approved migration's instance or target version is gone; nothing changed", {
+      ...(instance ? {} : { instanceGone: true }),
+      ...(version ? {} : { targetVersionGone: true }),
+    });
+    return;
+  }
   const a = assessMigration(instance, version);
   const moved = contentHashOf(instance.definition) !== m.fromDefinitionSha256;
   if (!a.ok || moved) {
