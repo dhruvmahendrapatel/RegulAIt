@@ -21987,7 +21987,7 @@ export const cmdbSyncRuns = pgTable(
     check("cmdb_sync_runs_finished_check", sql`(${t.status} = 'running') = (${t.finishedAt} IS NULL)`),
     check(
       "cmdb_sync_runs_error_check",
-      sql`(${t.status} IN ('failed', 'refused')) = (${t.errorCode} IS NOT NULL)`,
+      sql`(${t.status} = 'failed' OR ${t.status} = 'refused') = (${t.errorCode} IS NOT NULL)`,
     ),
   ],
 );

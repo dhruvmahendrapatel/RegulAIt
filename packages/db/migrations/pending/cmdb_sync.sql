@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS "cmdb_sync_runs" (
   CONSTRAINT "cmdb_sync_runs_trigger_check" CHECK ("trigger" IN ('manual', 'schedule')),
   CONSTRAINT "cmdb_sync_runs_status_check" CHECK ("status" IN ('running', 'succeeded', 'failed', 'refused')),
   CONSTRAINT "cmdb_sync_runs_finished_check" CHECK (("status" = 'running') = ("finished_at" IS NULL)),
-  CONSTRAINT "cmdb_sync_runs_error_check" CHECK (("status" IN ('failed', 'refused')) = ("error_code" IS NOT NULL)),
+  CONSTRAINT "cmdb_sync_runs_error_check" CHECK (("status" = 'failed' OR "status" = 'refused') = ("error_code" IS NOT NULL)),
   CONSTRAINT "cmdb_sync_runs_error_code_check" CHECK ("error_code" IS NULL OR "error_code" IN ('in_progress', 'disabled', 'air_gapped', 'no_credential', 'no_data_key', 'secret_unreadable', 'egress_blocked', 'unauthorized', 'http_error', 'rate_limited', 'bad_response', 'network', 'timeout', 'stale', 'internal'))
 );
 --> statement-breakpoint
