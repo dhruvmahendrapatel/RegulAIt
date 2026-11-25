@@ -187,11 +187,17 @@ Agentforce, OpenAI and n8n members. The admin screen is requested on #453 (KNOWN
   updates through Codex lane C2's signed feed once it exists (owner question on #973: build it in E44 if C2 slips?).
 
 **E43 — content inspection beyond text (owner, 2026-11-17; Forcepoint review gap 2).** In progress
-([ADR-0362](../decisions/0362-content-inspection-beyond-text.md)). Slice 1a built: the sandbox-only extractor and its
-image. Next: 1b (engine registration, the gateway's sandboxed call, the per-project setting, detector wiring), 2 (local
-Tesseract OCR), 3 (latency and throughput measured). Owner questions open: the permissive non-ADR-0176 licences bundled
-in `libpdfium.so` (FreeType, ICU, libpng, libtiff, zlib, AGG, Boost, IJG), and whether a guardrail at `block` should
-also force inspection on.
+([ADR-0362](../decisions/0362-content-inspection-beyond-text.md)).
+- Merged: slice 1a, the sandbox-only extractor and its image (#967); 1b, the engine registration and the gateway's
+  sandboxed call (#989); 1b-ii, the per-project setting and the detector wiring (#998); and 2, local Tesseract OCR (#993).
+- Slice 3, latency and throughput measured with the cost note, is #994.
+- The image stays held unpublished.
+- Owner questions open:
+  1. the permissive non-ADR-0176 licences bundled in `libpdfium.so` (FreeType, ICU, libpng, libtiff, zlib, AGG, Boost,
+     IJG);
+  2. whether a guardrail at `block` should also force inspection on;
+  3. Debian Tesseract's LGPL OS libraries;
+  4. whether the org-default PII mode should force it on.
 
 **E40 — behaviour analytics (owner, 2026-11-17).** Slice 1 built ([ADR-0359](../decisions/0359-behaviour-baselines-and-rule-suggestions.md)):
 per-install baselines per user and agent, explainable shadow findings. Open: slice 2 rule suggestions (lane E15's pack
