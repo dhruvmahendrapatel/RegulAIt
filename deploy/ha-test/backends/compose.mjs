@@ -23,6 +23,24 @@ export function composeBackend({ here, asyncReplication = false, log }) {
     execFileSync("docker", ["compose", "-f", file, "-p", "regulait-ha", ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const ports = { "gw-a": 13101, "gw-b": 13102 };
 
+  /** what the primary and the standby say, for an error message: replication state and their recent logs */
+  const diagnostics = () => {
+    const safe = (f) => {
+      try {
+        return f();
+      } catch (e) {
+        return `(unavailable: ${e.message.split("\n")[0]})`;
+      }
+    };
+    return [
+      "pg_stat_replication:",
+      safe(() => dc("exec", "-T", "-u", "postgres", "pg-primary", "psql", "-U", "regulait", "-d", "postgres", "-Atc",
+        "select application_name, state, sync_state from pg_stat_replication")),
+      "pg-primary / pg-standby logs (last 40 lines each):",
+      safe(() => dc("logs", "--no-color", "--tail", "40", "pg-primary", "pg-standby")),
+    ].join("\n");
+  };
+
   return {
     name: "compose",
     root: null,
@@ -38,19 +56,48 @@ export function composeBackend({ here, asyncReplication = false, log }) {
       dc("build", "gw-a");
       dc("up", "-d", "--wait", "pg-primary");
       dc("up", "-d", "pg-standby", "writer");
-      for (let i = 0; i < 300; i++) {
-        let s = "";
+      const psqlPrimary = (q) =>
+        dc("exec", "-T", "-u", "postgres", "pg-primary", "psql", "-U", "regulait", "-d", "postgres", "-Atc", q).trim();
+      // the standby server itself (not pg_basebackup's own WAL stream, which also says standby1) accepts connections
+      const standbyUp = () => {
         try {
-          s = dc("exec", "-T", "-u", "postgres", "pg-primary", "psql", "-U", "regulait", "-d", "postgres", "-Atc",
-            "select sync_state from pg_stat_replication where application_name = 'standby1'").trim();
+          dc("exec", "-T", "-u", "postgres", "pg-standby", "pg_isready", "-U", "regulait");
+          return "up";
         } catch {
-          /* not yet */
+          return ""; // not yet
         }
-        if (s === "sync") return;
-        await new Promise((r) => setTimeout(r, 500));
+      };
+      const syncState = () => {
+        try {
+          return psqlPrimary(
+            "select sync_state from pg_stat_replication where application_name = 'standby1' and state = 'streaming'");
+        } catch {
+          return ""; // not yet
+        }
+      };
+      const waitFor = async (probe, ok, tries) => {
+        let s = "";
+        for (let i = 0; i < tries; i++) {
+          s = probe();
+          if (ok(s)) return s;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        return s;
+      };
+      // first standby1 must be up and streaming; only then may commits wait for it (compose.yml says why)
+      if ((await waitFor(standbyUp, (s) => s === "up", 300)) !== "up") {
+        throw new Error(`the standby never started\n${diagnostics()}`);
       }
-      throw new Error("the standby never became synchronous");
+      const attached = await waitFor(syncState, (s) => s !== "", 120);
+      if (attached === "") throw new Error(`the standby never attached to the primary\n${diagnostics()}`);
+      psqlPrimary("alter system set synchronous_standby_names = 'FIRST 1 (standby1)'");
+      psqlPrimary("select pg_reload_conf()");
+      const last = await waitFor(syncState, (s) => s === "sync", 120);
+      if (last !== "sync") {
+        throw new Error(`the standby never became synchronous (last sync_state: ${last || "none"})\n${diagnostics()}`);
+      }
     },
+
 
     /** stop the standby so it falls behind; the returned function starts it again */
     async pauseStandby() {
