@@ -144,7 +144,8 @@ for (const c of FAILING_LISTS) {
     // Retry re-asks the server; once it answers, the rows replace the error
     failing = false;
     await alert.getByRole("button", { name: "Retry" }).click();
-    await expect(page.getByRole("cell", { name: c.present, exact: true }).first()).toBeVisible();
+    // the value, not the cell: a clickable row's primary cell is named by its button (UIS-04)
+    await expect(page.getByRole("cell").getByText(c.present, { exact: true }).first()).toBeVisible();
     await expect(alert).toHaveCount(0);
   });
 }
@@ -459,7 +460,7 @@ test("UXJ-02: selecting the lowest alert brings its detail into the viewport", a
     return json(route, {});
   });
   await page.goto("/ui/admin/governance/alerts");
-  const last = page.getByRole("link", { name: /without an approved model card/ });
+  const last = page.getByRole("button", { name: /without an approved model card/ });
   await last.scrollIntoViewIfNeeded();
   await last.click();
   const detail = page.getByTestId("alert-detail");

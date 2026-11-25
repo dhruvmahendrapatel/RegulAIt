@@ -128,7 +128,7 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
 
 test("Alert detail: path as chips, fix options labelled, acknowledgement at the bottom", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByRole("heading", { name: alert.title })).toBeVisible();
   await expect(detail.getByRole("list", { name: "Inherited-risk path" }).getByRole("listitem")).toHaveCount(4);
@@ -252,7 +252,7 @@ test("Alerts: the list is a contained card with a count, and the acknowledgement
   await page.goto("/ui/admin/governance/alerts");
   const list = page.locator("section[data-rg-card]").filter({ hasText: "Alerts" }).first();
   await expect(list).toContainText("1 alert");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByText("Manual option 12")).toBeAttached();
   await detail.evaluate((el) => { el.scrollTop = 0; });
@@ -317,7 +317,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 640 }], ["1440 px"
       drawer.getByRole("button", { name: "Deny" }),
       drawer.getByRole("button", { name: "Approve" }),
       drawer.getByText("Deciding this approves your own request, so a reason is required."),
-      drawer.getByText("Approve unlocks once a reason is entered"),
+      drawer.getByText("Approve and Deny unlock once a reason is entered"),
     ]) expect(await pinnedAfterScroll(drawer, control)).toBe("pinned");
     // the gate is unchanged: Approve waits for the required reason
     await expect(drawer.getByRole("button", { name: "Approve" })).toBeDisabled();
@@ -330,7 +330,7 @@ for (const [label, size] of [["390 px", { width: 390, height: 640 }], ["1440 px"
     await page.route("**/v1/governance/alerts/al/remediation", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...remediation, candidates: [...remediation.candidates, ...many] }) }));
     await page.setViewportSize(size);
     await page.goto("/ui/admin/governance/alerts");
-    await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+    await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
     const drawer = page.getByTestId("alert-detail");
     await expect(drawer.getByText("Manual option 12")).toBeAttached();
     const note = drawer.getByLabel("Acknowledgement note — required and audited");
@@ -362,14 +362,14 @@ test("L1: after an acknowledgement removes the alert, focus moves to the alert i
   alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
   ackRemoves = true;
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
-  await expect(page.getByRole("link", { name: /Credit-limit assistant inherits/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Credit-limit assistant inherits/ })).toHaveCount(0);
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /Support assistant inherits/ })).toBeFocused();
+  await expect(page.getByRole("button", { name: /Support assistant inherits/ })).toBeFocused();
 
-  await page.getByRole("link", { name: /Support assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Support assistant inherits/ }).click();
   await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns this one too.");
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
@@ -381,25 +381,25 @@ test("X6b M2: acknowledge with the drawer open: focus moves to the alert in its 
   alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
   ackRemoves = true;
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   // ADR-0226: the Alerts card pages on the server instead of folding, and its header still counts every alert
   await expect(page.locator("section[data-rg-card]").filter({ hasText: "Alerts" }).first()).toContainText("2 alerts");
   await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /Support assistant inherits/ })).toBeFocused();
+  await expect(page.getByRole("button", { name: /Support assistant inherits/ })).toBeFocused();
   expect(await focusIsOnBody(page)).toBe(false);
 });
 
 test("M2: an acknowledgement on the Active tab keeps the alert listed and moves focus to the drawer heading", async ({ page }) => {
   await page.goto("/ui/admin/governance/alerts");
-  await page.getByRole("link", { name: /Credit-limit assistant inherits/ }).click();
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   const detail = page.getByTestId("alert-detail");
   await expect(detail.getByRole("button", { name: "Acknowledge" })).toBeDisabled();
   await detail.getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
   await detail.getByRole("button", { name: "Acknowledge" }).click();
   await expect(detail.getByRole("button", { name: "Acknowledge" })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /Credit-limit assistant inherits/ })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /Credit-limit assistant inherits/ })).toHaveCount(1);
   await expect(detail.getByText("Acknowledged", { exact: true })).toBeVisible();
   await expect(detail.getByRole("heading", { level: 2, name: /Credit-limit assistant inherits/ })).toBeFocused();
   expect(await focusIsOnBody(page)).toBe(false);

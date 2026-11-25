@@ -73,6 +73,22 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
       `(regulait_workflow_template_set("template_ids"), ("change"->>'targetSystem'), "work_item_ref") NULLS NOT DISTINCT ` +
       `WHERE "work_item_ref" IS NOT NULL AND "status" NOT IN (${WORKFLOW_TERMINAL_STATUSES_SQL_LIST})`,
   },
+  {
+    // ADR-0312 (cost per outcome): the outcome spend join reads a run's metered rows by `detail.runId`
+    migration: "cost_outcomes",
+    name: "usage_events_run_id_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "usage_events_run_id_idx" ON "usage_events" (("detail"->>'runId')) ` +
+      `WHERE ("detail"->>'runId') IS NOT NULL`,
+  },
+  {
+    // ADR-0312: an outcome with no run id reads every run of its workflow instance (the spend join's IN subquery)
+    migration: "cost_outcomes",
+    name: "orchestration_runs_workflow_instance_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "orchestration_runs_workflow_instance_idx" ON "orchestration_runs" ` +
+      `("workflow_instance_id") WHERE "workflow_instance_id" IS NOT NULL`,
+  },
 ];
 
 /**
