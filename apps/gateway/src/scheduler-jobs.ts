@@ -102,6 +102,8 @@ export const SCHEDULER_JOB_NAMES = {
   idempotencyKeySweep: "idempotency-key-sweep",
   // ADR-0180 A2: measured conditions of approval
   conditionEvaluation: "condition-evaluation-sweep",
+  // ADR-0349 slice 4 (lane E30): defined and run by workflow-schedules.ts (block at the end)
+  workflowSchedules: "workflow-schedules",
   // ADR-0342 (lane E23): defined and run by process-analytics.ts (block at the end)
   processAnalyticsProjector: "process-analytics-projector",
   // ADR-0182 (D4): each defined and run by its slice's module (block at the end)
@@ -899,6 +901,7 @@ import { agentRiskProofJobDefinitions } from "./agent-risk-proof-runner.js";
 import { processAnalyticsJobDefinitions } from "./process-analytics.js";
 import { paidCallJobDefinitions } from "./paid-calls.js";
 import { thirdPartyIngestJobDefinitions } from "./third-party-ingest-retention.js";
+import { workflowScheduleJobDefinitions } from "./workflow-schedules.js";
 import { browserGovernanceJobDefinitions } from "./browser-capture-retention.js";
 import { vendorUsageJobDefinitions } from "./vendor-usage-pull.js";
 import { agentRiskJobDefinitions } from "./agent-risk.js";
@@ -930,6 +933,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...costOutcomeJobDefinitions(), // ADR-0312: cost-outcome-recorder
     ...paidCallJobDefinitions(), // ADR-0313: paid-call-hold-sweeper
     ...thirdPartyIngestJobDefinitions(), // ADR-0302: third-party-evidence-retention-sweep
+    ...workflowScheduleJobDefinitions({ dataKey: opts.dataKey }), // ADR-0349 slice 4: workflow-schedules
     ...browserGovernanceJobDefinitions(), // ADR-0334 B2: browser-prompt-capture-retention-sweep
     ...vendorUsageJobDefinitions({ dataKey: opts.dataKey }), // ADR-0322: vendor-usage-pull-sweep
     ...agentRiskJobDefinitions(), // ADR-0339: agent-risk-recompute-sweep, agent-risk-daily-mark

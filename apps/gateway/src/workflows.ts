@@ -3538,6 +3538,103 @@ export function withCascadeTemplates(templateIds: readonly string[], cascadeTemp
   return out;
 }
 
+/**
+ * THE governed workflow start (POST /v1/workflows/instances), as a function so a workflow schedule (ADR-0349 slice 4)
+ * starts exactly as a person does: server-resolved roles and data sensitivity (`resolveServerChange`), the shadow-AI
+ * remediation rules, assignment-rule routing (or an admin's explicit template), the compliance cascade, project
+ * attribution, the start conflict policy and the audit rows. Answers the HTTP status and body the route sends.
+ */
+export async function startGovernedWorkflow(
+  db: Db,
+  dataKey: string | undefined,
+  caller: { userId: string; isAdmin: boolean },
+  body: z.infer<typeof startInstanceSchema>,
+): Promise<{ status: number; body: unknown }> {
+  const answer = (status: number, out: unknown) => ({ status, body: out });
+  const userId = caller.userId;
+
+  // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
+  // start path (resolveServerChange)
+  const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
+
+  // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
+  // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
+  if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+    const environment = change.environment.trim();
+    if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
+      return answer(422, {
+        error: "environment_unstated",
+        detail:
+          "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
+          "(change.environment) before starting the workflow",
+      });
+    }
+    // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
+    const allowed = await allowedRemediationEnvironments(db);
+    if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
+      return answer(422, {
+        error: "environment_not_allowed",
+        allowed,
+        detail: "name one of the environments a deploy target or workflow assignment rule already uses",
+      });
+    }
+    // the install runs only once this start's own checks pass, so a refused start installs nothing
+    if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
+      if (body.projectId) {
+        const attribution = await assertProjectAttribution(db, body.projectId, userId, caller.isAdmin);
+        if (!attribution.ok) return answer(attribution.status, { error: attribution.error });
+      }
+      if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
+        return answer(422, secondApproverUnavailable());
+      }
+      await ensureShadowAiRemediationDefault(db, userId);
+    }
+  }
+
+  let templateIds: string[];
+  if (body.templateId) {
+    if (!caller.isAdmin) {
+      return answer(403, { error: "explicit_template_is_admin_only" });
+    }
+    templateIds = [body.templateId];
+  } else {
+    const rules = await db
+      .select()
+      .from(workflowAssignmentRules)
+      .orderBy(workflowAssignmentRules.createdAt);
+    templateIds = matchTemplates(change, rules);
+  }
+  // §8.3 cascade — the ENFORCED consumer: a classified project's required
+  // templates are unioned in with no manual per-control setup (and can
+  // force a workflow even when no assignment rule matches). The existing
+  // §4 union/strictest merge keeps every added sign-off stage.
+  templateIds = withCascadeTemplates(templateIds, cascadeTemplateIds);
+  if (templateIds.length === 0) {
+    // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
+    // rule, installed above): say who can fix it
+    return answer(422, {
+      error: "no_workflow_matches_change",
+      changeType: change.changeType,
+      detail:
+        `no workflow assignment rule matches this change (change type '${change.changeType}'), so no workflow was ` +
+        "started: an admin must assign a workflow template to it under Workflow templates (assignment rules)",
+    });
+  }
+
+  const started = await startWorkflowInstanceWithTemplates(db, dataKey, {
+    templateIds,
+    initiatorUserId: userId,
+    change,
+    projectId: body.projectId ?? null,
+    isAdmin: caller.isAdmin,
+    workItemRef: body.workItem ?? null,
+  });
+  if (!started.ok) return answer(started.status, started.body);
+  // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
+  if (started.reused) return answer(200, { ...started.instance, reused: true });
+  return answer(201, started.instance);
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // ADR-0189 R25 item 13 prevention: every executor a route runs gets the same
   // completion guard the route's own transition does (the strict default when
@@ -3975,87 +4072,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const body = startInstanceSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-
-    // ADR-0018 §4 and its addendum: the change's server-side attributes and the §8.3 cascade, resolved once for every
-    // start path (resolveServerChange)
-    const { change, cascadeTemplateIds } = await resolveServerChange(db, userId, body.change, body.projectId ?? null);
-
-    // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
-    // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
-    if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
-      const environment = change.environment.trim();
-      if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
-        return reply.status(422).send({
-          error: "environment_unstated",
-          detail:
-            "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
-            "(change.environment) before starting the workflow",
-        });
-      }
-      // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
-      const allowed = await allowedRemediationEnvironments(db);
-      if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
-        return reply.status(422).send({
-          error: "environment_not_allowed",
-          allowed,
-          detail: "name one of the environments a deploy target or workflow assignment rule already uses",
-        });
-      }
-      // the install runs only once this start's own checks pass, so a refused start installs nothing
-      if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
-        if (body.projectId) {
-          const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
-          if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-        }
-        if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
-          return reply.status(422).send(secondApproverUnavailable());
-        }
-        await ensureShadowAiRemediationDefault(db, userId);
-      }
-    }
-
-    let templateIds: string[];
-    if (body.templateId) {
-      if (!req.authCtx.isAdmin) {
-        return reply.status(403).send({ error: "explicit_template_is_admin_only" });
-      }
-      templateIds = [body.templateId];
-    } else {
-      const rules = await db
-        .select()
-        .from(workflowAssignmentRules)
-        .orderBy(workflowAssignmentRules.createdAt);
-      templateIds = matchTemplates(change, rules);
-    }
-    // §8.3 cascade — the ENFORCED consumer: a classified project's required
-    // templates are unioned in with no manual per-control setup (and can
-    // force a workflow even when no assignment rule matches). The existing
-    // §4 union/strictest merge keeps every added sign-off stage.
-    templateIds = withCascadeTemplates(templateIds, cascadeTemplateIds);
-    if (templateIds.length === 0) {
-      // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
-      // rule, installed above): say who can fix it
-      return reply.status(422).send({
-        error: "no_workflow_matches_change",
-        changeType: change.changeType,
-        detail:
-          `no workflow assignment rule matches this change (change type '${change.changeType}'), so no workflow was ` +
-          "started: an admin must assign a workflow template to it under Workflow templates (assignment rules)",
-      });
-    }
-
-    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
-      templateIds,
-      initiatorUserId: userId,
-      change,
-      projectId: body.projectId ?? null,
-      isAdmin: req.authCtx.isAdmin,
-      workItemRef: body.workItem ?? null,
-    });
-    if (!started.ok) return reply.status(started.status).send(started.body);
-    // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
-    if (started.reused) return reply.status(200).send({ ...started.instance, reused: true });
-    return reply.status(201).send(started.instance);
+    // ADR-0349 slice 4: the one governed start, shared with workflow schedules
+    const out = await startGovernedWorkflow(db, opts.dataKey, { userId, isAdmin: req.authCtx.isAdmin }, body);
+    return reply.status(out.status).send(out.body);
   });
 
   type LoadResult =
