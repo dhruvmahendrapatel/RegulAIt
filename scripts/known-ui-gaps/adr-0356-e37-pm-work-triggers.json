@@ -1,0 +1,13 @@
+{
+  "adr": "ADR-0356",
+  "lane": "E37",
+  "tracking": "ADR-0356 (lane E37): the brief is API and backend only; the PM trigger settings, identity-link and trigger list screens are requested on #453 (lane brief rule 3, recorded in ADR-0356)",
+  "gaps": {
+    "GET /v1/pm/connections/:name/trigger-settings": "reads a PM connection's work-trigger settings (off by default): the agent's PM identities, mechanisms, agent and change attributes",
+    "PUT /v1/pm/connections/:name/trigger-settings": "saves (and turns on or off) a PM connection's work-trigger settings, validated, audited",
+    "GET /v1/pm/identity-links": "lists the admin's PM identity links (PM identity to existing RegulAIt user)",
+    "POST /v1/pm/identity-links": "links a PM identity to an existing enabled RegulAIt user (never mints one), audited",
+    "DELETE /v1/pm/identity-links/:linkId": "removes a PM identity link; hand-overs from that identity are then denied, audited",
+    "GET /v1/pm/triggers": "pages a PM connection's work triggers with their lifecycle state and outcome"
+  }
+}
