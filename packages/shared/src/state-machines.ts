@@ -927,6 +927,41 @@ export const PIPELINE_RUN_MACHINE = defineMachine({
   },
 });
 
+/** `workflow_schedule_runs.outcome` (ADR-0349 slice 4, lane E30): what one fire time of a workflow schedule came to.
+ * One row per (schedule, fire time), unique, so a fire time starts at most once. A row is inserted `starting` inside
+ * the claim and settled by the governed start in the same call; every other outcome is recorded once, as it is
+ * decided, and never changes. A `starting` row left by a process that died before the start answered stays
+ * `starting`: the fire time is not retried (at most once, ADR-0349). */
+export const WORKFLOW_SCHEDULE_RUN_STATES = ["starting", "started", "reused", "skipped_overlap", "buffered", "skipped_missed", "refused"] as const;
+export type WorkflowScheduleRunState = (typeof WORKFLOW_SCHEDULE_RUN_STATES)[number];
+export const WORKFLOW_SCHEDULE_RUN_MACHINE = defineMachine({
+  id: "workflow_schedule_run",
+  stored: "workflow_schedule_runs.outcome",
+  states: WORKFLOW_SCHEDULE_RUN_STATES,
+  initial: ["starting", "skipped_overlap", "buffered", "skipped_missed"],
+  terminal: ["started", "reused", "skipped_overlap", "buffered", "skipped_missed", "refused"],
+  transitions: {
+    start: {
+      from: ["starting"],
+      to: "started",
+      by: ["system"],
+      summary: "The governed start, run as the schedule's run-as user, created a new workflow instance.",
+    },
+    reuse: {
+      from: ["starting"],
+      to: "reused",
+      by: ["system"],
+      summary: "Under the `use_existing` start conflict policy, the start answered with the instance already open.",
+    },
+    refuse: {
+      from: ["starting"],
+      to: "refused",
+      by: ["system"],
+      summary: "The run-as user can no longer start it, the stored change no longer validates, or the governed start refused.",
+    },
+  },
+});
+
 /** `builder_agents.autonomy_enforcement` (ADR-0180 addendum, 2026-11-21, lane E51). Whether an unmet autonomy floor
  * blocks dispatch for a `delegated` or `autonomous` builder agent. Every agent starts `enforced` (ADR-0180: the strict
  * value is the default, existing agents included). Only an admin relaxes it, with a reason and a step-up; restoring it
@@ -1186,4 +1221,6 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
   // ADR-0342 slice 2: a human task's SLA clock in the approvals queue (ADR-0046 sweep; re-armed by a reschedule)
   [APPROVAL_SLA_MACHINE.def.id]: APPROVAL_SLA_MACHINE,
+  // ADR-0349 slice 4 (lane E30): one fire time of a workflow schedule
+  [WORKFLOW_SCHEDULE_RUN_MACHINE.def.id]: WORKFLOW_SCHEDULE_RUN_MACHINE,
 } as Record<string, StateMachine<string, string>>);

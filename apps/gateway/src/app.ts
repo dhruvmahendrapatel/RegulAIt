@@ -552,6 +552,7 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
+import { registerWorkflowScheduleRoutes } from "./workflow-schedules.js";
 import { registerPipelineRoutes } from "./pipelines.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
@@ -6317,6 +6318,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerTemplateGalleryRoutes(app, db);
   // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
   registerWorkflowBuilderRoutes(app, db);
+  // ADR-0349 slice 4: workflow schedules (admin-only)
+  registerWorkflowScheduleRoutes(app, db, { dataKey: opts.dataKey });
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);

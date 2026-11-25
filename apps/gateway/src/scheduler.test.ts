@@ -832,6 +832,9 @@ describe("every sweep is registered", () => {
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0349 slice 4 (lane E30): starts due workflow schedules as their creators; driven end to end in
+        // zz-adr0349-schedules.test.ts (with no schedule it starts nothing)
+        SCHEDULER_JOB_NAMES.workflowSchedules,
         // ADR-0360 slice 2 (lane E41): EDR signal sync, and isolation polling with the webhook replay-table prune
         SCHEDULER_JOB_NAMES.edrSync,
         SCHEDULER_JOB_NAMES.edrIsolationPoll,
