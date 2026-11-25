@@ -26,12 +26,29 @@
  * that judges the whole text (a classifier score, a span longer than `hold`) can block
  * at the end after earlier pieces were released; the client then receives the error
  * event and must discard what it showed. That is why the mode is off by default.
+ *
+ * Fail closed. A scan that throws, or that has not answered within `scanTimeoutMs`,
+ * stops the releaser exactly like a block: nothing more is emitted, `settle()` rejects
+ * and the caller withholds the rest. The deadline sits above the longest trained-detector
+ * timeout an admin may set, so a slow detector blocks on its own `onFailure` first; the
+ * deadline only catches a scan that would otherwise never return and hang the stream.
  */
+import { TRAINED_TIMEOUT_MAX_MS } from "@regulait/shared";
+
 
 /** Longest finding the window rule covers (PII patterns, keyword hits). */
 export const STREAM_HOLD_BACK_CHARS = 256;
 /** How much new text a scan waits for (bounds scans to about length / step). */
 export const STREAM_SCAN_STEP_CHARS = 512;
+/** Longest one window scan may take before it fails closed. */
+export const STREAM_SCAN_TIMEOUT_MS = TRAINED_TIMEOUT_MAX_MS + 5_000;
+
+export class StreamScanTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`stream window scan did not answer within ${ms} ms`);
+    this.name = "StreamScanTimeoutError";
+  }
+}
 
 export type WindowScan = (window: string) => Promise<{ block: false } | { block: true; reason: "guardrail" | "pii" }>;
 
@@ -57,6 +74,7 @@ export class IncrementalStreamReleaser {
     private readonly hold = STREAM_HOLD_BACK_CHARS,
     private readonly step = STREAM_SCAN_STEP_CHARS,
     private readonly now: () => number = () => performance.now(),
+    private readonly scanTimeoutMs = STREAM_SCAN_TIMEOUT_MS,
   ) {}
 
   /** Called synchronously by the provider for every text delta. */
@@ -88,7 +106,7 @@ export class IncrementalStreamReleaser {
     if (target <= this.released || this.violation) return;
     const window = this.acc.slice(Math.max(0, this.released - this.hold), Math.min(this.acc.length, target + this.hold));
     const t0 = this.now();
-    const verdict = await this.scan(window);
+    const verdict = await this.scanWithDeadline(window);
     this.stats.scans += 1;
     this.stats.scanMs += this.now() - t0;
     if (verdict.block) {
@@ -101,7 +119,19 @@ export class IncrementalStreamReleaser {
     if (piece) this.emit(piece);
   }
 
-  /** Wait for every scheduled scan; rethrows a scanner failure. */
+  private async scanWithDeadline(window: string): ReturnType<WindowScan> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new StreamScanTimeoutError(this.scanTimeoutMs)), this.scanTimeoutMs);
+    });
+    try {
+      return await Promise.race([this.scan(window), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Wait for every scheduled scan; rethrows a scanner failure or timeout. */
   async settle(): Promise<void> {
     // a link may schedule the next one while it runs, so wait until the chain stops growing
     for (;;) {

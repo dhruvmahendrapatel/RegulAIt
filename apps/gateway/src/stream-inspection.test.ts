@@ -4,7 +4,15 @@
  */
 import { describe, expect, it } from "vitest";
 import { enforcePII } from "./projects.js";
-import { IncrementalStreamReleaser, STREAM_HOLD_BACK_CHARS, type WindowScan } from "./stream-inspection.js";
+import {
+  IncrementalStreamReleaser,
+  STREAM_HOLD_BACK_CHARS,
+  STREAM_SCAN_STEP_CHARS,
+  STREAM_SCAN_TIMEOUT_MS,
+  StreamScanTimeoutError,
+  type WindowScan,
+} from "./stream-inspection.js";
+import { TRAINED_TIMEOUT_MAX_MS } from "@regulait/shared";
 
 const piiScan: WindowScan = async (w) =>
   enforcePII("block", { output: w }, []).action === "block" ? { block: true, reason: "pii" } : { block: false };
@@ -91,6 +99,49 @@ describe("ADR-0352 incremental stream release", () => {
     await expect(r.settle()).rejects.toThrow(/scanner down/);
     r.flushTail();
     expect(r.emittedAny).toBe(false);
+  });
+
+  it("a scan that never answers fails closed at the deadline, and nothing more is released", async () => {
+    const out: string[] = [];
+    const r = new IncrementalStreamReleaser(
+      (d) => out.push(d),
+      () => new Promise(() => {}),
+      STREAM_HOLD_BACK_CHARS,
+      STREAM_SCAN_STEP_CHARS,
+      () => performance.now(),
+      50,
+    );
+    r.push(filler);
+    await expect(r.settle()).rejects.toBeInstanceOf(StreamScanTimeoutError);
+    r.push(filler); // later deltas are ignored once failed
+    r.flushTail();
+    expect(out).toEqual([]);
+    expect(r.emittedAny).toBe(false);
+  });
+
+  it("a failure after a released piece stops the stream: no unchecked text follows", async () => {
+    const out: string[] = [];
+    let calls = 0;
+    const r = new IncrementalStreamReleaser(
+      (d) => out.push(d),
+      async () => {
+        calls += 1;
+        if (calls === 1) return { block: false };
+        throw new Error("scanner down");
+      },
+    );
+    const first = filler.slice(0, STREAM_HOLD_BACK_CHARS + STREAM_SCAN_STEP_CHARS);
+    r.push(first);
+    await new Promise((res) => setImmediate(res));
+    r.push(filler.slice(first.length));
+    await expect(r.settle()).rejects.toThrow(/scanner down/);
+    r.flushTail();
+    // only the first scanned piece left; the held-back tail and the rest never did
+    expect(out.join("")).toBe(first.slice(0, first.length - STREAM_HOLD_BACK_CHARS));
+  });
+
+  it("the scan deadline sits above the longest trained-detector timeout", () => {
+    expect(STREAM_SCAN_TIMEOUT_MS).toBeGreaterThan(TRAINED_TIMEOUT_MAX_MS);
   });
 
   it("measures the overhead against one whole-result scan (recorded in ADR-0352)", async () => {

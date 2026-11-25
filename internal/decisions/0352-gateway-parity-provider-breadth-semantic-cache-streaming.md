@@ -197,7 +197,9 @@ the external-scorer registry and its guarded fetch (ADR-0088/0220), the egress g
   wait beyond a 256-character hold-back, it scans the window from 256 characters before the released point to the
   end, with the same detectors the final scan uses (`enforcePII` at `block`, and `runGuardrailsAsync` on the output
   phase). Only after the window passes is text released, up to 256 characters short of the end. Any finding no longer
-  than the hold-back that touches released text lies inside a scanned window. A scanner failure fails closed.
+  than the hold-back that touches released text lies inside a scanned window. A scanner failure fails closed, and so
+  does a window scan that has not answered within 15 s (`STREAM_SCAN_TIMEOUT_MS`, above the 10 s ceiling on a trained
+  detector's own timeout, so a slow detector blocks through its `onFailure` first). Either way nothing more is released.
 - **The full scan stays authoritative.** When the provider finishes, the existing whole-result scan runs exactly as
   before (it also covers thinking and tool-call arguments), and the held-back tail is released only if it passes and
   the delta transcript equals the result that was scanned. A window block, a final block, a scanner failure or a
