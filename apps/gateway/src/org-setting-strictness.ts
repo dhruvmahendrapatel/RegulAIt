@@ -74,6 +74,7 @@ import {
   CONTAINMENT_AUTO_THRESHOLD_DEFAULT,
   containmentThresholdLooser,
   type ContainmentAutoThreshold,
+  PRIVACY_OPS_ENABLED_DEFAULT,
 } from "@regulait/shared";
 
 /** every key `PUT /v1/org/settings` can store (the confirm flag is write-only) */
@@ -317,7 +318,11 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   dispatchAttributionRequired: notEqual(true),
   // ADR-0224 (P13 c): shipped off (owner 10-30), so nothing is looser than the default; once an org turns the
   // processing limit on, turning it off again is a relaxation
-  privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
+  // the rule follows the one constant: shipped off, nothing is looser than the default and turning it off again is a
+  // relaxation; shipped on, off is relaxed. Flipping PRIVACY_OPS_ENABLED_DEFAULT needs no edit here.
+  privacyOpsEnabled: PRIVACY_OPS_ENABLED_DEFAULT
+    ? notEqual(true)
+    : fromStored(false, (v, b) => b === true && v === false),
   // a longer due date for data-subject requests is looser
   dsrSlaDays: atMost(30),
   certificationReminderHours: exempt(

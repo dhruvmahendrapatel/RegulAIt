@@ -157,8 +157,11 @@ describe("the remaining rows follow the gateway's strictness registry", () => {
     expect(needsStepUp(mode, { hosted: 100 }, { hosted: 400 })).toBe(true);
     expect(needsStepUp(mode, {}, { hosted: 400 })).toBe(true);
   });
-  it("privacy operations (ADR-0224 addendum): the limit ships off, and only turning it off again is a step-up", () => {
+  it("privacy operations (ADR-0224 addendum): the limit ships off, and only turning it off again is a step-up", async () => {
     const limit = CORE_SPECS.privacyOpsEnabled!;
+    // the browser mirror of the one shared constant (review #1161): flipping the constant fails this until it agrees
+    const shared = await import(/* @vite-ignore */ sharedFile("privacy-ops.ts"));
+    expect(limit.strictDefault).toBe(shared.PRIVACY_OPS_ENABLED_DEFAULT);
     expect(limit.strictDefault).toBe(false);
     expect(needsStepUp(limit, true, false)).toBe(false);
     expect(needsStepUp(limit, false, true)).toBe(true);
