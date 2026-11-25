@@ -1,0 +1,17 @@
+/* the hidden "Actions" header of a row-action column, and a diff value kept on its own lines */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: calc(-1 * var(--s-hair));
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.value {
+  white-space: pre-wrap;
+  word-break: break-word;
+}

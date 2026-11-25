@@ -54,6 +54,7 @@
  * And nothing auto-discovers use cases: every row here was proposed by a
  * person.
  */
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { recordRiskAcceptance } from "./risk-tolerance.js";
 import { writeUseCaseDecisionRecord } from "./decision-regression.js";
 import { assertAiBomSignoffPossible, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
@@ -2095,6 +2096,7 @@ export function registerUseCaseRoutes(
         } else {
           // ADR-0188 S4: one intake-assist narrative the person asked for: a direct call, no agent principal acts — decided as the person (no delegation grant).
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,

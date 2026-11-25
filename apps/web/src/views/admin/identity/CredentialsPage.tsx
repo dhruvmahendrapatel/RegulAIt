@@ -235,7 +235,8 @@ export default function CredentialsPage() {
       />
       <div className={v.stack}>
         {inv && <AlertingCard inv={inv} />}
-        <Card title={`Inventory · ${inv?.counts.total ?? 0} credentials, ${inv?.counts.flagged ?? 0} flagged`}>
+        {/* CXR-ADM-007: unread is not zero, so the count shows only once a read has succeeded */}
+        <Card title={inv ? `Inventory · ${inv.counts.total} credentials, ${inv.counts.flagged} flagged` : "Inventory · —"}>
           <div className={v.stack}>
             <div className={v.row}>
               <Field label="Type">
@@ -331,7 +332,10 @@ function AlertingCard(props: { inv: CredentialInventory }) {
         <Button
           disabled={!valid || n === props.inv.unusedDays || act.busy}
           onClick={() =>
-            void act.run(() => putOrgSettings({ credentialUnusedDays: n }), `Unused threshold set to ${n} days`).then(() => setDays(""))
+            void act.run(() => putOrgSettings({ credentialUnusedDays: n }), `Unused threshold set to ${n} days`).then((ok) => {
+              // CXR-ADM-008: a refused save keeps the typed value, so it can be corrected and sent again
+              if (ok) setDays("");
+            })
           }
         >
           Save

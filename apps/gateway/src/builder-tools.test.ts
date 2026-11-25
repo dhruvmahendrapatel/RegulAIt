@@ -36,6 +36,9 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+import { meetDelegatedAutonomyFloorsForTest, type AutonomyFloorsFixture } from "./testing/autonomy-floors.js";
+
+let autonomyFloors: AutonomyFloorsFixture | undefined;
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -161,6 +164,8 @@ beforeAll(async () => {
   colleague = await k.person("colleague");
   approver = await k.person("approver");
   model = await k.model("tools", { price: 1 });
+  // ADR-0180 addendum (E51): its agents are delegated by setup, so the delegated autonomy floors are put in place
+  autonomyFloors = await meetDelegatedAutonomyFloorsForTest(k.db, [model]);
   limitedModel = model;
   await k.grantModel(owner.id, model);
   await k.grantModel(colleague.id, model);
@@ -183,6 +188,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await autonomyFloors?.cleanup();
   await restoreApprovalSigning?.();
   await restoreStrictAdmission?.();
   await k.req("PUT", "/v1/execution/mode", k.BOOT, { mode: "normal", reason: "builder-tools test: cleanup" });

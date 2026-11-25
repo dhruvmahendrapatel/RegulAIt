@@ -3,7 +3,9 @@
 #
 #   byoc-rehearsal-sweep.sh pre-destroy  <prefix>   empty what Terraform cannot:
 #       the rehearsal audit bucket (GOVERNANCE locks, bypassed: the rehearsal
-#       role may, the gateway role may not) and the pull-through cache repos.
+#       role may, the gateway role may not), the operator backup bucket
+#       (versioned, never force-deleted, no lock) and the pull-through cache
+#       repos.
 #   byoc-rehearsal-sweep.sh leftovers    <prefix>   list anything still tagged
 #       purpose=rehearsal besides the standing role, boundary and provider;
 #       exit 1 if there is any.
@@ -18,21 +20,35 @@ account="$(aws sts get-caller-identity --query Account --output text)" || exit 2
 
 case "$cmd" in
   pre-destroy)
-    bucket="$prefix-audit-anchors-$account"
-    if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
-      mode="$(aws s3api get-object-lock-configuration --bucket "$bucket" --query ObjectLockConfiguration.Rule.DefaultRetention.Mode --output text 2>/dev/null)"
-      if [ "$mode" != "GOVERNANCE" ]; then echo "bucket $bucket is $mode, not GOVERNANCE: not touching it" >&2; exit 1; fi
-      # Each pass lists from the start (no continuation token) and deletes
-      # what it listed, so the next pass sees the rest. That is correct only
-      # because every pass deletes; stop as soon as a pass finds nothing.
+    # Deletes every object version and delete marker in one bucket. Each pass
+    # lists from the start (no continuation token) and deletes what it listed,
+    # so the next pass sees the rest. That is correct only because every pass
+    # deletes; stop as soon as a pass finds nothing.
+    empty_bucket() {
+      local bucket="$1"; shift
       while :; do
         batch="$(aws s3api list-object-versions --bucket "$bucket" --max-items 500 --output json \
           --query '{Objects: [Versions[].{Key:Key,VersionId:VersionId}, DeleteMarkers[].{Key:Key,VersionId:VersionId}][] }')"
         n="$(jq '.Objects | length' <<<"$batch")"
         [ "$n" -gt 0 ] || break
-        aws s3api delete-objects --bucket "$bucket" --bypass-governance-retention --delete "$(jq -c '. + {Quiet: true}' <<<"$batch")" >/dev/null || exit 1
+        aws s3api delete-objects --bucket "$bucket" "$@" --delete "$(jq -c '. + {Quiet: true}' <<<"$batch")" >/dev/null || exit 1
         echo "deleted $n object versions from $bucket"
       done
+    }
+    bucket="$prefix-audit-anchors-$account"
+    if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+      mode="$(aws s3api get-object-lock-configuration --bucket "$bucket" --query ObjectLockConfiguration.Rule.DefaultRetention.Mode --output text 2>/dev/null)"
+      if [ "$mode" != "GOVERNANCE" ]; then echo "bucket $bucket is $mode, not GOVERNANCE: not touching it" >&2; exit 1; fi
+      empty_bucket "$bucket" --bypass-governance-retention
+    fi
+    bucket="$prefix-backups-$account"
+    if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+      # The backup bucket has no Object Lock. If one appears, someone meant
+      # these backups to be kept: refuse rather than bypass it.
+      if aws s3api get-object-lock-configuration --bucket "$bucket" >/dev/null 2>&1; then
+        echo "bucket $bucket has Object Lock: not touching it" >&2; exit 1
+      fi
+      empty_bucket "$bucket"
     fi
     for r in $(aws ecr describe-repositories --query "repositories[?starts_with(repositoryName, '$prefix-ecr-public/')].repositoryName" --output text); do
       aws ecr delete-repository --repository-name "$r" --force >/dev/null && echo "deleted cache repository $r"

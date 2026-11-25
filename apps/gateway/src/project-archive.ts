@@ -45,6 +45,7 @@ import {
   unarchiveProjectSchema,
   type ArchiveImpact,
   type RunningWork,
+  WORKFLOW_TERMINAL_STATUSES,
 } from "@regulait/shared";
 import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 
@@ -57,7 +58,6 @@ export const PROJECT_UNARCHIVED_RULE_ID = "project-unarchived";
 /** approvals still waiting on someone: a returned intake sign-off is waiting on its requester */
 const OPEN_APPROVAL_STATUSES = ["pending", "returned"] as const;
 /** the workflow statuses after which an instance does no more work (projects.ts O1 uses the same set) */
-const WORKFLOW_TERMINAL_STATUSES = ["completed", "denied", "aborted", "rolled_back"] as const;
 const ORCHESTRATION_OPEN_STATUSES = ["planned", "running"] as const;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });

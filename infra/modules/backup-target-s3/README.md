@@ -30,6 +30,23 @@ module "db_backup" {
 }
 ```
 
+## Writer profiles
+
+`writer_profile` shapes the grant for the kind of writer.
+
+| Profile | Writer | Grant |
+|---|---|---|
+| `host` (default) | A machine uploading with its instance role, with an on-box self-check and a heartbeat. | `s3:PutObject` and `s3:AbortMultipartUpload` on the prefix, prefix-limited `s3:ListBucket`, `cloudwatch:PutMetricData` in one namespace, and encrypt-only KMS. |
+| `kubernetes_job` | The RegulAIt operator's backup Job (ADR-0305 §2). | `s3:PutObject` on the prefix, and `kms:GenerateDataKey` and `kms:Decrypt` on `kms_key_arn`, both conditioned on `kms:ViaService = s3.<region>.amazonaws.com` and on this bucket's encryption context. No `ListBucket`, `GetObject`, `Delete` or CloudWatch. Needs `kms_key_arn`. |
+
+`kms:Decrypt` is in the Job's grant because the AWS CLI switches to a multipart upload above 8 MiB, and completing one
+needs the data key decrypted. The conditions keep the key usable only for S3 uploads to this bucket. The Job
+publishes no heartbeat, so set `enable_freshness_alarm = false` with it.
+
+A writer whose role attaches its own policies (for example a role from `terraform-aws-modules/eks-pod-identity`) is
+passed by ARN in `writer_role_arns`: it attaches `writer_policy_arn` itself, and this module still names it in the
+bucket policy's explicit Deny of every destructive action. See `infra/modules/byoc-aws/backup.tf`.
+
 ## The threat model, stated plainly
 
 The machine that writes backups is the internet-facing one. It is, by

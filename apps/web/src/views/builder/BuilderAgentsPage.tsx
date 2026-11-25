@@ -168,7 +168,7 @@ export default function BuilderAgentsPage() {
           <Table<BuilderAgentSummary>
             rows={list}
             rowKey={(a) => a.id}
-            onRowClick={(a) => navigate(`/builder/agents/${a.id}`)}
+            rowHref={(a) => `/builder/agents/${a.id}`}
             rowLabel={(a) => `Open ${a.name}`}
             columns={[
               {

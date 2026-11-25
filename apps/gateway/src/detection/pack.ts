@@ -243,6 +243,18 @@ export function packDigest(pack: DetectionPack): string {
   return createHash("sha256").update(packCanonicalBytes(pack)).digest("hex");
 }
 
+/**
+ * ADR-0333 §5b (review of #1157): the digest of ONE rule as it matches, the rule's canonical JSON plus the globs of every
+ * tool class it names. A suppression is bound to it, so an edit that changes what the rule matches, its severity or its
+ * response, ends the suppression's effect even when the rule id stays the same.
+ */
+export function ruleDigest(pack: DetectionPack, rule: DetectionRule): string {
+  const selectors = rule.type === "temporal_ordered" ? rule.steps.map((s) => s.selector) : [rule.selector];
+  const names = [...new Set(selectors.map((s) => s.toolClass).filter((c): c is string => typeof c === "string"))].sort();
+  const classes = Object.fromEntries(names.map((n) => [n, pack.toolClasses[n] ?? null]));
+  return createHash("sha256").update(canonicalJson({ rule, classes }), "utf8").digest("hex");
+}
+
 export function signDetectionPack(pack: DetectionPack, privateKey: KeyObject): string {
   return sign(null, packCanonicalBytes(pack), privateKey).toString("base64url");
 }
