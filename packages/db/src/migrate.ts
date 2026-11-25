@@ -74,6 +74,49 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
       `WHERE "work_item_ref" IS NOT NULL AND "status" NOT IN (${WORKFLOW_TERMINAL_STATUSES_SQL_LIST})`,
   },
   {
+    // ADR-0349 slice 5: the instances list's `template` (template_ids @> [id]) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_template_ids_gin",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_template_ids_gin" ON "workflow_instances" USING gin ("template_ids" jsonb_path_ops)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `target` search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_target_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_target_idx" ON "workflow_instances" (("change"->>'targetSystem'))`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `workItem` (closed instances too; the start-key index covers open ones only) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_work_item_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_work_item_idx" ON "workflow_instances" ("work_item_ref") WHERE "work_item_ref" IS NOT NULL`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `owner`, and every non-admin's own-instances list search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_initiator_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_initiator_idx" ON "workflow_instances" ("initiator_user_id", "created_at" DESC)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `stage` (the current stage id) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_current_stage_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_current_stage_idx" ON "workflow_instances" (("definition" -> 'stages' -> (("state" ->> 'currentStageIndex')::int) ->> 'id'))`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `complianceTag` (projects whose classifications hold the tag) search field
+    migration: "workflow_instance_search",
+    name: "projects_classifications_gin",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "projects_classifications_gin" ON "projects" USING gin ("classifications" jsonb_path_ops)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `complianceTag` search field, the other side of the join (the existing
+    // project index is partial, open instances only)
+    migration: "workflow_instance_search",
+    name: "workflow_instances_project_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_idx" ON "workflow_instances" ("project_id")`,
+  },
+  {
     // ADR-0312 (cost per outcome): the outcome spend join reads a run's metered rows by `detail.runId`
     migration: "cost_outcomes",
     name: "usage_events_run_id_idx",
