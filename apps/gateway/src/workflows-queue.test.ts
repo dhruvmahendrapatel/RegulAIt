@@ -9,7 +9,6 @@
  *  - the worker started the way boot starts it runs a job end to end.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -17,6 +16,7 @@ import { getConstructionPlans } from "pg-boss";
 import { and, auditLog, createDb, eq, orchestrationRuns, runMigrations, sql, workflowInstances, workflowTemplates, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { readMigration } from "./testing/migration-by-slug.js";
 import { createWorkflowTemplateValidated, handleNestedRunCompletion, runStageRetryJob } from "./workflows.js";
 import {
   STAGE_RETRY_QUEUE,
@@ -32,7 +32,7 @@ const migrationsFolder = path.resolve(here, "../../../packages/db/migrations");
 
 describe("the queue schema migration is the pinned pg-boss construction plan", () => {
   it("matches getConstructionPlans('regulait_queue') minus its own transaction wrapper", () => {
-    const file = readFileSync(path.join(migrationsFolder, "pending", "workflow_stage_queue.sql"), "utf8");
+    const file = readMigration(migrationsFolder, "workflow_stage_queue");
     const block = file.slice(file.indexOf("-- pg-boss:begin\n") + "-- pg-boss:begin\n".length, file.indexOf("-- pg-boss:end"));
     const wrapper = /^\s*(BEGIN;|COMMIT;|SET LOCAL lock_timeout|SET LOCAL idle_in_transaction_session_timeout|SELECT pg_advisory_xact_lock\()/;
     const plan = getConstructionPlans(WORKFLOW_QUEUE_SCHEMA)

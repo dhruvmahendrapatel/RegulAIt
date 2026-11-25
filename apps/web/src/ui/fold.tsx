@@ -100,11 +100,20 @@ export function FoldTable<T>(props: TableProps<T>) {
             ))}
           </span>
         ),
-        render: (row) => (
+        // the folded lines go after the cell's value, outside the row's link or button (UIS-04): a folded row action
+        // is a control of its own
+        after: (row) => (
           <>
-            {c.render(row)}
+            {c.after?.(row)}
             {into.map((f) => {
-              const value = f.render(row);
+              const value = f.after ? (
+                <>
+                  {f.render(row)}
+                  {f.after(row)}
+                </>
+              ) : (
+                f.render(row)
+              );
               return isEmpty(value) ? null : (
                 // inline, as the entry CSS has no headroom (size-limit); the label is a .fieldLabel
                 <div key={f.key} data-fold={f.key} style={{ display: "flex", flexWrap: "wrap", gap: "0 var(--s1)", marginTop: "var(--s0)" }}>

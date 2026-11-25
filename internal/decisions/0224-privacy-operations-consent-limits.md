@@ -136,3 +136,96 @@ Further honest limits:
    processing lives at `/admin/privacy` (the requests page stays at `/admin/privacy/requests`). Main's own entry is
    138.36 kB, so this lane fits with about 5 B to spare. The next lane that grows the entry will need the owner's
    ceiling decision.
+
+## Addendum, 2026-11-20: the processing limit on connector and MCP calls, and the settings controls (lane E47)
+
+Builder lane E47 (owner choice of lane, 2026-11-20). Two of the honest limits above are closed.
+
+1. **One check path for every call type.** The limit's implementation is now `processingLimitGate` in
+   `privacy-ops.ts`, keyed by a call target (model, connector or MCP tool). The ADR-0251 governed core exposes it as
+   `governedProcessingLimit` (`governed-core.ts`), and every call path calls the core, not the implementation:
+   - model dispatch (`dispatchAttempt` and the native invoke hoist), as before; `privacyDispatchGate` stays as the
+     model-shaped wrapper;
+   - connector calls (`connector-call.ts`), directly after the PII-mode input rung and before guardrails and
+     `provider.invoke`, on the object and payload that would be sent (after any redaction);
+   - MCP `tools/call` (`mcp-proxy.ts`), directly after the PII-mode argument rung, before the approval is consumed
+     and before the upstream is contacted, on the arguments that would be sent (after any redaction);
+   - the other MCP methods (`mcp-protocol.ts`: resources, prompts, completions), after their PII input scan.
+
+   The rule is unchanged: off (as shipped) it is one settings read; on, personal data whose category no active record
+   for the call's project permits is refused, and an unattributed call carrying personal data is refused. The cascade
+   still decides first. A connector refusal is 409 `processing_not_permitted`, as on the model path. On the MCP paths
+   it is a policy denial (`denied`, rule `processing-not-permitted`), so the MCP error, the trace span, the builder
+   tools and orchestration workers all report it as one without a new outcome kind. The audit row carries the call
+   type and categories only. Neither path stores the refused input in its trace span.
+
+2. **Settings controls.** The Organization page has a "2b · Privacy operations" card (the shared `OrgSettingsCard`)
+   for `privacyOpsEnabled` and `dsrSlaDays`, written through the existing audited `PUT /v1/org/settings`. The browser
+   mirrors the gateway's strictness rules (`org-setting-strictness.ts`): the due date is 1 to 90 days with 30 the
+   strict default, and a longer value, or one longer than what is stored, asks for the `settings_relax` step-up;
+   turning the limit off once it is on asks for the step-up. The switch on Records of processing stays.
+
+3. **Default not changed.** `privacy_ops_enabled` still ships false. ADR-0180 makes strict the default unless an ADR
+   records the reason; this ADR records the owner's 2026-10-30 rule for new backlog features (default off), and the
+   gateway's registry already treats "off" as the strict baseline for that reason. Turning it on by default would
+   refuse personal data in every call of an install with no records yet. Whether to change that is an owner question,
+   not part of this slice.
+
+4. **Open source first (ADR-0176).** No new capability: the slice reuses the existing detector, the governed core and
+   the settings card. No dependency added. No migration and no new route.
+
+Tests: `adr0224-processing-limit-tools.test.ts` (connector and MCP tool calls each refused before the provider or
+upstream, unattributed calls refused, one record permitting the same category on both paths, the settings audited);
+`orgSettingSpecs.test.ts` (the two controls' step-up rules). The existing `privacy-ops.test.ts` is unchanged.
+
+Still open: per-call declared purpose; per-subject objection enforcement; erasure step-up kind; A2A calls and
+training-corpus ingest (`regulait-llm.ts`) are not yet limited by records of processing.
+
+## Addendum, 2026-11-21: A2A calls and training-corpus ingest (lane E47, slice 2)
+
+Builder lane E47, second slice (dispatched 2026-11-21). The two paths the 2026-11-20 addendum left open now go
+through the same check, `governedProcessingLimit` in the ADR-0251 governed core:
+
+1. **A2A calls** (`a2a.ts`, `executeGovernedA2aCall`). The limit runs as step 6a: after the PII-mode rung (the
+   cascade decides first), before guardrails, egress and the credential. It checks the message text that would leave.
+   A refusal is `denied`, 409 `processing_not_permitted`, rule `processing-not-permitted`. The gate's own row is the
+   call's one audit row (object `a2a_agent`, the skill in `tool_name`), so the call writes no second row.
+2. **Training-corpus ingest and append** (`regulait-llm.ts`, `POST /v1/llm/datasets` and
+   `POST /v1/llm/datasets/:id/rows`). The limit runs after the ingest scan, when the scan has not already blocked,
+   and before anything is stored. It checks each row's input and output. A refusal is 409 `processing_not_permitted`;
+   no dataset or row is written. The gate writes one audit row (object `training_dataset`, `phase` `ingest` or
+   `append`). Append is checked too, so a second upload is no way around the limit. An ingest by the bootstrap
+   credential is audited under the module's existing no-identity sentinel, as its other ingest rows are.
+
+The rule is unchanged: off as shipped (`privacy_ops_enabled`, still an owner question); on, personal data whose
+category no active record for the project permits is refused, and unattributed calls or corpora carrying personal data
+are refused. No migration, no new route, no new dependency (ADR-0176: the detector, the core and the existing audit
+shape are reused).
+
+Tests: `adr0224-processing-limit-a2a-ingest.test.ts` (off passes; on, A2A and ingest each refused before egress or
+storage, unattributed refused, one record permitting the same category on both paths, append limited).
+
+Still open: per-call declared purpose; per-subject objection enforcement; an erasure step-up kind.
+
+### Review fixes to the 2026-11-21 addendum (#1161)
+
+1. **Every corpus path, through one check** (security review S4 [1]). `POST /v1/llm/datasets/:id/versions` stored new
+   rows, or a copy of the current version, without the limit. A new version was a way around it, and a corpus stored
+   while the limit was off could be re-minted unchecked. `regulait-llm.ts` now has one enforcement function,
+   `corpusProcessingRefusal`, and every path that writes corpus rows or sends a corpus to a trainer calls it:
+   - dataset ingest (`phase: "ingest"`);
+   - append (`phase: "append"`);
+   - a new version, on supplied or copied rows (`phase: "version"`);
+   - a training job, under the job's project, so a corpus stored before the limit was on cannot leave for a trainer
+     unchecked (`phase: "train"`).
+
+   Each refusal is 409 `processing_not_permitted` with one audit row, and nothing is stored or created. There is a
+   test per route.
+2. **A refusal always carries its audit id** (code review [2]). The gate throws if its refusal row was not written,
+   and the result type makes `auditLogId` required, so the A2A path no longer needs a fallback.
+3. **The shipped default is one constant** (code review [1]). `PRIVACY_OPS_ENABLED_DEFAULT` in `@regulait/shared`
+   (still `false`; the value is the open owner question). The Drizzle schema reads it, and so does the gateway's
+   strictness rule, which picks its rule from it. SQL and the browser cannot import it, so two tests hold them to it:
+   the live column default, and the Organization page's mirror. To flip it, change the constant and add a migration
+   in `pending/` that sets the column default and decides existing rows (ADR-0180). The two tests fail until both
+   agree.

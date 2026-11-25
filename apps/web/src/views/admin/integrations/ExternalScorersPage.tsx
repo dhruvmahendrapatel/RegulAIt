@@ -18,15 +18,22 @@
  *     (`method: "external:<name>"` on every row) — it does not validate the
  *     instrument.
  *
- * What is deliberately NOT here: any attachment to the inline guardrail path
- * (ADR-0042 stays local-detector only — ADR-0088's named boundary), any
- * in-house scoring model, and any vendor-specific API dialect: the wire
- * contract is ours, and a vendor that speaks something else gets a thin
- * translation shim the operator controls.
+ * Two uses, kept apart on the page (CXR-ADM-002): an EVAL use (a judge-backed
+ * scorer names the instrument; the run's input/output/context go to it), and,
+ * since ADR-0220, an INLINE use — a scorer claiming a `guardrail_*` kind can
+ * back a trained detector on the Guardrails page, and then the prompt or
+ * completion text of live dispatches is POSTed to it. ADR-0088's original
+ * "inline stays local-detector only" boundary no longer holds and the copy
+ * says so. Not here: the trained-detector settings themselves (they live on
+ * the Guardrails page), any in-house scoring model, and any vendor-specific
+ * API dialect: the wire contract is ours, and a vendor that speaks something
+ * else gets a thin translation shim the operator controls.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { ExternalScorer } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -39,7 +46,9 @@ import { EditExternalScorerButton } from "../editForms";
 /** the judge-backed kinds an instrument may claim, plus (ADR-0220) the three
  * guardrail kinds a trained-detector service serves on the Guardrails page —
  * the registration schema refuses anything else, so the lexical metrics are
- * not even expressible */
+ * not even expressible; ADR-0353 adds `routing_complexity` (a routing classifier), and
+ * ADR-0352 adds the local text embedder for the meaning-based cache tier, which
+ * the server refuses unless it is claimed alone. */
 const CLAIMABLE_KINDS = [
   "llm_as_judge",
   "groundedness_judge",
@@ -47,6 +56,10 @@ const CLAIMABLE_KINDS = [
   "guardrail_pii",
   "guardrail_prompt_injection",
   "guardrail_harm",
+  // ADR-0353: the pluggable routing classifier's kind
+  "routing_complexity",
+  // ADR-0352: the meaning-based cache tier's local embedder (claimed alone)
+  "text_embedding",
 ] as const;
 
 const useExternalScorers = () =>
@@ -98,15 +111,32 @@ export default function ExternalScorersPage() {
                 The wire contract is ours, not the vendor&apos;s API: one POST of{" "}
                 <code>{"{input, output, context, scorerKind}"}</code> returning{" "}
                 <code>{"{score: 0..1, reasons?}"}</code>. A vendor that speaks a different dialect gets a thin
-                translation shim you control. The inline guardrail path stays local-detector only — an external
-                verdict inside every dispatch is a latency and data-egress decision this slice deliberately does not
-                make.
+                translation shim you control.
               </p>
+              <p>
+                <strong>Two uses, and where your text goes.</strong>
+              </p>
+              <ul>
+                <li>
+                  <strong>Evaluations.</strong> When an eval run names a scorer, that run&apos;s input, output and
+                  context are sent to the scorer&apos;s URL, once per scored row.
+                </li>
+                <li>
+                  <strong>Inline trained detectors (ADR-0220).</strong> A scorer that ticks a guardrail kind
+                  (<code>guardrail_pii</code>, <code>guardrail_prompt_injection</code>, <code>guardrail_harm</code>) can
+                  back a trained detector. Once a detector is turned on, the prompt or completion text of live
+                  requests is sent to that scorer&apos;s URL during the request, through the egress guard. Nothing is
+                  sent inline until an admin turns a detector on, in the Trained detectors tab of the{" "}
+                  <Link className={v.inlineLink} to="/admin/guardrails">Guardrails</Link> page.
+                </li>
+              </ul>
             </>
           }
         >
           <p className={v.faint}>
-            An external score is <strong>the vendor&apos;s opinion</strong>.
+            An external score is <strong>the vendor&apos;s opinion</strong>. A scorer is used by evaluations, and
+            inline on live requests only when it backs a trained detector that an admin has turned on (Trained
+            detectors tab of <Link className={v.inlineLink} to="/admin/guardrails">Guardrails</Link>).
           </p>
         </Card>
 
@@ -297,10 +327,12 @@ export default function ExternalScorersPage() {
                           disabled={act.busy}
                           onClick={() =>
                             void act.run(
+                              // enabling a scorer an enabled trained detector uses is a settings_relax step-up
+                              // (external-scorers.ts); withStepUp opens the proof and resends this exact call
                               () =>
-                                api.post(`/v1/external-scorers/${r.id}/enabled`, {
-                                  enabled: !r.enabled,
-                                }),
+                                withStepUp((h) =>
+                                  stepUpApi.post(`/v1/external-scorers/${r.id}/enabled`, { enabled: !r.enabled }, h),
+                                ),
                               r.enabled ? `'${r.name}' disabled` : `'${r.name}' enabled`,
                             )
                           }

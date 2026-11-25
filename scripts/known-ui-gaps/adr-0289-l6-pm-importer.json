@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0289",
+  "lane": "L6",
+  "tracking": "ADR-0289 (lane L6, ADR-0054 §3): the PM importer ships API-first per the lane brief; its screen is requested on #453 (the design builder builds screens); owner answer relayed by the master session 2026-11-15 (recorded in the #828 body)",
+  "gaps": {
+    "POST /v1/onboarding/imports/pm": "previews (default) or applies a PM project / work-item import: linkage only, onto an Initiative; apply carries the previewed planSha256",
+    "GET /v1/onboarding/imports/pm/items": "pages the imported work-item linkage for one PM connection and its Initiative mapping"
+  }
+}

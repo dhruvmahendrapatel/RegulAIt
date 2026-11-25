@@ -4,7 +4,7 @@
  *   `@regulait/pm-provider` triggers.ts   signal extraction, the settings schema, the lifecycle table. Pure.
  *   THIS FILE                              the admin API (settings, identity links, the trigger list) and
  *                                          `handlePmTriggers`, which the PM webhook route calls.
- *   `workflows.ts`                         owns `startWorkflowForChange`. THIS FILE STARTS NOTHING ITSELF: it calls
+ *   `workflows.ts`                         owns `startGovernedWorkflow`. THIS FILE STARTS NOTHING ITSELF: it calls
  *                                          that function, exactly as `POST /v1/workflows/instances` does.
  *
  * THE WALLS A TRIGGER PASSES, IN ORDER
@@ -19,7 +19,7 @@
  *     Unlinked → denied. Disabled → denied.
  *  5. ENTITLED. The mapped user's own agent decision (`agentDecision`, the invoke path's check, in `execute` mode)
  *     must allow the connection's configured agent. Run as that user, never as an admin.
- *  6. THE ONE START. `startWorkflowForChange` as that user with that user's own `is_admin`: the template assignment
+ *  6. THE ONE START. `startGovernedWorkflow` as that user with that user's own `is_admin`: the template assignment
  *     picks the workflow (Intake, then forced Plan come from the template).
  * A denial is explained on the item in plain words. Every step writes an audit row.
  */
@@ -33,7 +33,6 @@ import {
   eq,
   inArray,
   lt,
-  oidcProviders,
   pmConnections,
   pmIdentityLinks,
   pmLinks,
@@ -41,7 +40,6 @@ import {
   pmWorkTriggers,
   projects,
   runWithRlsPrincipal,
-  samlProviders,
   sql,
   users,
   type Db,
@@ -60,7 +58,7 @@ import {
 } from "@regulait/pm-provider";
 import { agentDecision } from "./copilot.js";
 import { providerFor } from "./pm.js";
-import { startWorkflowForChange } from "./workflows.js";
+import { startGovernedWorkflow } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { whereFrom } from "./state-transition.js";
@@ -68,6 +66,7 @@ import { settingsOf } from "./pm-trigger-settings.js";
 import { syncPmWriteBacks } from "./pm-write-back.js";
 
 export { settingsOf };
+import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
 
 const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** at most this many triggers are handled from one delivery (a comment can mention the agent once; the rest is noise) */
@@ -310,19 +309,15 @@ async function handleOne(
 
   // wall 6: the one start, as the person, with the person's own is_admin
   const started = await runWithRlsPrincipal({ userId: user.id }, () =>
-    startWorkflowForChange(db, dataKey, {
-      userId: user.id,
-      isAdmin: user.isAdmin,
-      body: {
-        change: {
-          description,
-          paths: [],
-          changeType: settings.change.changeType,
-          environment: settings.change.environment,
-          ...(settings.change.targetSystem ? { targetSystem: settings.change.targetSystem } : {}),
-        },
-        projectId: row.projectId ?? undefined,
+    startGovernedWorkflow(db, dataKey, { userId: user.id, isAdmin: user.isAdmin }, {
+      change: {
+        description,
+        paths: [],
+        changeType: settings.change.changeType,
+        environment: settings.change.environment,
+        ...(settings.change.targetSystem ? { targetSystem: settings.change.targetSystem } : {}),
       },
+      ...(row.projectId ? { projectId: row.projectId } : {}),
     }),
   );
   if (started.status !== 201) {
@@ -464,19 +459,33 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
     const body = putSettingsSchema.parse(req.body);
     const conn = await connByName(name);
     if (!conn) return reply.status(404).send({ error: "unknown_connection" });
+    // a shadow-AI remediation starts only from its plan (ADR-0195 A4): a PM hand-over must never start one, nor install
+    // its default workflow (ported from #986, lane L6; the same refusal the pipeline-run start makes)
+    if (body.change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+      return reply.status(422).send({
+        error: "change_type_not_triggerable",
+        detail: "a shadow-AI remediation starts from its plan through the workflow start, not from a PM tool hand-over",
+      });
+    }
     const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
     if (!agent) return reply.status(400).send({ error: "invalid_reference", detail: "agentId names no registered agent" });
     if (body.projectId) {
       const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
       if (!project) return reply.status(400).send({ error: "invalid_reference", detail: "projectId names no project" });
     }
-    // turning triggers on lets a PM tool start governed work: a relaxation, so a step-up, audited (ADR-0180)
-    if (body.enabled) {
-      const [current] = await db.select({ enabled: pmTriggerSettings.enabled }).from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
-      if (!current?.enabled) {
-        const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { pmTriggers: "enable", connection: conn.name } });
-        if (!su.ok) return reply;
-      }
+    // turning triggers on lets a PM tool start governed work, and turning the rule mechanism on lets whoever can edit a
+    // rule name the actor: each is a relaxation, so a step-up, audited (ADR-0180)
+    const [currentRow] = await db.select().from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
+    const current = currentRow ? settingsOf(currentRow) : null;
+    const relaxations: string[] = [];
+    if (body.enabled && !currentRow?.enabled) relaxations.push("enable");
+    if (body.mechanisms.rule && !current?.mechanisms.rule) relaxations.push("rule");
+    if (relaxations.length > 0) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { pmTriggers: relaxations.join("+"), connection: conn.name },
+      });
+      if (!su.ok) return reply;
     }
     const { enabled, agentId, projectId, ...config } = body;
     const values = { enabled, agentId, projectId: projectId ?? null, config, updatedByUserId: req.authCtx.userId ?? null };
@@ -525,9 +534,16 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
       });
     }
     if (user.disabledAt) return reply.status(422).send({ error: "user_disabled", detail: "a disabled user cannot be linked" });
-    const [oidc] = await db.select({ id: oidcProviders.id }).from(oidcProviders).where(eq(oidcProviders.enabled, true)).limit(1);
-    const [saml] = await db.select({ id: samlProviders.id }).from(samlProviders).where(eq(samlProviders.enabled, true)).limit(1);
-    const verifiedSource = user.scimExternalId ? "scim" : oidc || saml ? "idp" : "admin_asserted";
+    // nothing here checks that the PM identity belongs to this user, so an admin-created link is only ever the admin's
+    // assertion ('idp'/'scim' are for a later auto-link that matches a verified identity, ADR-0356 open question 2)
+    const verifiedSource = "admin_asserted";
+    // a link is a grant: whoever controls that PM identity starts governed work as this user (an admin included), so
+    // creating one is a step-up, audited (ADR-0180); removing one only narrows access and needs none
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { pmIdentityLink: true, connection: conn.name, pmUserId: body.pmUserId, userId: user.id },
+    });
+    if (!su.ok) return reply;
     const [row] = await db
       .insert(pmIdentityLinks)
       .values({ connectionId: conn.id, pmUserId: body.pmUserId, userId: user.id, verifiedSource, createdByUserId: req.authCtx.userId ?? null })
