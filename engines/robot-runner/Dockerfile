@@ -58,8 +58,10 @@ COPY --from=shim /out /app
 # So is fontconfig's system cache (/var/cache/fontconfig): fc-cache writes different bytes on every build (measured: two
 # installs of the same packages, every cache file differs). With a read-only root, fontconfig builds its cache under
 # HOME (/work, the run's tmpfs) when the browser starts.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && node /app/node_modules/playwright-core/cli.js install-deps chromium-headless-shell \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
           /var/cache/apt/*.bin /var/cache/fontconfig/*
