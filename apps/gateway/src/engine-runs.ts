@@ -118,7 +118,7 @@ import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPl
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { admissionReportOf, recordSubjectRunEndTx, setAdmissionScanRuntime, subjectInputTx } from "./admission-scan-runs.js";
-import { CONTENTEXTRACT_ENGINE_ID, recordContentExtractRunEndTx, setContentInspectionRuntime } from "./content-inspection-runs.js";
+import { CONTENTEXTRACT_ENGINE_ID, recordContentExtractRunEndTx, setContentInspectionRuntime, sweepContentInspectionOrphans } from "./content-inspection-runs.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
 import { loadOrgSettings } from "./org-settings.js";
@@ -1171,7 +1171,7 @@ export async function runEngineRunSweep(db: Db, opts: { actorUserId?: string | n
   // N11 fix round B1 (M-075): every expiry is judged on the database clock the rows were stamped by, never
   // the scheduler's process clock: SQL `now()` in the reads, the wall clock under the row lock in the re-checks
   const actor = opts.actorUserId ?? NO_IDENTITY;
-  const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0, workflowsNotified: 0 };
+  const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0, workflowsNotified: 0, contentResultsDeleted: 0, contentRunsCancelled: 0 };
   const overdue = await db
     .select({ id: engineRuns.id, deadlinePassed: sql<boolean>`coalesce(${engineRuns.deadlineAt} < now(), false)` })
     .from(engineRuns)
@@ -1267,6 +1267,10 @@ export async function runEngineRunSweep(db: Db, opts: { actorUserId?: string | n
     )
     .returning({ id: engineRuns.id });
   out.rawReportsPurged = purged.length;
+  // ADR-0362: a content-extraction result nobody read, or an extraction run nobody waits for, past ten minutes
+  const orphans = await sweepContentInspectionOrphans(db, cancelEngineRunAsSystem);
+  out.contentResultsDeleted = orphans.resultsDeleted;
+  out.contentRunsCancelled = orphans.runsCancelled;
   return out;
 }
 
@@ -1354,7 +1358,8 @@ export function engineJobDefinitions(): SchedulerJobDefinition[] {
       name: ENGINE_SWEEP_JOB_NAME,
       description:
         "End engine runs whose deadline passed or whose lease expired (status timeout) and revoke their keys; end queued " +
-        "runs no runner took in 24 hours (not_run); delete raw engine reports past their retention. The kill switch does " +
+        "runs no runner took in 24 hours (not_run); delete raw engine reports past their retention; delete unread content " +
+        "inspection results and end extraction runs nobody waits for after ten minutes (ADR-0362). The kill switch does " +
         "not depend on it: a cancel revokes the key at once, and a key expires at the run deadline anyway.",
       adr: "ADR-0187",
       defaultIntervalSeconds: 60,
