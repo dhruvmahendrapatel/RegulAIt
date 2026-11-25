@@ -4734,8 +4734,18 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     }
     return { row: loaded.instance, stageId: view.currentStage?.id ?? null };
   };
-  const auditIncident = (row: { id: string }, userId: string, action: string, detail: Record<string, unknown>, reason: string) =>
-    db.insert(auditLog).values({
+  // S4 review [2]: the audit row is written in the same transaction as the transition (applyEvent's precondition runs
+  // under the instance lock), so a refused or raced transition rolls it back and the trail never claims an action that
+  // did not happen. The one path with no transition (re-running an executor) writes it after the run, with the outcome.
+  const auditIncident = (
+    q: Pick<Db, "insert">,
+    row: { id: string },
+    userId: string,
+    action: string,
+    detail: Record<string, unknown>,
+    reason: string,
+  ) =>
+    q.insert(auditLog).values({
       userId,
       objectType: "workflow",
       objectId: row.id,
@@ -4756,13 +4766,18 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const t = await incidentTarget(req, reply, "retry");
     if (!t) return reply;
     const userId = req.authCtx.userId!;
-    await auditIncident(t.row, userId, "retry", { stageId: t.stageId, note: b.note, status: t.row.status }, `incident console: retry of stage '${t.stageId}'`);
+    const detail = { stageId: t.stageId, note: b.note, status: t.row.status };
+    const reason = `incident console: retry of stage '${t.stageId}'`;
     let executed: ExecutorOutcome;
     if (t.row.status === "blocked_on_check") {
-      const r = await applyEvent(db, t.row.id, { kind: "recheck", stageId: t.stageId! }, userId);
+      const r = await applyEvent(db, t.row.id, { kind: "recheck", stageId: t.stageId! }, userId, async (tx) => {
+        await auditIncident(tx, t.row, userId, "retry", detail, reason);
+        return true;
+      });
       executed = await runExecutors(t.row.id, r.effects, userId);
     } else {
       executed = await runExecutors(t.row.id, [{ kind: "execute_stage", stageId: t.stageId! }], userId);
+      await auditIncident(db, t.row, userId, "retry", { ...detail, ...(executed.refused ? { refused: executed.refused } : {}) }, reason);
     }
     return answerInstance(t.row.id, userId, executed);
   });
@@ -4778,8 +4793,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "workflow_stage_skip", instanceId: t.row.id, stageId: b.stageId } });
     if (!su.ok) return reply;
     const userId = req.authCtx.userId!;
-    await auditIncident(t.row, userId, "skip", { stageId: b.stageId, note: b.note, status: t.row.status, stepUp: su.method }, `incident console: stage '${b.stageId}' skipped`);
-    const r = await applyEvent(db, t.row.id, { kind: "stage_skipped", stageId: b.stageId, reason: b.note }, userId);
+    const r = await applyEvent(db, t.row.id, { kind: "stage_skipped", stageId: b.stageId, reason: b.note }, userId, async (tx) => {
+      await auditIncident(tx, t.row, userId, "skip", { stageId: b.stageId, note: b.note, status: t.row.status, stepUp: su.method }, `incident console: stage '${b.stageId}' skipped`);
+      return true;
+    });
     const executed = await runExecutors(t.row.id, r.effects, userId);
     return answerInstance(t.row.id, userId, executed);
   });
@@ -4789,9 +4806,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const t = await incidentTarget(req, reply, "cancel");
     if (!t) return reply;
     const userId = req.authCtx.userId!;
-    await auditIncident(t.row, userId, "cancel", { stageId: t.stageId, note: b.note, status: t.row.status }, "incident console: instance cancelled");
-    await applyEvent(db, t.row.id, { kind: "abort" }, userId);
-    return answerInstance(t.row.id, userId);
+    const applied = await applyEvent(db, t.row.id, { kind: "abort" }, userId, async (tx) => {
+      await auditIncident(tx, t.row, userId, "cancel", { stageId: t.stageId, note: b.note, status: t.row.status }, "incident console: instance cancelled");
+      return true;
+    });
+    // S4 review [1]: as /abort does, a cancel that starts compensating runs the first compensation now, as the admin
+    // who cancelled; without this the instance parks on the compensation stage and the deployed change stays live
+    const executed = await runExecutors(t.row.id, applied.effects, userId);
+    return answerInstance(t.row.id, userId, executed);
   });
 
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {

@@ -17,6 +17,7 @@ const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const BOOT = "e30-inc-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const RUN = Date.now().toString(36);
+const DEPLOY_TARGET = `e30-inc-dt-${RUN}`;
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -92,6 +93,29 @@ beforeAll(async () => {
   ana = await makeUser("ana");
   await makeTemplate("skippable", true);
   await makeTemplate("strict", false);
+  // S4 review [1]: a template whose deploy has a declared compensation (a rollback)
+  expect((await app.inject({ method: "POST", headers: AUTH, url: "/v1/deploy/targets", payload: { name: DEPLOY_TARGET, provider: "mock", environment: "staging" } })).statusCode).toBe(201);
+  const comp = `e30-inc-compensating-${RUN}`;
+  const t = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/workflows/templates",
+    payload: {
+      name: comp,
+      definition: {
+        workflow: comp,
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "deploy", type: "deployment", connection: DEPLOY_TARGET, environment: "staging" },
+          { id: "checks", type: "automated_check", checks: ["e2e"] },
+          { id: "undo_deploy", type: "rollback", connection: DEPLOY_TARGET, compensates: "deploy" },
+        ],
+      },
+    },
+  });
+  expect(t.statusCode, t.body).toBe(201);
+  const r = await app.inject({ method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules", payload: { templateId: t.json().id, changeType: comp } });
+  expect(r.statusCode).toBe(201);
 });
 
 afterEach(async () => {
@@ -189,5 +213,29 @@ describe("ADR-0349 incident console", () => {
     const twice = await act(id, "cancel", { note: "again" });
     expect(twice.statusCode).toBe(409);
     expect(twice.json().detail).toMatch(/has ended/);
+  });
+
+  it("cancel of a deployed instance runs its compensation now: the rollback is dispatched and the instance ends aborted", async () => {
+    const id = await start("compensating");
+    const [deployed] = await db.select({ context: workflowInstances.context }).from(workflowInstances).where(eq(workflowInstances.id, id));
+    expect((deployed!.context as Record<string, unknown>)["deploy:deploy"]).toBeDefined();
+    await failCheck(id);
+    expect(await statusOf(id)).toBe("blocked_on_check");
+    const res = await act(id, "cancel", { note: "the deploy must be undone" });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().status).toBe("aborted");
+    expect(res.json().state.compensation).toMatchObject({ cause: "aborted", plan: ["undo_deploy"], outcome: "completed" });
+    expect(res.json().context["rollback:undo_deploy"]).toBeDefined();
+    expect(await auditsOf(id, "external-effect:deploy.rollback")).toHaveLength(1);
+    expect(await auditsOf(id, "workflow:incident-cancel")).toHaveLength(1);
+  });
+
+  it("the audit row commits with the transition: two racing cancels leave exactly one cancel row", async () => {
+    const id = await start("skippable");
+    await failCheck(id);
+    const [a, b] = await Promise.all([act(id, "cancel", { note: "one" }), act(id, "cancel", { note: "two" })]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    expect(await statusOf(id)).toBe("aborted");
+    expect(await auditsOf(id, "workflow:incident-cancel")).toHaveLength(1);
   });
 });
