@@ -53,6 +53,8 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = "c".repeat(64);
 const HOST = `e39-${RUN}.service-now.example.com`;
 const OTHER_HOST = `e39-other-${RUN}.service-now.example.com`;
+/** a second allow-listed instance: moving there must re-push the whole inventory */
+const MOVE_HOST = `e39-move-${RUN}.service-now.example.com`;
 const PASSWORD = `pw-${RUN}-SECRET`;
 const resolve = async () => [{ address: "93.184.216.34", family: 4 }];
 const allowed = trackEgressAllowHosts();
@@ -118,6 +120,10 @@ beforeAll(async () => {
     app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost(HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `e39 ${RUN}` } }),
   );
   expect(allow.statusCode, allow.body).toBe(201);
+  const allowMove = await relaxStepUpAround(db, () =>
+    app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost(MOVE_HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `e39 move ${RUN}` } }),
+  );
+  expect(allowMove.statusCode, allowMove.body).toBe(201);
   const mk = async (k: string, isAdmin: boolean) => {
     const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `e39c-${k}-${RUN}@example.com`, displayName: `e39c ${k}`, isAdmin } });
     expect(u.statusCode, u.body).toBe(201);
@@ -301,6 +307,30 @@ describe("ADR-0358 CMDB connectors: off by default, export only", () => {
     const p = (await req("GET", `${base()}/runs?limit=10`)).json();
     expect(p.items.length).toBeGreaterThan(0);
     expect((await req("GET", `${base()}/runs?limit=3`)).statusCode).toBe(400);
+  });
+
+  it("moving to another allowed instance revokes, disables, clears the ledger and re-pushes every asset", async () => {
+    const before = mine(await links());
+    expect(before.length).toBeGreaterThan(0);
+    const moved = await req("PUT", `${base()}/config`, { instanceUrl: `https://${MOVE_HOST}`, reason: "move to the new instance" });
+    expect(moved.statusCode, moved.body).toBe(200);
+    expect(moved.json().connector).toMatchObject({ enabled: false, credential: null, posture: { egressAllowed: true } });
+    const creds = await db.select().from(cmdbCredentials).where(eq(cmdbCredentials.connectorId, connectorId));
+    expect(creds.length).toBeGreaterThan(0);
+    for (const c of creds) expect(c).toMatchObject({ revokedAt: expect.any(Date), secretCiphertext: null });
+    // the old instance's ledger says nothing about the new one: it is cleared in the move transaction
+    expect(await links()).toHaveLength(0);
+    await db.insert(cmdbCredentials).values({ connectorId, username: "svc-move", secretCiphertext: await encrypted() });
+    await db.update(cmdbConnectors).set({ enabled: true }).where(eq(cmdbConnectors.id, connectorId));
+    const fake = fakeServiceNow();
+    const out = await sync(fake);
+    expect(out!.run.status, JSON.stringify(out!.run)).toBe("succeeded");
+    const push = fake.got.filter((g) => g.url.includes("/api/now/identifyreconcile"));
+    expect(push.length).toBeGreaterThan(0);
+    expect(push.every((g) => g.url.startsWith(`https://${MOVE_HOST}/`))).toBe(true);
+    const pushedKeys = new Set(push.flatMap((g) => (g.body as { items: Array<{ sys_object_source_info: { source_native_key: string } }> }).items.map((i) => i.sys_object_source_info.source_native_key)));
+    for (const l of before) expect(pushedKeys.has(l.sourceKey), l.sourceKey).toBe(true);
+    expect(mine(await links()).map((l) => l.sourceKey).sort()).toEqual(before.map((l) => l.sourceKey).sort());
   });
 
   it("a host off the egress allow-list gets nothing", async () => {

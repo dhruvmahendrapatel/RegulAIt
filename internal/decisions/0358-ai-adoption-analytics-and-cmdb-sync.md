@@ -126,6 +126,13 @@ hand-written is RegulAIt's: which assets are exported, the policy, the audit and
   route runs the same function.
 - **Row-level security** on every new table: an active admin principal, `system_task` and `migration` only.
 
+### What this part does not do
+
+- **No CI retirement.** An asset deleted in RegulAIt keeps its `cmdb_ci_links` row and its CI is not retired or
+  marked absent in the CMDB; the CMDB's own staleness rules apply. Retirement is a later slice if asked for.
+- **Moving the instance re-pushes everything.** Changing a connector's instance URL clears its `cmdb_ci_links` ledger
+  in the same transaction as the credential revoke, so the first pass on the new instance pushes the whole inventory.
+
 ### ServiceNow setup the admin does (stated on the posture read)
 
 1. Add a `discovery_source` choice for RegulAIt on `cmdb_ci` (the IRE requires a registered source name).

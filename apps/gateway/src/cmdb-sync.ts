@@ -694,6 +694,8 @@ export function registerCmdbSyncRoutes(app: FastifyInstance, db: Db, opts: { dat
           .where(and(eq(cmdbCredentials.connectorId, c.id), isNull(cmdbCredentials.revokedAt)))
           .returning({ id: cmdbCredentials.id });
         revoked = r?.id ?? null;
+        // the ledger records what the OLD instance holds: kept, the new instance would never get the inventory
+        await t.delete(cmdbCiLinks).where(eq(cmdbCiLinks.connectorId, c.id));
       }
       await audit(
         t,
@@ -701,7 +703,7 @@ export function registerCmdbSyncRoutes(app: FastifyInstance, db: Db, opts: { dat
         c,
         CMDB_RULE_IDS.configured,
         turningOnReadBack ? "deny" : "allow",
-        `CMDB connector '${c.name}' configured${moved ? `: moved to ${instanceUrl}, so it was disabled and its credential revoked` : ""}${turningOnReadBack ? "; ownership read-back turned ON — RELAXED from export only (step-up)" : ""}: ${b.data.reason}`,
+        `CMDB connector '${c.name}' configured${moved ? `: moved to ${instanceUrl}, so it was disabled, its credential revoked and its CI links cleared for a full re-push` : ""}${turningOnReadBack ? "; ownership read-back turned ON — RELAXED from export only (step-up)" : ""}: ${b.data.reason}`,
         {
           from: { instanceUrl: c.instanceUrl, sourceName: c.sourceName, ciClasses: c.ciClasses, readBackOwnership: c.readBackOwnership },
           to: { instanceUrl, sourceName: row.sourceName, ciClasses, readBackOwnership: row.readBackOwnership },
