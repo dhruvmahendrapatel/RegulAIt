@@ -98,7 +98,8 @@ export interface ModernMcpContext {
   /** the shared `tools/list` (mcp-proxy.ts `listToolsForCaller`) */
   listTools: () => Promise<{ tools: unknown[] }>;
   /** the shared `tools/call` (mcp-proxy.ts `callToolForCaller`) */
-  callTool: (name: string, args: Record<string, unknown> | undefined) => Promise<Record<string, unknown>>;
+  /** `signal`: ADR-0364 S3 (review B), the exchange's abort (the client left), so a robot run is cancelled with it */
+  callTool: (name: string, args: Record<string, unknown> | undefined, signal?: AbortSignal) => Promise<Record<string, unknown>>;
   /**
    * The capabilities to advertise: the 2025-era `protocolCapabilities(...)` of the org's enabled methods with
    * `logging/setLevel` left out (`tools` is always added here).
@@ -112,6 +113,8 @@ export interface ModernMcpContext {
       relay: (n: { method: string; params?: Record<string, unknown> }) => Promise<void>;
       progressToken?: string | number;
       relayLogMessages: false;
+      /** the exchange's abort (ADR-0364 S3 review B), passed to the upstream request */
+      signal?: AbortSignal;
     },
   ) => Promise<Record<string, unknown>>;
   /** closes whatever upstream session the route opened (its own close-on-disconnect stays registered) */
@@ -163,9 +166,9 @@ interface ExchangeState {
 
 /**
  * The per-request v2 server: `tools` through the shared tool functions, the governed non-tool methods through the
- * shared protocol primitive, anything else an audited `-32601`.
+ * shared protocol primitive, anything else an audited `-32601`. `signal` is the exchange's abort (ADR-0364 S3).
  */
-export function buildModernServer(ctx: ModernMcpContext, state: ExchangeState = { handled: false }): ModernServer {
+export function buildModernServer(ctx: ModernMcpContext, state: ExchangeState = { handled: false }, signal?: AbortSignal): ModernServer {
   const server = new ModernServer(
     { name: "regulait-gateway", version: "0.1.0" },
     { capabilities: { ...(ctx.capabilities as ModernServerCapabilities), tools: {} } },
@@ -177,7 +180,7 @@ export function buildModernServer(ctx: ModernMcpContext, state: ExchangeState = 
   });
   server.setRequestHandler("tools/call", async (request) => {
     state.handled = true;
-    const result = await ctx.callTool(request.params.name, request.params.arguments as Record<string, unknown> | undefined);
+    const result = await ctx.callTool(request.params.name, request.params.arguments as Record<string, unknown> | undefined, signal);
     return server.projectCallToolResult(result as CallToolResult, undefined);
   });
   server.fallbackRequestHandler = async (request: JSONRPCRequest, sctx) => {
@@ -190,6 +193,7 @@ export function buildModernServer(ctx: ModernMcpContext, state: ExchangeState = 
         relay: (n) => sctx.mcpReq.notify(n as never),
         ...(progressToken !== undefined ? { progressToken } : {}),
         relayLogMessages: false,
+        ...(signal ? { signal } : {}),
       })) as never;
     }
     const reason = await auditMethodNotServed(ctx, request.method);
@@ -225,7 +229,7 @@ export async function serveModernMcp(req: FastifyRequest, reply: FastifyReply, c
   const abort = new AbortController();
   reply.raw.on("close", () => abort.abort());
   const state: ExchangeState = { handled: false };
-  const handler = createMcpHandler(() => buildModernServer(ctx, state), {
+  const handler = createMcpHandler(() => buildModernServer(ctx, state, abort.signal), {
     legacy: "reject",
     onerror: (err) => req.log.debug({ err }, "mcp 2026-07-28 exchange reported an error"),
   });

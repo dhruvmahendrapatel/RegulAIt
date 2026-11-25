@@ -128,6 +128,16 @@ func TestEventCarriesNoCallContent(t *testing.T) {
 		{enforce.AgentCodex, codexGitPush}, {enforce.AgentCursor, cursorShellPush}, {enforce.AgentCopilotCLI, copilotUnlisted},
 	} {
 		_, ev := hook(t, in.agent, in.input, testPolicy(enforce.ModeEnforce))
+		// The two generated fields are proved content-free by their exact shape (a random UUIDv4 and a 64-hex
+		// pseudonym), then blanked: a random id can contain a marker such as "c-1" by chance, which made this test
+		// fail at random. Every other byte of the event is still searched.
+		if !uuidV4Shape.MatchString(ev.EventID) {
+			t.Fatalf("%s eventId is not a UUIDv4: %q", in.agent, ev.EventID)
+		}
+		if ev.SessionRef != nil && !hex64.MatchString(*ev.SessionRef) {
+			t.Fatalf("%s sessionRef is not a 64-hex pseudonym: %q", in.agent, *ev.SessionRef)
+		}
+		ev.EventID, ev.SessionRef = "", nil
 		b, _ := json.Marshal(ev)
 		for _, forbidden := range []string{"secret-argument", "/work", "/etc", "s-1", "thr_1", "c-1", "s-9", "shadow", "git push"} {
 			if strings.Contains(string(b), forbidden) {

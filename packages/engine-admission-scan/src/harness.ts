@@ -32,7 +32,7 @@ import {
   type EngineTaskInputUpload,
 } from "@regulait/shared";
 import { admissionScanAdapter } from "./adapter.js";
-import { ADMISSION_SUBJECT_FILE, pinnedVersion } from "./config.js";
+import { ADMISSION_SUBJECT_FILE, pinnedVersion, type SubjectEngineId } from "./config.js";
 import { SubjectExchange } from "./exchange.js";
 import { admissionScanTask, type AdmissionTaskOptions } from "./task.js";
 
@@ -70,7 +70,7 @@ process.exit(${exitCode});
   return { command: process.execPath, args: [script] };
 }
 
-export function subjectLease(engine: AdmissionScanEngineId, subject: Buffer | null, deadlineMs = 60_000): EngineLease {
+export function subjectLease(engine: SubjectEngineId, subject: Buffer | null, deadlineMs = 60_000): EngineLease {
   return {
     runId: randomUUID(),
     engineId: engine,
@@ -86,7 +86,7 @@ export function subjectLease(engine: AdmissionScanEngineId, subject: Buffer | nu
 }
 
 /** the gateway's task-start rules for a subject run (engine-tasks.ts, #843 security review), or the refusal */
-export function gatewayStartRefusal(engine: AdmissionScanEngineId, body: unknown): string | null {
+export function gatewayStartRefusal(engine: SubjectEngineId, body: unknown): string | null {
   const parsed = engineTaskInputUploadSchema.safeParse(body);
   if (!parsed.success) return "engine_task_input_invalid";
   const u = parsed.data;
@@ -105,15 +105,40 @@ export interface EndToEndResult {
   taskCode: number | null;
 }
 
+export interface EndToEndRun {
+  started: EngineTaskInputUpload | null;
+  envelope: EngineResultEnvelope;
+  /** the raw report's bytes parsed as JSON, only for a completed run (as the gateway reads it) */
+  report: unknown;
+  taskCode: number | null;
+}
+
 /** one scan through the adapter, the bridge and the sandbox task, judged as the gateway judges it */
 export async function scanEndToEnd(args: {
   engine: AdmissionScanEngineId;
+  subject: Buffer;
+  placed?: Record<string, Buffer>;
+  task?: AdmissionTaskOptions;
+  lease?: EngineLease;
+}): Promise<EndToEndResult> {
+  const r = await runEndToEnd(args);
+  const s = r.started as EngineTaskInputUpload | null;
+  const interpretation = interpretAdmissionScanReport(r.report, {
+    engine: args.engine,
+    input: s?.subject ? { path: s.subject.path, sha256: createHash("sha256").update(args.subject).digest("hex") } : null,
+  });
+  return { started: r.started, envelope: r.envelope, interpretation, taskCode: r.taskCode };
+}
+
+/** one run of any subject engine through the adapter, the bridge and the sandbox task (ADR-0362: the extractor too) */
+export async function runEndToEnd(args: {
+  engine: SubjectEngineId;
   subject: Buffer;
   /** what the executor writes at the input root (default: `subject`, under the gateway's name) */
   placed?: Record<string, Buffer>;
   task?: AdmissionTaskOptions;
   lease?: EngineLease;
-}): Promise<EndToEndResult> {
+}): Promise<EndToEndRun> {
   const root = await mkdtemp(path.join(tmpdir(), "adr0242-l4-"));
   const abort = new AbortController();
   try {
@@ -169,12 +194,7 @@ export async function scanEndToEnd(args: {
     const envelope = engineResultEnvelopeSchema.parse({ version: ENGINE_RESULT_VERSION, runId: lease.runId, engineId: args.engine, engineVersion: lease.engineVersion, ...body });
     // as the gateway: the report is the raw report's bytes; only a completed run's report is recorded
     const report = envelope.status === "completed" && envelope.rawReport?.contentBase64 !== undefined ? (JSON.parse(Buffer.from(envelope.rawReport.contentBase64, "base64").toString("utf8")) as unknown) : null;
-    const s = started as EngineTaskInputUpload | null;
-    const interpretation = interpretAdmissionScanReport(report, {
-      engine: args.engine,
-      input: s?.subject ? { path: s.subject.path, sha256: createHash("sha256").update(args.subject).digest("hex") } : null,
-    });
-    return { started, envelope, interpretation, taskCode };
+    return { started, envelope, report, taskCode };
   } finally {
     abort.abort();
     await rm(root, { recursive: true, force: true });

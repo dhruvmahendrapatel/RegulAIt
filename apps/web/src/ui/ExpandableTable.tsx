@@ -10,7 +10,19 @@
  * - a mouse click anywhere on the row (not on a control) toggles it too.
  */
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { Button, EmptyState, ErrorState, InfoButton, Skeleton, StatusDot, type TableProps } from "./kit";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  InfoButton,
+  primaryColumn,
+  rowClickThrough,
+  rowControl,
+  rowsClickable,
+  Skeleton,
+  StatusDot,
+  type TableProps,
+} from "./kit";
 import s from "./kit.module.css";
 import x from "./expandableTable.module.css";
 import { errorText } from "../api/format";
@@ -20,11 +32,14 @@ export type ExpandableTableProps<T> = TableProps<T> & {
 };
 
 export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const [localKey, setSortKey] = useState<string | null>(null);
+  const [localDir, setSortDir] = useState<1 | -1>(1);
+  // a server-side sort (DataList, CXR-REV-003): rows arrive sorted and a header asks the server, as in the kit Table
+  const sortKey = props.sort ? props.sort.key : localKey;
+  const sortDir = props.sort ? props.sort.dir : localDir;
   const sorted = useMemo(() => {
     const rows = props.rows ?? [];
-    if (!sortKey) return rows;
+    if (!sortKey || props.sort) return rows;
     const col = props.columns.find((c) => c.key === sortKey);
     if (!col?.sort) return rows;
     const sortFn = col.sort;
@@ -33,15 +48,17 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
       const bv = sortFn(b);
       return (av < bv ? -1 : av > bv ? 1 : 0) * sortDir;
     });
-  }, [props.rows, props.columns, sortKey, sortDir]);
+  }, [props.rows, props.columns, props.sort, sortKey, sortDir]);
   const by = (key: string) => {
-    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
+    if (props.sort) props.sort.by(key);
+    else if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
     else {
       setSortKey(key);
       setSortDir(1);
     }
   };
   const shown = props.columns.filter((c) => !c.hidden);
+  const primaryKey = primaryColumn(shown);
   const ex = props.expand;
   const exId = useId();
   const detailId = (row: T) => `${exId}-x-${props.rowKey(row).replace(/[^\w-]/g, "_")}`;
@@ -97,32 +114,20 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
                 </tr>
               ))
             : sorted.map((row) => {
-                const clickable = Boolean(props.onRowClick);
+                const clickable = rowsClickable(props);
                 const open = ex.open(row);
                 const did = detailId(row);
                 return (
                   <Fragment key={props.rowKey(row)}>
+                    {/* UIS-04: a clickable row's one control is a link or button in its primary cell (kit Table) */}
                     <tr
                       className={clickable ? s.rowClickable : x.rowExpandable}
-                      tabIndex={clickable ? 0 : undefined}
-                      role={clickable ? "link" : undefined}
-                      aria-label={clickable ? props.rowLabel?.(row) : undefined}
                       onClick={
                         clickable
-                          ? () => props.onRowClick!(row)
+                          ? rowClickThrough
                           : (e) => {
                               if (!(e.target as HTMLElement).closest("button,a,input,select,textarea,label")) ex.toggle(row);
                             }
-                      }
-                      onKeyDown={
-                        clickable
-                          ? (e) => {
-                              if (e.target === e.currentTarget && e.key === "Enter") {
-                                e.preventDefault();
-                                props.onRowClick!(row);
-                              }
-                            }
-                          : undefined
                       }
                     >
                       <td>
@@ -143,7 +148,8 @@ export function ExpandableTable<T>(props: ExpandableTableProps<T>) {
                       </td>
                       {shown.map((c) => (
                         <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
-                          {c.render(row)}
+                          {clickable && c.key === primaryKey ? rowControl(props, row, c.render(row)) : c.render(row)}
+                          {c.after?.(row)}
                         </td>
                       ))}
                     </tr>

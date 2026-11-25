@@ -27,6 +27,10 @@
 //            gateway shards and their coverage check are replaced by ONE runner that runs only the gateway tests that
 //            read apps/web sources (`--gateway-web-readers`, below): step-up-posture-guard walks every product source,
 //            apps/web included, and a handful of contract tests read SPA files (#737 review finding 1).
+//   journeys #1227 (ADR-0262 addendum, 2026-11-23): what the real-gateway SPA journeys (ci.yml `spa-journeys`) are
+//            built from: the web app and its e2e specs, the shared packages it is built with, and the gateway's
+//            non-test sources (the journeys boot the real gateway and read its API). This repository has no merge
+//            queue, so a gate on `full` alone never ran the journeys before a merge (#1227 turned main red).
 //
 // usage: node scripts/ci-scope.mjs                         (reads GITHUB_EVENT_NAME; appends to $GITHUB_OUTPUT if set)
 //        node scripts/ci-scope.mjs --gateway-web-readers   (prints the gateway test files that read outside the gateway)
@@ -57,11 +61,16 @@ export const SELF_RE = /^(scripts\/ci-(scope|plan)(\.test)?\.mjs|\.github\/actio
 export const ALL_RE = /^(pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|\.node-version|tsconfig\.base\.json)$|(^|\/)package\.json$|^\.github\/(workflows|actions)\/|^\.github\/(CODEOWNERS|dependabot\.yml)$|^packages\/db\/(src\/schema\.ts|migrations\/|drizzle\.config\.ts)|^security\/|^\.gitleaks\.toml$/;
 /** ADR-0323: documentation that build-and-test-base's checks read (the scripts tests and the licence gate) */
 export const BASE_DOCS_RE = /^internal\/(decisions|fragments)\/|^internal\/product\/PENDING\.md$|(^|\/)THIRD_PARTY\.md$/;
+/** #1227: the real-gateway journeys' inputs: apps/web (src and e2e), packages/shared and packages/ui (as WEB_RE), and
+ *  apps/gateway/src. A unit test file (`*.test.ts(x)`) is not built into the gateway or the SPA, so it alone does not
+ *  run them; the e2e specs are `*.spec.ts` and do. */
+export const JOURNEYS_RE = /^(apps\/web\/|packages\/(shared|ui)\/|apps\/gateway\/src\/)/;
+export const JOURNEYS_IGNORED_RE = /\.test\.tsx?$/;
 /** ADR-0323: the only tree a web-only PR changes; anything else is a gateway change */
 export const WEB_ONLY_RE = /^apps\/web\//;
 
-export const FULL = Object.freeze({ full: true, code: true, base: true, web: true, image: true, engines: true, gateway: true, reason: "" });
-export const OUTPUTS = Object.freeze(["full", "code", "base", "web", "image", "engines", "gateway"]);
+export const FULL = Object.freeze({ full: true, code: true, base: true, web: true, image: true, engines: true, gateway: true, journeys: true, reason: "" });
+export const OUTPUTS = Object.freeze(["full", "code", "base", "web", "image", "engines", "gateway", "journeys"]);
 
 /** the scope for a list of changed paths (null = could not be read) */
 export function scopeOf(files) {
@@ -79,6 +88,7 @@ export function scopeOf(files) {
     image: code.some((f) => IMAGE_RE.test(f) && !IMAGE_IGNORED_RE.test(f)),
     engines: code.some((f) => ENGINES_RE.test(f)),
     gateway: code.some((f) => !WEB_ONLY_RE.test(f)),
+    journeys: code.some((f) => JOURNEYS_RE.test(f) && !JOURNEYS_IGNORED_RE.test(f)),
     reason: "",
   };
 }

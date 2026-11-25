@@ -186,7 +186,7 @@ regexTarget = "secret"
 regexes = ['''^wJalrXUtnFEMI/K7MDENG\+bPxRfiCYADR0352KEY$''']
 
 [[allowlists]]
-description = "ADR-0220, ADR-0247: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
+description = "ADR-0220, ADR-0247, ADR-0352: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
 condition = "AND"
 paths = ['''^agents/trained-detectors/models\.lock\.json$''']
 regexTarget = "secret"
@@ -199,6 +199,9 @@ regexes = [
   '''^8823984edea41294b27aac79047c15d33909ac913ecdbcbd30e139326226d29a$''',
   # ADR-0247: leolee99/PIGuard tokenizer.json
   '''^5124ef2ead1a10a717703bc436de7f353da76d6340e4587719b42b1693707964$''',
+  # ADR-0352: sentence-transformers/all-MiniLM-L6-v2 tokenizer.json and tokenizer_config.json
+  '''^be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037$''',
+  '''^acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b$''',
 ]
 
 [[allowlists]]
@@ -367,3 +370,11 @@ regexes = [
   '''^opaque-token-value-0123456789$''',
   '''^placeholder-secret-0123456789$''',
 ]
+
+[[allowlists]]
+description = "HISTORY ONLY: synthetic GitHub-token-shaped guidance fixture (ADR-0354, lane E35) in the commit that added it; the next commit builds the token at runtime, so the literal is no longer in the tree"
+condition = "AND"
+paths = ['''^packages/shared/src/agent-guidance\.test\.ts$''']
+commits = ["c69bf54bb06851251cfab557a3e04f729dacceb3"]
+regexTarget = "secret"
+regexes = ['''^ghp_0123456789abcdefghijABCDEFGHIJ012345$''']

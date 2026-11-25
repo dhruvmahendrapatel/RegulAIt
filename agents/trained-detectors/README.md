@@ -50,6 +50,20 @@ docker run -d --name trained-detectors -e DETECTOR_API_KEY=<random> -p 8080:8080
 3. **Policies & gates → Guardrails → Trained detectors:** turn each detector on and choose the service. The defaults are
    strict: mode `block`, and a failed or slow call is treated as a hit.
 
+## Text embeddings for the meaning-based cache (ADR-0352)
+
+`DETECTOR_MODELS=pii,prompt_injection,harm,embedding` also loads `sentence-transformers/all-MiniLM-L6-v2` (pinned in
+`models.lock.json`, used as its published ONNX export) and serves:
+
+```
+POST /embed   {"scorerKind": "text_embedding", "input": str}
+           -> {"embedding": [384 floats, unit length], "dims": 384, "model": "<repo>@<revision>"}
+```
+
+Register it on the gateway as an external scorer at `http://<host>:8080/embed` claiming only `text_embedding`, run the
+connection test, enable it, and name it as the org's `semanticCacheEmbedderId`. The gateway refuses an embedder whose
+host resolves to anything but private or loopback addresses, so this service must run inside your network.
+
 ## Offline baseline (ADR-0244)
 
 `eval_baselines.py` runs the injection classifier, through `server.load_models` and `detector_core.score_injection`,

@@ -1,0 +1,8 @@
+{
+  "adr": "ADR-0180",
+  "lane": "E51",
+  "tracking": "ADR-0180 addendum (lane E51, oversight levels at runtime): API-only by the lane brief (new routes go in the census with a KNOWN_UI_GAPS entry, no screens); the Relax/Restore control on the agent's Autonomy panel is posted on #453",
+  "gaps": {
+    "PUT /v1/builder/agents/:id/autonomy/enforcement": "an admin relaxes (step-up) or restores the gate that refuses a delegated or autonomous builder agent's runs while its autonomy floors are unmet, with a reason; audited"
+  }
+}

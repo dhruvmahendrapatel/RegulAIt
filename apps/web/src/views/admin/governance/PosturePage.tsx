@@ -28,6 +28,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, InfoButton } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import { PostureEstimate, type PostureScoreDoc } from "./PostureEstimate";
+import { AssetScoresSection } from "./AssetScore";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import p from "./posture.module.css";
@@ -384,6 +385,7 @@ export default function PosturePage() {
             </p>
             {/* ---------------- estimate, objectives and what to fix first ---------------- */}
             {d.score && <PostureEstimate score={d.score} />}
+            <AssetScoresSection />
             {/* ---------------- headlines: the approved mockup's five-tile row ---------------- */}
             <div className={ed.kpis} role="group" aria-label="Headline figures">
               <Headline

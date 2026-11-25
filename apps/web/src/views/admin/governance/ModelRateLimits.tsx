@@ -2,15 +2,20 @@
  * Rate limits keyed on a model — shown inside the existing Rate limits card on the
  * Rules page, beside the server/tool limits. A limit caps how many calls one subject
  * (user, role, team or the whole fleet) may make to one model in a window. Limits
- * bind only while enforcement is on; turning it on or off, and removing a limit,
- * ask the admin to confirm their identity again.
+ * bind only while enforcement is on, which is the stored default (ADR-0251); turning
+ * it off or on again, and removing a limit, ask the admin to confirm their identity again.
+ *
+ * CXR-ACC-003: the enforcement state is shown only from a successful read. A failed read
+ * is an error with Retry (a 403 is the kit's access state, with no Retry), never a value:
+ * the page must not claim "Not enforced" when it does not know.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { ModelRateLimitRule } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
-import { Badge, Button, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, EmptyState, ErrorState, Field, Input, Select, Skeleton, Table } from "../../../ui/kit";
+import { errorText } from "../../../api/format";
 import { agentOpts, optionEls, RemoveButton, useAction, useAgents, type Opt } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -63,26 +68,59 @@ export function ModelRateLimits(props: {
     windowSeconds: "",
   });
   const set = (patch: Partial<typeof f>) => setF((x) => ({ ...x, ...patch }));
-  const enabled = limits.data?.enforcementEnabled ?? false;
   const agentName = new Map((agents.data?.agents ?? []).map((x) => [x.id, x.name]));
-
-  return (
-    <section aria-labelledby="model-rate-limits-heading" data-testid="model-rate-limits">
+  const heading = (
+    <>
       <h3 id="model-rate-limits-heading">Per-model limits — max calls to one model per window</h3>
       <p className={v.hint}>
         A per-model limit caps how many calls a person makes to one model inside the window. A role, team or fleet
         limit still counts each person separately. A call over the limit is refused and recorded in the audit trail.
       </p>
+    </>
+  );
+
+  // CXR-ACC-003: no value is shown until the server has answered; a failed read is an error, not "Not enforced"
+  if (limits.isLoading) {
+    return (
+      <section aria-labelledby="model-rate-limits-heading" data-testid="model-rate-limits" aria-busy="true">
+        {heading}
+        <Skeleton width="60%" />
+      </section>
+    );
+  }
+  if (limits.error || !limits.data) {
+    const access = (limits.error as { status?: number } | null)?.status === 403;
+    return (
+      <section aria-labelledby="model-rate-limits-heading" data-testid="model-rate-limits">
+        {heading}
+        <ErrorState
+          title="Couldn't read the per-model limits or whether they are enforced"
+          message={
+            access
+              ? "Per-model limits are not available to your account."
+              : `${errorText(limits.error)} — no enforcement state is shown until the read succeeds.`
+          }
+          access={access}
+          onRetry={() => void limits.refetch()}
+        />
+      </section>
+    );
+  }
+  const enabled = limits.data.enforcementEnabled;
+
+  return (
+    <section aria-labelledby="model-rate-limits-heading" data-testid="model-rate-limits">
+      {heading}
       <div className={a.formRow}>
-        <Badge tone={enabled ? "ok" : "neutral"}>{enabled ? "Enforced" : "Not enforced"}</Badge>
+        <Badge tone={enabled ? "ok" : "warn"}>{enabled ? "Enforced" : "Not enforced"}</Badge>
         <span className={v.hint}>
           {enabled
-            ? "Per-model limits below are enforced on every model call."
-            : "Off by default. Limits can be added now; none is enforced until you turn enforcement on."}
+            ? "On by default. Per-model limits below are enforced on every model call."
+            : "Turned off — the default is on. Limits can still be added; none is enforced until enforcement is turned back on."}
         </span>
         <Button
           variant={enabled ? "default" : "primary"}
-          disabled={toggle.busy || limits.isLoading}
+          disabled={toggle.busy}
           data-testid="model-rate-limits-toggle"
           onClick={() =>
             void toggle.run(
@@ -201,11 +239,8 @@ export function ModelRateLimits(props: {
             ),
           },
         ]}
-        rows={limits.data?.rules ?? []}
+        rows={limits.data.rules}
         rowKey={(r) => r.id}
-        loading={limits.isLoading}
-        error={limits.error}
-        onRetry={() => void limits.refetch()}
         empty={<EmptyState title="No per-model limits" />}
       />
     </section>
