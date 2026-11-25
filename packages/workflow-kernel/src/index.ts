@@ -1668,3 +1668,5 @@ export function transition(
 export * from "./builder.js";
 // ADR-0342: the pure workflow-history replayer (process analytics; lane E30's CI replay check)
 export * from "./replay.js";
+// ADR-0340 slice 3: migrating a running instance to another template version, and the canary lifecycle
+export * from "./migration.js";

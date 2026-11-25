@@ -1146,7 +1146,8 @@
                 "vendor_control_delegated",
                 "saas_finding_review",
                 "agent_containment",
-                "ai_saas_remediation"
+                "ai_saas_remediation",
+                "workflow_migration"
               ]
             }
           },

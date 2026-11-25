@@ -1,7 +1,7 @@
 # ADR-0340: Process-level reliability for pillar 2's runner: compensation (saga) stages, stage deadlines with SLA escalation, and process-version pinning, migration and canary
 
-- **Status**: Accepted (builder lane E21; slice 1, compensation, and slice 2, deadlines, are built; slice 3 follows
-  in this lane under this ADR)
+- **Status**: Accepted (builder lane E21; slice 1, compensation, slice 2, deadlines, and slice 3, versions, are built;
+  slice 3 is built on ADR-0341's version store, see the 2026-11-25 addendum)
 - **Date**: 2026-11-16
 - **Index**: Process reliability for the workflow runner (Camunda gap 2 and 8): compensation stages run in reverse on a cancel or a denial through the ordinary executors; stage deadlines with SLA escalation (notify, reassign or fail) over pg-boss timers; process versions pinned per instance, governed in-flight migration and canary rollout. No new engine.
 - **Backlog item**: `internal/product/GAP_ANALYSIS_CAMUNDA_2026-11.md` rows 2, 5 and 8; next step 3 ("process-level
@@ -11,8 +11,8 @@
   engine), ADR-0046 and ADR-0061 (the approvals queue and ChatOps), ADR-0180 (secure by default), ADR-0176 (open
   source first), AER-048 and AER-049 (rounds, stage entries, effect records).
 - **Migrations**: slice 1 none (the compensation state lives in the instance's `state` jsonb, which the kernel
-  owns). Slice 2: `pending/workflow_stage_queue_deadline.sql` (the `workflow-stage-deadline` queue). Slice 3 adds its
-  own. All numbered at merge (ADR-0252).
+  owns). Slice 2: `pending/workflow_stage_queue_deadline.sql` (the `workflow-stage-deadline` queue). Slice 3:
+  `pending/workflow_template_canary_pinning.sql`. All numbered at merge (ADR-0252).
 
 ## Context
 
@@ -176,3 +176,52 @@ kernel and runner.
   (`compensation.test.ts`), `apps/gateway/src/workflows-compensation.test.ts` (denial and cancel through the routes,
   the order on the audit trail, a manual compensation, the admin-only abandon), and the external-effect barrier
   matrix (`git.close_pull_request` and `git.delete_branch` under every execution mode).
+
+## Addendum (2026-11-25): slice 3 is built on ADR-0341's `workflow_template_versions`
+
+**Why.** Slice 3 was first drafted (PR #894) with template versions as ADR-0048 `config_versions` rows (a new
+artifact type `workflow_template`). While it waited, ADR-0341 (the visual pipeline builder) merged its own version
+store, `workflow_template_versions`, written by the builder's publish and by ADR-0357's governance apply, both of which
+replace `workflow_templates.definition`. Merging the draft as it was would have given one template two version
+histories and two writers of its live definition: a builder publish would have been undone for new instances (they
+started on the older active `config_versions` body), and a version activated through `config_versions` would have had
+no builder history. One fact lives in one place (ADR-0200), so slice 3 was rebuilt on the builder's table and the
+`config_versions` artifact type was dropped. The master decided the rebuild on 2026-11-25; the new PR supersedes #894.
+
+What changes against decisions 13 to 15:
+
+13. **Versions** are ADR-0341's rows; slice 3 adds no version store. The version that holds a template's live
+    definition serves a new instance; when a template has none yet (never opened in the builder, or written by a
+    seed), the start records its live definition as the next version (`origin` `baseline`, audited
+    `workflow-template-version-baseline`, the rule the builder uses for the same act). No template lock is taken on
+    the start path: two starts recording the same number race on the (template, version) unique index and the loser
+    reads the winner's row. Every instance is pinned in `workflow_instance_template_versions` (one row per template at
+    start, one per applied migration; append-only), so every pin names a real version and the join table needs no
+    template column.
+14. **Governed migration** is unchanged, with the target a `workflow_template_versions` row of the instance's own
+    (single) template. It is also refused when the instance already runs the target's definition (`no_change`). The
+    request's reason is 10 to 500 characters. The definition hash is SHA-256 of ADR-0060's canonical JSON, the same
+    hash as the version's `content_hash`.
+15. **Canary.** A canary opens with a builder publish that names `canaryPercent` (1 to 50, bound into the publish's
+    step-up with the other facts, so a proof for a plain publish cannot open one). The new version is the canary and
+    the version it replaced is the stable one (`workflow_template_canaries`, composite foreign keys keep both versions
+    on the canary's own template; at most one open per template). The bucket is `canaryBucket(template, instance)`
+    from `@regulait/shared` (ADR-0048's FNV-1a), so the choice is sticky per instance. While a canary is open no other
+    publish is accepted, from the builder or from governance apply (`canary_open`), so its two versions cannot move
+    under it. It ends once (`CANARY_LIFECYCLE`, rule 12): **promoted** (every new instance gets the canary version) or
+    **rolled back** (the stable definition is published again as the next version, `origin` `canary_rollback`, and
+    becomes the live definition; a restore is a publish, ADR-0341 §5). Ending needs a reason (10 to 500 characters)
+    and is audited (`workflow-template-canary-promoted` / `-rolled-back`); opening is audited
+    (`workflow-template-canary-started`). Ending takes no second step-up: promoting widens a version whose bytes were
+    already stepped up at publish, and rolling back returns to a version that was live before.
+    While a canary is open `workflow_templates.definition` is the canary version (the builder's publish wrote it);
+    the stable side is read from its version row.
+
+Routes (admin, the default class): `GET /v1/workflows/builder/templates/:id/canary`,
+`POST /v1/workflows/builder/templates/:id/canary/end`, `POST|GET /v1/workflows/instances/:id/migrations`. They are
+API-only until the design builder's screens (`scripts/known-ui-gaps/adr-0340-e21-workflow-template-versions.json`).
+The approvals-queue kind `workflow_migration` is decided in the one decide path, which refuses the requester
+(`cannot_approve_own_workflow_migration`). Tests: `packages/workflow-kernel/src/migration.test.ts` (the plan, both
+lifecycle tables) and `apps/gateway/src/workflows-template-versions.test.ts` (a pin on the recorded live version, a
+canary publish bound to its share, the open-canary refusal, both sides served and audited, rollback and promote, a
+migration approved by another admin and one recorded stale).

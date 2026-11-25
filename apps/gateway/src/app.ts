@@ -552,6 +552,8 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
+import { registerWorkflowTemplateVersionRoutes } from "./workflow-template-versions.js";
+import { applyWorkflowMigrationDecision, precheckWorkflowMigrationDecision, registerWorkflowMigrationRoutes } from "./workflow-migrations.js";
 import { registerPipelineRoutes } from "./pipelines.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import {
@@ -5405,6 +5407,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckRuleStepSwitchDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0340 slice 3 — `cannot_approve_own_workflow_migration`, keyed on the DECIDER (same reasoning as above).
+    if (row.objectType === "workflow_migration") {
+      const refusal = await precheckWorkflowMigrationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
@@ -5677,6 +5684,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // its robot is active, else it is recorded rejected; denied = rejected.
       if (updated.objectType === "robot_version") {
         await applyRobotVersionDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
+      // ADR-0340 slice 3: an approved migration is re-planned under the instance lock and applied HERE, inside the
+      // decision's transaction, or recorded stale; denied = nothing changes
+      if (updated.objectType === "workflow_migration") {
+        await applyWorkflowMigrationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
       }
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
@@ -6316,6 +6328,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerTemplateGalleryRoutes(app, db);
   // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
   registerWorkflowBuilderRoutes(app, db);
+  registerWorkflowTemplateVersionRoutes(app, db);
+  registerWorkflowMigrationRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0171 / AER-050 — the intake wizard's server-side drafts
   registerUseCaseDraftRoutes(app, db);

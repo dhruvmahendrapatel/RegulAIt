@@ -149,6 +149,7 @@ import {
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
 import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
+import { recordInstanceTemplateVersions, resolveTemplateVersions } from "./workflow-template-versions.js";
 import { z } from "zod";
 
 const instanceIdParam = z.object({ instanceId: z.string().uuid() });
@@ -231,7 +232,7 @@ async function requestStageApprovals(
  * shows, and `workflow:sla-scheduled` (or `-not-scheduled`, deny, when the queue could not take a job: the transition
  * still commits and the stage simply has no deadline).
  */
-async function scheduleStageDeadlines(
+export async function scheduleStageDeadlines(
   tx: DbOrTx,
   instanceId: string,
   projectId: string | null,
@@ -2493,7 +2494,7 @@ export function stageClaimState(
 }
 
 /** the context keys that make up a stage execution claim */
-const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
+export const CLAIM_KEYS = ["executing", "executingSince", "executingEntry", "executingClaim"] as const;
 
 /** drop the claim from an in-memory context (the normal release path) */
 function releaseStageClaim(context: Record<string, unknown>): void {
@@ -3372,7 +3373,12 @@ export async function startWorkflowInstanceWithTemplates(
   }
   // merge in matched order (deterministic: matchTemplates preserves rule order)
   const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
-  const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+  // ADR-0340 slice 3: each template serves its RESOLVED version: the live one, or, for a share of new instances while
+  // a canary runs, the canary (sticky per instance id). The instance is pinned to what served it, in its insert's
+  // transaction.
+  const newInstanceId = randomUUID();
+  const resolved = await resolveTemplateVersions(db, ordered, newInstanceId, initiatorUserId);
+  const merged = mergeDefinitions(resolved.map((r) => r.definition));
 
   // ADR-0195 A4: a sign-off owed by an admin other than the initiator needs one to exist, or the stage could never
   // be decided: refused before anything is written
@@ -3421,6 +3427,7 @@ export async function startWorkflowInstanceWithTemplates(
     if (existing) return conflict(existing);
   }
   const values = {
+    id: newInstanceId,
     templateIds,
     definition: merged,
     initiatorUserId,
@@ -3432,9 +3439,13 @@ export async function startWorkflowInstanceWithTemplates(
   };
   let instance: typeof workflowInstances.$inferSelect | undefined;
   try {
-    [instance] = startKey
-      ? await db.transaction((tx) => tx.insert(workflowInstances).values(values).returning())
-      : await db.insert(workflowInstances).values(values).returning();
+    // one transaction (a savepoint under a caller's own) for the instance and its pins, so a start-key race rolls
+    // both back and the caller's transaction survives the violation
+    [instance] = await db.transaction(async (tx) => {
+      const rows = await tx.insert(workflowInstances).values(values).returning();
+      await recordInstanceTemplateVersions(tx, rows[0]!.id, resolved, "start", initiatorUserId);
+      return rows;
+    });
   } catch (err) {
     if (!startKey || !isUniqueViolation(err, WORKFLOW_START_KEY_INDEX)) throw err;
     return conflict(await openInstanceForStartKey(db, startKey));

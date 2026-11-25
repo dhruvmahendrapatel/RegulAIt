@@ -326,11 +326,24 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   },
   "POST /v1/workflows/builder/templates/:templateId/publish": {
     summary:
-      "Publish the draft as the next version and make it live. Refused while invalid or stale; a relaxation needs `acceptRelaxations` and a `reason`; " +
-      "needs a `settings_relax` step-up bound to the template, the version replaced and the content hash. Audited.",
+      "Publish the draft as the next version and make it live. Refused while invalid or stale, or while a canary is open; a relaxation needs `acceptRelaxations` and a `reason`; " +
+      "needs a `settings_relax` step-up bound to the template, the version replaced and the content hash. `canaryPercent` (1 to 50, bound into the step-up) " +
+      "opens a canary: that share of new instances gets the new version, the rest the version it replaced (ADR-0340). Audited.",
   },
   "GET /v1/workflows/builder/templates/:templateId/versions": { summary: "The template's published versions, newest first (`before` pages)." },
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": { summary: "One version's definition and its diff against the live template." },
+  "GET /v1/workflows/builder/templates/:templateId/canary": {
+    summary: "The template's open canary (or null), the last one, and how many new instances each side has served (ADR-0340).",
+  },
+  "POST /v1/workflows/builder/templates/:templateId/canary/end": {
+    summary:
+      "End the open canary once: `promote` (every new instance gets the canary version) or `rollback` (the stable definition is published again as the next version). Needs a `reason`. Audited.",
+  },
+  "POST /v1/workflows/instances/:instanceId/migrations": {
+    summary:
+      "Dry-run (default) the migration of a running instance to another version of its template: the plan and the RFC 6902 diff. `dryRun: false` with a `reason` files it for another admin's approval; applied in the decision, or recorded stale (ADR-0340).",
+  },
+  "GET /v1/workflows/instances/:instanceId/migrations": { summary: "The instance's migration requests, newest first, with the plan each was filed against." },
   "GET /v1/workflows/instances/:instanceId": {
     summary: "One workflow instance with its stage history.",
     responseNote:

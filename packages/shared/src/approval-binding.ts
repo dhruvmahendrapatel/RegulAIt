@@ -122,6 +122,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "agent_containment",
   // ADR-0361 slice 3: deleting a monitored AI SaaS conversation through the vendor API, run once by the requester
   "ai_saas_remediation",
+  // ADR-0340 slice 3: moving one running workflow instance to another template version (stageId = migration:<id>)
+  "workflow_migration",
 ] as const;
 export type ApprovalObjectType = (typeof APPROVAL_OBJECT_TYPES)[number];
 
@@ -155,6 +157,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   saas_finding_review: "SaaS entitlement finding (remove the grant, or accept the risk)",
   agent_containment: "rogue-agent containment",
   ai_saas_remediation: "AI SaaS conversation deletion",
+  workflow_migration: "workflow instance migration",
 };
 
 /**

@@ -102,6 +102,7 @@ export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/ai-saas-monitoring/connectors/:x/runs", "ADR-0361: an AI SaaS monitor run is the ledger the append-only interaction evidence points at (FK RESTRICT); it is never removed"],
   ["/v1/managed-settings/bundles", "ADR-0310: a signed managed-settings bundle is evidence of what was pushed to devices (drift is measured against it); a new version supersedes it, and it is removed only with its subject (FK cascade)"],
   ["/v1/decisions", "signed approval decisions are evidence; a decision is superseded by a later one, never deleted"],
+  ["/v1/workflows/instances/:x/migrations", "ADR-0340: a migration request is the evidence of a decided change to a running instance; it ends applied, denied or stale, never deleted"],
   ["/v1/runs", "a run is an execution record the audit trail and cost ledger point at"],
   ["/v1/pipeline-runs", "ADR-0232 (lane E49): a pipeline run is the evidence record of one governed run of one template version; the database refuses its deletion, and its workflow instance is aborted through the engine"],
   ["/v1/evals/runs", "an evaluation run is a result record that model-risk sign-offs cite"],

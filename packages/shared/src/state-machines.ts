@@ -16,6 +16,7 @@ import { AGENT_NHI_LINK_STATUSES } from "./agent-identity.js";
 import { VENDOR_ACTION_MACHINE, VENDOR_CONTROL_DELEGATED_MACHINE } from "./vendor-agent-control.js";
 import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 import { APPROVAL_SLA_MACHINE } from "./workbench.js";
+import { WORKFLOW_MIGRATION_MACHINE, WORKFLOW_TEMPLATE_CANARY_MACHINE } from "./workflow-template-versions.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
 export const TRAINING_JOB_MACHINE = defineMachine({
@@ -1183,4 +1184,7 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
   // ADR-0342 slice 2: a human task's SLA clock in the approvals queue (ADR-0046 sweep; re-armed by a reschedule)
   [APPROVAL_SLA_MACHINE.def.id]: APPROVAL_SLA_MACHINE,
+  // ADR-0340 slice 3: a governed migration of a running workflow instance, and a canary over new instances
+  [WORKFLOW_MIGRATION_MACHINE.def.id]: WORKFLOW_MIGRATION_MACHINE,
+  [WORKFLOW_TEMPLATE_CANARY_MACHINE.def.id]: WORKFLOW_TEMPLATE_CANARY_MACHINE,
 } as Record<string, StateMachine<string, string>>);
