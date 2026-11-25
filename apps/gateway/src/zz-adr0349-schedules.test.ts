@@ -228,7 +228,8 @@ describe("ADR-0349 slice 4: schedules", () => {
     // the bootstrap identity cannot edit or backfill one: a schedule runs as a named admin
     expect((await patch(AUTH, { change: { ...change, description: "boot" } })).json().error).toBe("bootstrap_cannot_schedule");
     // a rename by another admin changes nothing about who it runs as
-    expect((await patch(bob.auth, { name: `rebind-renamed-${RUN}` })).json().runAsUserId).toBe(admin.id);
+    const renamed = await patch(bob.auth, { name: `rebind-renamed-${RUN}` });
+    expect(renamed.json(), JSON.stringify(renamed.json())).toMatchObject({ runAsUserId: admin.id });
     // only the run-as user may backfill it
     const to = topOfHour(new Date(Date.now() - 2 * HOUR));
     const bf = await app.inject({ method: "POST", headers: bob.auth, url: `/v1/workflows/schedules/${s.id}/backfill`, payload: { from: new Date(to.getTime() - HOUR).toISOString(), to: to.toISOString(), note: "b" } });

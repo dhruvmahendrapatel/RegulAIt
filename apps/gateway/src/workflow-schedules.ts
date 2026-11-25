@@ -566,7 +566,9 @@ export function registerWorkflowScheduleRoutes(app: FastifyInstance, db: Db, opt
         ...(calendarMoved && !s.pausedAt ? { nextFireAt: nextFireAfter(cron, tz, now) } : {}),
         updatedAt: sql`now()`,
       })
-      .where(and(eq(workflowSchedules.id, s.id), eq(workflowSchedules.updatedAt, s.updatedAt)))
+      // the optimistic check compares at millisecond precision: the row read into a JS Date keeps milliseconds only,
+      // while the column holds microseconds, so a plain equality never matched and every edit answered 409
+      .where(and(eq(workflowSchedules.id, s.id), sql`date_trunc('milliseconds', ${workflowSchedules.updatedAt}) = ${s.updatedAt.toISOString()}::timestamptz`))
       .returning();
     if (!row) return reply.status(409).send({ error: "changed_concurrently", detail: "the schedule changed while this edit was being checked: load it again and repeat the edit" });
     await audit(db, row, editorId, "workflow:schedule-updated", "allow", `workflow schedule '${row.name}' updated${rebind ? "; it now runs as the editing admin" : ""}`, {
