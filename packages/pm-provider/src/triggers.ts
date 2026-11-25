@@ -66,15 +66,17 @@ export const pmTriggerSettingsSchema = z
     /** the RegulAIt agent user's identity in the PM tool: a Jira accountId; an Azure DevOps identity id (guid) and/or
      * its unique name. Assigning to or mentioning any of these is a trigger. */
     agentIdentities: z.array(pmIdentity).min(1).max(5),
-    /** which mechanisms start work; each can be turned off */
+    /** which mechanisms start work; each can be turned off. `rule` is off by default (ADR-0180): on a rule delivery the
+     * actor is whatever the rule's body names, as trustworthy as whoever can edit a rule holding the connection's
+     * webhook secret, so an admin turns it on explicitly, with a step-up */
     mechanisms: z
       .object({
         assignment: z.boolean().default(true),
         mention: z.boolean().default(true),
-        rule: z.boolean().default(true),
+        rule: z.boolean().default(false),
       })
       .strict()
-      .default({ assignment: true, mention: true, rule: true }),
+      .default({ assignment: true, mention: true, rule: false }),
     /** the RegulAIt registry agent the work runs on: the triggering person must be entitled to it */
     agentId: z.string().uuid(),
     /** the change attributes the normal template assignment reads (ADR-0018) */

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, pmLinks, pmWorkTriggers, runMigrations, sql, users, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
 
 /**
@@ -152,17 +153,26 @@ beforeAll(async () => {
     method: "PUT",
     headers: AUTH,
     url: `/v1/pm/connections/${CONN}/trigger-settings`,
-    payload: { enabled: true, agentIdentities: [AGENT_ACCOUNT], agentId, change: { changeType: CHANGE_TYPE, environment: "dev" } },
+    payload: {
+      enabled: true,
+      agentIdentities: [AGENT_ACCOUNT],
+      agentId,
+      // the rule mechanism is off by default (ADR-0180); this suite turns it on to prove the rule path
+      mechanisms: { assignment: true, mention: true, rule: true },
+      change: { changeType: CHANGE_TYPE, environment: "dev" },
+    },
   }));
   expect(put.statusCode, put.body).toBe(200);
   for (const [who, account] of [[alice, "557058:pmt-alice"], [bob, "557058:pmt-bob"]] as const) {
-    const l = await app.inject({
+    // creating a link is a settings_relax step-up (relaxed here, as above)
+    const l = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/pm/identity-links",
       payload: { connectionName: CONN, pmUserId: account, email: `pmt-${who === alice ? "alice" : "bob"}-${RUN}@example.com` },
-    });
+    }));
     expect(l.statusCode, l.body).toBe(201);
+    expect(l.json().verifiedSource).toBe("admin_asserted");
   }
 });
 
@@ -249,15 +259,79 @@ describe("ADR-0356 trigger path", () => {
     expect(r.json().triggers, r.body).toEqual([expect.objectContaining({ externalId: ruleId, mechanism: "rule", state: "running" })]);
   });
 
+  it("the rule mechanism is off by default, and turning it on or creating a link is a step-up (security review S6)", async () => {
+    // triggers on, mechanisms left to their defaults: a rule delivery names an actor nothing verified, so it is ignored
+    const on = await relaxStepUpAround(db, () => app.inject({
+      method: "PUT",
+      headers: AUTH,
+      url: `/v1/pm/connections/${CONN_OFF}/trigger-settings`,
+      payload: { enabled: true, agentIdentities: [AGENT_ACCOUNT], agentId, change: { changeType: CHANGE_TYPE, environment: "dev" } },
+    }));
+    expect(on.statusCode, on.body).toBe(200);
+    const got = await app.inject({ method: "GET", headers: AUTH, url: `/v1/pm/connections/${CONN_OFF}/trigger-settings` });
+    expect(got.json().mechanisms).toEqual({ assignment: true, mention: true, rule: false });
+    const ruleId = `r-off-${RUN}`;
+    const rule = JSON.stringify({
+      webhookEvent: "regulait:trigger",
+      timestamp: Date.now(),
+      user: { accountId: "557058:pmt-alice" },
+      issue: { id: ruleId, key: `PMT-${ruleId}` },
+    });
+    const r = await deliver(CONN_OFF, secretOff, rule, `d-${ruleId}`);
+    expect(r.statusCode, r.body).toBe(202);
+    expect(await triggersFor(ruleId)).toEqual([]);
+
+    // an admin's API key can never give a step-up (the bootstrap credential passes one only during first-admin setup).
+    // MFA is off while the key is issued and used, so the refusals below are the step-up and not MFA enrolment; the
+    // strict value is restored at the end of this test, pass or fail (M-068)
+    const [admin] = await db.insert(users).values({ email: `pmt-admin-${RUN}@example.com`, displayName: "pmt admin", isAdmin: true }).returning({ id: users.id });
+    const restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+    try {
+      const key = await app.inject({ method: "POST", url: `/v1/users/${admin!.id}/keys`, headers: AUTH, payload: { name: "pmt-admin" } });
+      expect(key.statusCode, key.body).toBe(201);
+      const ADMIN_KEY = { authorization: `Bearer ${key.json().token}` };
+
+      // turning the rule mechanism on without a fresh step-up is refused, and nothing changes
+      const relax = await app.inject({
+        method: "PUT",
+        headers: ADMIN_KEY,
+        url: `/v1/pm/connections/${CONN_OFF}/trigger-settings`,
+        payload: {
+          enabled: true,
+          agentIdentities: [AGENT_ACCOUNT],
+          agentId,
+          mechanisms: { assignment: true, mention: true, rule: true },
+          change: { changeType: CHANGE_TYPE, environment: "dev" },
+        },
+      });
+      expect(relax.statusCode, relax.body).toBe(403);
+      expect(relax.json().error).toBe("step_up_required");
+      const after = await app.inject({ method: "GET", headers: AUTH, url: `/v1/pm/connections/${CONN_OFF}/trigger-settings` });
+      expect(after.json().mechanisms.rule).toBe(false);
+
+      // a link is a grant (whoever holds that PM identity starts work as the user): without a step-up it is refused
+      const link = await app.inject({
+        method: "POST",
+        headers: ADMIN_KEY,
+        url: "/v1/pm/identity-links",
+        payload: { connectionName: CONN_OFF, pmUserId: "557058:pmt-alice", email: `pmt-alice-${RUN}@example.com` },
+      });
+      expect(link.statusCode, link.body).toBe(403);
+      expect(link.json().error).toBe("step_up_required");
+    } finally {
+      await restoreIdentity();
+    }
+  });
+
   it("a disabled linked person, and a person whose link was removed, are denied (ported from #986)", async () => {
     const mk = async (tag: string) => {
       const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: `pmt-${tag}-${RUN}@example.com`, displayName: tag } });
-      const l = await app.inject({
+      const l = await relaxStepUpAround(db, () => app.inject({
         method: "POST",
         headers: AUTH,
         url: "/v1/pm/identity-links",
         payload: { connectionName: CONN, pmUserId: `557058:pmt-${tag}`, email: `pmt-${tag}-${RUN}@example.com` },
-      });
+      }));
       expect(l.statusCode, l.body).toBe(201);
       return { userId: u.json().id as string, linkId: l.json().id as string };
     };

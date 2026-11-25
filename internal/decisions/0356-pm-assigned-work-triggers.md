@@ -70,8 +70,12 @@ we extend our own adapters. The repository search found the pieces above to reus
    **denied**, and so is a person whose own agent decision (the same `evaluateAgent` call the invoke path uses, in
    `execute` mode, with grants, role grants, revocations and the tier ceiling) does not allow the configured agent.
    On a rule delivery the actor is the one the rule's body names (Jira: `{{initiator.accountId}}`), so it is as
-   trustworthy as whoever can edit a rule holding the connection's webhook secret; an admin who does not want that
-   turns the `rule` mechanism off. The agent's own actions (its write-back comments) never trigger it.
+   trustworthy as whoever can edit a rule holding the connection's webhook secret, so the `rule` mechanism is **off by
+   default** (ADR-0180, security review S6 on #987): turning it on, like turning triggers on, is a `settings_relax`
+   step-up, audited. Creating an identity link is a grant (whoever holds that PM identity starts work as the user), so
+   it is a `settings_relax` step-up too; removing one only narrows access and needs none. An admin-created link is
+   recorded as `admin_asserted`, since nothing here checks that the PM identity belongs to the user (`idp`/`scim` are
+   for the later auto-link, open question 2). The agent's own actions (its write-back comments) never trigger it.
    The bot never becomes the actor and no admin authority is borrowed: the start runs as the mapped user, with that
    user's own `is_admin`, inside that user's row-level-security scope.
 5. **The normal start.** An accepted trigger starts the workflow through the same function the

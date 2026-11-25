@@ -33,7 +33,6 @@ import {
   eq,
   inArray,
   lt,
-  oidcProviders,
   pmConnections,
   pmIdentityLinks,
   pmLinks,
@@ -41,7 +40,6 @@ import {
   pmWorkTriggers,
   projects,
   runWithRlsPrincipal,
-  samlProviders,
   sql,
   users,
   type Db,
@@ -478,13 +476,19 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
       const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
       if (!project) return reply.status(400).send({ error: "invalid_reference", detail: "projectId names no project" });
     }
-    // turning triggers on lets a PM tool start governed work: a relaxation, so a step-up, audited (ADR-0180)
-    if (body.enabled) {
-      const [current] = await db.select({ enabled: pmTriggerSettings.enabled }).from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
-      if (!current?.enabled) {
-        const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { pmTriggers: "enable", connection: conn.name } });
-        if (!su.ok) return reply;
-      }
+    // turning triggers on lets a PM tool start governed work, and turning the rule mechanism on lets whoever can edit a
+    // rule name the actor: each is a relaxation, so a step-up, audited (ADR-0180)
+    const [currentRow] = await db.select().from(pmTriggerSettings).where(eq(pmTriggerSettings.connectionId, conn.id));
+    const current = currentRow ? settingsOf(currentRow) : null;
+    const relaxations: string[] = [];
+    if (body.enabled && !currentRow?.enabled) relaxations.push("enable");
+    if (body.mechanisms.rule && !current?.mechanisms.rule) relaxations.push("rule");
+    if (relaxations.length > 0) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { pmTriggers: relaxations.join("+"), connection: conn.name },
+      });
+      if (!su.ok) return reply;
     }
     const { enabled, agentId, projectId, ...config } = body;
     const values = { enabled, agentId, projectId: projectId ?? null, config, updatedByUserId: req.authCtx.userId ?? null };
@@ -533,9 +537,16 @@ export function registerPmTriggerRoutes(app: FastifyInstance, db: Db): void {
       });
     }
     if (user.disabledAt) return reply.status(422).send({ error: "user_disabled", detail: "a disabled user cannot be linked" });
-    const [oidc] = await db.select({ id: oidcProviders.id }).from(oidcProviders).where(eq(oidcProviders.enabled, true)).limit(1);
-    const [saml] = await db.select({ id: samlProviders.id }).from(samlProviders).where(eq(samlProviders.enabled, true)).limit(1);
-    const verifiedSource = user.scimExternalId ? "scim" : oidc || saml ? "idp" : "admin_asserted";
+    // nothing here checks that the PM identity belongs to this user, so an admin-created link is only ever the admin's
+    // assertion ('idp'/'scim' are for a later auto-link that matches a verified identity, ADR-0356 open question 2)
+    const verifiedSource = "admin_asserted";
+    // a link is a grant: whoever controls that PM identity starts governed work as this user (an admin included), so
+    // creating one is a step-up, audited (ADR-0180); removing one only narrows access and needs none
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { pmIdentityLink: true, connection: conn.name, pmUserId: body.pmUserId, userId: user.id },
+    });
+    if (!su.ok) return reply;
     const [row] = await db
       .insert(pmIdentityLinks)
       .values({ connectionId: conn.id, pmUserId: body.pmUserId, userId: user.id, verifiedSource, createdByUserId: req.authCtx.userId ?? null })
