@@ -15,6 +15,7 @@ import (
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/auth"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/transport"
 )
 
@@ -91,7 +92,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 	st := func(outcome, code, ticketID string) RedeemStatus {
 		s := RedeemStatus{Schema: "regulait.endpoint-redeem-status/1", Outcome: outcome, Code: code, TicketID: ticketID, At: o.Now().UTC().Format(time.RFC3339)}
 		if b, err := json.MarshalIndent(s, "", "  "); err == nil {
-			if err := writeAtomic(o.Paths.StatusFile, append(b, '\n'), 0o644, -1); err != nil {
+			if err := fsutil.WriteAtomic(o.Paths.StatusFile, append(b, '\n'), 0o644, -1, true); err != nil {
 				o.Log.Error("install step: could not write the status file", "err", err)
 			}
 		}
@@ -110,8 +111,8 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 	if t, err := readTicket(o, cfg); err == nil {
 		return st(OutcomeTicketValid, "", t.TicketID)
 	}
-	raw, err := readChecked(o.Paths.EnrolFile, o.SystemOwner, OwnerOnly)
-	if errors.Is(err, ErrUnsafeFile) {
+	raw, err := readChecked(o.Paths.EnrolFile, o.SystemOwner, fsutil.OwnerOnly)
+	if errors.Is(err, fsutil.ErrUnsafeFile) {
 		// the fleet token must never be readable by ordinary users; an exposed one is not used
 		o.Log.Error("install step: the bulk token file is not root-only; it was not used", "err", err)
 		return st(OutcomeTokenFileUnsafe, "", "")
@@ -120,7 +121,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 		return st(OutcomeTokenFileInvalid, "unreadable", "")
 	}
 	var ef EnrolFile
-	if err := strictJSON(raw, &ef); err != nil || ef.Schema != contract.SchemaEnrolFile || !validSecret(ef.Token) {
+	if err := fsutil.StrictJSON(raw, &ef); err != nil || ef.Schema != contract.SchemaEnrolFile || !validSecret(ef.Token) {
 		return st(OutcomeTokenFileInvalid, "malformed", "")
 	}
 	if iss, err := transport.ParseIssuer(ef.Issuer); err != nil || iss != cfg.Issuer {
@@ -135,6 +136,13 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 			return st(OutcomeTokenExpired, contract.ErrTokenExpired, "")
 		}
 	}
+	return redeemToken(ctx, o, cfg, ef.Token, st)
+}
+
+// redeemToken exchanges an enrolment token (the bulk token from the MDM file, or a one-line token from standard input)
+// for the device ticket and writes the ticket file. The token is only ever in this call's memory and its Authorization
+// header: it is never logged, never in a status file and never written to disk.
+func redeemToken(ctx context.Context, o Options, cfg *Config, token string, st func(outcome, code, ticketID string) RedeemStatus) RedeemStatus {
 	host, err := o.Hostname()
 	if err != nil || host == "" {
 		host = "unknown"
@@ -145,7 +153,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 	}
 	body, _ := json.Marshal(contract.TicketRequest{Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH, AgentVersion: Version})
 	res, err := auth.Send(ctx, client, http.MethodPost, cfg.Issuer+contract.RouteEnrolmentTickets,
-		http.Header{"Authorization": {"Bearer " + ef.Token}, "Content-Type": {"application/json"}}, body)
+		http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}}, body)
 	if err != nil {
 		return st(OutcomeGatewayUnreachable, "", "")
 	}
@@ -160,7 +168,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 		return st(OutcomeRefused, code, "")
 	}
 	var tr contract.TicketResponse
-	if err := strictJSON(res.Body, &tr); err != nil || !validSecret(tr.Ticket) || tr.TicketID == "" {
+	if err := fsutil.StrictJSON(res.Body, &tr); err != nil || !validSecret(tr.Ticket) || tr.TicketID == "" {
 		return st(OutcomeGatewayError, "malformed_ticket", "")
 	}
 	exp, err := parseTime(tr.ExpiresAt)
@@ -172,7 +180,7 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 	if err := os.MkdirAll(filepath.Dir(o.Paths.TicketFile), 0o755); err != nil {
 		return st(OutcomeWriteFailed, "", tr.TicketID)
 	}
-	if err := writeAtomic(o.Paths.TicketFile, append(tf, '\n'), 0o640, o.TicketGID); err != nil {
+	if err := fsutil.WriteAtomic(o.Paths.TicketFile, append(tf, '\n'), 0o640, o.TicketGID, true); err != nil {
 		o.Log.Error("install step: could not write the ticket file", "err", err)
 		return st(OutcomeWriteFailed, "", tr.TicketID)
 	}
@@ -184,12 +192,12 @@ func Redeem(ctx context.Context, o Options) RedeemStatus {
 var ErrWaitingForTicket = errors.New("waiting for enrolment ticket")
 
 func readTicket(o Options, cfg *Config) (*TicketFile, error) {
-	raw, err := readChecked(o.Paths.TicketFile, o.SystemOwner, GroupRead)
+	raw, err := readChecked(o.Paths.TicketFile, o.SystemOwner, fsutil.GroupRead)
 	if err != nil {
 		return nil, err
 	}
 	var t TicketFile
-	if err := strictJSON(raw, &t); err != nil || t.Schema != contract.SchemaTicketFile || !validSecret(t.Ticket) {
+	if err := fsutil.StrictJSON(raw, &t); err != nil || t.Schema != contract.SchemaTicketFile || !validSecret(t.Ticket) {
 		return nil, errors.New("the ticket file is malformed")
 	}
 	if t.Issuer != cfg.Issuer {
@@ -213,7 +221,7 @@ func (e *RegistrationError) Error() string {
 }
 
 func loadState(o Options) (*State, error) {
-	raw, err := readChecked(filepath.Join(o.Paths.StateDir, "state.json"), ownUID(), OwnerOnly)
+	raw, err := readChecked(filepath.Join(o.Paths.StateDir, "state.json"), ownUID(), fsutil.OwnerOnly)
 	if errors.Is(err, os.ErrNotExist) {
 		return &State{Schema: schemaState}, nil
 	}
@@ -221,7 +229,7 @@ func loadState(o Options) (*State, error) {
 		return nil, err
 	}
 	var s State
-	if err := strictJSON(raw, &s); err != nil || s.Schema != schemaState {
+	if err := fsutil.StrictJSON(raw, &s); err != nil || s.Schema != schemaState {
 		return nil, errors.New("the state file is malformed")
 	}
 	return &s, nil
@@ -235,7 +243,7 @@ func saveState(o Options, s *State) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(o.Paths.StateDir, "state.json"), append(b, '\n'), 0o600, -1)
+	return fsutil.WriteAtomic(filepath.Join(o.Paths.StateDir, "state.json"), append(b, '\n'), 0o600, -1, true)
 }
 
 // storeByName finds the store a saved key id belongs to.
@@ -315,7 +323,7 @@ func Register(ctx context.Context, o Options) (*State, error) {
 		return nil, &RegistrationError{Status: res.Status, Code: res.Code()}
 	}
 	var rr contract.RegisterResponse
-	if err := strictJSON(res.Body, &rr); err != nil || rr.IdentityID == "" {
+	if err := fsutil.StrictJSON(res.Body, &rr); err != nil || rr.IdentityID == "" {
 		return nil, errors.New("the registration answer is malformed")
 	}
 	if rr.ClientID != clientID {

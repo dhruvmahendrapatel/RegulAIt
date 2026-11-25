@@ -35,7 +35,7 @@ const version = (mutate: (b: ExecutionProfileBody) => void): ExecutionProfileBod
 
 describe("which profiles are versioned", () => {
   it("engine-worker is versionable; the strict references are not; a custom name is", () => {
-    expect(VERSIONABLE_SHIPPED_EXECUTION_PROFILES).toEqual(["engine-worker"]);
+    expect(VERSIONABLE_SHIPPED_EXECUTION_PROFILES).toEqual(["engine-worker", "robot-browser"]);
     expect(executionProfileVersionable("engine-worker")).toBe(true);
     expect(executionProfileVersionable("restricted")).toBe(false);
     expect(executionProfileVersionable("restricted-microvm")).toBe(false);

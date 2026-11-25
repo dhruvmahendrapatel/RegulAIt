@@ -33,10 +33,10 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "6.2.1",
-    "postcss": "8.5.32",
+    "postcss": "8.5.33",
     "size-limit": "14.3.0",
     "typescript": "^5.8.3",
-    "vite": "8.3.6",
+    "vite": "8.3.8",
     "web-vitals": "6.2.3"
   }
 }

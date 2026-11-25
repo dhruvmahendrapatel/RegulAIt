@@ -61,6 +61,17 @@ describe("ADR-0356 Jira signals", () => {
     const other = extractTriggerSignals("jira", body.replace(AGENT, "557058:bob"));
     expect(matchTrigger(other[0]!, settings)).toBe(false);
   });
+  it("an issue created already assigned to the agent is a trigger (the assignee is on the issue, not a changelog)", () => {
+    const body = j({
+      webhookEvent: "jira:issue_created",
+      timestamp: Date.now(),
+      user: { accountId: "557058:alice" },
+      issue: { id: "10043", key: "OPS-2", fields: { assignee: { accountId: AGENT } } },
+    });
+    const [s] = extractTriggerSignals("jira", body);
+    expect(s).toEqual({ externalId: "10043", mechanism: "assignment", actorIds: ["557058:alice"], targetIds: [AGENT] });
+    expect(matchTrigger(s!, settings)).toBe(true);
+  });
   it("an unrelated update carries no signal", () => {
     const body = j({ webhookEvent: "jira:issue_updated", issue: { id: "1" }, changelog: { items: [{ fieldId: "summary", to: "x" }] } });
     expect(extractTriggerSignals("jira", body)).toEqual([]);
@@ -124,6 +135,17 @@ describe("ADR-0356 Azure DevOps signals", () => {
       resource: { workItemId: 314, revisedBy: { id: "x" }, fields: { "System.AssignedTo": { newValue: "RegulAIt Agent <REGULAIT@contoso.com>" } } },
     });
     expect(matchTrigger(extractTriggerSignals("azure_devops", legacy)[0]!, settings)).toBe(true);
+  });
+  it("an update without revisedBy takes the actor from the revision's System.ChangedBy (ported from #986)", () => {
+    const body = j({
+      eventType: "workitem.updated",
+      resource: {
+        workItemId: 315,
+        revision: { id: 315, fields: { "System.ChangedBy": "Alice <Alice@Contoso.com>" } },
+        fields: { "System.AssignedTo": { oldValue: null, newValue: { id: ADO_AGENT, uniqueName: "regulait@contoso.com" } } },
+      },
+    });
+    expect(extractTriggerSignals("azure_devops", body)[0]).toMatchObject({ externalId: "315", mechanism: "assignment", actorIds: ["alice@contoso.com"] });
   });
   it("an edit that does not change the assignee is not an assignment", () => {
     const body = j({ eventType: "workitem.updated", resource: { workItemId: 1, fields: { "System.AssignedTo": "RegulAIt <regulait@contoso.com>" } } });

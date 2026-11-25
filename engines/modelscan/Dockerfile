@@ -33,7 +33,7 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -50,7 +50,7 @@ COPY engines/modelscan/modelscan-settings.toml /opt/modelscan/modelscan-settings
 COPY engines/modelscan/npy-header.py /opt/modelscan/npy-header.py
 
 # ---- stage 2: the runner and scanner shim -------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -60,7 +60,7 @@ COPY apps ./apps
 # install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-modelscan..." build \
  && pnpm --filter @regulait/engine-modelscan deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
@@ -78,8 +78,10 @@ LABEL org.opencontainers.image.title="regulait-engine-modelscan" \
 # then drop what apt and dpkg wrote with wall-clock content (the lists, their logs and ldconfig's
 # aux-cache), so the layer stays byte-reproducible (ADR-0187 addendum 2026-10-21: build and rebuild
 # must match). Remove this when a rebuilt base digest already carries the fix.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12

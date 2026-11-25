@@ -1,0 +1,96 @@
+[
+ {
+  "id": "github.gist.create",
+  "title": "Create a GitHub gist",
+  "mcp": {
+   "upstreamHosts": [
+    "api.githubcopilot.com"
+   ],
+   "tools": [
+    "create_gist"
+   ]
+  },
+  "cli": [
+   [
+    "gh",
+    "gist",
+    "create",
+    "**"
+   ],
+   [
+    "gh",
+    "gist",
+    "new",
+    "**"
+   ]
+  ],
+  "http": [
+   {
+    "method": "POST",
+    "host": "api.github.com",
+    "path": "/gists"
+   }
+  ]
+ },
+ {
+  "id": "github.pull.merge",
+  "title": "Merge a GitHub pull request",
+  "mcp": {
+   "upstreamHosts": [
+    "api.githubcopilot.com"
+   ],
+   "tools": [
+    "merge_pull_request"
+   ]
+  },
+  "cli": [
+   [
+    "gh",
+    "pr",
+    "merge",
+    "**"
+   ]
+  ],
+  "http": [
+   {
+    "method": "PUT",
+    "host": "api.github.com",
+    "path": "/repos/*/*/pulls/*/merge"
+   }
+  ]
+ },
+ {
+  "id": "github.issue.create",
+  "title": "Create a GitHub issue",
+  "mcp": {
+   "upstreamHosts": [
+    "api.githubcopilot.com"
+   ],
+   "tools": [
+    "create_issue",
+    "issue_write"
+   ]
+  },
+  "cli": [
+   [
+    "gh",
+    "issue",
+    "create",
+    "**"
+   ],
+   [
+    "gh",
+    "issue",
+    "new",
+    "**"
+   ]
+  ],
+  "http": [
+   {
+    "method": "POST",
+    "host": "api.github.com",
+    "path": "/repos/*/*/issues"
+   }
+  ]
+ }
+]

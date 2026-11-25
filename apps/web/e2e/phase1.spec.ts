@@ -120,7 +120,8 @@ test("runs: list and open a seeded run (DAG + nodes)", async () => {
   await expect(page.getByRole("heading", { name: "Runs", exact: true })).toBeVisible();
   await shot(page, "05-runs-list");
 
-  const firstRow = page.locator("tbody tr[role='link']").first();
+  // UIS-04: a row that opens its run carries a real link in its primary cell, named "Open run <name>"
+  const firstRow = page.locator("tbody").getByRole("link", { name: /^Open run / }).first();
   await expect(firstRow).toBeVisible();
   await firstRow.click();
 
@@ -135,7 +136,7 @@ test("run detail: PM work items and the decision ledger (pillars 8 + 4)", async 
   // the seeded checkout-refactor run is pm-synced and already carries one
   // decision, so both surfaces have real data to render
   await page.getByRole("link", { name: "Runs", exact: true }).click();
-  await page.locator("tbody tr[role='link']").first().click();
+  await page.locator("tbody").getByRole("link", { name: /^Open run / }).first().click();
   await expect(page.getByText("Task graph")).toBeVisible();
 
   const pmCard = page.locator("section", { hasText: "PM work items" }).first();
@@ -171,7 +172,8 @@ test("workflows: list and open a seeded instance (stage rail)", async () => {
   await expect(page.getByRole("heading", { name: "Workflows", exact: true })).toBeVisible();
   await shot(page, "07-workflows-list");
 
-  const firstRow = page.locator("tbody tr[role='link']").first();
+  // UIS-04: a row that opens its instance carries a real link in its primary cell, named "Open workflow <change>"
+  const firstRow = page.locator("tbody").getByRole("link", { name: /^Open workflow / }).first();
   await expect(firstRow).toBeVisible();
   await firstRow.click();
 

@@ -20,7 +20,9 @@ import (
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/collect"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/decisionlog"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/devicekey"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/gatewaytest"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/pack/packtest"
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/privacy"
@@ -58,7 +60,13 @@ type fixture struct {
 
 func newFixture(t *testing.T, cap int) *fixture {
 	t.Helper()
-	gw := gatewaytest.New(bulkToken(), cap)
+	return newFixtureToken(t, cap, bulkToken())
+}
+
+// newFixtureToken is newFixture with the enrolment token the fake gateway accepts.
+func newFixtureToken(t *testing.T, cap int, token string) *fixture {
+	t.Helper()
+	gw := gatewaytest.New(token, cap)
 	t.Cleanup(gw.Close)
 	dir := t.TempDir()
 	sys := filepath.Join(dir, "sys")
@@ -67,13 +75,13 @@ func newFixture(t *testing.T, cap int) *fixture {
 	os.WriteFile(ca, gw.CAPEM(), 0o644)
 	cfg := fmt.Sprintf(`{"schema":"regulait.endpoint-agent-config/1","issuer":%q,"caBundleFile":%q}`, gw.Issuer, ca)
 	os.WriteFile(filepath.Join(sys, "config.json"), []byte(cfg), 0o644)
-	enrol := fmt.Sprintf(`{"schema":"regulait.endpoint-enrol/1","issuer":%q,"token":%q}`, gw.Issuer, bulkToken())
+	enrol := fmt.Sprintf(`{"schema":"regulait.endpoint-enrol/1","issuer":%q,"token":%q}`, gw.Issuer, token)
 	os.WriteFile(filepath.Join(sys, "enrol.json"), []byte(enrol), 0o600)
 	logs := &strings.Builder{}
 	f := &fixture{t: t, gw: gw, dir: dir, logs: logs, signer: packtest.NewSigner()}
 	f.opts = Options{
 		Paths: Paths{ConfigFile: filepath.Join(sys, "config.json"), EnrolFile: filepath.Join(sys, "enrol.json"), TicketFile: filepath.Join(sys, "ticket.json"),
-			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(dir, "user", "state")},
+			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(dir, "user", "state"), SpoolDir: filepath.Join(dir, "spool")},
 		SystemOwner: os.Getuid(), TicketGID: -1,
 		Log:      slog.New(slog.NewTextHandler(logs, nil)),
 		Hostname: func() (string, error) { return "jdoe-laptop", nil },
@@ -103,6 +111,13 @@ func (f *fixture) cycle() *Cycle {
 			return &collect.Env{OS: "linux", Roots: map[contract.Root]fs.FS{contract.RootHome: home}, StartupFiles: collect.DefaultStartupFiles("linux")}, nil
 		},
 		Identity: privacy.Identity{HomeDir: "/home/jdoe", UserName: "jdoe", Hostname: "jdoe-laptop"},
+		// never the real /etc: the tamper report reads these (all missing unless a test writes one)
+		ManagedFiles: []decisionlog.ManagedFile{
+			{File: contract.ManagedFileClaudeCode, Path: filepath.Join(f.dir, "managed", "managed-settings.json")},
+			{File: contract.ManagedFileCursor, Path: filepath.Join(f.dir, "managed", "hooks.json")},
+			{File: contract.ManagedFileCopilotCLI, Path: filepath.Join(f.dir, "managed", "regulait.json")},
+			{File: contract.ManagedFileCodex, Path: filepath.Join(f.dir, "managed", "requirements.toml")},
+		},
 	}
 }
 
@@ -515,11 +530,11 @@ func TestReadCheckedRefusesAnotherOwnerUID(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(path, os.Getuid(), OwnerOnly); err != nil {
+	if _, err := readChecked(path, os.Getuid(), fsutil.OwnerOnly); err != nil {
 		t.Fatalf("own file: %v", err)
 	}
 	other := os.Getuid() + 1
-	if _, err := readChecked(path, other, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid") {
+	if _, err := readChecked(path, other, fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid") {
 		t.Fatalf("checked against uid %d: %v", other, err)
 	}
 }
@@ -533,7 +548,7 @@ func TestFileOwnedByAnotherUIDIsUnsafe(t *testing.T) {
 	if err := os.Chown(f.opts.Paths.EnrolFile, 4242, -1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(f.opts.Paths.EnrolFile, 0, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid 4242") {
+	if _, err := readChecked(f.opts.Paths.EnrolFile, 0, fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid 4242") {
 		t.Fatalf("another uid's file: %v", err)
 	}
 	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {
@@ -556,7 +571,7 @@ func TestSymlinkIsAnUnsafeFile(t *testing.T) {
 	if err := os.Symlink(real, f.opts.Paths.EnrolFile); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readChecked(f.opts.Paths.EnrolFile, os.Getuid(), OwnerOnly); !errors.Is(err, ErrUnsafeFile) {
+	if _, err := readChecked(f.opts.Paths.EnrolFile, os.Getuid(), fsutil.OwnerOnly); !errors.Is(err, fsutil.ErrUnsafeFile) {
 		t.Fatalf("symlink: %v", err)
 	}
 	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {

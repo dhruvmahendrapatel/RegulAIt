@@ -102,15 +102,17 @@ export const pmTriggerSettingsSchema = z
     /** the RegulAIt agent user's identity in the PM tool: a Jira accountId; an Azure DevOps identity id (guid) and/or
      * its unique name. Assigning to or mentioning any of these is a trigger. */
     agentIdentities: z.array(pmIdentity).min(1).max(5),
-    /** which mechanisms start work; each can be turned off */
+    /** which mechanisms start work; each can be turned off. `rule` is off by default (ADR-0180): on a rule delivery the
+     * actor is whatever the rule's body names, as trustworthy as whoever can edit a rule holding the connection's
+     * webhook secret, so an admin turns it on explicitly, with a step-up */
     mechanisms: z
       .object({
         assignment: z.boolean().default(true),
         mention: z.boolean().default(true),
-        rule: z.boolean().default(true),
+        rule: z.boolean().default(false),
       })
       .strict()
-      .default({ assignment: true, mention: true, rule: true }),
+      .default({ assignment: true, mention: true, rule: false }),
     /** the RegulAIt registry agent the work runs on: the triggering person must be entitled to it */
     agentId: z.string().uuid(),
     /** ADR-0356 PR 2: what is written back to the item, and how (comments on by default; no state is changed unless an
@@ -257,7 +259,10 @@ function adoSignals(rawBody: string, query: Record<string, string | undefined>):
     case "workitem.updated": {
       const externalId = bounded(r.workItemId ?? revision?.id);
       if (!externalId) return [];
-      const actorIds = adoIdentity(r.revisedBy);
+      // the actor is `revisedBy`; a payload without it carries the same person as the revision's System.ChangedBy
+      // (ported from #986, lane L6), so a hand-over is never denied as "not linked" for a missing field
+      const revisedBy = adoIdentity(r.revisedBy);
+      const actorIds = revisedBy.length > 0 ? revisedBy : adoIdentity(adoNew(revFields["System.ChangedBy"] ?? fields["System.ChangedBy"]));
       if (query.trigger === "rule") return [{ externalId, mechanism: "rule", actorIds, targetIds: [] }];
       const assigned = fields["System.AssignedTo"];
       // only a CHANGE of assignee in this update is an assignment (an unrelated edit of an assigned item is not)

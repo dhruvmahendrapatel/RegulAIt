@@ -1,3 +1,5 @@
+import type { CompiledDetectionFeedRule, DetectionFeedRule } from "./detection-feed.js";
+import { normaliseForInjection } from "./detection-content/index.js";
 /**
  * ADR-0042 — the GUARDRAIL ENGINE's pure half.
  *
@@ -35,12 +37,13 @@
  * admin's tuning is a conversation about rules rather than about vibes.
  */
 
+import type { CompiledClassifier } from "./custom-classifiers.js";
 import { detectPII, type PiiHit } from "./pii.js";
 // ADR-0186 V: vendored detection content, applied through the foundation's
 // runner (the data is slice V's; this file only calls the runner)
 import type { VendoredDetectionPack } from "./batch4.js";
 import { VENDORED_INJECTION_RULES, VENDORED_SECRET_RULES } from "./detection-content/index.js";
-import { injectionText, vendoredInjectionHits, vendoredSecretCount } from "./detection-content/match.js";
+import { injectionRuleHits, injectionText, vendoredInjectionHits, vendoredSecretCount } from "./detection-content/match.js";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -120,6 +123,7 @@ export interface GuardrailDetector {
 /** ADR-0186 V: the deployment facts a detector may consult. Absent = the
  * strict default (every vendored pack on). */
 export interface GuardrailDetectContext {
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
   /** `org_settings.vendored_detection_packs` */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
 }
@@ -157,6 +161,9 @@ function escapeTerm(term: string): string {
  * starts/ends with a word character, so "roadmap" does not match "roadmaps"'
  * neighbours accidentally but a multi-word phrase still works.
  */
+/** ADR-0363 slice 2: the admin-term matcher, shared with customer `keyword` classifiers (one rule, one function) */
+export const countGuardrailTerms = (text: string, terms: readonly string[] | undefined): number => countTerms(text, terms);
+
 function countTerms(text: string, terms: readonly string[] | undefined): number {
   if (!terms || terms.length === 0 || !text) return 0;
   let n = 0;
@@ -267,6 +274,10 @@ export const promptInjectionDetector: GuardrailDetector = {
       const same = hits.find((h) => h.category === v.category);
       if (same) same.count += v.count;
       else hits.push({ detector: "prompt_injection", category: v.category, count: v.count });
+    }
+    if(ctx?.detectionFeedRules?.length) {
+      for(const v of injectionRuleHits(normaliseForInjection(text), ctx.detectionFeedRules, false))
+        hits.push({detector:"prompt_injection",category:`feed.${v.category}`,count:v.count});
     }
     const custom = countTerms(text, terms);
     if (custom > 0) hits.push({ detector: "prompt_injection", category: "custom_term", count: custom });
@@ -697,6 +708,14 @@ export function evaluateGuardrails(args: {
   exclude?: readonly GuardrailDetectorId[] | undefined;
   /** ADR-0186 V: `org_settings.vendored_detection_packs`; absent = all on */
   vendoredPacks?: readonly VendoredDetectionPack[] | undefined;
+  detectionFeedRules?: readonly (DetectionFeedRule | CompiledDetectionFeedRule)[] | undefined;
+  /**
+   * ADR-0363 slice 2: the org's PUBLISHED customer classifiers. Each runs with its OWN mode (an approved publish is
+   * the admin's explicit act, so it does not wait on the `semantic_dlp` switch) and reports as a `semantic_dlp`
+   * finding with category `classifier.<key>`. A classifier that cannot run (`unavailable`) counts as a hit: content
+   * that could not be checked is never reported clean.
+   */
+  classifiers?: readonly CompiledClassifier[] | undefined;
 }): GuardrailEvaluation {
   const findings: GuardrailFinding[] = [];
   let action: GuardrailEvaluation["action"] = "allow";
@@ -706,13 +725,22 @@ export function evaluateGuardrails(args: {
     if (mode === "off") continue;
     const detector = GUARDRAIL_DETECTORS[id];
     if (!detector.phases.includes(args.phase)) continue;
-    const hits = detector.detect(args.text, args.terms?.[id], { vendoredPacks: args.vendoredPacks });
+    const hits = detector.detect(args.text, args.terms?.[id], { vendoredPacks: args.vendoredPacks, detectionFeedRules: args.detectionFeedRules });
     if (hits.length === 0) continue;
     // mode -> action is exactly enforcePII's mapping: block blocks, warn
     // warns, log allows-but-records.
     const findingAction = mode === "block" ? "block" : mode === "warn" ? "warn" : "log";
     findings.push({ detector: id, mode, action: findingAction, hits });
     if (ACTION_RANK[findingAction] > ACTION_RANK[action]) action = findingAction;
+  }
+  for (const c of args.classifiers ?? []) {
+    if (!c.phases.includes(args.phase) || !args.text) continue;
+    const counted = c.count(args.text);
+    const count = counted === "unavailable" ? 1 : counted;
+    if (count === 0) continue;
+    const category = counted === "unavailable" ? `classifier.${c.key}.unavailable` : `classifier.${c.key}`;
+    findings.push({ detector: "semantic_dlp", mode: c.mode, action: c.mode, hits: [{ detector: "semantic_dlp", category, count }] });
+    if (ACTION_RANK[c.mode] > ACTION_RANK[action]) action = c.mode;
   }
   return {
     phase: args.phase,

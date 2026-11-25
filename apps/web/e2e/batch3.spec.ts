@@ -128,7 +128,8 @@ test("MCP methods require audited enablement and a separate real per-user protoc
   expect((await request("/v1/org/settings")).settings.mcpProtocolMethods).not.toContain("resources/list");
   await confirm.getByRole("button", { name: "Save audited change" }).click();
   await expect.poll(async () => (await request("/v1/org/settings")).settings.mcpProtocolMethods).toContain("resources/list");
-  const servers = (await request("/v1/servers")).servers;
+  // ADR-0364: the first-party Robots server (in-process, seeded by migration) serves no protocol methods
+  const servers = (await request("/v1/servers")).servers.filter((s: { transport?: string }) => s.transport !== "first_party");
   expect(servers.length).toBeGreaterThan(0);
   await page.getByLabel("Protocol user").selectOption(ownerId);
   await page.getByLabel("Protocol server").selectOption(servers[0].id);
@@ -173,7 +174,7 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   const row = await registered.json(); serverId = row.id;
   expect(row.stdio).toEqual({ image: IMAGE, command: "/srv/mcp/server.js", args: ["--root", "/srv/data with spaces"] });
   expect(row.stdioCommandDigest).toBe(IMAGE);
-  await expect(page.getByRole("link", { name: `Show tools on ${SERVER}`, exact: true })).toContainText(IMAGE);
+  await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: `Show tools on ${SERVER}`, exact: true }) })).toContainText(IMAGE);
   await page.getByLabel("Server to assign").selectOption(serverId!);
   await page.getByLabel(`Owner for ${SERVER}`).selectOption(ownerId);
   await page.getByRole("button", { name: "Save owner", exact: true }).click();
