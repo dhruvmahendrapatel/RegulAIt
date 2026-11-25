@@ -9,10 +9,12 @@ import {
   type ToolRef,
 } from "./index.js";
 import { cedarRateLimitEvaluator } from "./rate-limit-cedar.js";
+import { cedarApprovalRuleEvaluator } from "./approval-rule-cedar.js";
 
-/** ADR-0239 decision 4: rate limits need an engine (the hand-written default is gone); these cases run on the one the
- * gateway injects. A case may still pass its own `rateLimitEvaluator`. */
-const evaluate = (input: EvaluationInput) => kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, ...input });
+/** ADR-0239 decision 4 and P8a: rate limits and approval rules need an engine (the hand-written defaults are gone);
+ * these cases run on the ones the gateway injects. A case may still pass its own evaluator. */
+const evaluate = (input: EvaluationInput) =>
+  kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, approvalRuleEvaluator: cedarApprovalRuleEvaluator, ...input });
 
 /** ADR-0124 — the shipped posture: the dial adds nothing to any decision.
  * Declared here rather than exported from the kernel on purpose: a public
@@ -1987,7 +1989,14 @@ describe("evaluateConnector — a queueable write under the require_approval dia
 // Dana's repo-tools write_file rule (approver Avery) because the gateway loaded
 // the rules with no ORDER BY and the kernel took the first match.
 // ---------------------------------------------------------------------------
-import { approvalRulesMayOverlap, compareApprovalRulePrecedence, compareApprovalRuleSpecificity, matchingApprovalRules } from "./index.js";
+import { approvalRulesMayOverlap, compareApprovalRulePrecedence, compareApprovalRuleSpecificity, matchingApprovalRulesWith } from "./index.js";
+
+/** P8a: the match runs on the engine the gateway injects (the hand-written `matchingApprovalRules` is gone) */
+function matchingApprovalRules(rules: readonly ApprovalRule[], ctx: Parameters<typeof matchingApprovalRulesWith>[2]): ApprovalRule[] {
+  const v = matchingApprovalRulesWith(cedarApprovalRuleEvaluator, rules, ctx);
+  if (v.kind === "error") throw new Error(v.message);
+  return v.rules;
+}
 
 describe("approval-rule precedence (ADR-0229)", () => {
   const ADA = "user-ada";

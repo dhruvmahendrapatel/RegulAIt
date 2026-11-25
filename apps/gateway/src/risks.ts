@@ -42,7 +42,9 @@
  * the measurements legible AS RISK. And nothing auto-creates risks: every row
  * was registered by a person.
  */
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { wantsListContract, type ListSpec } from "./list-contract.js";
+import { answerListExport, answerListPage, type ContractList } from "./list-contract-route.js";
 import {
   idempotentReplay,
   readIdempotencyKey,
@@ -910,29 +912,32 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
 
   // List: fleet for admins, own risks for everyone else — the same scoping
   // shape as GET /v1/use-cases.
-  app.get("/v1/risks", async (req, reply) => {
-    const q = z
-      .object({
-        status: z.enum(AI_RISK_STATUSES).optional(),
-        category: z.enum(AI_RISK_CATEGORIES).optional(),
-        /** ADR-0147: the risks registered against one use case */
-        useCaseId: z.string().uuid().optional(),
-      })
-      .parse(req.query);
+  // CXR-REV-003 (ADR-0226): with any of sort/dir/cursor/offset/count the register answers the shared list contract
+  // (pages, a total, the Excel export); with none of them, the older `{ risks, disclaimer }` response, which now also
+  // says when its 200-row cap cut the list (`truncated`) instead of stopping silently. Both read the same WHERE.
+  const riskFilters = z
+    .object({
+      status: z.enum(AI_RISK_STATUSES).optional(),
+      category: z.enum(AI_RISK_CATEGORIES).optional(),
+      /** ADR-0147: the risks registered against one use case */
+      useCaseId: z.string().uuid().optional(),
+    })
+    .strict();
+  type RiskFilters = z.infer<typeof riskFilters>;
+  /** the list's one WHERE: its filters plus the object-level rule (fleet for admins, own risks otherwise); `null`
+   * refuses the identity-less bootstrap credential, which owns no risk */
+  const riskWhere = (req: FastifyRequest, q: RiskFilters) => {
     const conditions = [];
     if (q.status) conditions.push(eq(aiRisks.status, q.status));
     if (q.category) conditions.push(eq(aiRisks.category, q.category));
     if (q.useCaseId) conditions.push(eq(aiRisks.useCaseId, q.useCaseId));
     if (!req.authCtx.isAdmin) {
-      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_risks" });
+      if (!req.authCtx.userId) return null;
       conditions.push(eq(aiRisks.ownerUserId, req.authCtx.userId));
     }
-    const rows = await db
-      .select()
-      .from(aiRisks)
-      .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(desc(aiRisks.createdAt))
-      .limit(200);
+    return conditions.length ? and(...conditions) : undefined;
+  };
+  const withOwnersAndControls = async <R extends AiRiskRow>(rows: R[]) => {
     const ownerIds = [...new Set(rows.map((r) => r.ownerUserId))];
     const ownerRows = ownerIds.length
       ? await db
@@ -942,12 +947,58 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
       : [];
     const ownerName = new Map(ownerRows.map((u) => [u.id, u.displayName || u.email]));
     const controls = await loadRiskControls(db, rows.map((r) => r.id));
+    return rows.map((r) => ({
+      ...r,
+      ownerName: ownerName.get(r.ownerUserId) ?? null,
+      controls: controls.get(r.id) ?? [],
+    }));
+  };
+  const risksList: ContractList<RiskListRow, RiskFilters> = {
+    spec: RISKS_LIST,
+    filters: riskFilters,
+    reader: {
+      fetch: async (q) => {
+        const rows = await db
+          .select({ risk: aiRisks, _cursorAt: q.cursorAt })
+          .from(aiRisks)
+          .where(q.where)
+          .orderBy(...q.orderBy)
+          .limit(q.limit)
+          .offset(q.offset);
+        const enriched = await withOwnersAndControls(rows.map((r) => r.risk));
+        return enriched.map((r, i) => ({ ...r, _cursorAt: rows[i]!._cursorAt }));
+      },
+      countable: (where) => db.select({ one: sql`1` }).from(aiRisks).where(where),
+      idOf: (r) => r.id,
+    },
+    where: (req, f) => riskWhere(req, f),
+    refusal: { status: 403, body: { error: "bootstrap_has_no_risks" } },
+    extra: () => ({ disclaimer: AI_RISK_REGISTER_DISCLAIMER }),
+  };
+  app.get("/v1/risks/export.xlsx", async (req, reply) => answerListExport(db, req, reply, risksList));
+
+  // List: fleet for admins, own risks for everyone else — the same scoping
+  // shape as GET /v1/use-cases.
+  app.get("/v1/risks", async (req, reply) => {
+    if (wantsListContract(req.query)) return answerListPage(db, req, reply, risksList);
+    const q = riskFilters
+      .extend({ limit: z.coerce.number().int().min(1).max(LEGACY_RISK_LIST_MAX).default(LEGACY_RISK_LIST_MAX) })
+      .strip()
+      .parse(req.query ?? {});
+    const where = riskWhere(req, q);
+    if (where === null) return reply.status(403).send({ error: "bootstrap_has_no_risks" });
+    // one row past the cap tells a truncated list from a complete one without a count
+    const rows = await db
+      .select()
+      .from(aiRisks)
+      .where(where)
+      .orderBy(desc(aiRisks.createdAt), desc(aiRisks.id))
+      .limit(q.limit + 1);
+    const truncated = rows.length > q.limit;
     return {
-      risks: rows.map((r) => ({
-        ...r,
-        ownerName: ownerName.get(r.ownerUserId) ?? null,
-        controls: controls.get(r.id) ?? [],
-      })),
+      risks: await withOwnersAndControls(rows.slice(0, q.limit)),
+      truncated,
+      limit: q.limit,
       disclaimer: AI_RISK_REGISTER_DISCLAIMER,
     };
   });
@@ -1470,3 +1521,39 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     return reply.status(204).send();
   });
 }
+
+// ---------------------------------------------------------------------------
+// CXR-REV-003: the risk register under the shared list contract (ADR-0226)
+// ---------------------------------------------------------------------------
+
+/** the older response's cap, kept for its callers (the demo seeders, `demo:check`) */
+export const LEGACY_RISK_LIST_MAX = 200;
+
+type RiskListRow = AiRiskRow & { ownerName: string | null; controls: Array<{ controlRef: string; title: string | null; linkedAt: Date }> };
+const RISK_OWNER_NAME = sql<string | null>`(select coalesce(nullif(${users.displayName}, ''), ${users.email}) from ${users} where ${users.id} = ${aiRisks.ownerUserId})`;
+const LEVEL_RANK = (col: typeof aiRisks.likelihood | typeof aiRisks.impact) =>
+  sql`case ${col} when 'low' then 1 when 'medium' then 2 when 'high' then 3 end`;
+
+export const RISKS_LIST: ListSpec<RiskListRow> = {
+  id: "risks",
+  sorts: {
+    title: { expr: sql`lower(${aiRisks.title})` },
+    status: { expr: aiRisks.status },
+    category: { expr: aiRisks.category },
+    declared: { expr: LEVEL_RANK(aiRisks.likelihood), then: [LEVEL_RANK(aiRisks.impact)] },
+    owner: { expr: sql`lower(${RISK_OWNER_NAME})` },
+    created: { expr: aiRisks.createdAt, keysetAt: aiRisks.createdAt },
+  },
+  columns: {
+    title: { label: "Risk", value: (r) => r.title },
+    status: { label: "Status", value: (r) => r.status },
+    category: { label: "Category", value: (r) => r.category.replace(/_/g, " ") },
+    declared: { label: "Declared L/I", value: (r) => `${r.likelihood} / ${r.impact}` },
+    owner: { label: "Owner", value: (r) => r.ownerName ?? r.ownerUserId },
+    mitigation: { label: "Mitigating control", value: (r) => r.mitigation ?? "none recorded" },
+    created: { label: "Registered", value: (r) => r.createdAt },
+  },
+  filters: ["status", "category", "useCaseId"],
+  defaultSort: { col: "created", dir: "desc" },
+  idCol: aiRisks.id,
+};

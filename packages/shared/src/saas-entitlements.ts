@@ -100,6 +100,72 @@ export interface SaasEntitlementBatch {
    * every grant of that app. Applied to complete and partial batches alike. Optional; empty when absent.
    */
   revokedPrincipals?: SaasRevokedPrincipal[];
+  /**
+   * What the read observed of each app's USE (slice 3). Optional: a reader that has no usage source for its platform
+   * leaves it out, which the findings read as coverage `none` (not assessable, never "unused").
+   */
+  usage?: SaasUsageObservation;
+}
+
+/**
+ * How finely a read could observe use:
+ *  - `none`: no usage source (the platform has no read-only one, the tenant's edition or licence lacks it, or the read
+ *    of it failed). Nothing can be judged unused or excessive.
+ *  - `app`: when each app was last used, with no split between reads and writes (Entra service-principal sign-in
+ *    activity). An app with no use in the window can be judged; an excessive scope cannot.
+ *  - `verb`: when each app last read and last wrote (Google token `activity` events, whose API method names are
+ *    classified by `classifyGoogleApiMethod`). Both rules can be judged.
+ */
+export const SAAS_USAGE_COVERAGES = ["none", "app", "verb"] as const;
+export type SaasUsageCoverage = (typeof SAAS_USAGE_COVERAGES)[number];
+
+export interface SaasUsageObservation {
+  coverage: SaasUsageCoverage;
+  /**
+   * The earliest moment the read could see use from (ISO 8601): the start of a log window (Google keeps token events
+   * for 180 days). Null when the vendor reports a last-use time that is not bounded by a window (Entra keeps the last
+   * sign-in time per app). A finding is judged only over a window the read covered.
+   */
+  windowStart: string | null;
+  /** a plain-language note on what was and was not observed (for coverage `none`, why) */
+  note: string;
+  /** per app the read saw use of; an app the read lists among its grants but not here was not seen used */
+  apps: SaasAppUsage[];
+  /**
+   * For a platform whose usage source is a guided, off-by-default setup (Microsoft 365's Entra activity logs, owner
+   * decision 2026-11-22): what the read observed of that setup. Absent for every other platform.
+   */
+  activityLogState?: SaasActivityLogState;
+}
+
+/**
+ * What a read observed of an off-by-default activity-log setup (ADR-0337 §5a). It is an OBSERVATION, not a lifecycle:
+ * each read replaces it, so any state may follow any other; nothing is decided from it except what to tell the admin.
+ *  - `off`: the source does not ask for activity logs (the default); nothing was read.
+ *  - `not_enabled`: the vendor refused the read (the permission is not consented, or the licence is missing).
+ *  - `unreadable`: the read failed or was cut short, so whether the logs flow cannot be told.
+ *  - `no_activity_yet`: the read worked and reached its end, but the logs hold no activity at all yet (they are not
+ *    flowing yet, so nothing is judged from them).
+ *  - `flowing`: the read worked and the logs hold activity.
+ * Coverage follows: only `flowing` observes use (`app`); the other four observe none.
+ */
+export const SAAS_ACTIVITY_LOG_STATES = ["off", "not_enabled", "unreadable", "no_activity_yet", "flowing"] as const;
+export type SaasActivityLogState = (typeof SAAS_ACTIVITY_LOG_STATES)[number];
+const ACTIVITY_LOG_OBSERVES_USE: Readonly<Record<SaasActivityLogState, boolean>> = Object.freeze({
+  off: false,
+  not_enabled: false,
+  unreadable: false,
+  no_activity_yet: false,
+  flowing: true,
+});
+
+export interface SaasAppUsage {
+  externalId: string;
+  /** the latest use of any kind (ISO 8601); for coverage `verb`, the later of the two below */
+  lastUseAt: string;
+  /** coverage `verb` only: the latest read, and the latest write (a call the classifier could not tell is a write) */
+  lastReadAt: string | null;
+  lastWriteAt: string | null;
 }
 
 export interface SaasRevokedPrincipal {
@@ -114,6 +180,7 @@ export const SAAS_ENTITLEMENT_LIMITS = Object.freeze({
   grantsPerApp: 500,
   principalsPerGrant: 1_000,
   revokedPrincipals: 50_000,
+  usageNote: 300,
   externalId: 255,
   displayName: 200,
   publisher: 200,
@@ -219,7 +286,140 @@ export function checkSaasEntitlementBatch(batch: unknown, expected: SaasEntitlem
       revokedPrincipals.push({ externalId: r.externalId, principal: r.principal });
     }
   }
-  return { platform: expected, tenant: b.tenant, complete: b.complete, apps, revokedPrincipals };
+  const usage = b.usage === undefined ? undefined : checkUsage(b.usage);
+  return { platform: expected, tenant: b.tenant, complete: b.complete, apps, revokedPrincipals, ...(usage ? { usage } : {}) };
+}
+
+// an ISO 8601 instant a reader produced, not more than a day in the future (a clock skew, never a forged "used later")
+const instant = (v: unknown): v is string => {
+  if (typeof v !== "string" || v.length > 40 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(v)) return false;
+  const t = Date.parse(v);
+  return Number.isFinite(t) && t <= Date.now() + 86_400_000;
+};
+const later = (a: string | null, b: string | null): string | null => (a === null ? b : b === null ? a : Date.parse(a) >= Date.parse(b) ? a : b);
+
+function checkUsage(raw: unknown): SaasUsageObservation {
+  if (!raw || typeof raw !== "object") throw new SaasEntitlementBatchRefused("the usage block is not an object");
+  const u = raw as Record<string, unknown>;
+  if (!(SAAS_USAGE_COVERAGES as readonly unknown[]).includes(u.coverage)) throw new SaasEntitlementBatchRefused("the usage block has an unknown coverage");
+  const coverage = u.coverage as SaasUsageCoverage;
+  if (u.windowStart !== null && !instant(u.windowStart)) throw new SaasEntitlementBatchRefused("the usage window start is not a valid time");
+  if (!label(u.note, SAAS_ENTITLEMENT_LIMITS.usageNote) || u.note === null) throw new SaasEntitlementBatchRefused("the usage block has no valid note");
+  if (!Array.isArray(u.apps) || u.apps.length > SAAS_ENTITLEMENT_LIMITS.apps) throw new SaasEntitlementBatchRefused(`the usage list is not a list, or holds more than ${SAAS_ENTITLEMENT_LIMITS.apps} apps`);
+  if (coverage === "none" && u.apps.length > 0) throw new SaasEntitlementBatchRefused("a usage block with coverage 'none' lists use");
+  const byApp = new Map<string, SaasAppUsage>();
+  for (const rawApp of u.apps as unknown[]) {
+    const a = (rawApp ?? {}) as Record<string, unknown>;
+    if (!printable(a.externalId, SAAS_ENTITLEMENT_LIMITS.externalId)) throw new SaasEntitlementBatchRefused("a usage entry has no valid app id");
+    const read = a.lastReadAt ?? null;
+    const write = a.lastWriteAt ?? null;
+    if (coverage === "app" && (read !== null || write !== null)) throw new SaasEntitlementBatchRefused("a usage entry splits reads from writes under coverage 'app'");
+    if ((read !== null && !instant(read)) || (write !== null && !instant(write))) throw new SaasEntitlementBatchRefused(`a usage entry of ${a.externalId.slice(0, 64)} has an invalid time`);
+    // for coverage verb the last use IS the later of the two; anything else would be a second, contradicting fact
+    const lastUseAt = coverage === "verb" ? later(read as string | null, write as string | null) : a.lastUseAt;
+    if (!instant(lastUseAt)) throw new SaasEntitlementBatchRefused(`a usage entry of ${a.externalId.slice(0, 64)} has no valid last use`);
+    const entry: SaasAppUsage = { externalId: a.externalId, lastUseAt, lastReadAt: read as string | null, lastWriteAt: write as string | null };
+    const prev = byApp.get(a.externalId);
+    byApp.set(
+      a.externalId,
+      prev
+        ? { externalId: a.externalId, lastUseAt: later(prev.lastUseAt, entry.lastUseAt)!, lastReadAt: later(prev.lastReadAt, entry.lastReadAt), lastWriteAt: later(prev.lastWriteAt, entry.lastWriteAt) }
+        : entry,
+    );
+  }
+  let activityLogState: SaasActivityLogState | undefined;
+  if (u.activityLogState !== undefined) {
+    if (!(SAAS_ACTIVITY_LOG_STATES as readonly unknown[]).includes(u.activityLogState)) throw new SaasEntitlementBatchRefused("the usage block has an unknown activity-log state");
+    activityLogState = u.activityLogState as SaasActivityLogState;
+    // the state and the coverage are one fact seen twice: they must agree
+    if (ACTIVITY_LOG_OBSERVES_USE[activityLogState] !== (coverage !== "none")) throw new SaasEntitlementBatchRefused(`activity-log state '${activityLogState}' contradicts coverage '${coverage}'`);
+  }
+  return { coverage, windowStart: u.windowStart as string | null, note: u.note, apps: [...byApp.values()], ...(activityLogState ? { activityLogState } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// guided, off-by-default reads (owner decisions 2026-11-22, ADR-0337 §5a)
+// ---------------------------------------------------------------------------
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The Microsoft 365 activity-log setup, as data the admin UI shows step by step (the checklist screen is the design
+ * lane's, #453). The read it enables is Graph `reports/servicePrincipalSignInActivities`: application permission
+ * `AuditLog.Read.All`, and a tenant on Microsoft Entra ID P1 or P2.
+ */
+export const M365_ACTIVITY_LOG_SETUP = Object.freeze({
+  permission: "AuditLog.Read.All",
+  permissionType: "application",
+  license: "Microsoft Entra ID P1 or P2",
+  steps: Object.freeze([
+    Object.freeze({
+      id: "add-permission",
+      title: "Add the read permission to the app registration",
+      detail:
+        "In the Microsoft Entra admin center, open App registrations, select the app this source signs in as, open API permissions, and add the Microsoft Graph APPLICATION permission AuditLog.Read.All. It reads sign-in and audit logs and cannot change anything.",
+    }),
+    Object.freeze({
+      id: "grant-consent",
+      title: "Grant admin consent",
+      detail:
+        "Open the admin consent link (or select 'Grant admin consent' on the same API permissions page) as a Privileged Role Administrator or Global Administrator, and review the listed permissions before accepting.",
+    }),
+    Object.freeze({
+      id: "check-license",
+      title: "Check the tenant's licence",
+      detail:
+        "Service principal sign-in activity needs Microsoft Entra ID P1 or P2. In the admin center, Overview shows the licence. Without it Microsoft refuses the read and this setup stays 'not enabled'.",
+    }),
+    Object.freeze({
+      id: "turn-on",
+      title: "Turn on activity logs for this source",
+      detail: "Set the source's 'activityLogs' to 'on'. Changing an enabled source's target is a step-up, like any widening of a read.",
+    }),
+    Object.freeze({
+      id: "run-and-confirm",
+      title: "Run the source and confirm the logs flow",
+      detail:
+        "Run the source. The state reads 'flowing' once sign-in activity appears; a newly consented app can show 'no activity yet' for a while. Until the state is 'flowing', no app is judged unused.",
+    }),
+  ]),
+});
+
+/** the tenant-wide admin consent link for the source's app, or null when either id is not a GUID */
+export function m365AdminConsentUrl(tenantId: string, clientId: string | null | undefined): string | null {
+  if (!GUID.test(tenantId) || !clientId || !GUID.test(clientId)) return null;
+  return `https://login.microsoftonline.com/${tenantId.toLowerCase()}/adminconsent?client_id=${clientId.toLowerCase()}`;
+}
+
+/**
+ * What the Salesforce read sees, and cannot see, WITHOUT the admin opt-in (owner decision 2026-11-22: no broad access
+ * by default). The permission map shows these plainly next to the Salesforce apps.
+ */
+export const SALESFORCE_DEFAULT_READ = Object.freeze({
+  sees: Object.freeze([
+    "every connected app in the org, and whether any user may authorise it themselves",
+    "the profiles and permission sets an admin pre-authorised for each connected app",
+  ]),
+  cannotSee: Object.freeze([
+    "each connected app's OAuth scopes (they are only in the Metadata API, which needs write-capable permissions; never read)",
+    "which users hold a token for each app, and when each app was last used (org-wide OAuth tokens need Customize Application; read only with the admin opt-in)",
+  ]),
+});
+
+/** the trade-off an admin accepts by turning on the Salesforce org-wide token read; shown and audited with the switch */
+export const SALESFORCE_ORG_TOKENS_TRADE_OFF =
+  "The integration user must hold Customize Application, a permission that can also change the org's setup (custom objects, fields, page layouts and connected apps). RegulAIt still only reads, and still refuses the credential if the user holds any other write or escalation permission or object-level write, but the credential is no longer read-only by construction: it is recorded as 'unverified', never 'read_only'. In return the map shows which users hold a token for each connected app and when each app was last used, so unused apps can be found.";
+
+/**
+ * Whether one Google API method (the `method_name` of a token `activity` event, e.g. `gmail.users.messages.get`) only
+ * reads: its last segment starts with get, list, search, query, batchGet or export. Anything else (insert, send,
+ * modify, delete, watch, an unfamiliar verb) counts as a write: secure by default, a method nobody recognises is not
+ * assumed harmless. Frozen with the V1 finding rules; a better rule is a new version.
+ */
+export const GOOGLE_READ_METHOD = /^(?:get|list|search|query|batchGet|export)(?:[A-Z][A-Za-z0-9]*)?$/;
+export function classifyGoogleApiMethod(method: string): "read" | "write" {
+  const last = method.length > 256 ? "" : (method.split(".").pop() ?? "");
+  return GOOGLE_READ_METHOD.test(last) ? "read" : "write";
 }
 
 // ---------------------------------------------------------------------------

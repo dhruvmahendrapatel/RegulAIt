@@ -131,7 +131,7 @@ test.describe("ADR-0183 2.3: refusals say what to do next, with the link", () =>
       return null;
     });
     await page.goto("/ui/admin/users");
-    await page.getByRole("cell", { name: "Riley Reviewer", exact: true }).click();
+    await page.getByRole("button", { name: "Manage Riley Reviewer" }).click();
     await page.getByRole("button", { name: "Issue API key" }).click();
     const notice = page.getByTestId("refusal-guidance");
     await expect(notice).toContainText("No key was issued: your organization requires two-step verification for this person");

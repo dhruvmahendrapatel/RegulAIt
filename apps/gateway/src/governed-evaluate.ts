@@ -26,7 +26,7 @@ import {
   sql,
 } from "@regulait/db";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
-import { evaluate, matchingApprovalRulesWith, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { evaluate, matchingApprovalRulesWith, withAgentResponse, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 // ADR-0239 slice 2: approval rules are matched on Cedar, here and in the kernel call below, so the gateway's reads of
 // the matched rules (consent scope, quorum) and the kernel's decision come from ONE engine and cannot disagree
 import { cedarApprovalRuleEvaluator } from "@regulait/policy-kernel/approval-rule-cedar";
@@ -1029,9 +1029,14 @@ export async function governedEvaluate(
   // BEFORE any shadow work starts. Everything after this point is measurement.
   // With no consent held it IS `pendingDecision` — the same pure function of
   // the same inputs — so the second call is made only when a row satisfied.
-  const decision = approvedApprovalId
-    ? evaluateWith(servedARules, limitsWithCounts, servedScopeRules, approvedApprovalId)
-    : pendingDecision;
+  // ADR-0354: the served decision carries the governing policy's graduated response (advise, correct,
+  // block_session, disable) when that policy produced it; the effect is never changed by it.
+  const decision = withAgentResponse(
+    approvedApprovalId
+      ? evaluateWith(servedARules, limitsWithCounts, servedScopeRules, approvedApprovalId)
+      : pendingDecision,
+    abacDecision?.response,
+  );
 
   // ---------------------------------------------------------------------
   // ADR-0073 §2 — THE SHADOW PASS.
