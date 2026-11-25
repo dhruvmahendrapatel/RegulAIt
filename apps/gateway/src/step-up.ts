@@ -114,6 +114,7 @@ import {
   orgSettings,
   roleAgentGrants,
   roleConnectorGrants,
+  a2aAgentRoleGrants,
   roleServerGrants,
   roleToolGrants,
   samlProviders,
@@ -691,7 +692,7 @@ export function ownerChangeStepUpArgs(objectType: string, objectId: string, owne
  * which revocation, of which kind, for whom, and (for a scope change) to what.
  */
 export function revocationLiftStepUp(
-  kind: "mcp" | "agent" | "connector",
+  kind: "mcp" | "agent" | "connector" | "a2a",
   revocationId: string,
   userId?: string,
 ): StepUpCheckArgs {
@@ -709,7 +710,7 @@ export function grantMintStepUp(grant: Record<string, unknown>): StepUpCheckArgs
 
 /**
  * ADR-0250 (PR #720 review): assigning a role, or mapping a group to it, confers the role's grants, which widens
- * default deny exactly like minting them. Which of these roles hold any tool, server-read, agent or connector grant;
+ * default deny exactly like minting them. Which of these roles hold any tool, server-read, agent, connector or remote-agent (A2A) grant;
  * a role in the result needs the `grant_mint` step-up to be assigned or mapped. A role that later gains a grant does
  * so through a stepped-up role-grant mint, so a role holding none at the check cannot be used to widen access
  * without one.
@@ -722,6 +723,8 @@ export async function rolesHoldingGrants(db: Db, roleIds: readonly string[]): Pr
     db.selectDistinct({ roleId: roleServerGrants.roleId }).from(roleServerGrants).where(inArray(roleServerGrants.roleId, ids)),
     db.selectDistinct({ roleId: roleAgentGrants.roleId }).from(roleAgentGrants).where(inArray(roleAgentGrants.roleId, ids)),
     db.selectDistinct({ roleId: roleConnectorGrants.roleId }).from(roleConnectorGrants).where(inArray(roleConnectorGrants.roleId, ids)),
+    // ADR-0219 follow-up (PR #810 review): a role's remote-agent (A2A) grants widen default deny the same way
+    db.selectDistinct({ roleId: a2aAgentRoleGrants.roleId }).from(a2aAgentRoleGrants).where(inArray(a2aAgentRoleGrants.roleId, ids)),
   ]);
   return new Set(found.flat().map((r) => r.roleId));
 }

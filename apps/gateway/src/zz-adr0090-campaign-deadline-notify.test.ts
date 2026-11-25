@@ -13,6 +13,8 @@
  *     a reviewer with no active account is a final `no_named_recipient`, audited and never retried; a non-resend
  *     workspace gets exactly one channel notice carrying the campaign total; a campaign first seen past due gets only
  *     the expiry notice.
+ *  6. (ADR-0234 batch 7) under RLS: the registered scheduler job runs under `system_task` on the app role, reads its
+ *     own delivery markers back from the FORCE-RLS audit log, and a second run sends and records nothing.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
@@ -26,12 +28,14 @@ import {
   connectorCredentials,
   connectors,
   createDb,
+  currentRlsScope,
   desc,
   eq,
   grantCertificationCampaigns,
   grantCertificationItems,
   inArray,
   runMigrations,
+  runWithRlsSystem,
   sql,
   users,
   type Db,
@@ -47,6 +51,8 @@ import {
   CAMPAIGN_EXPIRY_NOTICE_WINDOW_HOURS,
   runCampaignDeadlineNotifySweep,
 } from "./grant-certification.js";
+import { SCHEDULER_JOB_NAMES, schedulerJobDefinitions } from "./scheduler-jobs.js";
+import { runSchedulerJob, syncSchedulerJobs, toRegistry, type SchedulerJobDefinition } from "./scheduler.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -456,5 +462,37 @@ describe("ADR-0090 amendment: campaign deadline notices", () => {
     } finally {
       expect((await put({ certificationReminderHours: CAMPAIGN_DEADLINE_REMINDER_HOURS })).statusCode).toBe(200);
     }
+  });
+  it("under RLS: the registered job runs as system_task, sees its own markers, and a second run sends nothing", async () => {
+    const registered = schedulerJobDefinitions().find((d) => d.name === SCHEDULER_JOB_NAMES.certificationDeadlineNotify);
+    expect(registered).toBeDefined();
+    // the registered body, unchanged, with a probe of the scope it runs in and of the marker read it depends on
+    const scopes: unknown[] = [];
+    const def: SchedulerJobDefinition = {
+      ...registered!,
+      run: async (ctx) => {
+        scopes.push(currentRlsScope() ?? null);
+        return registered!.run(ctx);
+      },
+    };
+    await syncSchedulerJobs(db, toRegistry([def]));
+    const rlsCampaign = await makeCampaign(3, [{ reviewer: reviewerA }]);
+    const runJob = () => runSchedulerJob(db, def, { instanceId: `cdn-rls-${RUN}`, trigger: "manual", ignoreDue: true, ignoreEnabled: true });
+    const first = await runJob();
+    expect(first).toMatchObject({ outcome: "ok" });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(rlsCampaign))).toHaveLength(1);
+    expect(await markers(rlsCampaign)).toHaveLength(1);
+    // the marker is visible from inside the job's own scope (audit_log is FORCE RLS; without a reason it reads empty)
+    const second = await runJob();
+    expect(second).toMatchObject({ outcome: "ok" });
+    expect(mailsFor(emails[reviewerA]!).filter((m) => m.html.includes(rlsCampaign))).toHaveLength(1);
+    expect(await markers(rlsCampaign)).toHaveLength(1);
+    // the control: a reason with no ledger read (append only) reads no marker, which is how de-duplication failed
+    expect(await runWithRlsSystem("public_ingest", "test.cdn-rls", () => markers(rlsCampaign))).toHaveLength(0);
+    expect(await runWithRlsSystem("system_task", "test.cdn-rls", () => markers(rlsCampaign))).toHaveLength(1);
+    expect(scopes).toEqual([
+      { kind: "system", reason: "system_task", path: `scheduler.${SCHEDULER_JOB_NAMES.certificationDeadlineNotify}` },
+      { kind: "system", reason: "system_task", path: `scheduler.${SCHEDULER_JOB_NAMES.certificationDeadlineNotify}` },
+    ]);
   });
 });

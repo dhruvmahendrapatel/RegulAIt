@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0357",
+  "lane": "E38",
+  "tracking": "ADR-0357 (lane E38): the brief is API and backend only (master brief 2026-11-17, rule 3); the governance-config export and plan-review screen is requested on #453",
+  "gaps": {
+    "GET /v1/governance-config/schema": "serves the JSON Schema of the governance-config document (for editors and CI)",
+    "GET /v1/governance-config/export": "exports the org's roles, rate limits, MCP bundles, workflow templates and budgets as a versioned YAML or JSON document, never a secret (audited)",
+    "POST /v1/governance-config/plan": "dry-runs a governance-config document: validates, resolves names, diffs against live and marks each change widens/narrows/neutral (audited, writes nothing)",
+    "POST /v1/governance-config/apply": "applies a reviewed governance-config plan all or nothing, bound to its planHash (settings_relax step-up bound to the plan and its widenings, audited)"
+  }
+}
