@@ -62,6 +62,10 @@ import { startGovernedWorkflow } from "./workflows.js";
 import { errMessage } from "./err-serializer.js";
 import { requireStepUp } from "./step-up.js";
 import { whereFrom } from "./state-transition.js";
+import { settingsOf } from "./pm-trigger-settings.js";
+import { syncPmWriteBacks } from "./pm-write-back.js";
+
+export { settingsOf };
 import { SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai-remediation.js";
 
 const SYSTEM_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -105,16 +109,6 @@ const OUTCOME_TEXT: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Settings: the stored row ↔ the validated document
 // ---------------------------------------------------------------------------
-
-/** the stored row as the one validated settings document, or null when it no longer validates (then: ignored) */
-export function settingsOf(row: typeof pmTriggerSettings.$inferSelect): PmTriggerSettings | null {
-  const parsed = pmTriggerSettingsSchema.safeParse({
-    ...(row.config !== null && typeof row.config === "object" ? (row.config as Record<string, unknown>) : {}),
-    enabled: row.enabled,
-    agentId: row.agentId,
-  });
-  return parsed.success ? parsed.data : null;
-}
 
 const putSettingsSchema = pmTriggerSettingsSchema.extend({ projectId: z.string().uuid().nullable().optional() }).strict();
 
@@ -341,6 +335,13 @@ async function handleOne(
     await audit(db, user.id, trigger.id, PM_TRIGGER_RULE_IDS.running, "allow",
       `PM connection '${conn.name}': item ${signal.externalId} started workflow instance ${instanceId}`, { ...detail, instanceId });
   }
+  // ADR-0356 PR 2: tell the item at once (started, the plan sign-off request); the sweep retries anything that fails
+  // (never fails the trigger: the workflow is running and the sweep retries the write-back)
+  await syncPmWriteBacks(db, dataKey, instanceId).catch(async (err: unknown) => {
+    await audit(db, user.id, trigger.id, "pm-write-back-failed", "deny",
+      `PM connection '${conn.name}': the first write-back to item ${signal.externalId} failed; the sweep retries it`,
+      { ...detail, instanceId, error: errMessage(err).slice(0, 300) });
+  });
   return { ...base, state: "running", instanceId };
 }
 
