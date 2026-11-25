@@ -429,6 +429,8 @@ export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly 
     "minIsolationClass",
     // ADR-0045 amendment 2026-11-14
     "mrmRequired",
+    // ADR-0347
+    "memoryTtlHours",
   ],
 };
 
@@ -513,6 +515,7 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullish(),
     minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullish(),
     mrmRequired: z.boolean().nullish(),
+    memoryTtlHours: z.number().int().min(1).max(8760).nullish(),
   }),
 };
 

@@ -9,12 +9,15 @@ bin="${1:?bin dir}"; out="${2:?out dir}"; version="${3:?version}"
 case "$version" in *[!0-9A-Za-z.+-]*) echo "bad version: $version" >&2; exit 2 ;; esac
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
-install -d "$root/Library/Application Support/RegulAIt/Agent/bin" "$root/Library/LaunchAgents"
+install -d "$root/Library/Application Support/RegulAIt/Agent/bin" "$root/Library/LaunchAgents" "$root/Library/LaunchDaemons"
 lipo -create -output "$root/Library/Application Support/RegulAIt/Agent/bin/regulait-agent" \
   "$bin/regulait-agent-darwin-arm64" "$bin/regulait-agent-darwin-amd64"
 chmod 0755 "$root/Library/Application Support/RegulAIt/Agent/bin/regulait-agent"
 install -m 0644 "$here/com.regulait.agent.plist" "$root/Library/LaunchAgents/com.regulait.agent.plist"
 plutil -lint "$root/Library/LaunchAgents/com.regulait.agent.plist"
+# ADR-0360 §4: the root self-update check (installs nothing unless the gateway signs a directive for this device)
+install -m 0644 "$here/com.regulait.agent.update.plist" "$root/Library/LaunchDaemons/com.regulait.agent.update.plist"
+plutil -lint "$root/Library/LaunchDaemons/com.regulait.agent.update.plist"
 chmod 0755 "$here/scripts/postinstall"
 mkdir -p "$out"
 pkgbuild --root "$root" --scripts "$here/scripts" --identifier com.regulait.agent --version "$version" \

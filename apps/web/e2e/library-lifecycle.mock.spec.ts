@@ -95,8 +95,8 @@ test("g9 red-team retire version", async ({ page }) => {
   await page.goto("/ui/admin/redteam");
   // the libraries sit behind their own tab on the red-teaming page
   await page.getByRole("tab", { name: "Libraries (3)" }).click();
-  await expect(page.getByRole("link", { name: /^Support jailbreak set v2/ })).toBeVisible({ timeout: 30_000 });
-  await page.getByRole("link", { name: /^Support jailbreak set v2/ }).click();
+  await expect(page.getByRole("button", { name: /^Support jailbreak set v2/ })).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: /^Support jailbreak set v2/ }).click();
   const retire = page.getByRole("button", { name: "Retire version" });
   await expect(retire).toBeVisible();
   await page.getByText("Attack libraries").evaluate((el) => el.scrollIntoView({ block: "start" }));

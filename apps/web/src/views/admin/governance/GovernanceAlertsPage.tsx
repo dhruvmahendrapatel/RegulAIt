@@ -102,7 +102,8 @@ const FILTERS = [
 const ALERT_COLUMNS: Array<DataColumn<GovernanceAlert>> = [
   { key: "severity", header: "Severity", main: true, sortable: true, required: "Severity is always shown", render: (alert) => <SeverityBadge severity={alert.severity} /> },
   { key: "status", header: "Status", main: true, sortable: true, required: "Status is always shown", render: (alert) => humanize(alert.status) },
-  { key: "title", header: "Alert", main: true, sortable: true, render: (alert) => <strong>{alert.title}</strong> },
+  // UIS-04: the row's button sits on the alert's title, not its severity badge
+  { key: "title", header: "Alert", main: true, sortable: true, primary: true, render: (alert) => <strong>{alert.title}</strong> },
   { key: "rule", header: "Rule", main: true, sortable: true, render: (alert) => alert.ruleLabel },
   { key: "lastSeen", header: "Last seen", main: true, sortable: true, render: (alert) => ago(alert.lastDetectedAt) },
   {
@@ -158,7 +159,8 @@ export default function GovernanceAlertsPage() {
     setSelectedId(null);
     const active = document.activeElement;
     if (active && active !== document.body && active.isConnected) return;
-    const rows = list.current?.querySelectorAll<HTMLElement>("tbody tr");
+    // each row's one control, its button (UIS-04): the <tr> itself is not focusable
+    const rows = list.current?.querySelectorAll<HTMLElement>("tbody tr [data-row-control]");
     const at = Math.min(ackedAt.current, (rows?.length ?? 0) - 1);
     // M2: a row in a folded section cannot take focus, so the section's fold button, then the heading, follow it
     focusFirst(rows?.[at], foldButtonOf(list.current), document.querySelector<HTMLElement>("h1"));

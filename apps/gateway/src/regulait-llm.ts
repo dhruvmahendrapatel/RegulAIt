@@ -155,6 +155,7 @@ import {
 } from "./compiled-egress.js";
 import { ensureLineageEdge, ensureLineageNode } from "./lineage.js";
 import { errMessage } from "./err-serializer.js";
+import { governedProcessingLimit } from "./governed-core.js";
 
 /** the audit actor when the caller is the identity-less bootstrap token — the
  * same sentinel every other admin surface in this gateway uses */
@@ -1328,6 +1329,12 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     }));
 
     const scan = await scanAndDecide(db, rows, body.piiMode, body.projectId ?? null);
+    // ADR-0224 addendum: the records-of-processing limit on the corpus (`corpusProcessingRefusal`, the one check every
+    // corpus write and send goes through), after the scan's PII floor and before anything is stored
+    if (scan.verdict !== "blocked") {
+      const refused = await corpusProcessingRefusal(req, { datasetId: null, datasetName: body.name, phase: "ingest" }, body.projectId ?? null, rows);
+      if (refused) return reply.status(refused.status).send({ error: refused.error, detail: refused.detail });
+    }
     if (scan.verdict === "blocked") {
       await audit(db, {
         userId: actor(req),
@@ -1444,6 +1451,11 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     // THE SCAN RUNS ON THE ADDED ROWS TOO. A dataset that passed at ingest must
     // not become a laundering route for a second upload.
     const scan = await scanAndDecide(db, added, dataset.piiMode, dataset.projectId);
+    // ADR-0224 addendum: the same limit on appended rows, so a second upload is no way around it
+    if (scan.verdict !== "blocked") {
+      const refused = await corpusProcessingRefusal(req, { datasetId: dataset.id, datasetName: dataset.name, phase: "append" }, dataset.projectId, added);
+      if (refused) return reply.status(refused.status).send({ error: refused.error, detail: refused.detail });
+    }
     if (scan.verdict === "blocked") {
       await audit(db, {
         userId: actor(req),
@@ -1495,6 +1507,11 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     if (scan.verdict === "blocked") {
       return reply.status(422).send({ error: "training_data_refused", detail: scan.summary, findings: scan.findings });
     }
+    // ADR-0224 addendum (review S4 [1]): a new version is a new corpus. Its rows, supplied or copied from the current
+    // version, pass the same limit before anything is stored, so neither a supplied body nor a re-mint of a corpus
+    // stored while the limit was off is a way around it.
+    const versionRefused = await corpusProcessingRefusal(req, { datasetId: dataset.id, datasetName: dataset.name, phase: "version" }, dataset.projectId, rows);
+    if (versionRefused) return reply.status(versionRefused.status).send({ error: versionRefused.error, detail: versionRefused.detail });
 
     const [maxRow] = await db
       .select({ max: sql<number>`coalesce(max(${trainingDatasets.version}), 0)::int` })
@@ -1688,6 +1705,10 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
 
     // VALIDATION, before anything is written.
     const rows = await loadRows(db, dataset.id, dataset.version);
+    // ADR-0224 addendum: the corpus leaves for a trainer here, so the limit runs on it once more, under the job's
+    // project. This also covers a corpus stored before the limit was turned on.
+    const trainRefused = await corpusProcessingRefusal(req, { datasetId: dataset.id, datasetName: dataset.name, phase: "train" }, body.projectId ?? dataset.projectId, rows);
+    if (trainRefused) return reply.status(trainRefused.status).send({ error: trainRefused.error, detail: trainRefused.detail });
     const hp = validateHyperparameters(body.method, body.hyperparameters);
     if (!hp.ok) {
       return reply.status(422).send({ error: "hyperparameters_invalid", detail: hp.errors.join("; ") });
@@ -2167,6 +2188,26 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
 
   /** the SCAN + the composed mode + the verdict, in one place so ingest,
    * append and version-mint cannot disagree */
+  /**
+   * ADR-0224 addendum: THE records-of-processing check for a training corpus. Every path that writes corpus rows
+   * (ingest, append, a new version) or sends a corpus to a trainer (a job) calls this, so the limit has one
+   * enforcement point in this module, through the governed core's `governedProcessingLimit`. Null to proceed, or an
+   * already-audited 409 refusal.
+   */
+  async function corpusProcessingRefusal(
+    req: { authCtx: { userId?: string | null } },
+    target: { datasetId: string | null; datasetName: string; phase: "ingest" | "append" | "version" | "train" },
+    projectId: string | null,
+    rows: ReadonlyArray<TrainingRow>,
+  ) {
+    return governedProcessingLimit(db, {
+      userId: actor(req) ?? NO_IDENTITY,
+      target: { type: "training_dataset", ...target },
+      projectId,
+      input: JSON.stringify(rows.map((r) => ({ input: r.input, output: r.output ?? null }))),
+    });
+  }
+
   async function scanAndDecide(
     database: Db,
     rows: TrainingRow[],

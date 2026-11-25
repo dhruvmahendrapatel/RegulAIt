@@ -61,6 +61,8 @@ type Result struct {
 	Rotated  bool
 	// Directives is the add-on removal sync (ADR-0331); nil when it did not run.
 	Directives *DirectiveRun
+	// Update is the self-update spool sync (ADR-0360 §4); its Offer is not_configured unless both keyrings are pinned.
+	Update *UpdateRun
 }
 
 func clampInterval(seconds int) time.Duration {
@@ -126,7 +128,9 @@ func (c *Cycle) client(ctx context.Context, cfg *Config, s *State) (*auth.Client
 
 // RunOnce registers if needed, fetches and verifies the collection pack, collects, and uploads one signed report;
 // then it uploads the hook decisions spooled on the device and this cycle's managed-file report (ADR-0310 addendum).
-// The two uploads are independent: a failed report still lets the decisions go, and the report's error is returned.
+// The report, the decision upload and the self-update sync (ADR-0360 §4) are independent: a failed report (the config
+// route refused, the pack untrusted, the upload lost) still lets the decisions go and the update offer and result
+// through, and the report's error is returned with a Result that carries only Update.
 func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	c.defaults()
 	s, err := Register(ctx, c.Options)
@@ -145,9 +149,13 @@ func (c *Cycle) RunOnce(ctx context.Context) (*Result, error) {
 	if _, err := c.uploadDecisions(ctx, cl); err != nil {
 		c.Log.Warn("decision upload failed; the next run resends it", "err", err)
 	}
+	// ADR-0360 §4: carry the update offer into the spool and the root updater's result back; it never fails the cycle,
+	// and it never waits on the report (the config route can refuse while an update is offered)
+	upd := c.syncUpdate(ctx, cl, cfg)
 	if repErr != nil {
-		return nil, repErr
+		return &Result{Update: upd}, repErr
 	}
+	out.Update = upd
 	if cl.RotateDue(c.Now()) {
 		if err := c.rotate(ctx, cfg, cl, store, s); err != nil {
 			c.Log.Warn("key rotation failed; the next run retries", "err", err)
@@ -199,6 +207,7 @@ func (c *Cycle) report(ctx context.Context, cl *auth.Client, cfg *Config, s *Sta
 	if err != nil {
 		return nil, err
 	}
+	env.Fingerprint = cfg.CredentialReuse
 	facts, gaps := collect.Collect(env, verified.Collection, disabled)
 	if facts == nil {
 		facts = []contract.Fact{}

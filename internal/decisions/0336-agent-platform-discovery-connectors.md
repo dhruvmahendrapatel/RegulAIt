@@ -283,9 +283,9 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
 ## Slice 4 as built
 
 - **Finding path:** the existing discovery observation path, with no new table, matcher or ADR.
-  - **Evidence kind:** the new `agent_config` (`DISCOVERY_EVIDENCE_KINDS`). The OpenAI and n8n kinds declare
-    `evidenceKinds: ["agent_config"]` and `subjectKinds: ["system"]`. Copilot Studio, Agentforce and the #855 registry
-    kinds declare none until they scan (#1130 R9 [3]).
+  - **Evidence kind:** the new `agent_config` (`DISCOVERY_EVIDENCE_KINDS`). The four E17 kinds declare
+    `evidenceKinds: ["agent_config"]` and `subjectKinds: ["system"]` (OpenAI and n8n in slice 4, Copilot Studio and
+    Agentforce once slice 5 made them scan); the #855 registry kinds declare none.
   - **Observation:** `{ evidenceKind: "agent_config", subjectKind: "system", subject: <staged record external id>,
     location: { path: <field path> }, secretRule: <vendored rule id> }` and nothing else.
   - **Worker checks** (`checkConfigSecret`):
@@ -314,9 +314,22 @@ reply, 2026-08), so a GPT's connected apps are what its configured actions name,
   - **n8n:** every string parameter of every node of an agent workflow (a system message, an HTTP tool's header value,
     a code node's source), at most 2,000 per workflow and 8 deep. The path is built from node ids and parameter keys
     only; a segment that is not a plain identifier becomes its position.
-  - **Copilot Studio and Agentforce:** not scanned in this slice. Their adapters select no content column (decision
-    4), so scanning would widen what is fetched from the vendor (`botcomponents.data`; planner and topic
-    `Description`). That widening is left as an owner question rather than done silently.
+  - **Copilot Studio and Agentforce:** added in slice 5 (owner, 2026-11-21: yes to widening their reads for this
+    scan, in memory only). See "Slice 5 as built".
+
+## Slice 5 as built
+
+- **Copilot Studio:** a separate listing, `COPILOT_STUDIO_SCANNED`: `botcomponents` with `botcomponentid`,
+  `componenttype`, `_parentbotid_value` and `data`, filtered to topics (type 9) and generative instructions (type 15),
+  20 per page. Each component's YAML is scanned in memory and dropped; path `bots/<bot id>/components/<id>/data`.
+  The kept columns (`COPILOT_STUDIO_SELECTS`) still exclude `data`. The path is one already on the allow-list.
+- **Agentforce:** three queries of their own, `AGENTFORCE_SCAN_QUERIES` (pinned): planner `Description` (Tooling),
+  topic `Description` and `Scope`, action `Description`. Each row is attributed to its agent through the planner, or
+  the topic's planner, as the component read does; rows of an unlinked planner are not scanned. Paths
+  `planners/<id>/Description`, `topics/<id>/Scope`, `actions/<id>/Description`. The kept queries
+  (`AGENTFORCE_QUERIES`) still select no free-text column. A scan query that fails is a read outcome, not a failed run.
+- Topic instructions in their own object (`GenAiPluginInstructionDef`) are not read: Salesforce does not document it
+  as queryable, so it is left until it is.
 
 ## Open-source check (ADR-0176)
 

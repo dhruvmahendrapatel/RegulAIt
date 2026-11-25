@@ -8,9 +8,12 @@ import { fileURLToPath } from "node:url";
 import { and, auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { evaluate as kernelEvaluate, type EvaluationInput } from "@regulait/policy-kernel";
 import { cedarRateLimitEvaluator } from "@regulait/policy-kernel/rate-limit-cedar";
+import { cedarApprovalRuleEvaluator } from "@regulait/policy-kernel/approval-rule-cedar";
 
 /** ADR-0239 decision 4: rate limits need the engine the gateway injects (the hand-written default is gone) */
-const evaluate = (input: EvaluationInput) => kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, ...input });
+// ADR-0239 P8a: approval rules need an engine too (the hand-written default is gone); the one the gateway injects
+const evaluate = (input: EvaluationInput) =>
+  kernelEvaluate({ rateLimitEvaluator: cedarRateLimitEvaluator, approvalRuleEvaluator: cedarApprovalRuleEvaluator, ...input });
 import { buildApp } from "./app.js";
 import { deriveDeployContext, governedEvaluate } from "./governed-evaluate.js";
 import { effectiveModeOverrides, runAuditPruneOnce, retentionFloor } from "./org-settings.js";

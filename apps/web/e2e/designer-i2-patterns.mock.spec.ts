@@ -331,6 +331,7 @@ test.describe("I-2: Enforcement posture tabs name what is unresolved inside them
     isolationFloorRegulated: "microvm",
     isolationFloorMcpStdio: "user_space_kernel",
     isolationFloorEngineWorker: "user_space_kernel",
+    isolationFloorRobotBrowser: "user_space_kernel",
     executorAttestationMaxAgeMinutes: 120,
   };
   // every BOM setting at its strict default

@@ -111,12 +111,13 @@ export const MACHINE_ONLY = new Map([
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["POST /v1/third-party-ingest/defenseclaw/records", "third-party exporter channel: a customer's DefenseClaw HTTP JSONL exporter posts here with its source's write-only rgti_ token, never a person (ADR-0261)"],
   ["POST /v1/third-party-ingest/defenseclaw/otlp/v1/logs", "third-party exporter channel: a customer's DefenseClaw OTLP/HTTP logs exporter (protobuf or JSON) posts here with its source's write-only rgti_ token, never a person (ADR-0302)"],
-  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b; ADR-0331 added its signed removal directives and their outcomes; the ADR-0310 addendum its decision batches)", matches: 8 }],
+  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b; ADR-0331 added its signed removal directives and their outcomes; the ADR-0310 addendum its decision batches; ADR-0360 slice 1c its signed update offer, the offer's binary and the root updater's result)", matches: 11 }],
   ["* /v1/browser-extension/*", { reason: "browser extension channel: the managed extension's registration (bulk enrolment token) and its device-proof routes (policy, breach events, prompt capture) reach these, never a person (ADR-0334)", matches: 4 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
+  ["POST /v1/edr-webhooks/:connectionId", "inbound callback: EDR vendor webhooks (Falcon HMAC, SentinelOne shared token), verified in route with a replay table (ADR-0360)"],
   ["POST /v1/model-drift/ingest/:monitorId/reports", "pipeline push: a drift monitor's write-only ingestion credential, authenticated in route (ADR-0223 amendment 1)"],
   ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
   ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
@@ -135,6 +136,8 @@ export const MACHINE_ONLY = new Map([
  */
 export const SUPERSEDED = new Map([
   ["GET /v1/reports/definitions", { replacement: "GET /v1/reports/overview", reason: "the overview carries every definition (unpaged, all rows) with its schedules and run count" }],
+  // CXR-REV-002 (ADR-0047 addendum 2026-11-22): DELETE is kept for older clients and archives, the same act
+  ["DELETE /v1/reports/definitions/:id", { replacement: "POST /v1/reports/definitions/:id/archive", reason: "a report definition is archived, never deleted; DELETE is kept so an older client archives too" }],
   ["GET /v1/reports/schedules", { replacement: "GET /v1/reports/overview", reason: "the overview nests every definition's schedules (unpaged, all rows)" }],
   ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries every policy (unpaged, all rows)" }],
   ["GET /v1/scim/tokens", { replacement: "GET /v1/scim/status", reason: "the SCIM status carries the token list" }],
@@ -199,6 +202,7 @@ export const INDIRECT_UI_CALLS = new Map([
     // P2 batch C: the workflows, engines, cost and operations lists
     ["GET /v1/admission/skills/export.xlsx", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements/export.xlsx", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
+    ["GET /v1/risks/export.xlsx", "apps/web/src/views/admin/governance/RisksPage.tsx"],
     ["GET /v1/builder/threads/export.xlsx", "apps/web/src/views/builder/BuilderInboxPage.tsx"],
     ["GET /v1/compliance/pack-reports/export.xlsx", "apps/web/src/views/admin/compliance/PackRecords.tsx"],
     ["GET /v1/cost-events/export.xlsx", "apps/web/src/views/admin/cost/OptimizationPage.tsx"],
@@ -307,6 +311,8 @@ export const INDIRECT_UI_CALLS = new Map([
     // ADR-0226 P2 batch C: a list the shared control reads, page by page, from the endpoint its page hands it
     ["GET /v1/admission/skills", "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx"],
     ["GET /v1/billing/statements", "apps/web/src/views/admin/cost/BillingHistory.tsx"],
+    // CXR-REV-003: the risk register
+    ["GET /v1/risks", "apps/web/src/views/admin/governance/RisksPage.tsx"],
     ["GET /v1/compliance/pack-reports", "apps/web/src/views/admin/compliance/PackRecords.tsx"],
     ["GET /v1/engine-schedules", "apps/web/src/views/admin/integrations/EngineSchedulesCard.tsx"],
     ["GET /v1/executors/:executorId/attestations", "apps/web/src/views/admin/integrations/isolation/ExecutorDetail.tsx"],

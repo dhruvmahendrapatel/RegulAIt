@@ -21,6 +21,11 @@
  * tests); `Description`, `Scope`, `AgentGraph`, `ProgressIndicatorMessage`, `Metadata` and `FullName` are never
  * selected. The run-as user is staged only as a pseudonym.
  *
+ * Plaintext credentials (decision 4, slice 5): the planner, topic and action `Description` and the topic `Scope` are
+ * read by separate pinned queries (`AGENTFORCE_SCAN_QUERIES`), passed in memory through the vendored secret matcher
+ * and dropped; a hit is reported as `agent_config` evidence by its path (`planners/<id>/Description`, …) and rule id
+ * only. The kept queries (`AGENTFORCE_QUERIES`) still select no free-text column.
+ *
  * Every call goes through `allowListedFetch` (AGENTFORCE_ENDPOINTS: the token POST, and GET on the REST and Tooling
  * `query` paths, nothing else) on top of the guarded fetch. Paging takes the query locator from `nextRecordsUrl` and
  * builds the next URL itself on the same path; a `nextRecordsUrl` is never fetched as given.
@@ -34,16 +39,15 @@
 import type { AgentRegistry, DiscoveryReadOutcome } from "@regulait/shared";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { REGISTRY_COMPONENTS_PER_RECORD_MAX } from "./agent-registry-records.js";
-import { attrs, finishRegistry, fullyRead } from "./agent-registry-scanners.js";
+import { ConfigSecretCollector, attrs, finishRegistry, fullyRead, type ConfigField } from "./agent-registry-scanners.js";
 import { dedupedSecretSink, scannerFetch } from "./discovery-cloud-scanners.js";
 import { ITEM_CAP, ReadFailure, WIDER_MAX_ITEMS, WiderSourceConfigError, atPath, getJson, readListing, str } from "./discovery-wider-scanners.js";
 import { salesforceJwtToken, type SalesforceEnvironment } from "./salesforce-jwt.js";
+import { SALESFORCE_PERMISSIONS_QUERY, salesforceMyDomain, salesforceMyDomainProblem, salesforceWritePermissions } from "./salesforce-org.js";
 import type { RegistryAgentComponent, RegistryAgentRecord, ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
 
 const KIND = "agent_registry_agentforce";
 export const AGENTFORCE_DEFAULT_API_VERSION = "67.0";
-const PRODUCTION_HOST = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?\.my\.salesforce\.com$/;
-const SANDBOX_HOST = /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?--[a-z0-9]{1,40}\.sandbox\.my\.salesforce\.com$/;
 const API_VERSION = /^(?:6[5-9]|[7-9][0-9])\.0$/;
 /** a Salesforce record id: 15 characters (case-sensitive) or 18 (with the case-safe suffix) */
 const SF_ID = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
@@ -58,43 +62,28 @@ export const AGENTFORCE_ENDPOINTS: readonly EndpointRule[] = Object.freeze([
   { method: "GET", path: /^\/services\/data\/v[0-9]{2}\.0\/tooling\/query\/[A-Za-z0-9]{15,18}-[0-9]{1,7}$/ },
 ]);
 
-/**
- * A system permission on the integration user's session that writes, or lets the user grant itself more: any one of
- * these refuses the credential. Deactivating an agent (a write E19 may add with its own credential) needs one of the
- * first group; the second group are the escalation and user-management permissions (#1111 R4 [1]).
- */
-export const WRITE_SYSTEM_PERMISSIONS = Object.freeze([
-  "PermissionsModifyAllData",
-  "PermissionsModifyMetadata",
-  "PermissionsCustomizeApplication",
-  "PermissionsAuthorApex",
-  "PermissionsManageUsers",
-  "PermissionsAssignPermissionSets",
-  "PermissionsManageProfilesPermissionsets",
-  "PermissionsManageInternalUsers",
-  "PermissionsManageRoles",
-  "PermissionsManageSharing",
-  "PermissionsResetPasswords",
-] as const);
-
-/**
- * Object-level write on any object, across every permission set assigned to the user (#1111 S4 [1]): one row is
- * enough to refuse. The user id is validated (a 15- or 18-character Salesforce id) before it is placed in the query.
- */
-export function objectWriteQuery(userId: string): string {
-  if (!SF_ID.test(userId)) throw new WiderSourceConfigError(`${KIND}: the session's user id is not a Salesforce id`);
-  return `SELECT Id, SobjectType FROM ObjectPermissions WHERE (PermissionsCreate = true OR PermissionsEdit = true OR PermissionsDelete = true OR PermissionsModifyAllRecords = true) AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}') LIMIT 5`;
-}
+// the integration user's read-only check is shared with the ADR-0337 entitlement reader (#890 R4 [1])
+export { WRITE_SYSTEM_PERMISSIONS, objectWriteQuery } from "./salesforce-org.js";
 
 /** the exact SOQL issued (decision 4: pinned in tests); no free-text column is ever selected */
 export const AGENTFORCE_QUERIES = Object.freeze({
-  permissions: `SELECT ${WRITE_SYSTEM_PERMISSIONS.join(", ")} FROM UserPermissionAccess`,
+  permissions: SALESFORCE_PERMISSIONS_QUERY,
   bots: "SELECT Id, DeveloperName, MasterLabel, Type, AgentType, BotUserId FROM BotDefinition",
   versions: "SELECT Id, BotDefinitionId, VersionNumber, Status FROM BotVersion",
   /** Tooling: LinkedBotVersionId is documented on the Tooling object only */
   planners: "SELECT Id, DeveloperName, MasterLabel, PlannerType, LinkedBotVersionId FROM GenAiPlannerDefinition",
   topics: "SELECT Id, DeveloperName, MasterLabel, PlannerId FROM GenAiPluginDefinition",
   actions: "SELECT Id, DeveloperName, MasterLabel, PlannerId, PluginId, InvocationTargetType FROM GenAiFunctionDefinition",
+} as const);
+
+/**
+ * Slice 5: the free-text columns scanned in memory for plaintext credentials and then dropped, in queries of their own
+ * so the kept queries above stay free of text. Planners are read through Tooling, as above.
+ */
+export const AGENTFORCE_SCAN_QUERIES = Object.freeze({
+  planners: "SELECT Id, Description FROM GenAiPlannerDefinition",
+  topics: "SELECT Id, PlannerId, Description, Scope FROM GenAiPluginDefinition",
+  actions: "SELECT Id, PlannerId, PluginId, Description FROM GenAiFunctionDefinition",
 } as const);
 
 export interface AgentforceTarget {
@@ -104,23 +93,17 @@ export interface AgentforceTarget {
 }
 
 export function agentforceTarget(target: Readonly<Record<string, string>>): AgentforceTarget | null {
-  const origin = (target.myDomain ?? "").trim().toLowerCase().replace(/\/+$/, "");
-  const environment = target.environment;
+  const domain = salesforceMyDomain(target);
   const apiVersion = target.apiVersion ?? AGENTFORCE_DEFAULT_API_VERSION;
-  if (environment !== "production" && environment !== "sandbox") return null;
-  if (!(environment === "production" ? PRODUCTION_HOST : SANDBOX_HOST).test(origin)) return null;
-  if (!API_VERSION.test(apiVersion)) return null;
-  return { origin, environment, apiVersion };
+  if (!domain || !API_VERSION.test(apiVersion)) return null;
+  return { ...domain, apiVersion };
 }
 
 export function agentforceTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (target.environment !== "production" && target.environment !== "sandbox") return "'environment' must be production or sandbox";
   if (target.apiVersion !== undefined && !API_VERSION.test(target.apiVersion)) return "'apiVersion' must be a Salesforce API version from 65.0, such as 67.0";
-  if (!agentforceTarget(target)) {
-    return target.environment === "production"
-      ? "'myDomain' must be the org's My Domain URL, https://<name>.my.salesforce.com"
-      : "'myDomain' must be the sandbox's My Domain URL, https://<name>--<sandbox>.sandbox.my.salesforce.com";
-  }
+  const domain = salesforceMyDomainProblem(target);
+  if (domain) return domain;
   if (!scope.orgLevel && (scope.include.length === 0 || scope.include.some((x) => !SF_ID.test(x.trim())))) return "the scope names agent (BotDefinition) ids of 15 or 18 characters";
   return null;
 }
@@ -181,17 +164,7 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   // 1. what the integration user may do: any write permission, system or object, refuses it (decision 5)
   const PERMISSIONS = `credential permissions in ${host}`;
   try {
-    const body = await get(queryUrl(AGENTFORCE_QUERIES.permissions));
-    const rows = atPath(body, "records");
-    if (!Array.isArray(rows) || rows.length !== 1) throw new ReadFailure("error", "the permission check returned no single row");
-    const unknown = WRITE_SYSTEM_PERMISSIONS.filter((p) => typeof atPath(rows[0], p) !== "boolean");
-    if (unknown.length) throw new ReadFailure("error", `the permission check did not report ${unknown.join(", ")}`);
-    const held: string[] = WRITE_SYSTEM_PERMISSIONS.filter((p) => atPath(rows[0], p) === true);
-    if (!held.length) {
-      const objects = atPath(await get(queryUrl(objectWriteQuery(session.userId))), "records");
-      if (!Array.isArray(objects)) throw new ReadFailure("error", "the object permission check was not readable");
-      for (const o of objects) held.push(`write on ${str(atPath(o, "SobjectType"), 80) ?? "an object"}`);
-    }
+    const held = await salesforceWritePermissions(get, queryUrl, session.userId, KIND);
     if (held.length) {
       outcomes.push({ read: PERMISSIONS, status: "denied", detail: `the integration user holds write permissions: ${held.join(", ").slice(0, 400)}` });
       return { observations: [], credentialWriteScope: "write", readOutcomes: outcomes };
@@ -300,6 +273,28 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   });
 
   const componentsComplete = versionsComplete && plannersComplete && topicsComplete && actionsComplete;
+
+  // 7. slice 5: the free text, scanned in memory for plaintext credentials and dropped (never kept)
+  const secrets = new ConfigSecretCollector();
+  const text = (row: unknown, field: string): unknown => (row && typeof row === "object" && Object.hasOwn(row, field) ? (row as Record<string, unknown>)[field] : undefined);
+  const scanRow = (bot: Bot | undefined, kind: string, id: string | null, fields: readonly string[], row: unknown) => {
+    if (!bot || !id || !SF_ID.test(id)) return;
+    const list: ConfigField[] = fields.map((f) => ({ path: `${kind}/${id}/${f}`, text: text(row, f) }));
+    secrets.scan(bot.rec.externalId, list);
+  };
+  await listing(`agent planner text in ${host}`, AGENTFORCE_SCAN_QUERIES.planners, true, (p) => {
+    const id = str(atPath(p, "Id"), 18);
+    scanRow(botOfPlanner.get(id15(id ?? "")), "planners", id, ["Description"], p);
+  });
+  await listing(`agent topic text in ${host}`, AGENTFORCE_SCAN_QUERIES.topics, false, (tp) => {
+    scanRow(botOfPlanner.get(id15(str(atPath(tp, "PlannerId"), 18) ?? "")), "topics", str(atPath(tp, "Id"), 18), ["Description", "Scope"], tp);
+  });
+  await listing(`agent action text in ${host}`, AGENTFORCE_SCAN_QUERIES.actions, false, (a) => {
+    const planner = id15(str(atPath(a, "PlannerId"), 18) ?? "") || plannerOfTopic.get(id15(str(atPath(a, "PluginId"), 18) ?? "")) || "";
+    scanRow(botOfPlanner.get(planner), "actions", str(atPath(a, "Id"), 18), ["Description"], a);
+  });
+  const capped = secrets.outcome(`plaintext credentials in agent configurations in ${host}`);
+  if (capped) outcomes.push(capped);
   const records: RegistryAgentRecord[] = [];
   let unlinked = 0;
   let overCap = 0;
@@ -318,7 +313,7 @@ async function runAgentforce(ctx: ScanContext): Promise<ScanResult> {
   if (overCap > 0) outcomes.push({ read: `agent components in ${host}`, status: "read", detail: `${overCap} agent(s) use more than ${REGISTRY_COMPONENTS_PER_RECORD_MAX} actions: their components were not staged, so the stored set is kept` });
   const registries: AgentRegistry[] = botsComplete ? ["agentforce"] : [];
   // read_only: no write system permission on the session, and no object-level write on any assigned permission set
-  return finishRegistry(records, outcomes, registries, "read_only");
+  return finishRegistry(records, outcomes, registries, "read_only", secrets.observations);
 }
 
 export const AGENTFORCE_SCANNER: Scanner = Object.freeze({
