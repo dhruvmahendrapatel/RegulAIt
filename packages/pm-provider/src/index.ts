@@ -1398,6 +1398,8 @@ export {
   matchTrigger,
   pmTriggerSettingsSchema,
   pmTriggerSourcesOf,
+  pmWriteBackSettingsSchema,
+  PM_WRITE_BACK_KINDS,
   PM_TRIGGER_OPEN_STATES,
   PM_TRIGGER_STATES,
   PM_TRIGGER_TRANSITIONS,
@@ -1407,6 +1409,8 @@ export {
   type PmTriggerSettings,
   type PmTriggerSignal,
   type PmTriggerState,
+  type PmWriteBackKind,
+  type PmWriteBackSettings,
 } from "./triggers.js";
 
 // ---------------------------------------------------------------------------

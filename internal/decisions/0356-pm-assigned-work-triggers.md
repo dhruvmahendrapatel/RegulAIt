@@ -5,7 +5,7 @@
 - **Index**: **A customer assigns work to RegulAIt from inside Jira or Azure Boards. Assigning an item to the RegulAIt agent user, @mentioning it, or a Jira Automation / Azure DevOps service-hook rule starts a pillar-2 workflow (Intake, then forced Plan, through the normal template assignment) as the person who triggered it, after the existing signed and replay-protected PM webhook verifies the delivery, an admin-managed identity link maps the person to a RegulAIt user, and that user's own agent entitlement allows it. A denied trigger gets a comment on the item saying why. Plan sign-off requests, decisions, approvals, PR links and the final outcome are written back as comments, status changes or linked records, each once (idempotent) and audited, with a configurable field mapping. Atlassian Rovo-agent and MCP audit events are ingested read-only as evidence.** Off by default per connection.
 - **Backlog item**: `MARKET_ANALYSIS_2026-11` G4 (owner decision 2026-11-17, competitor gap audit)
 - **Built in**: lane E37, three PRs (1: this ADR and the trigger path; 2: write-back; 3: Rovo and MCP audit-event ingest)
-- **Migration**: `pending/pm_work_triggers.sql` (PR 1), numbered at merge (ADR-0252)
+- **Migration**: `pending/pm_work_triggers.sql` (PR 1), `pending/pm_write_backs.sql` (PR 2), numbered at merge (ADR-0252)
 - **Related**: [ADR-0010](0010-pm-inbound-sync-webhooks-plus-read-through.md) (inbound webhooks, S-03 replay amendment),
   [ADR-0054](0054-onboarding-migration.md) (onboarding), [ADR-0289](0289-pm-work-item-importer.md) (work-item importer, #828),
   [ADR-0061](0061-chatops-approvals.md) (the identity-link pattern reused here), ADR-0018/0019 (template assignment),
@@ -116,6 +116,20 @@ as comments, status changes or linked records, through the adapter's `addComment
 before the call and released on failure, and an audit row. What is written where is the connection's existing
 `PmMapping` extended with a `writeBack` section (configurable field mapping, validated by schema). The trigger moves to
 `written_back` when the final outcome is written.
+
+**As built (PR 2).** One reconcile, `syncPmWriteBacks(instanceId)` (`apps/gateway/src/pm-write-back.ts`), derives what
+to write from the instance's stored state rather than from events: `started`, one `signoff_request` per stage and
+round with a pending approval, one `approval` per decided approval (approved, denied, returned; an approved one uses
+the connection's `PmMapping.approval` stage map, as the ADR-0010 sign-off mirror does), one `pr_link` per recorded
+pull-request url, and one `outcome` at a terminal status, after which the trigger moves `running → written_back`. It
+runs right after the trigger's start, from the workflow routes' transition hook and both approval decide paths, and
+from the `pm-write-back-sweep` scheduler job (every 5 minutes), which catches transitions no route reports (an
+executor's) and retries failures. The ledger is `pm_write_backs` (migration `pending/pm_write_backs.sql`): unique
+(trigger, kind, source), inserted before the call and deleted when it fails. The ADR-0010 sign-off mirror skips an
+instance a trigger started, so the item is told once. Decision records keep their existing §4 mirror (a linked
+Decision work item, or a tagged comment), which already writes once per decision record and is audited. The
+`writeBack` section of the trigger settings is the configurable mapping: per kind a comment (on by default) and an
+optional state or, for the pull request, a field; no item state is moved unless an admin names one.
 
 ### 3. Rovo-agent and MCP audit events (PR 3)
 

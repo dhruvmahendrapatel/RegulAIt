@@ -1617,6 +1617,7 @@ export const auditLog = pgTable(
         "pm_work_trigger",
         "pm_identity_link",
         "pm_trigger_settings",
+        "pm_write_back",
         // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
         // write time (the 400 on POST/PATCH /v1/servers) or at connect time
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
@@ -3558,6 +3559,14 @@ export const workflowInstances = pgTable(
     uniqueIndex("workflow_instances_open_start_uq")
       .on(sql`regulait_workflow_template_set(${t.templateIds})`, sql`(${t.change}->>'targetSystem')`, t.workItemRef)
       .where(sql`${t.workItemRef} IS NOT NULL AND ${t.status} NOT IN (${sql.raw(WORKFLOW_TERMINAL_STATUSES_SQL_LIST)})`),
+    // ADR-0349 slice 5: the typed search fields of GET /v1/workflows/instances, all built CONCURRENTLY by
+    // runMigrations (CONCURRENT_INDEXES); `projects_classifications_gin` on projects serves the compliance tag
+    index("workflow_instances_template_ids_gin").using("gin", sql`${t.templateIds} jsonb_path_ops`),
+    index("workflow_instances_target_idx").on(sql`(${t.change}->>'targetSystem')`),
+    index("workflow_instances_work_item_idx").on(t.workItemRef).where(sql`${t.workItemRef} IS NOT NULL`),
+    index("workflow_instances_initiator_idx").on(t.initiatorUserId, t.createdAt.desc()),
+    index("workflow_instances_project_idx").on(t.projectId),
+    index("workflow_instances_current_stage_idx").on(sql`(${t.definition} -> 'stages' -> ((${t.state} ->> 'currentStageIndex')::int) ->> 'id')`),
   ],
 );
 
@@ -21363,6 +21372,29 @@ export const pmWorkTriggers = pgTable(
   ],
 );
 export type PmWorkTriggerRow = typeof pmWorkTriggers.$inferSelect;
+
+/**
+ * ADR-0356 PR 2 (migration `pm_write_backs`): the write-back ledger. One row per write-back to a triggering item,
+ * keyed by the trigger, the kind and the source (an approval id and status, a PR url, a terminal status). Recorded
+ * BEFORE the PM call and released (deleted) when the call fails, so a write-back is made at most once when it
+ * succeeds and retried when it does not. A marker, not evidence: the audit trail holds that.
+ */
+export const pmWriteBacks = pgTable(
+  "pm_write_backs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    triggerId: uuid("trigger_id")
+      .notNull()
+      .references(() => pmWorkTriggers.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["started", "signoff_request", "approval", "pr_link", "outcome"] }).notNull(),
+    sourceKey: text("source_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("pm_write_backs_key_uq").on(t.triggerId, t.kind, t.sourceKey),
+    check("pm_write_backs_kind_ck", sql`${t.kind} IN ('started', 'signoff_request', 'approval', 'pr_link', 'outcome')`),
+  ],
+);
 // ===== end ADR-0356 =====
 
 // ===== ADR-0366 (lane E52): rogue-agent containment =====

@@ -484,6 +484,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/deploy-override",
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
+  // ADR-0349 slice 5: what the instance waits for; the same readers as the instance itself (initiator, admins, approvers)
+  "GET /v1/workflows/instances/:instanceId/pending",
   "GET /v1/approvals",
   // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
   "GET /v1/approvals/export.xlsx",

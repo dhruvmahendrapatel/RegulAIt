@@ -698,6 +698,9 @@ describe("every sweep is registered", () => {
         // is no second adjudication. Driven end-to-end in
         // mcp-admission-rescan.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0356 PR 2: writes PM-triggered workflows' progress back to their work items, each once; the backstop for
+        // transitions no route reports. Driven end-to-end in pm-write-back.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.pmWriteBackSweep,
         // ADR-0126's ACTIVE half: probes every registered upstream — broken ones
         // first — and feeds the result to the breaker, so a dead server is
         // refused before a user finds it and a recovered one resumes without
