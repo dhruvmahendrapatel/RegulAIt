@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, desc, eq, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
+import { and, auditLog, createDb, desc, eq, notInArray, orgSettings, runMigrations, sql, workflowInstances, type Db } from "@regulait/db";
 import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
 import { TERMINAL_STATUSES, type InstanceStatus } from "@regulait/workflow-kernel";
 import { buildApp } from "./app.js";
@@ -148,7 +148,12 @@ describe("ADR-0349 slice 2: one open instance per template set + target + work i
   });
 
   it("keys on the template SET: the same templates in another order hold the same key", async () => {
-    const [held] = await db.select().from(workflowInstances).where(eq(workflowInstances.workItemRef, item(1)));
+    // the open row only: the test above also left an aborted row with this work item, and copying that one would
+    // insert rows the index rightly ignores
+    const [held] = await db
+      .select()
+      .from(workflowInstances)
+      .where(and(eq(workflowInstances.workItemRef, item(1)), notInArray(workflowInstances.status, [...WORKFLOW_TERMINAL_STATUSES])));
     const other = "00000000-0000-4000-8000-000000000001";
     const ids = held!.templateIds as string[];
     // a set of two, written in both orders: the second open row is refused
