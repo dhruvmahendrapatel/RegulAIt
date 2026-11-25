@@ -5688,7 +5688,7 @@ export const orgSettings = pgTable(
     /** Shipped OFF (owner, 10-30). When on, personal data the PII detector finds in a governed dispatch must be a
      * category an active record of processing permits for the dispatch's project, or the dispatch is refused 409
      * `processing_not_permitted` (privacy-ops.ts). Turning it off again is an audited relaxation with a step-up. */
-    privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(false),
+    privacyOpsEnabled: boolean("privacy_ops_enabled").notNull().default(PRIVACY_OPS_ENABLED_DEFAULT),
     /** days from a data-subject request's receipt to its due date; 30 is the strict default, shorter is stricter */
     dsrSlaDays: integer("dsr_sla_days").notNull().default(30),
     /** ADR-0090 amendment (lane L11, owner 2026-11-15): how many hours before a certification campaign's due time its
@@ -20631,6 +20631,7 @@ export const contextGraphNodeScopes = pgTable(
 // of `workflow_instances.status` (the source of truth). Runs are never deleted; steps are append-only. RLS ENABLED and
 // FORCED on both: the requester and an admin read, an admin request or the system writes.
 import { PIPELINE_RUN_STATES as PIPELINE_RUN_STATES_E49 } from "@regulait/shared";
+import { PRIVACY_OPS_ENABLED_DEFAULT } from "@regulait/shared";
 
 export const pipelineRuns = pgTable(
   "pipeline_runs",

@@ -20,8 +20,10 @@
 #     into a venv; pip is removed afterwards;
 #   - the licence gate (licence-gate.mjs, this engine's copy of mcpscanner's) on the INSTALLED closure and the Python
 #     runtime;
-#   - the extractor's own unit tests, with REGULAIT_REQUIRE_PDFIUM=1 so the PDF cases cannot be skipped: an image whose
-#     extractor fails its tests is never produced;
+#   - Tesseract 5.5.0 and its eng/osd language data from Debian trixie, exact versions (ADR-0362 slice 2), in the test
+#     stage and the runtime;
+#   - the extractor's own unit tests, with REGULAIT_REQUIRE_PDFIUM=1 and REGULAIT_REQUIRE_OCR=1 so the PDF and OCR cases
+#     cannot be skipped: an image whose extractor fails its tests is never produced;
 #   - the shim (packages/engine-admission-scan) built and deployed in a pinned node stage, exactly as modelscan's.
 #
 # linux/amd64 ONLY (the wheel hash is the manylinux x86_64 wheel).
@@ -38,8 +40,17 @@ RUN python -m venv /opt/contentextract/venv \
  && /opt/contentextract/venv/bin/pip uninstall -y --disable-pip-version-check pip \
  && node licence-gate.mjs /opt/contentextract/venv/lib/python3.12/site-packages licence-allow.json --readings licence-readings.json --runtime python=PSF-2.0 \
  && find /opt/contentextract/venv -name '__pycache__' -prune -exec rm -rf {} +
+# ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
+# Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
+# Reproducible builds (ADR-0187 addendum 2026-10-21): the packages' maintainer scripts write wall-clock content
+# (update-alternatives' log, apt's binary caches, fontconfig's cache), which goes, as in robot-runner's image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+           /var/cache/apt/*.bin /var/cache/fontconfig/* \
+ && tesseract --version
 COPY engines/contentextract/extract.py engines/contentextract/test_extract.py /opt/contentextract/
-RUN REGULAIT_REQUIRE_PDFIUM=1 /opt/contentextract/venv/bin/python -I -m unittest discover -s /opt/contentextract \
+RUN REGULAIT_REQUIRE_PDFIUM=1 REGULAIT_REQUIRE_OCR=1 /opt/contentextract/venv/bin/python -I -m unittest discover -s /opt/contentextract \
  && rm /opt/contentextract/test_extract.py \
  && find /opt/contentextract -name '__pycache__' -prune -exec rm -rf {} +
 
@@ -58,7 +69,7 @@ COPY apps ./apps
 # install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-admission-scan..." build \
  && pnpm --filter @regulait/engine-admission-scan deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
@@ -66,7 +77,7 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
 # ---- stage 3: runtime ---------------------------------------------------------------------------
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-contentextract" \
-      org.opencontainers.image.description="ADR-0362 content extraction (PDF, Office Open XML, CSV, zip), sandbox-only" \
+      org.opencontainers.image.description="ADR-0362 content extraction (PDF, Office Open XML, CSV, zip, OCR), sandbox-only" \
       org.opencontainers.image.licenses="LicenseRef-RegulAIt" \
       org.regulait.engine="contentextract" \
       org.regulait.engine-version="0.1.0"
@@ -77,6 +88,13 @@ LABEL org.opencontainers.image.title="regulait-engine-contentextract" \
 RUN apt-get update \
  && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
+# ADR-0362 slice 2: Tesseract OCR (Apache-2.0) and its English language data, from Debian trixie, exact versions.
+# Everything OCR needs is in the image, so nothing is downloaded at run time (air-gapped).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr=5.5.0-1+b1 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-osd=1:4.1.0-2 \
+ && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+           /var/cache/apt/*.bin /var/cache/fontconfig/* \
+ && tesseract --version
 # no package installer at run time: the base image's pip goes too
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12

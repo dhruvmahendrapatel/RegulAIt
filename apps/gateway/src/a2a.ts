@@ -88,7 +88,8 @@ import type { ListReader, ListSpec } from "./list-contract.js";
 import { timeouts } from "./timeouts.js";
 import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
-import { governedEvaluateResource } from "./governed-core.js";
+import { governedEvaluateResource, governedProcessingLimit } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 
@@ -494,6 +495,19 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     // COUNTS ONLY, never the matched text
     piiDetail = { mode: piiMode, action: chk.action, phase: "input", inputHits: chk.hits };
     if (chk.action === "block") return deny(403, "pii_blocked", A2A_RULE_IDS.piiBlocked, `the message contains PII (${piiCategoryList(chk.hits)})`, label, { pii: piiDetail });
+  }
+
+  // 6a. ADR-0224 addendum (2026-11-21): the records-of-processing limit, the governed core's one check path, on the
+  //     text that would leave. After the PII mode (the cascade decides first), before guardrails and egress. The gate
+  //     writes the one audit row for the refusal, so it is returned here without a second.
+  const processingRefusal = await governedProcessingLimit(db, {
+    userId: args.userId,
+    target: { type: "a2a", agentId: agent.id, agentName: agent.name, skillId },
+    projectId,
+    input: args.text,
+  });
+  if (processingRefusal) {
+    return { kind: "denied", status: processingRefusal.status, error: processingRefusal.error, ruleId: PRIVACY_RULE_IDS.dispatchRefused, reason: processingRefusal.detail, auditId: processingRefusal.auditLogId };
   }
 
   // 6b. the ADR-0042 guardrails on the message (PII has its own path above, so the detectors exclude it). There is no
