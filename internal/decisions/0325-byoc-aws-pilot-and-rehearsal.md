@@ -207,8 +207,12 @@ The follow-up named in PR 3. No AWS step: plan-only tests, like the rest of the 
   status report each run instead.
 - **Output `backup_spec`** is `spec.backup.s3` ready to paste: bucket, region, `pg/`, key, owner account,
   `podIdentity: true`, and `egressCIDRs` (the endpoint subnets and S3's published ranges). The runbook's §6.9 adds
-  the ADR-0305 acceptance check, a real-size Job upload confirmed from the admin's own credentials. The uninstall
-  section asks whether to keep the dumps.
+  the ADR-0305 acceptance check: a real-size Job upload, then a download of it with the admin's own credentials
+  and `pg_restore --list` plus a full read. §6.9.1 is the restore ADR-0305 names (#1162 review R3, finding 1). It
+  covers the admin read grant, choosing an object version, an in-cluster `pg_restore` pod (RDS is reachable only from
+  the nodes), the master password from Secrets Manager and the matching data key (ADR-0035). The uninstall section
+  asks whether to keep the dumps. An automated restore rehearsal stays open (ADR-0305) until the rehearsal is
+  un-parked.
 - **The rehearsal** sets `backup_retention_days = 1`. `byoc-rehearsal-sweep.sh pre-destroy` empties the rehearsal
   backup bucket and refuses one with Object Lock, so `terraform destroy` is not stopped by a non-empty bucket.
 

@@ -270,10 +270,137 @@ go-live. A dump over 8 MiB is uploaded in parts, which is the path most likely t
 kubectl -n regulait create job --from=cronjob/regulait-backup backup-check
 kubectl -n regulait wait --for=condition=complete job/backup-check --timeout=30m
 aws s3api list-object-versions --bucket "$(terraform output -raw backup_bucket)" --prefix pg/ \
-  --query 'Versions[0].[Key,Size]'          # from your own admin credentials, not the Job's
+  --query 'reverse(sort_by(Versions,&LastModified))[0].[Key,VersionId,Size]'   # admin credentials, not the Job's
 ```
 
+Then prove that the upload can be read back, with the same admin credentials. Download the key and version printed
+above and check it as in **6.9.1** step 3:
+
+```bash
+aws s3api get-object --bucket "$(terraform output -raw backup_bucket)" --key <Key> --version-id <VersionId> check.dump
+pg_restore --list check.dump | grep -c 'TABLE DATA'   # must be at least 1
+pg_restore -f /dev/null check.dump                    # must exit 0
+rm -f check.dump
+```
+
+An upload that cannot be read back is not a backup. Do this once before go-live, and again after any change to the
+key, the bucket or the backup image.
+
 The data key is not in these dumps' bucket and must not be: a dump is useless without it (ADR-0035).
+
+**6.9.1 Restoring a dump from S3** (ADR-0305: manual, `aws s3` then `pg_restore`). Use it when the database must go
+back to the night of a dump. For a recent point in time, RDS point-in-time recovery (under *Upgrades and rollback*)
+is faster and loses less.
+
+1. **Credentials.** The backup Job's role cannot read the bucket, by design. Use your own admin credentials, for
+   example your SSO administrator role. They need:
+   - `s3:ListBucketVersions` on the bucket;
+   - `s3:GetObject` and `s3:GetObjectVersion` on `<bucket>/pg/*`;
+   - `kms:Decrypt` on the stack key (`terraform output -raw kms_key_arn`). The key policy lets the account's IAM
+     grant it.
+2. **Choose the object version.** Each night writes a new key, `pg/regulait-<UTC timestamp>.dump`. Pick the key for
+   the night you need, then its version:
+
+   ```bash
+   BUCKET=$(terraform output -raw backup_bucket)
+   aws s3api list-object-versions --bucket "$BUCKET" --prefix pg/ \
+     --query 'Versions[].[LastModified,Key,VersionId,IsLatest,Size]' --output table
+   ```
+
+   - The bucket is versioned, so a key normally has one version. If it has several, something wrote that key
+     again: an operator re-running a Job, or a compromised backup pod overwriting it. Do not trust the latest
+     version on sight. Take the newest version written **before** the incident, and check its size against the
+     nights around it.
+   - Noncurrent versions are kept for `backup_noncurrent_version_retention_days` (7) only, so act within that window.
+
+   Download that exact version to your workstation:
+
+   ```bash
+   aws s3api get-object --bucket "$BUCKET" --key pg/regulait-<timestamp>.dump \
+     --version-id <VersionId> regulait.dump
+   ```
+
+3. **Check the dump before using it.** A `--list` alone is not enough: a dump cut short still lists its contents,
+   but holds no data (see `BACKUP_RESTORE.md`). Both checks run in a one-off pod (step 4), or anywhere with
+   `pg_restore` 16:
+
+   ```bash
+   pg_restore --list regulait.dump | grep -c 'TABLE DATA'   # must be at least 1
+   pg_restore -f /dev/null regulait.dump                    # must exit 0: reads the whole file
+   ```
+
+4. **Restore from inside the cluster.** RDS is reachable only from the nodes, so `pg_restore` runs in a one-off pod.
+   Give it the labels of the operator's database clients, so the namespace's NetworkPolicy lets it reach DNS and the
+   database and nothing else. Use the same `pg_dump` image as `spec.backup.image`, by digest. The pod reads the
+   database URL from the `regulait` Secret (6.3).
+
+   That URL was built from the RDS master password, which RDS keeps in Secrets Manager. If the Secret is gone or the
+   password has been rotated, rebuild `database-url` from
+   `aws secretsmanager get-secret-value --secret-id "$(terraform output -raw db_master_secret_arn)"`, exactly as in
+   6.3.
+
+   The URL asks for `sslmode=verify-full`, so the pod also needs the RDS CA bundle. Download it on your workstation
+   from `https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem` and give it to the pod as a ConfigMap:
+
+   ```bash
+   kubectl -n regulait create configmap rds-ca --from-file=global-bundle.pem
+   kubectl -n regulait apply -f - <<'EOF'
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: db-restore
+     labels:
+       app.kubernetes.io/name: regulait
+       app.kubernetes.io/instance: regulait
+       app.kubernetes.io/component: migrate   # DNS and the database only (the operator's database-clients policy)
+   spec:
+     restartPolicy: Never
+     automountServiceAccountToken: false
+     securityContext: { runAsNonRoot: true, runAsUser: 999, seccompProfile: { type: RuntimeDefault } }
+     containers:
+       - name: restore
+         image: <the pg_dump image from spec.backup.image, by digest>
+         command: ["sleep", "3600"]
+         env:
+           - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: regulait, key: database-url } } }
+           - { name: PGSSLROOTCERT, value: /ca/global-bundle.pem }
+         securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+         volumeMounts:
+           - { name: work, mountPath: /work }
+           - { name: ca, mountPath: /ca, readOnly: true }
+     volumes:
+       - { name: work, emptyDir: { sizeLimit: 20Gi } }
+       - { name: ca, configMap: { name: rds-ca } }
+   EOF
+   kubectl -n regulait wait --for=condition=Ready pod/db-restore
+   kubectl -n regulait cp regulait.dump db-restore:/work/regulait.dump
+   ```
+
+   Run step 3's checks in the pod (`kubectl -n regulait exec db-restore -- pg_restore --list /work/regulait.dump`
+   and so on). Then stop the gateway, so nothing writes while the data is replaced, and restore:
+
+   ```bash
+   kubectl -n regulait scale deploy/regulait-gateway --replicas=0
+   kubectl -n regulait exec db-restore -- sh -c \
+     'pg_restore --clean --if-exists --no-owner --single-transaction -d "$DATABASE_URL" /work/regulait.dump'
+   ```
+
+   `--single-transaction` means a failed restore changes nothing. To rehearse first, restore into a scratch database
+   on the same instance (`createdb` one, put its name in the URL, drop it afterwards) and leave the gateway running.
+5. **The data key must match (ADR-0035).** Every stored credential in the dump is encrypted under the data key that
+   was in the `regulait` Secret when the dump was taken. If the Secret still holds that key, change nothing. If it
+   was recreated, put the recorded `DATA_KEY` (6.3) back under `data-key` before the gateway starts. Under a
+   different key the gateway starts, but no stored credential decrypts, and they cannot be recovered.
+6. **Start and clean up.** Scale the gateway back up, check sign-in and one stored connector, then delete the pod,
+   the ConfigMap and the local copy of the dump:
+
+   ```bash
+   kubectl -n regulait scale deploy/regulait-gateway --replicas=<previous count>
+   kubectl -n regulait delete pod db-restore && kubectl -n regulait delete configmap rds-ca
+   shred -u regulait.dump 2>/dev/null || rm -f regulait.dump
+   ```
+
+   The dump holds the whole database. Keep it on your workstation only as long as the restore takes.
 
 ## 7. Sign-in with Microsoft Entra ID
 

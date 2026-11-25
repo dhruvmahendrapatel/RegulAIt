@@ -4,6 +4,7 @@
 2026-11-15 E10 pending fragment. `backup-target-s3` gains a `kubernetes_job` writer profile (PutObject on the prefix,
 S3-conditioned GenerateDataKey and Decrypt, no List, Get or Delete) and `writer_role_arns`. `byoc-aws/backup.tf`
 composes a versioned SSE-KMS bucket and a Pod Identity role bound to `<installation>-backup`, with `operator_backups`
-on by default. The output `backup_spec` is the `spec.backup.s3` block. The runbook has a new §6.9 acceptance check and
-an uninstall step. The rehearsal sweep empties the backup bucket. Plan-only tests only: no AWS step, no
+on by default. The output `backup_spec` is the `spec.backup.s3` block. The runbook has a new §6.9 acceptance check (upload,
+then download and `pg_restore --list`), the §6.9.1 restore, and an uninstall step. Still open: an automated restore
+rehearsal (ADR-0305), once the rehearsal is un-parked. The rehearsal sweep empties the backup bucket. Plan-only tests only: no AWS step, no
 `terraform apply`. The rehearsal is still parked (D-2026-11-18-09).
