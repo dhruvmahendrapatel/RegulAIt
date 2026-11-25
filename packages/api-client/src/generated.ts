@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   76
+// Operations:   77
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -561,6 +561,14 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * GET /v1/state-machines
+ * @stability public-beta — auth: user
+   */
+  getV1StateMachines<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/state-machines`, undefined, options);
+  }
+
+  /**
  * The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters.
  * @stability public-stable — auth: user
    */
@@ -1020,6 +1028,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1SpendForecast",
     "method": "GET",
     "path": "/v1/spend/forecast"
+  },
+  {
+    "id": "getV1StateMachines",
+    "method": "GET",
+    "path": "/v1/state-machines"
   },
   {
     "id": "getV1UsageEvents",

@@ -1,0 +1,16 @@
+{
+  "adr": "ADR-0322",
+  "lane": "E7",
+  "tracking": "ADR-0322 (lane E7): API-only by the lane brief (master dispatch 2026-11-15: new routes go in the census with a KNOWN_UI_GAPS entry pointing at #453, no screens), recorded in ADR-0322 (As built, slice 2); the vendor usage pull settings screen is posted on #453",
+  "gaps": {
+    "GET /v1/vendor-usage": "reads the vendor usage pull policy, the vendor catalogue and every connector (credentials never returned)",
+    "PUT /v1/vendor-usage/policy": "turns vendor usage pull on (settings_relax step-up, refused when air-gapped) or off, with a required reason",
+    "POST /v1/vendor-usage/connectors": "registers a vendor usage connector (disabled) with its schema-validated configuration",
+    "PUT /v1/vendor-usage/connectors/:connectorId/config": "changes a connector's configuration (backfill, the gateway's own key/project/workspace ids) and re-marks stored lines",
+    "PUT /v1/vendor-usage/connectors/:connectorId/credential": "stores or rotates a connector's vendor key (step-up, write-capable acknowledgement, encrypted, never returned)",
+    "DELETE /v1/vendor-usage/connectors/:connectorId/credential": "revokes a connector's vendor key and disables the connector (no step-up)",
+    "PUT /v1/vendor-usage/connectors/:connectorId/enabled": "enables (step-up, needs a live credential) or disables a connector",
+    "POST /v1/vendor-usage/connectors/:connectorId/pull": "runs one pull now for a connector",
+    "GET /v1/vendor-usage/connectors/:connectorId/runs": "lists a connector's last 50 pull runs"
+  }
+}

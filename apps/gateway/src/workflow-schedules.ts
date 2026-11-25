@@ -1,7 +1,10 @@
 /**
  * ADR-0349 slice 4 (lane E30, Temporal Schedules): a workflow template that starts on a calendar.
  *
- * - **Who it runs as.** The admin who created it (`run_as_user_id`). Every start is `startGovernedWorkflow` as that
+ * - **Who it runs as.** The admin who created it, or the admin who last changed what or when it starts
+ *   (`run_as_user_id`): an edit to the change, project, work item, calendar, overlap, catch-up or jitter by another
+ *   admin re-binds it to that editor, audited, so the person who chose a start is its initiator and cannot also be
+ *   its "other admin" approver. Only the run-as user may backfill it. Every start is `startGovernedWorkflow` as that
  *   person, the same path as `POST /v1/workflows/instances`: entitlements, project attribution, the compliance
  *   cascade, the start conflict policy and the audit rows. A schedule never runs as a system identity. A run-as user
  *   who is disabled or no longer an admin, a retired template, or a refused start PAUSES the schedule, with the reason
@@ -14,7 +17,10 @@
  *   need a `settings_relax` step-up and are audited.
  * - **Catch-up.** A fire time older than the window (at least the sweep's 5-minute grace) is recorded `skipped_missed`,
  *   once per pass, never started; newer ones start oldest first, at most 20 per schedule per pass.
- * - **Jitter.** 0..`jitter_seconds`, deterministic from the schedule id and the fire time (`fnv1a32`).
+ * - **Jitter.** 0..`jitter_seconds`, deterministic from the schedule id and the fire time (`fnv1a32`). A fire time is
+ *   due at its jittered time, and the catch-up window is measured from there.
+ * - **Run rows.** `workflow_schedule_runs.outcome` follows `WORKFLOW_SCHEDULE_RUN_MACHINE` (ADR-0348): `starting`
+ *   settles once, to started, reused or refused; every other outcome is final as recorded.
  * - **Pause, resume, backfill.** Each takes a note and is audited. Resume restarts the calendar from now (fires missed
  *   while paused are not caught up). Backfill starts one instance per fire time in a range, at most 100, under the
  *   overlap policy.
@@ -44,9 +50,10 @@ import {
   type Db,
   type WorkflowScheduleRow,
 } from "@regulait/db";
-import { changeDescriptorSchema, fnv1a32, startInstanceSchema } from "@regulait/shared";
+import { changeDescriptorSchema, fnv1a32, startInstanceSchema, WORKFLOW_SCHEDULE_RUN_MACHINE } from "@regulait/shared";
 import { databaseNow } from "./db-clock.js";
 import { errMessage } from "./err-serializer.js";
+import { whereFrom } from "./state-transition.js";
 import { requireStepUp } from "./step-up.js";
 import { startGovernedWorkflow } from "./workflows.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
@@ -227,8 +234,13 @@ export async function fireSchedule(
 
   const runId = await recordRun(db, s, fireAt, trigger, "starting");
   if (!runId) return { outcome: "already_fired" };
-  const finishRun = async (outcome: RunOutcome, instanceId: string | null, refusal: string | null) => {
-    await db.update(workflowScheduleRuns).set({ outcome, instanceId, refusal, updatedAt: sql`now()` }).where(eq(workflowScheduleRuns.id, runId));
+  // ADR-0348: the run row settles through its declared lifecycle (WORKFLOW_SCHEDULE_RUN_MACHINE), only from `starting`
+  const finishRun = async (outcome: "started" | "reused" | "refused", instanceId: string | null, refusal: string | null) => {
+    const event = outcome === "started" ? "start" : outcome === "reused" ? "reuse" : "refuse";
+    await db
+      .update(workflowScheduleRuns)
+      .set({ outcome, instanceId, refusal, updatedAt: sql`now()` })
+      .where(and(eq(workflowScheduleRuns.id, runId), whereFrom(workflowScheduleRuns.outcome, WORKFLOW_SCHEDULE_RUN_MACHINE, event)));
   };
 
   const [runAs] = await db
@@ -238,7 +250,7 @@ export async function fireSchedule(
   if (!runAs || runAs.disabledAt || !runAs.isAdmin) {
     const why = !runAs ? "run_as_user_missing" : runAs.disabledAt ? "run_as_user_disabled" : "run_as_user_not_admin";
     await finishRun("refused", null, why);
-    await pauseForFailure(db, s, `its run-as user can no longer start it (${why}); an admin must recreate or reassign it`, { fireAt, refusal: why });
+    await pauseForFailure(db, s, `its run-as user can no longer start it (${why}); an admin must take it over (an edit re-binds it to the editing admin) or recreate it`, { fireAt, refusal: why });
     return { outcome: "refused", refusal: why };
   }
 
@@ -256,7 +268,7 @@ export async function fireSchedule(
   const out = await startGovernedWorkflow(db, dataKey, { userId: runAs.id, isAdmin: true }, body.data);
   const answer = (out.body ?? {}) as { id?: string; reused?: boolean; error?: string };
   if ((out.status === 201 || out.status === 200) && answer.id) {
-    const outcome: RunOutcome = answer.reused ? "reused" : "started";
+    const outcome = answer.reused ? "reused" : "started";
     await finishRun(outcome, answer.id, null);
     await audit(db, s, runAs.id, "workflow:schedule-fired", "allow", `workflow schedule '${s.name}' started an instance (${trigger})`, { fireAt, trigger, instanceId: answer.id, outcome });
     return { outcome, instanceId: answer.id };
@@ -312,11 +324,20 @@ export async function runWorkflowScheduleSweep(db: Db, dataKey: string | undefin
   out.due = due.length;
   for (const s of due) {
     const first = s.nextFireAt!;
-    if (now.getTime() < first.getTime() + jitterMs(s.id, first, s.jitterSeconds)) continue;
-    // every fire time from the claimed one up to now, bounded
-    const times = [first, ...fireTimesBetween(s.cronExpression, s.timeZone, first, now, MAX_FIRES_PER_PASS)];
-    // the fire after the last one reached: later than now, unless the pass was capped (the rest are caught next pass)
-    const next = nextFireAfter(s.cronExpression, s.timeZone, times[times.length - 1]!);
+    // each fire time is due at its jittered time, and its lateness is measured from that (review finding: jitter
+    // larger than the catch-up window must not turn an on-time fire into a missed one)
+    const dueOf = (t: Date) => t.getTime() + jitterMs(s.id, t, s.jitterSeconds);
+    const nominal = [first, ...fireTimesBetween(s.cronExpression, s.timeZone, first, now, MAX_FIRES_PER_PASS)];
+    // the fire times reached so far, in order; a later one whose jittered time has not come yet waits for a later pass
+    const times: Date[] = [];
+    for (const t of nominal) {
+      if (now.getTime() < dueOf(t)) break;
+      times.push(t);
+    }
+    if (times.length === 0) continue;
+    // the next claim: the first fire time not reached yet, or the one after the last nominal time (capped passes
+    // catch the rest next pass)
+    const next = times.length < nominal.length ? nominal[times.length]! : nextFireAfter(s.cronExpression, s.timeZone, nominal[nominal.length - 1]!);
     const [claimed] = await db
       .update(workflowSchedules)
       .set({ nextFireAt: next, updatedAt: sql`now()` })
@@ -324,8 +345,8 @@ export async function runWorkflowScheduleSweep(db: Db, dataKey: string | undefin
       .returning();
     if (!claimed) continue; // another sweep claimed it
     const windowMs = Math.max(SWEEP_GRACE_MS, claimed.catchupWindowSeconds * 1000);
-    const missed = times.filter((t) => now.getTime() - t.getTime() > windowMs);
-    const onTime = times.filter((t) => now.getTime() - t.getTime() <= windowMs);
+    const missed = times.filter((t) => now.getTime() - dueOf(t) > windowMs);
+    const onTime = times.filter((t) => now.getTime() - dueOf(t) <= windowMs);
     if (missed.length > 0) {
       for (const t of missed) await recordRun(db, claimed, t, "scheduled", "skipped_missed");
       out.skippedMissed += missed.length;
@@ -394,6 +415,12 @@ const patchBody = z
     jitterSeconds: z.number().int().min(0).max(3600).optional(),
   })
   .strict();
+/**
+ * The fields that decide WHAT a schedule starts and WHEN (review finding, four-eyes): an edit to any of them by an
+ * admin other than the run-as user re-binds `run_as_user_id` to that editor, so the instances it starts name the
+ * person who chose them. An `admin_not_initiator` approver then cannot be the same admin who wrote the change.
+ */
+const RUN_AS_BINDING_FIELDS = ["cronExpression", "timeZone", "change", "projectId", "workItem", "overlapPolicy", "catchupWindowSeconds", "jitterSeconds"] as const;
 const backfillBody = z.object({ from: z.string().datetime(), to: z.string().datetime(), note }).strict();
 const idParam = z.object({ scheduleId: z.string().uuid() });
 const listQuery = z.object({
@@ -508,8 +535,12 @@ export function registerWorkflowScheduleRoutes(app: FastifyInstance, db: Db, opt
   app.patch("/v1/workflows/schedules/:scheduleId", async (req, reply) => {
     const { scheduleId } = idParam.parse(req.params);
     const b = patchBody.parse(req.body);
+    const editorId = req.authCtx.userId;
+    if (!editorId) return reply.status(403).send({ error: "bootstrap_cannot_schedule", detail: "a schedule runs as a named admin: sign in as one to edit it" });
     const s = await load(scheduleId);
     if (!s) return reply.status(404).send({ error: "not_found", detail: "no such workflow schedule" });
+    // an edit to what or when it starts, by another admin, makes that admin its run-as user (audited below)
+    const rebind = editorId !== s.runAsUserId && RUN_AS_BINDING_FIELDS.some((f) => b[f] !== undefined);
     const cron = b.cronExpression ?? s.cronExpression;
     const tz = b.timeZone ?? s.timeZone;
     const now = await databaseNow(db);
@@ -530,15 +561,19 @@ export function registerWorkflowScheduleRoutes(app: FastifyInstance, db: Db, opt
         overlapPolicy: overlap,
         ...(b.catchupWindowSeconds !== undefined ? { catchupWindowSeconds: b.catchupWindowSeconds } : {}),
         ...(b.jitterSeconds !== undefined ? { jitterSeconds: b.jitterSeconds } : {}),
+        ...(rebind ? { runAsUserId: editorId } : {}),
         // a moved calendar starts again from now; a paused schedule stays without a next fire
         ...(calendarMoved && !s.pausedAt ? { nextFireAt: nextFireAfter(cron, tz, now) } : {}),
         updatedAt: sql`now()`,
       })
-      .where(and(eq(workflowSchedules.id, s.id), eq(workflowSchedules.updatedAt, s.updatedAt)))
+      // the optimistic check compares at millisecond precision: the row read into a JS Date keeps milliseconds only,
+      // while the column holds microseconds, so a plain equality never matched and every edit answered 409
+      .where(and(eq(workflowSchedules.id, s.id), sql`date_trunc('milliseconds', ${workflowSchedules.updatedAt}) = ${s.updatedAt.toISOString()}::timestamptz`))
       .returning();
     if (!row) return reply.status(409).send({ error: "changed_concurrently", detail: "the schedule changed while this edit was being checked: load it again and repeat the edit" });
-    await audit(db, row, req.authCtx.userId ?? null, "workflow:schedule-updated", "allow", `workflow schedule '${row.name}' updated`, {
+    await audit(db, row, editorId, "workflow:schedule-updated", "allow", `workflow schedule '${row.name}' updated${rebind ? "; it now runs as the editing admin" : ""}`, {
       changed: Object.keys(b),
+      ...(rebind ? { runAsRebound: { from: s.runAsUserId, to: editorId } } : {}),
       ...(overlap !== "skip" && b.overlapPolicy !== undefined && b.overlapPolicy !== s.overlapPolicy ? { relaxed: ["overlapPolicy"] } : {}),
     });
     return view(row);
@@ -582,8 +617,17 @@ export function registerWorkflowScheduleRoutes(app: FastifyInstance, db: Db, opt
   app.post("/v1/workflows/schedules/:scheduleId/backfill", async (req, reply) => {
     const { scheduleId } = idParam.parse(req.params);
     const b = backfillBody.parse(req.body);
+    const callerId = req.authCtx.userId;
+    if (!callerId) return reply.status(403).send({ error: "bootstrap_cannot_schedule", detail: "a backfill starts instances as a named admin: sign in as one" });
     const s = await load(scheduleId);
     if (!s) return reply.status(404).send({ error: "not_found", detail: "no such workflow schedule" });
+    // every backfilled start runs as the run-as user, so only that admin may ask for them (review finding, four-eyes)
+    if (callerId !== s.runAsUserId) {
+      return reply.status(403).send({
+        error: "schedule_run_as_only",
+        detail: "a backfill starts instances as the schedule's run-as user, so only that admin may backfill it: take it over first by editing it (an edit re-binds it to you)",
+      });
+    }
     if (s.pausedAt) return reply.status(409).send({ error: "schedule_paused", detail: "resume the schedule before backfilling it" });
     const from = new Date(b.from);
     const to = new Date(b.to);
@@ -596,7 +640,7 @@ export function registerWorkflowScheduleRoutes(app: FastifyInstance, db: Db, opt
     if (times.length > MAX_BACKFILL) {
       return reply.status(422).send({ error: "backfill_too_large", detail: `the range holds more than ${MAX_BACKFILL} fire times: backfill it in parts` });
     }
-    await audit(db, s, req.authCtx.userId ?? null, "workflow:schedule-backfill", "allow", `workflow schedule '${s.name}' backfilled ${times.length} fire time(s)`, { from, to, fireTimes: times.length, note: b.note });
+    await audit(db, s, callerId, "workflow:schedule-backfill", "allow", `workflow schedule '${s.name}' backfilled ${times.length} fire time(s)`, { from, to, fireTimes: times.length, note: b.note });
     const results: Array<{ fireAt: Date } & FireResult> = [];
     for (const t of times) {
       const r = await fireSchedule(db, opts.dataKey, s, t, "backfill");

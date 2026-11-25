@@ -1,0 +1,20 @@
+{
+  "adr": "ADR-0338",
+  "lane": "E19",
+  "tracking": "ADR-0338 (lane E19): vendor agent control admin routes, API-only in slices 1, 1b and 1c; screen requested on #453",
+  "gaps": {
+    "POST /v1/vendor-agent-control/actions": "requests a disable, quarantine or restore of a discovered vendor agent (settings_relax step-up, then a second administrator's approval; audited; off until the org switch is on)",
+    "GET /v1/vendor-agent-control/actions": "lists vendor agent control actions, newest first, with each one's lifecycle",
+    "GET /v1/vendor-agent-control/actions/:id": "one vendor agent control action, its lifecycle and the kill-switch guard's reason when execute is refused",
+    "POST /v1/vendor-agent-control/actions/:id/execute": "the requester executes an approved action once, with a fresh step-up; the vendor is called through the guarded fetch and the outcome is audited",
+    "POST /v1/vendor-agent-control/actions/:id/settle": "settles an action whose outcome is unknown by reading the vendor state only (step-up, never a second call)",
+    "POST /v1/vendor-agent-control/actions/:id/cancel": "cancels an action before it runs and withdraws its approval (audited, no step-up)",
+    "GET /v1/discovery/sources/:sourceId/control-credential": "the source's vendor control credential (purpose platform_write): its mode, app, expiry and whether it is usable, never a secret",
+    "PUT /v1/discovery/sources/:sourceId/control-credential": "stores or replaces a source's separate vendor control credential (settings_relax step-up bound to the source, mode and app; audited)",
+    "DELETE /v1/discovery/sources/:sourceId/control-credential": "revokes a source's vendor control credential and destroys its stored secret (audited, no step-up)",
+    "POST /v1/discovery/sources/:sourceId/control-credential/delegated": "starts a delegated (named admin) sign-in for a source's vendor control credential, naming the second administrator who must approve it: answers the Entra authorization URL (API-only; the screen is #453)",
+    "GET /v1/discovery/control-credential/delegated/callback": "the vendor's sign-in redirect: redeems the code with the server-side PKCE verifier, holds the named account's refresh token encrypted and queues the second administrator's approval (API-only; the screen is #453)",
+    "GET /v1/discovery/control-credential/delegated/:requestId": "reads one delegated sign-in request and its lifecycle (API-only; the screen is #453)",
+    "POST /v1/discovery/control-credential/delegated/:requestId/cancel": "withdraws an open delegated sign-in request before it is approved, destroying what it held (API-only; the screen is #453)"
+  }
+}

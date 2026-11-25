@@ -12,7 +12,7 @@ ALTER TABLE "workflow_instances" ADD CONSTRAINT "workflow_instances_work_item_re
 -- the same templates routed in another order are the same key. Immutable, so an index may use it; its search_path is
 -- pinned.
 CREATE OR REPLACE FUNCTION "regulait_workflow_template_set"("ids" jsonb) RETURNS jsonb
-  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE SET search_path = pg_catalog, pg_temp
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE SET search_path = pg_catalog, public, pg_temp
   AS $$ SELECT COALESCE(jsonb_agg(e ORDER BY e COLLATE "C"), '[]'::jsonb) FROM jsonb_array_elements_text("ids") AS e $$;
 
 -- The start key's uniqueness is the partial unique index

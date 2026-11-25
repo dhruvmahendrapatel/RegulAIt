@@ -184,7 +184,7 @@ test("C on a stdio MCP server: the control sits under its execution profile and 
   await page.route("**/v1/users", (route) => json(route, { users: [] }));
   await page.goto("/ui/admin/mcp-servers");
   await expect(page.getByRole("heading", { level: 1, name: "MCP servers", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Show tools on Synthetic stdio" }).click();
+  await page.getByRole("button", { name: "Show tools on Synthetic stdio" }).click();
   const control = page.getByTestId("person-stdio-relaxation");
   await expect(control.getByText(/A person's own calls · Synthetic stdio/)).toBeVisible();
   const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/execution-person-stdio-relaxations/mcp_server/ocd-stdio", kind: "settings_relax" });

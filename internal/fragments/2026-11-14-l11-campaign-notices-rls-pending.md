@@ -1,2 +1,0 @@
-<!-- fold: pending -->
-- **ADR-0234 batch 7 (RLS runtime cut-over): register the `certification-deadline-notify-sweep` job.** It reads `audit_log` (its delivery markers) and `users` (`activeUserEmail`), both FORCE RLS. Under `regulait_app` with no system reason, de-duplication silently fails and every target is resent hourly. Add an RLS-scoped test at the cut-over. (Review of #825, ADR-0090 amendment.)

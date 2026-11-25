@@ -185,3 +185,67 @@ export function canonicalPolicyJson(policy: EffectiveMcpPolicy): string {
 export function parseCodexRequirements(toml: string): Record<string, unknown> {
   return parseToml(toml) as Record<string, unknown>;
 }
+
+/**
+ * ADR-0310 slice 2 (drift): the MCP config files each managed vendor reads, as paths relative to the ADR-0259
+ * collection root (home, %APPDATA% or %LOCALAPPDATA%). A configured server in one of these files is under the
+ * vendor's managed allowlist; one in any other host's file (Claude Desktop, Windsurf, Zed, …) is not, so drift is
+ * reported only for these. A path matches when it equals the suffix or ends with "/" + the suffix, so the per-OS
+ * prefixes (`Library/Application Support/`, `.config/`) need no entry. Data, not detection: the agent's signed
+ * manifest decides which files are read.
+ */
+export const MANAGED_VENDOR_CONFIG_PATHS: Readonly<Record<ManagedSettingsVendor, readonly string[]>> = {
+  "claude-code": [".claude.json", ".mcp.json", ".claude/settings.json"],
+  "github-copilot": ["Code/User/mcp.json", "Code/User/settings.json", ".vscode/mcp.json"],
+  "openai-codex": [".codex/config.toml"],
+  cursor: [".cursor/mcp.json"],
+};
+
+/** The managed vendor whose MCP config this collection-root-relative path is, or null (drift does not apply). */
+export function managedVendorOfConfigPath(configPath: string): ManagedSettingsVendor | null {
+  const p = configPath.replace(/\\/g, "/");
+  for (const v of MANAGED_SETTINGS_VENDORS) {
+    if (MANAGED_VENDOR_CONFIG_PATHS[v].some((s) => p === s || p.endsWith(`/${s}`))) return v;
+  }
+  return null;
+}
+
+/**
+ * Whether a remote MCP server host a device reported (ADR-0259: host and optional port, never a path) is this
+ * gateway. Both sides are lowercased, and an explicit default port on either side matches its absence.
+ */
+export function isGatewayHost(reportedHost: string, publicUrl: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(publicUrl);
+  } catch {
+    return false;
+  }
+  const dflt = u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "";
+  const strip = (h: string) => (dflt && h.endsWith(`:${dflt}`) ? h.slice(0, -(dflt.length + 1)) : h);
+  return strip(reportedHost.toLowerCase()) === strip(u.host.toLowerCase());
+}
+
+export type ManagedVendorCoverageStatus = "collected" | "partial" | "not_collected";
+
+/**
+ * Which of a managed vendor's MCP config files the enabled endpoint catalogue makes the agent collect (#902 review).
+ * The ADR-0259 agent reads only files the signed manifest names, and the manifest comes from enabled `config_path`
+ * catalogue rows, so a vendor with no covering row is NOT MEASURED: its drift must be reported as unknown, never as
+ * zero (ADR-0180). A catalogue value covers a path when it is that path, or an OS-prefixed form of it; a directory
+ * row (`.codex`) does not, since the agent does not expand directories into the files under them.
+ */
+export function managedVendorCoverage(
+  enabledConfigPaths: readonly string[],
+): Array<{ vendor: ManagedSettingsVendor; status: ManagedVendorCoverageStatus; collectedPaths: string[]; missingPaths: string[] }> {
+  const values = enabledConfigPaths.map((v) => v.replace(/\\/g, "/"));
+  return MANAGED_SETTINGS_VENDORS.map((vendor) => {
+    const collectedPaths: string[] = [];
+    const missingPaths: string[] = [];
+    for (const s of MANAGED_VENDOR_CONFIG_PATHS[vendor]) {
+      (values.some((v) => v === s || v.endsWith(`/${s}`)) ? collectedPaths : missingPaths).push(s);
+    }
+    const status: ManagedVendorCoverageStatus = missingPaths.length === 0 ? "collected" : collectedPaths.length === 0 ? "not_collected" : "partial";
+    return { vendor, status, collectedPaths, missingPaths };
+  });
+}

@@ -28,4 +28,7 @@ audit_retention_days   = 1
 
 log_retention_days = 7
 
+# The sweep empties the backup bucket before destroy; 1 day so nothing lingers.
+backup_retention_days = 1
+
 egress_allowed_domains = ["login.microsoftonline.com"]

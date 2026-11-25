@@ -135,19 +135,36 @@ func parseConfig(name string, raw []byte) (map[string]any, bool) {
 //   - `mcp_servers` (Codex config.toml; developers.openai.com/codex/config-file/config-reference)
 //   - `projects.<project>.mcpServers` (Claude Code's per-project servers; the project key, a path, is never kept)
 func serverMaps(doc map[string]any) []map[string]any {
-	var out []map[string]any
-	pick := func(v any) {
+	at := serverMapsAt(doc)
+	out := make([]map[string]any, len(at))
+	for i, m := range at {
+		out[i] = m.servers
+	}
+	return out
+}
+
+// serverMap is one server map and the key path to it in the parsed config.
+type serverMap struct {
+	path    []string
+	servers map[string]any
+}
+
+// serverMapsAt is serverMaps with each map's key path, so a removal (ADR-0331) deletes exactly the entry the
+// collector described, at the place it was found.
+func serverMapsAt(doc map[string]any) []serverMap {
+	var out []serverMap
+	pick := func(v any, path ...string) {
 		if m, ok := v.(map[string]any); ok {
-			out = append(out, m)
+			out = append(out, serverMap{path: path, servers: m})
 		}
 	}
-	pick(doc["mcpServers"])
-	pick(doc["servers"])
+	pick(doc["mcpServers"], "mcpServers")
+	pick(doc["servers"], "servers")
 	if mcp, ok := doc["mcp"].(map[string]any); ok {
-		pick(mcp["servers"])
+		pick(mcp["servers"], "mcp", "servers")
 	}
-	pick(doc["context_servers"])
-	pick(doc["mcp_servers"])
+	pick(doc["context_servers"], "context_servers")
+	pick(doc["mcp_servers"], "mcp_servers")
 	if projects, ok := doc["projects"].(map[string]any); ok {
 		keys := make([]string, 0, len(projects))
 		for p := range projects {
@@ -156,7 +173,7 @@ func serverMaps(doc map[string]any) []map[string]any {
 		sort.Strings(keys)
 		for _, p := range keys {
 			if proj, ok := projects[p].(map[string]any); ok {
-				pick(proj["mcpServers"])
+				pick(proj["mcpServers"], "projects", p, "mcpServers")
 			}
 		}
 	}
@@ -606,7 +623,7 @@ func rootMount(args []string, container bool) bool {
 func describeURL(raw string) (host string, plaintext bool, keys []contract.KeyFound) {
 	raw = strings.TrimSpace(raw)
 	if r := secrets.Match(raw); r != "" {
-		keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: r, Present: true})
+		keys = append(keys, keyFound("(url)", r, raw))
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -614,14 +631,15 @@ func describeURL(raw string) (host string, plaintext bool, keys []contract.KeyFo
 	}
 	if u.User != nil {
 		if _, has := u.User.Password(); has {
-			keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: RuleURLUserinfo, Present: true})
+			pw, _ := u.User.Password()
+			keys = append(keys, keyFound("(url)", RuleURLUserinfo, pw))
 		}
 	}
 	if len(keys) == 0 {
 		for _, vs := range u.Query() {
 			for _, v := range vs {
 				if secrets.Match(v) != "" {
-					keys = append(keys, contract.KeyFound{KeyName: "(url)", RuleID: RuleURLKey, Present: true})
+					keys = append(keys, keyFound("(url)", RuleURLKey, v))
 				}
 			}
 		}
@@ -666,9 +684,9 @@ func envKeys(v any) []contract.KeyFound {
 			reported = unnamed
 		}
 		if r := secrets.Match(val); r != "" {
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: r, Present: true})
+			out = append(out, keyFound(reported, r, val))
 		} else if secretName(name) && !reference(val) {
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleNamedLiteral, Present: true})
+			out = append(out, keyFound(reported, RuleNamedLiteral, val))
 		}
 	}
 	return out
@@ -691,17 +709,17 @@ func headerKeys(v any) []contract.KeyFound {
 		lower := strings.ToLower(name)
 		switch {
 		case secrets.Match(val) != "":
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: secrets.Match(val), Present: true})
+			out = append(out, keyFound(reported, secrets.Match(val), val))
 		case lower == "authorization" || lower == "proxy-authorization":
 			cred := strings.TrimSpace(val)
 			if i := strings.IndexByte(cred, ' '); i > 0 {
 				cred = strings.TrimSpace(cred[i+1:])
 			}
 			if cred != "" && !reference(cred) {
-				out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleAuthHeader, Present: true})
+				out = append(out, keyFound(reported, RuleAuthHeader, cred))
 			}
 		case secretName(strings.ReplaceAll(strings.ToUpper(name), "-", "_")) && !reference(val):
-			out = append(out, contract.KeyFound{KeyName: reported, RuleID: RuleNamedLiteral, Present: true})
+			out = append(out, keyFound(reported, RuleNamedLiteral, val))
 		}
 	}
 	return out
@@ -712,7 +730,7 @@ func mergeKeys(in []contract.KeyFound) []contract.KeyFound {
 	seen := map[string]bool{}
 	var out []contract.KeyFound
 	for _, k := range in {
-		id := k.KeyName + "\x00" + k.RuleID
+		id := k.KeyName + "\x00" + k.RuleID + "\x00" + k.Fingerprint
 		if seen[id] {
 			continue
 		}
@@ -723,7 +741,10 @@ func mergeKeys(in []contract.KeyFound) []contract.KeyFound {
 		if out[i].KeyName != out[j].KeyName {
 			return out[i].KeyName < out[j].KeyName
 		}
-		return out[i].RuleID < out[j].RuleID
+		if out[i].RuleID != out[j].RuleID {
+			return out[i].RuleID < out[j].RuleID
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
 	})
 	return out
 }

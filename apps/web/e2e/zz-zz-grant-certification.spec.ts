@@ -101,13 +101,13 @@ test("a campaign is opened with a scope preview, one item kept, one revoked — 
   await expect(page.getByText("2 grant(s) would be snapshotted at open")).toBeVisible();
   await page.getByRole("button", { name: "Open campaign" }).click();
 
-  // the campaign lists as open with 2 undecided items (clickable rows render
-  // with a link role in this Table)
-  const row = page.getByRole("link", { name: /zz-cert-campaign/ });
+  // the campaign lists as open with 2 undecided items (a clickable row carries
+  // a button named for its campaign in its first cell, UIS-04)
+  const row = page.getByRole("row").filter({ has: page.getByRole("button", { name: /zz-cert-campaign/ }) });
   await expect(row).toBeVisible();
   await expect(row.getByText("open", { exact: true })).toBeVisible();
   await expect(row.getByText("2 undecided")).toBeVisible();
-  await page.getByRole("cell", { name: "zz-cert-campaign", exact: true }).click();
+  await page.getByRole("button", { name: "Open campaign zz-cert-campaign" }).click();
   // Card titles render as plain text, not headings
   await expect(page.getByText("Campaign: zz-cert-campaign")).toBeVisible();
 
@@ -132,7 +132,7 @@ test("a campaign is opened with a scope preview, one item kept, one revoked — 
   expect(grantedIds).toContain(agentKeep);
 
   // every item decided → the campaign reads completed
-  await expect(page.getByRole("link", { name: /zz-cert-campaign/ }).getByText("completed")).toBeVisible();
+  await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: /zz-cert-campaign/ }) }).getByText("completed")).toBeVisible();
 });
 
 test("the posture page carries the campaigns line", async ({ page }) => {

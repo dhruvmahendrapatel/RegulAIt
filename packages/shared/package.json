@@ -10,6 +10,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./browser-governance": {
+      "types": "./dist/browser-governance/index.d.ts",
+      "default": "./dist/browser-governance/index.js"
+    },
+    "./browser-governance/constants": {
+      "types": "./dist/browser-governance/constants.d.ts",
+      "default": "./dist/browser-governance/constants.js"
+    },
+    "./dlp-secret-re2": {
+      "types": "./dist/dlp-secret-re2.d.ts",
+      "default": "./dist/dlp-secret-re2.js"
     }
   },
   "scripts": {
@@ -18,7 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@arizeai/openinference-genai": "0.4.0",
+    "@arizeai/openinference-genai": "0.4.3",
     "@arizeai/openinference-semantic-conventions": "2.14.0",
     "@cyclonedx/cyclonedx-library": "10.3.0",
     "@humanwhocodes/momoa": "3.3.13",
@@ -30,6 +42,7 @@
     "canonicalize": "5.1.0",
     "csv-stringify": "6.9.0",
     "fast-xml-parser": "5.12.1",
+    "fflate": "0.8.3",
     "re2js": "2.8.8",
     "rfc6902": "5.3.0",
     "simple-statistics": "7.12.1",

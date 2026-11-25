@@ -104,6 +104,23 @@ describe("ADR-0349 replay regression: recorded histories reach their recorded st
     });
   }
 
+  it("a fixture whose first two events share one commit timestamp, stored in the wrong order, still replays", () => {
+    // events written in one transaction share now(), so storage may return them out of order; ADR-0342's tie search
+    // must recover the applied order (the gap the code review named for fixtures built from scenarios)
+    const f = fixtures.find((x) => x.name === "intake-happy-path-completed")!;
+    const at = (i: number) => new Date(Date.UTC(2026, 0, 1) + i * 1000);
+    const history = f.events.map((event, i) => ({ event, at: i < 2 ? at(0) : at(i) }));
+    [history[0], history[1]] = [history[1]!, history[0]!];
+    // the swapped order alone is not a valid history: with distinct timestamps (no tie to search) it diverges
+    const untied = history.map((h, i) => ({ ...h, at: at(i) }));
+    expect(replayHistory(f.definition, untied, f.expected.state).status).toBe("diverged");
+    const out = replayHistory(f.definition, history, f.expected.state);
+    expect(out.status).toBe("ok");
+    if (out.status !== "ok") return;
+    expect(out.steps.map((s) => s.event)).toEqual(f.events);
+    expect(out.final).toEqual(f.expected.state);
+  });
+
   it("together the fixtures use every event kind and rest in every status", () => {
     const kinds = new Set(fixtures.flatMap((f) => f.events.map((e) => e.kind)));
     expect([...EVENT_KINDS].filter((k) => !kinds.has(k))).toEqual([]);
