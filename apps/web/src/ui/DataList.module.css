@@ -8,6 +8,11 @@
   min-width: 0;
 }
 
+/* UIS-05: the previous answer stays on screen while the new one is read, dimmed so it does not read as the result */
+.updating tbody {
+  opacity: 0.5;
+}
+
 /* the column picker's wrapper takes no box of its own */
 .viewOnly {
   display: contents;

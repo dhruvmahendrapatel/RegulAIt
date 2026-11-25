@@ -240,6 +240,32 @@ export const MONITOR_RULES = {
       "One person reached the jailbreak-finding threshold within the window (monitorJailbreakThreshold, " +
       "monitorJailbreakWindowHours) and then made a tool call that was allowed (ADR-0186 M).",
   },
+  // --- ADR-0312 (pilot addendum): spend budgets (loader: the gateway's budget-alerts.ts) ----------------------------
+  project_budget_threshold: {
+    label: "Project spend crossed its budget alert threshold",
+    severity: "medium",
+    description:
+      "A project's metered spend in its budget window (the calendar month for a monthly budget, otherwise its " +
+      "lifetime) reached its alert threshold (alert_threshold_pct of budget_usd, 80% by default). High once spend " +
+      "reaches the budget itself. Imported spend is shown beside it, never added. The budget gate enforces; this alerts.",
+  },
+  user_budget_threshold: {
+    label: "Person's spend crossed their budget alert threshold",
+    severity: "medium",
+    description:
+      "A person's metered spend across every model, MCP tool and connector call in their budget window reached the " +
+      "alert threshold of their spend budget (user_spend_budgets). High once spend reaches the budget itself. " +
+      "Imported spend (seat and usage exports) is shown beside it, never added. Alert only: no call is refused.",
+  },
+  user_imported_budget_threshold: {
+    label: "Person's imported spend crossed their budget alert threshold",
+    severity: "medium",
+    description:
+      "A person's IMPORTED spend (seat and usage exports of tools that do not run through the gateway, such as " +
+      "coding assistants; applied, non-superseded USD lines whose billing period overlaps the window) reached the " +
+      "alert threshold of their spend budget. A separate alert from the metered one, never added to it (ADR-0069): " +
+      "each basis is compared with the budget on its own. High once imported spend reaches the budget. Alert only.",
+  },
   // --- ADR-0223 (P13b): classical-model drift --------------------------------
   classical_model_drift: {
     label: "Classical model drift above threshold",
@@ -461,6 +487,8 @@ export interface MonitorInput {
   /** ADR-0182 (D4) — the accountability rules, each fed by its slice's
    * loader (same shape as `assurance`); an absent rule key = not evaluated */
   accountability?: Partial<Record<AccountabilityMonitorRuleId, MonitorAssuranceInput>>;
+  /** ADR-0312 (pilot addendum) — the spend-budget rules; an absent rule key = not evaluated */
+  spend?: Partial<Record<SpendMonitorRuleId, MonitorAssuranceInput>>;
   /** ADR-0186 M — the four detection rules, fed by the gateway's
    * `monitor-detection-rules.ts` (same shape as `assurance`); an absent rule key
    * = not evaluated */
@@ -484,6 +512,11 @@ export const ACCOUNTABILITY_MONITOR_RULE_IDS = [
   "literacy_coverage_gap",
 ] as const satisfies readonly MonitorRuleId[];
 export type AccountabilityMonitorRuleId = (typeof ACCOUNTABILITY_MONITOR_RULE_IDS)[number];
+
+/** ADR-0312 (pilot addendum) — the spend-budget rules, evaluated by the gateway's budget-alerts.ts loader (same
+ * shape as `assurance`); an absent rule key = not evaluated */
+export const SPEND_MONITOR_RULE_IDS = ["project_budget_threshold", "user_budget_threshold", "user_imported_budget_threshold"] as const;
+export type SpendMonitorRuleId = (typeof SPEND_MONITOR_RULE_IDS)[number];
 
 /** ADR-0180 — the six continuous-assurance rules. Their evaluation is owned by
  * the D3 items (the gateway loaders compute the breaches from the ledgers);
@@ -854,6 +887,12 @@ export function evaluateMonitorRules(input: MonitorInput): MonitorFinding[] {
   // decides what breached.
   for (const ruleId of ACCOUNTABILITY_MONITOR_RULE_IDS) {
     for (const b of input.accountability?.[ruleId]?.breaches ?? []) {
+      out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
+    }
+  }
+  // ADR-0312 (pilot addendum) — the spend-budget rules, the same way
+  for (const ruleId of SPEND_MONITOR_RULE_IDS) {
+    for (const b of input.spend?.[ruleId]?.breaches ?? []) {
       out.push({ ruleId, subjectKey: b.subjectKey, severity: b.severity ?? sev(ruleId), title: b.title, detail: b.detail });
     }
   }

@@ -88,24 +88,29 @@ afterAll(async () => {
   await restoreMode?.();
 });
 
+/** machines whose column has no CHECK constraint yet; the migration that adds one is a follow-up batch */
+const NO_CHECK_YET = new Set(["approval"]);
+
 describe("ADR-0348 machines equal their CHECK constraints", () => {
-  it("training_jobs.status", async () => {
-    expect(await checkValues("training_jobs_status_check")).toEqual([...TRAINING_JOB_MACHINE.def.states].sort());
-    expect([...TRAINING_JOB_MACHINE.def.states]).toEqual([...TRAINING_JOB_STATUSES]);
-  });
-
-  it("mcp_servers.admission_state", async () => {
+  it.each(Object.values(STATE_MACHINES).map((m) => [m.def.id, m] as const))("%s", async (_id, m) => {
+    const [table, column] = m.def.stored.split(".") as [string, string];
     const rows = (await db.execute(
-      sql`SELECT conname FROM pg_constraint WHERE conrelid = 'mcp_servers'::regclass AND contype = 'c'
-          AND pg_get_constraintdef(oid) LIKE '%admission_state%'`,
+      sql`SELECT conname FROM pg_constraint WHERE conrelid = ${table}::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) ~ ${`\\m${column}\\M.*(IN|ANY)`}`,
     )) as unknown as { rows?: Array<{ conname: string }> } & Array<{ conname: string }>;
-    const name = (rows.rows ?? rows)[0]?.conname;
-    expect(name).toBeTruthy();
-    expect(await checkValues(name!)).toEqual([...MCP_ADMISSION_STATES].sort());
+    const names = (rows.rows ?? rows).map((r) => r.conname);
+    if (NO_CHECK_YET.has(m.def.id)) {
+      // a column with no CHECK yet (STATE_MACHINES.md §4): adding one moves it off this list
+      expect(names, `${m.def.stored} has a CHECK now: remove it from NO_CHECK_YET`).toHaveLength(0);
+      return;
+    }
+    expect(names, `a CHECK on ${m.def.stored}`).toHaveLength(1);
+    expect(await checkValues(names[0]!)).toEqual([...m.def.states].sort());
   });
 
-  it("every registered machine names where it is stored", () => {
-    for (const m of Object.values(STATE_MACHINES)) expect(m.def.stored).toMatch(/^[a-z_]+\.[a-z_]+$/);
+  it("the training job table and the column's TypeScript enum list the same values", () => {
+    expect([...TRAINING_JOB_MACHINE.def.states]).toEqual([...TRAINING_JOB_STATUSES]);
+    expect([...MCP_ADMISSION_MACHINE.def.states]).toEqual([...MCP_ADMISSION_STATES]);
   });
 });
 

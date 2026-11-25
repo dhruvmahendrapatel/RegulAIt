@@ -30,6 +30,7 @@ import { Badge, Button, Card, EmptyState, Field, Fieldset, InfoButton, Input, Ro
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
+import { ThirdPartyIngestCard } from "./ThirdPartyIngestCard";
 import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
 import { EndpointMcpServersCard } from "./EndpointMcpServersCard";
@@ -101,6 +102,8 @@ export default function DiscoverySourcesPage() {
   const [familyDraft, setFamilyDraft] = useState<Partial<FamilySwitches>>({});
   // MCP host-config discovery as edited (unsaved); null = as saved. Turning it on asks for the step-up.
   const [mcpDraft, setMcpDraft] = useState<boolean | null>(null);
+  // ADR-0337 §4: the Directory token listing as edited (unsaved); null = as saved. On asks for the step-up.
+  const [gdtDraft, setGdtDraft] = useState<boolean | null>(null);
   // a finding's sighting links here with ?pseudonym=… (revealing still needs the step-up)
   const [params] = useSearchParams();
   const [pseudonym, setPseudonym] = useState(params.get("pseudonym") ?? "");
@@ -123,6 +126,8 @@ export default function DiscoverySourcesPage() {
   const familyEdit = familyChanges(savedFamilies, familyDraft);
   const mcpSaved = settings.data?.endpointMcpConfig ?? false;
   const mcpChanged = mcpDraft !== null && mcpDraft !== mcpSaved;
+  const gdtSaved = settings.data?.googleDirectoryTokens ?? false;
+  const gdtChanged = gdtDraft !== null && gdtDraft !== gdtSaved;
   const chosenKind = kinds.find((k) => k.kind === form.kind);
   const chosenKindOff = !form.editing && familySwitchedOff(chosenKind, savedFamilies);
   const posture = sources.data?.posture;
@@ -212,12 +217,14 @@ export default function DiscoverySourcesPage() {
     if (retentionDays.trim()) body.endpointRetentionDays = Number(retentionDays);
     if (Object.keys(familyEdit.changed).length > 0) body.families = familyEdit.changed;
     if (mcpChanged) body.endpointMcpConfig = mcpDraft;
+    if (gdtChanged) body.googleDirectoryTokens = gdtDraft;
     void act.run(async () => {
       await withStepUp((h) => stepUpApi.put("/v1/discovery/settings", body, h));
       setWarnDays("");
       setRetentionDays("");
       setFamilyDraft({});
       setMcpDraft(null);
+      setGdtDraft(null);
       await refetchAll();
     }, "Discovery settings saved");
   };
@@ -233,6 +240,7 @@ export default function DiscoverySourcesPage() {
     <>
       <PageHeader
         title="Discovery sources"
+        actions={<Link to="/admin/shadow-ai/entitlement-findings">SaaS entitlement findings</Link>}
         info={
           <>
             Discovery sources are the places regulAIt reads, read-only, to find AI use nobody registered, such as cloud
@@ -447,6 +455,8 @@ export default function DiscoverySourcesPage() {
                       }
                     />
                     {!s.enabled && !s.scannerBuilt ? <div className={v.faint}>Its scanner is not built yet, so it cannot be enabled.</div> : null}
+                    {s.kind === "entitlement_m365" || s.kind === "entitlement_salesforce" ? <Link to={`/admin/shadow-ai/discovery-sources/read-setup/${s.id}`}>Read setup</Link> : null}
+                    {s.kind.startsWith("entitlement_") ? <Link to={`/admin/shadow-ai/discovery-sources/apps/${s.id}`}>Apps and agents</Link> : null}
                     </>
                   ),
                 },
@@ -521,6 +531,8 @@ export default function DiscoverySourcesPage() {
 
           <FederationCard />
 
+          <ThirdPartyIngestCard />
+
           <Card title="Settings">
             {/* A15: the stated ages wait for the read; a failed read says so, with Retry */}
             <QueryGate loading={settings.isPending} error={settings.error} onRetry={() => void settings.refetch()}>
@@ -561,12 +573,19 @@ export default function DiscoverySourcesPage() {
                   <span className={v.faint}> · endpoint agents read MCP host configs, read-only, never a secret value. Switching it on asks you to confirm it&apos;s you.</span>
                 </span>
               </label>
+              <label className={v.row}>
+                <input type="checkbox" checked={gdtDraft ?? gdtSaved} disabled={!settings.data} onChange={(e) => setGdtDraft(e.target.checked)} />
+                <span>
+                  Directory token listing for workspace suites
+                  <span className={v.faint}> · lets a workspace-suite source read every user&apos;s app grants. That permission could also revoke them; regulAIt never does. Switching it on asks you to confirm it&apos;s you.</span>
+                </span>
+              </label>
               <div>
                 <Button
-                  disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim() && Object.keys(familyEdit.changed).length === 0 && !mcpChanged)}
+                  disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim() && Object.keys(familyEdit.changed).length === 0 && !mcpChanged && !gdtChanged)}
                   onClick={saveSettings}
                 >
-                  {familyEdit.turnsOn || (mcpChanged && mcpDraft) ? "Save settings (confirm it's you)" : "Save settings"}
+                  {familyEdit.turnsOn || (mcpChanged && mcpDraft) || (gdtChanged && gdtDraft) ? "Save settings (confirm it's you)" : "Save settings"}
                 </Button>
               </div>
             </div>

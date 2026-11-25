@@ -1,0 +1,1 @@
+{"session_id":"thr_1","transcript_path":null,"cwd":"/work","hook_event_name":"PreToolUse","model":"m","permission_mode":"default","turn_id":"turn_1","tool_name":"apply_patch","tool_use_id":"call_9","tool_input":{"command":"*** Begin Patch\n*** Update File: src/a.go\n@@\n-a\n+secret-argument\n*** End Patch\n"}}

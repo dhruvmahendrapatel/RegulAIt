@@ -18,7 +18,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { BuilderMessage, BuilderPendingStep, BuilderTemplate, BuilderTool, BuilderToolStep, BuilderToolStepStatus } from "../../api/types";
 import { fmtUsd, fmtDur, errorText } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Field, Input, Modal, Select, Tabs, Textarea } from "../../ui/kit";
+import { Badge, Button, Field, Input, Modal, Select, Switch as KitSwitch, Tabs, Textarea } from "../../ui/kit";
 import { ModelPicker } from "../../ui/ModelPicker";
 import { Logo, hasLogo } from "../../ui/logos/Logo";
 import { providerLogoKey } from "../../ui/logos/providerLogo";
@@ -26,7 +26,7 @@ import { useToast } from "../../ui/toast";
 import { RunGraph } from "../../ui/runGraph/RunGraph";
 import rg from "../../ui/runGraph/runGraph.module.css";
 import { bk, builderApi, chatRefusal, useMyModelTiles, useMyProjects, type ChatResponse } from "./builderApi";
-import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
+import { agentInitials, importMessage, isImeComposing, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
 
 // ---- glyphs (inline, decorative) -------------------------------------------
@@ -190,18 +190,9 @@ export function Segmented<T extends string>(props: {
   );
 }
 
+/** the builder's compact switch is the kit one (review of #744: one switch in the repo) */
 export function Switch(props: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={props.checked}
-      aria-label={props.label}
-      className={s.switch}
-      disabled={props.disabled}
-      onClick={() => props.onChange(!props.checked)}
-    />
-  );
+  return <KitSwitch size="sm" checked={props.checked} onChange={props.onChange} label={props.label} disabled={props.disabled} />;
 }
 
 export function Disclosure(props: { label: string; open: boolean; onToggle: () => void; controls: string }) {
@@ -642,11 +633,18 @@ export function MessageList(props: {
   );
 }
 
-/** the message box: Enter sends, Shift+Enter breaks a line */
+/**
+ * the message box: Enter sends, Shift+Enter breaks a line.
+ *
+ * `onSend` returns the send's promise. The text stays in the box until that
+ * promise resolves, so a refused or failed send keeps what was written and the
+ * caller shows the error (UIW-01). Text edited while the send is in flight is
+ * kept too.
+ */
 export function Composer(props: {
   label: string;
   placeholder: string;
-  onSend: (text: string) => void;
+  onSend: (text: string) => Promise<unknown>;
   busy?: boolean;
   disabled?: boolean;
   leading?: ReactNode;
@@ -656,8 +654,11 @@ export function Composer(props: {
   const send = () => {
     const t = text.trim();
     if (!t || props.busy || props.disabled) return;
-    props.onSend(t);
-    setText("");
+    props.onSend(t).then(
+      () => setText((cur) => (cur.trim() === t ? "" : cur)),
+      // the caller's own error handler shows why; the draft stays for a retry
+      () => undefined,
+    );
   };
   return (
     <div className={s.composer}>
@@ -672,7 +673,7 @@ export function Composer(props: {
         autoFocus={props.autoFocus}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (e.key === "Enter" && !e.shiftKey && !isImeComposing(e)) {
             e.preventDefault();
             send();
           }

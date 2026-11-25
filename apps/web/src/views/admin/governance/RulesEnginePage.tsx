@@ -474,7 +474,7 @@ export default function RulesEnginePage() {
                 </Field>
               </>
             )}
-            onSubmit={(s, extra) => api.post("/v1/rules/approvals", approvalRuleBody(subjectBody(s), extra))}
+            onSubmit={(s, extra) => withStepUp((h) => stepUpApi.post("/v1/rules/approvals", approvalRuleBody(subjectBody(s), extra), h))}
           />
           <Table<ApprovalRule>
             columns={[

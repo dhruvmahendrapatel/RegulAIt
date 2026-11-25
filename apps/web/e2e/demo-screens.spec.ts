@@ -462,8 +462,8 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("G5 an alert in the shared detail drawer: a side panel above 900 px, a modal at 900 px and below", async () => {
     await ada.goto("/ui/admin/governance/alerts");
     await expect(ada.getByRole("heading", { name: "Governance alerts", exact: true })).toBeVisible();
-    // each alert row in the list is a link named for its alert; it opens the alert in the shared detail drawer
-    const rows = ada.getByRole("link", { name: /^Open alert / });
+    // each alert row carries a button named for its alert (UIS-04); it opens the alert in the shared detail drawer
+    const rows = ada.getByRole("button", { name: /^Open alert / });
     // the list has loaded (a row, or its empty state) before the rows are counted
     await expect(rows.first().or(ada.getByText("No active alerts", { exact: true }))).toBeVisible();
     if ((await rows.count()) === 0) {

@@ -275,12 +275,35 @@ export interface PrivacyGateContext {
   input: string;
 }
 
+/**
+ * ADR-0224 addendum (2026-11-20): what the processing limit is deciding for. Model dispatch, connector calls and MCP
+ * calls all reach the one implementation below through the governed core (`governedProcessingLimit`), so a record of
+ * processing limits every call type the same way. The target only shapes the audit row.
+ */
+export type ProcessingLimitTarget =
+  | { type: "model"; agentId: string; agentName: string }
+  | { type: "connector"; connectorId: string; connectorName: string; operation: string }
+  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string }
+  /** ADR-0224 addendum 2026-11-21: a call to a remote agent (ADR-0219) */
+  | { type: "a2a"; agentId: string; agentName: string; skillId: string | null }
+  /** ADR-0224 addendum 2026-11-21: rows entering a training corpus (ingest or append), before anything is stored */
+  | { type: "training_dataset"; datasetId: string | null; datasetName: string; phase: "ingest" | "append" | "version" | "train" };
+
+export interface ProcessingLimitInput {
+  userId: string;
+  target: ProcessingLimitTarget;
+  projectId: string | null;
+  /** the text that would leave the gateway (prompt, connector object and payload, MCP arguments) */
+  input: string;
+}
+
 export type PrivacyGateResult = {
   kind: "refuse";
   status: 409;
   error: typeof PROCESSING_NOT_PERMITTED;
   detail: string;
-  auditLogId: string | null;
+  /** the refusal's own audit row: always present, a refusal that could not be audited throws instead */
+  auditLogId: string;
 } | null;
 
 /** the categories the active records of processing for `projectId` permit, and how many records there are */
@@ -303,12 +326,36 @@ export async function permittedCategories(db: Db, projectId: string): Promise<{ 
   return { categories: [...new Set(rows.flatMap((r) => r.dataCategories))], recordIds: rows.map((r) => r.id) };
 }
 
+function targetAuditColumns(t: ProcessingLimitTarget) {
+  switch (t.type) {
+    case "model":
+      return { columns: { objectType: "agent" as const, objectId: t.agentId }, detail: { agentId: t.agentId, agentName: t.agentName } };
+    case "connector":
+      return {
+        columns: { objectType: "connector" as const, objectId: t.connectorId },
+        detail: { connectorId: t.connectorId, connectorName: t.connectorName, operation: t.operation },
+      };
+    case "mcp_tool":
+      return { columns: { serverId: t.serverId, toolName: t.toolName }, detail: t.method ? { method: t.method } : {} };
+    case "a2a":
+      return {
+        columns: { objectType: "a2a_agent" as const, objectId: t.agentId, toolName: t.skillId },
+        detail: { agentId: t.agentId, agentName: t.agentName, skillId: t.skillId },
+      };
+    case "training_dataset":
+      return {
+        columns: { objectType: "training_dataset" as const, objectId: t.datasetId },
+        detail: { datasetName: t.datasetName, phase: t.phase },
+      };
+  }
+}
+
 /**
- * The rung `dispatchAttempt` gains after the PII-mode check: returns null when the dispatch may proceed, or an
- * already-audited refusal. Off (the shipped default) it is one settings read. The audit row carries categories,
- * counts and record ids only, never the input.
+ * The processing limit for any governed call: returns null when the call may proceed, or an already-audited refusal.
+ * Off (the shipped default) it is one settings read. The audit row carries categories, counts and record ids only,
+ * never the input.
  */
-export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Promise<PrivacyGateResult> {
+export async function processingLimitGate(db: Db, ctx: ProcessingLimitInput): Promise<PrivacyGateResult> {
   const org = await loadOrgSettings(db);
   if (!org.privacyOpsEnabled) return null;
   const hits: PiiHit[] = detectPII(ctx.input, await piiInternationalCategories(db));
@@ -321,16 +368,16 @@ export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Prom
     projectAttributed: Boolean(ctx.projectId),
     recordCount: permitted.recordIds.length,
   });
+  const target = targetAuditColumns(ctx.target);
   const [row] = await db
     .insert(auditLog)
     .values({
       userId: ctx.userId,
-      objectType: "agent",
-      objectId: ctx.agentId,
+      ...target.columns,
       detail: {
         phase: "privacy",
-        agentId: ctx.agentId,
-        agentName: ctx.agentName,
+        callType: ctx.target.type,
+        ...target.detail,
         ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
         hits,
         refusedCategories: refused,
@@ -344,7 +391,19 @@ export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Prom
       reason: detail,
     })
     .returning({ id: auditLog.id });
-  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row?.id ?? null };
+  // fail loudly rather than refuse without evidence (review #1161 R2 [2]); the caller's error path refuses the call
+  if (!row) throw new Error("processing limit: the refusal's audit row was not written");
+  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row.id };
+}
+
+/** the model-dispatch form of `processingLimitGate`, kept for the dispatch callers' existing signature */
+export async function privacyDispatchGate(db: Db, ctx: PrivacyGateContext): Promise<PrivacyGateResult> {
+  return processingLimitGate(db, {
+    userId: ctx.userId,
+    target: { type: "model", agentId: ctx.agentId, agentName: ctx.agentName },
+    projectId: ctx.projectId,
+    input: ctx.input,
+  });
 }
 
 // ---------------------------------------------------------------------------

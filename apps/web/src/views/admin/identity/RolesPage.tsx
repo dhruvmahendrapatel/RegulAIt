@@ -7,7 +7,7 @@
 import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../../api/client";
-import { withStepUp } from "../../../stepup/stepUp";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { Role, RoleAssignment, RoleGrants } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { DataList } from "../../../ui/DataList";
@@ -65,7 +65,8 @@ export default function RolesPage() {
 
   const deleteRole = async (role: Role) => {
     try {
-      await api.del(`/v1/roles/${role.id}`);
+      // settings_relax when the change hands calls to a rule with a wider approver pool (step-up.ts); withStepUp resends once
+      await withStepUp((h) => stepUpApi.del(`/v1/roles/${role.id}`, undefined, h));
       await act.run(async () => {}, "Role deleted");
       if (activeRoleId === role.id) setActiveRoleId("");
     } catch (e) {
@@ -247,7 +248,7 @@ export default function RolesPage() {
             void act
               .run(
                 () =>
-                  fetchDeleteWithBody(`/v1/roles/${r.id}`, { force: true, reason }),
+                  withStepUp((h) => stepUpApi.del(`/v1/roles/${r.id}`, { force: true, reason }, h)),
                 "Role force-deleted — holders unassigned, reason audited",
               )
               .then((ok) => {
@@ -259,25 +260,6 @@ export default function RolesPage() {
   );
 }
 
-/** DELETE with a JSON body (the force-delete contract) */
-async function fetchDeleteWithBody(path: string, body: unknown): Promise<void> {
-  const res = await fetch(path, {
-    method: "DELETE",
-    credentials: "include",
-    headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      payload = { raw: text };
-    }
-    throw new ApiError(res.status, payload);
-  }
-}
 
 // ---- grants + holders for the active role ---------------------------------
 
@@ -554,7 +536,7 @@ function RoleGrantsPanel(props: { roleId: string }) {
           setUnassign(null);
           if (x)
             void act.run(
-              () => api.del(`/v1/users/${x.userId}/roles/${props.roleId}`),
+              () => withStepUp((h) => stepUpApi.del(`/v1/users/${x.userId}/roles/${props.roleId}`, undefined, h)),
               "Role unassigned",
             );
         }}

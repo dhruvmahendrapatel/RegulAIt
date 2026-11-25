@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0363",
+  "lane": "E44",
+  "tracking": "ADR-0363 slice 3 (lane E44): the brief is API-only (rule 3); the risk column on the shadow-AI screen is for the design builder on #453. RAISED for review: the master decides on the PR",
+  "gaps": {
+    "GET /v1/ai-app-risk": "shows the curated AI app risk dataset (version, digest, weights; every value with its source and check date)",
+    "GET /v1/shadow-ai/risk": "ranks the shadow-AI inventory by app risk, with each score's factors and a suggested (never applied) site rule"
+  }
+}

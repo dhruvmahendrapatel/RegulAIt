@@ -561,6 +561,14 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * GET /v1/state-machines
+ * @stability public-beta — auth: user
+   */
+  getV1StateMachines<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/state-machines`, undefined, options);
+  }
+
+  /**
  * The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters.
  * @stability public-stable — auth: user
    */
@@ -1020,6 +1028,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1SpendForecast",
     "method": "GET",
     "path": "/v1/spend/forecast"
+  },
+  {
+    "id": "getV1StateMachines",
+    "method": "GET",
+    "path": "/v1/state-machines"
   },
   {
     "id": "getV1UsageEvents",
