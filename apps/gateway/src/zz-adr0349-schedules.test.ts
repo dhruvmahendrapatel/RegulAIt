@@ -10,6 +10,7 @@ import { and, auditLog, createDb, eq, runMigrations, sql, workflowInstances, wor
 import { buildApp } from "./app.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+import { adminsOtherThan } from "./workflow-approvers.js";
 import { fireTimesBetween, jitterMs, nextFireAfter, runWorkflowScheduleSweep, validateCalendar } from "./workflow-schedules.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -211,6 +212,64 @@ describe("ADR-0349 slice 4: schedules", () => {
     expect(await audits(s.id, "workflow:schedule-backfill")).toHaveLength(2);
     const tooBig = await app.inject({ method: "POST", headers: admin.auth, url: `/v1/workflows/schedules/${s.id}/backfill`, payload: { from: new Date(Date.now() - 200 * HOUR).toISOString(), to: to.toISOString(), note: "x" } });
     expect(tooBig.statusCode).toBe(422);
+    await abortAll(s.id);
+  });
+
+  it("an edit by another admin re-binds the run-as user, so the editor cannot also be the 'other admin' approver", async () => {
+    // review finding (four-eyes): admin B rewrites admin A's schedule, then would approve the instance as "the other admin"
+    const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: `e30-sch-b-${RUN}@example.com`, displayName: "admin b", isAdmin: true } });
+    const k = await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${u.json().id}/keys`, payload: { name: "t" } });
+    const bob = { id: u.json().id as string, auth: { authorization: `Bearer ${k.json().token}` } };
+    const s = (await create({ name: `rebind-${RUN}` })).json();
+    expect(s.runAsUserId).toBe(admin.id);
+    const patch = (headers: Record<string, string>, payload: Record<string, unknown>) =>
+      app.inject({ method: "PATCH", headers, url: `/v1/workflows/schedules/${s.id}`, payload });
+
+    // the bootstrap identity cannot edit or backfill one: a schedule runs as a named admin
+    expect((await patch(AUTH, { change: { ...change, description: "boot" } })).json().error).toBe("bootstrap_cannot_schedule");
+    // a rename by another admin changes nothing about who it runs as
+    expect((await patch(bob.auth, { name: `rebind-renamed-${RUN}` })).json().runAsUserId).toBe(admin.id);
+    // only the run-as user may backfill it
+    const to = topOfHour(new Date(Date.now() - 2 * HOUR));
+    const bf = await app.inject({ method: "POST", headers: bob.auth, url: `/v1/workflows/schedules/${s.id}/backfill`, payload: { from: new Date(to.getTime() - HOUR).toISOString(), to: to.toISOString(), note: "b" } });
+    expect(bf.statusCode).toBe(403);
+    expect(bf.json().error).toBe("schedule_run_as_only");
+
+    // B changes what it starts: the schedule now runs as B, audited with both identities
+    const edited = await patch(bob.auth, { change: { ...change, description: `edited by b ${RUN}` } });
+    expect(edited.statusCode).toBe(200);
+    expect(edited.json().runAsUserId).toBe(bob.id);
+    const [upd] = (await audits(s.id, "workflow:schedule-updated")).filter((a) => (a.detail as { runAsRebound?: unknown }).runAsRebound);
+    expect(upd!.detail).toMatchObject({ runAsRebound: { from: admin.id, to: bob.id } });
+
+    // the next fire starts B's change with B as its initiator, so B is not among the admins who may sign it off
+    const fire = topOfHour(new Date(Date.now() - HOUR));
+    await dueAt(s.id, fire);
+    await runWorkflowScheduleSweep(db, undefined, { now: new Date(fire.getTime() + 60_000) });
+    const [run] = await runsOf(s.id);
+    expect(run).toMatchObject({ outcome: "started" });
+    const [inst] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, run!.instanceId!));
+    expect(inst!.initiatorUserId).toBe(bob.id);
+    const approvers = await adminsOtherThan(db, inst!.initiatorUserId);
+    expect(approvers).not.toContain(bob.id);
+    expect(approvers).toContain(admin.id);
+    await app.inject({ method: "POST", headers: bob.auth, url: `/v1/workflows/instances/${run!.instanceId}/abort` });
+  });
+
+  it("a jitter larger than the catch-up window still starts the fire on time (review finding)", async () => {
+    const s = (await create({ name: `jitter-${RUN}`, jitterSeconds: 1800 })).json();
+    // a fire time whose jitter is well past the 5-minute grace
+    let fire = topOfHour(new Date(Date.now() - 48 * HOUR));
+    while (jitterMs(s.id, fire, 1800) < 10 * 60_000) fire = new Date(fire.getTime() + HOUR);
+    const j = jitterMs(s.id, fire, 1800);
+    await dueAt(s.id, fire);
+    // before its jittered time nothing fires and the claim does not move
+    expect((await runWorkflowScheduleSweep(db, undefined, { now: new Date(fire.getTime() + j - 60_000) })).fired).toBe(0);
+    expect((await rowOf(s.id)).nextFireAt!.getTime()).toBe(fire.getTime());
+    // one sweep tick after it, the fire starts: it is not recorded as missed
+    const out = await runWorkflowScheduleSweep(db, undefined, { now: new Date(fire.getTime() + j + 60_000) });
+    expect(out.skippedMissed).toBe(0);
+    expect((await runsOf(s.id)).map((r) => r.outcome)).toEqual(["started"]);
     await abortAll(s.id);
   });
 

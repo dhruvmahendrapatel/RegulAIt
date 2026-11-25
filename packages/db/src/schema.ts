@@ -174,6 +174,8 @@ import {
   type ModalitySplit,
   // ADR-0349: the one declared list of terminal workflow statuses (the open-instance index predicates below)
   WORKFLOW_TERMINAL_STATUSES_SQL_LIST,
+  // ADR-0349 slice 4: a workflow schedule run's outcome lifecycle (the declared machine's states)
+  WORKFLOW_SCHEDULE_RUN_STATES,
   // ADR-0322: the vendor usage pull run states, declared with their machine (ADR-0348)
   VENDOR_USAGE_PULL_RUN_STATUSES,
   // ADR-0346 (migration fairness_evaluation): the fairness-evaluation vocabularies, in lockstep with the CHECKs
@@ -21877,17 +21879,8 @@ export const WORKFLOW_SCHEDULE_OVERLAP_POLICIES = ["skip", "buffer_one", "allow"
 export type WorkflowScheduleOverlapPolicy = (typeof WORKFLOW_SCHEDULE_OVERLAP_POLICIES)[number];
 /** why a run row exists */
 export const WORKFLOW_SCHEDULE_RUN_TRIGGERS = ["scheduled", "buffered", "backfill"] as const;
-/** what one fire time came to. `starting` is the row's first state, inside the claim; it is replaced in the start's
- * own call and stays only if the process died in between (then nothing started twice: the claim had moved on). */
-export const WORKFLOW_SCHEDULE_RUN_OUTCOMES = [
-  "starting",
-  "started",
-  "reused",
-  "skipped_overlap",
-  "buffered",
-  "skipped_missed",
-  "refused",
-] as const;
+/** what one fire time came to: the declared lifecycle's states (`WORKFLOW_SCHEDULE_RUN_MACHINE`, @regulait/shared) */
+export const WORKFLOW_SCHEDULE_RUN_OUTCOMES = WORKFLOW_SCHEDULE_RUN_STATES;
 
 /**
  * A template that starts on a calendar (Temporal Schedules). Deployment-wide like `workflow_templates` (no tenant
