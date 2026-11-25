@@ -335,7 +335,7 @@ export function curatedPieceByKey(key: string): PieceDef | undefined {
 // REGULAIT_DATA_KEY), decrypted per call and handed in here; a piece never
 // keeps or persists one.
 // ---------------------------------------------------------------------------
-const jiraCredentialSchema = z
+export const jiraCredentialSchema = z
   .object({
     /** the Jira Cloud site root, e.g. https://acme.atlassian.net — a host and nothing else */
     siteUrl: z.string().min(1).max(300),
@@ -343,7 +343,7 @@ const jiraCredentialSchema = z
     apiToken: z.string().min(1).max(500),
   })
   .strict();
-const googleCredentialSchema = z
+export const googleCredentialSchema = z
   .object({
     clientId: z.string().min(1).max(500),
     clientSecret: z.string().min(1).max(500),

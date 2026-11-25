@@ -193,7 +193,7 @@ export default function BuilderInboxPage() {
                   placeholder={detail.data?.pending ? "Answer the tool request above first" : `Reply to ${t.agentName}…`}
                   busy={reply.isPending}
                   disabled={!!detail.data?.pending}
-                  onSend={(m) => reply.mutate(m)}
+                  onSend={(m) => reply.mutateAsync(m)}
                 />
               </div>
             </div>

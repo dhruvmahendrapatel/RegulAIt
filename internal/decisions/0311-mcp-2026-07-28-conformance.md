@@ -1,6 +1,6 @@
 # ADR-0311: MCP 2026-07-28 conformance check, the transport fixes it found, and the staged move to the stateless protocol
 
-- **Status**: Accepted for the check and the fixes (lane E1 brief, gap G10 of `internal/product/MARKET_ANALYSIS_2026-11.md` §3). Decision 4 (the staged move to the stateless protocol) is **Accepted** (owner, 2026-11-21); slice 1, the 2026-07-28 server side for `tools/*`, is built.
+- **Status**: Accepted for the check and the fixes (lane E1 brief, gap G10 of `internal/product/MARKET_ANALYSIS_2026-11.md` §3). Decision 4 (the staged move to the stateless protocol) is **Accepted** (owner, 2026-11-21); slice 1, the 2026-07-28 server side for `tools/*`, and slice 2, its governed resources, prompts and completions, are built.
 - **Date**: 2026-11-19
 - **Index**: **MCP 2026-07-28 conformance (G10).** The 2026-07-28 revision is a breaking, stateless protocol, not a hardening pass, so the gateway does not conform yet. This ADR records the gap matrix for the server and client sides and fixes now the transport MUSTs that hold in every revision the gateway serves: browser `Origin` validation, no JSON-RPC batches from 2025-06-18 on, and DELETE answered 405. It proposes a staged move to SDK v2 that serves both protocol generations.
 - **Built in**: lane E1 (slice 3).
@@ -122,16 +122,44 @@ It found the following:
      (`detail.protocolRevision`). `subscriptions/listen`, which the SDK would serve itself, is refused the same way
      before the handler runs.
 
-   Deferred to later slices: resources, prompts, completions and logging on the new path (the v1 path keeps the
-   ADR-0185 G3 surface); subscriptions; `InputRequiredResult`; `Mcp-Param-*` header validation (the SDK checks it
-   only for its high-level `McpServer`); the upstream client side (d); MCP Apps `ui://` governance (e); dropping the
-   oldest versions (f).
+   **Slice 2 (built, 2026-11-21).** The governed non-tool methods on the server side.
+   - `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`, `prompts/get` and
+     `completion/complete` on the new path call `protocolCallForCaller` (`mcp-proxy.ts`), the v1 route's inline
+     protocol `call` moved out unchanged. Both paths therefore run the same ADR-0185 G3 primitive
+     (`executeGovernedProtocolCall`): the org switch (`mcp-method-disabled`), the kernel decision on the `mcp:*`
+     grant, data scopes (`resources/read` is decided on `{uri}`), definition pins, approvals, input and output scans,
+     content provenance and audit.
+   - The new path advertises `protocolCapabilities(...)` of the org's enabled methods, the same input as the v1 path,
+     minus `logging/setLevel`. It never advertises `logging`.
+   - Upstream connects are unchanged: the route connects eagerly only for `tools/list`, and the primitive connects
+     only after an allow. `server/discover` still opens no upstream, even with every method enabled.
+   - Differences from 2025-era behaviour come from the revision and are left to the SDK. The SDK re-codes
+     resource-not-found `-32002` to `-32602`. List results carry `resultType` and the `ttlMs: 0` /
+     `cacheScope: private` defaults. Only `tools/list` is sorted: the revision's deterministic-order SHOULD names
+     `tools/list` alone, so the other lists keep the upstream's order and cursors.
+   - Progress for the caller's own request is relayed on that request's response stream (`ctx.mcpReq.notify`; the
+     SDK upgrades the answer to SSE). The org rule is the 2025-era one: progress is relayed only while
+     `logging/setLevel` is enabled. Upstream `notifications/message` are never relayed on this path, and no
+     `protocol-relay` decision is made for them (`relayLogMessages: false`). The revision removed
+     `logging/setLevel`, and a server MUST NOT emit log messages for a request without a per-request log level, which
+     the gateway does not offer.
+   - Refusals keep the existing vocabulary (`mcp-method-unsupported`, `detail.protocolRevision`). The SDK answers
+     `-32601` itself, before any handler runs, for a method that is not a client-to-server request of the revision:
+     `logging/setLevel`, `ping`, `resources/subscribe`, and the client-bound `sampling/*` among them. That answer now
+     gets its audit row after the fact (`detail.answeredBy: "sdk"`). A non-spec name under an always-refused prefix
+     reaches the primitive and is refused by name, as on the v1 path. An unknown method stays an audited `-32601`.
+
+   Deferred to later slices: subscriptions; `InputRequiredResult`; per-request log levels
+   (`io.modelcontextprotocol/logLevel`, logging being deprecated); `Mcp-Param-*` header validation (the SDK checks
+   it only for its high-level `McpServer`); the upstream client side (d); MCP Apps `ui://` governance (e); dropping
+   the oldest versions (f).
 
 ## Consequences
 
 - The gateway enforces the transport rules every served revision requires, and a refusal never reaches an upstream.
 - The gateway does not yet speak 2026-07-28. A client that speaks only 2026-07-28 cannot use it, and this is now
-  written down instead of assumed done. (Superseded in part by slice 1: such a client can discover, list and call
-  tools; the other methods are deferred.)
+  written down instead of assumed done. (Superseded in part by slices 1 and 2: such a client can discover, list
+  and call tools, and use the governed resources, prompts and completions; subscriptions and logging are not
+  offered on that path.)
 - The `/mcp` route gains `DELETE` (405) in the route classes, the census (protocol plumbing) and OpenAPI. No
   migration, table or UI is added.

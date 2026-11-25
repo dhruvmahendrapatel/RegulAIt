@@ -1,0 +1,2 @@
+<!-- fold: state-recap -->
+**2026-11-21 - E47 slice 2: the ADR-0224 processing limit now also covers A2A calls and training-corpus ingest ([ADR-0224](../decisions/0224-privacy-operations-consent-limits.md) addendum 2026-11-21, branch `builder/e47-ropa-a2a-ingest`).** Every governed path (model, connector, MCP, A2A, dataset ingest and append) now reaches `governedProcessingLimit`. Still off as shipped (owner question). No migration, no new route.

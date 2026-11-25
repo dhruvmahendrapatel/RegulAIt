@@ -36,6 +36,7 @@
  * codebase (`agent_grants.allowedModes`, node `mode`, the mode-scoped rules),
  * and this reuses it rather than inventing a second, softer one.
  */
+import { WORKFLOW_TERMINAL_STATUSES } from "@regulait/shared";
 import {
   and,
   auditLog,
@@ -260,7 +261,7 @@ export interface ProjectPlanOnlyRefusal {
 }
 
 /** the instance statuses that can never rest at a stage again (mirrors `currentPlanningStage`) */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+const TERMINAL_INSTANCE_STATUSES = WORKFLOW_TERMINAL_STATUSES;
 
 /** live instances of a project that rest at a planning stage, oldest first */
 export async function projectPlanningInstances(

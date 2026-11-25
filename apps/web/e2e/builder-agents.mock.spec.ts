@@ -30,8 +30,9 @@ test.describe("ADR-0172: your agents", () => {
 
     await page.getByRole("radio", { name: "List" }).check();
     await expect(page).toHaveURL(/view=list/);
+    // the row's link sits in its name cell (UIS-04); the model is in the row beside it
     const row = page.getByRole("link", { name: "Open Vendor risk assessor" });
-    await expect(row).toContainText("gpt-review");
+    await expect(page.getByRole("row").filter({ has: row })).toContainText("gpt-review");
     await expectAxeClean(page, "agents, list");
     await row.click();
     await expect(page).toHaveURL(/\/ui\/builder\/agents\/aaaaaaaa-/);

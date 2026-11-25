@@ -5,7 +5,8 @@
  * starts engine processes (`@regulait/engine-runner/worker`: the process-group runner and the in-sandbox task helper)
  * is reached only from each engine's TASK entry, which only a sandbox init runs.
  *
- * What it checks, for garak, modelscan, promptfoo, spikee and the admission-scan shim (mcpscanner, skillscanner):
+ * What it checks, for garak, modelscan, promptfoo, spikee and the subject-engine shim (mcpscanner, skillscanner and,
+ * ADR-0362, contentextract):
  *  - the RUNNER entry point's static import closure (static and side-effect imports, re-exports, dynamic `import()`
  *    and `require`, followed through relative modules and into `@regulait/engine-runner`) contains no module that
  *    names a process-spawning API (`child_process`) and no edge into `@regulait/engine-runner/worker`;

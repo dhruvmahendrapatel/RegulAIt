@@ -64,9 +64,9 @@ describe("ADR-0336 slice 4: the worker's contract for agent_config", () => {
     }
     // a non-E17 source may not report it at all
     expect(() => checkObservations("agent_registry_entra", [OK], NOW)).toThrow(ObservationRefused);
-    // nor may Copilot Studio or Agentforce until they scan (#1130 R9 [3])
-    expect(() => checkObservations("agent_registry_copilot_studio", [OK], NOW)).toThrow(ObservationRefused);
-    expect(() => checkObservations("agent_registry_agentforce", [OK], NOW)).toThrow(ObservationRefused);
+    // slice 5: Copilot Studio and Agentforce scan too, each under its own vendor
+    expect(checkObservations("agent_registry_copilot_studio", [OK], NOW)[0]!.configSecret).toEqual({ rule: RULE, vendor: "microsoft" });
+    expect(checkObservations("agent_registry_agentforce", [OK], NOW)[0]!.configSecret).toEqual({ rule: RULE, vendor: "salesforce" });
     expect(() => checkObservations("repo_github", [OK], NOW)).toThrow(ObservationRefused);
   });
 

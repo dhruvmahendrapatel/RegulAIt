@@ -50,7 +50,7 @@ RUN test "$(go env GOVERSION)" = "go1.27.4" \
  && go version -m /out/skill-scanner-cel-go-linux-amd64 | head -3
 
 # ---- stage 2: the Python closure ----------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -76,7 +76,7 @@ RUN python -m venv /opt/skillscanner/venv \
 # (on the internal `engines` network, holding the runner key; it never runs the scanner) and
 # `node /app/dist/task-main.js skillscanner` is the manifest's taskEntry, started ONLY by the sandbox executor in a gVisor
 # sandbox under the run's engine_worker placement, where it runs our driver on the gateway's subject file.
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -86,7 +86,7 @@ COPY apps ./apps
 # install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-admission-scan..." build \
  && pnpm --filter @regulait/engine-admission-scan deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
@@ -103,8 +103,10 @@ LABEL org.opencontainers.image.title="regulait-engine-skillscanner" \
 # 1:1.3.dfsg+really1.3.1-1+b1; the fix is in Debian trixie-security. Upgrade exactly that package to exactly the
 # fixed version, then drop what apt and dpkg wrote with wall-clock content, so the layer stays byte-reproducible.
 # Remove this when a rebuilt base digest already carries the fix.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \
            /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12

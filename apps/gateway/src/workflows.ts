@@ -91,6 +91,8 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { isUniqueViolation } from "./pg-errors.js";
+import { answerStartConflict, openInstanceForStartKey, startKeyOf, WORKFLOW_START_KEY_INDEX } from "./workflow-start-conflict.js";
 import {
   REMEDIATION_ENVIRONMENT_PATTERN,
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
@@ -142,6 +144,8 @@ import {
   type changeDescriptorSchema,
   submitArtifactSchema,
   isIntakeTemplateName,
+  WORKFLOW_TERMINAL_STATUSES,
+  isWorkflowTerminalStatus,
 } from "@regulait/shared";
 // ADR-0182 A11 — intake-named templates pass the decision-regression gate
 import { parseAcceptance, writeIntakeTemplateGated } from "./decision-regression.js";
@@ -596,8 +600,7 @@ async function applyEvent(
     // a re-open cancels those of the rounds it left behind. Same transaction
     // as the transition, under the instance row lock.
     // ADR-0340: a cancel or denial that starts compensating ends the FORWARD work the same way
-    const endsInstance =
-      ["completed", "denied", "aborted", "rolled_back"].includes(state.status) || effects.some((e) => e.kind === "compensation_started");
+    const endsInstance = isWorkflowTerminalStatus(state.status) || effects.some((e) => e.kind === "compensation_started");
     if (endsInstance || isReopen) {
       const { cancelEngineRunsOfInstance } = await import("./engine-runs.js");
       await cancelEngineRunsOfInstance(tx, instance.id, actorUserId, {
@@ -747,8 +750,7 @@ async function recordWorkflowStageSpan(
   });
   // The instance's trace closes when the INSTANCE does — not when one of its
   // transitions returns, exactly as a run's trace closes with the run.
-  const terminal = ["completed", "denied", "aborted", "rolled_back"];
-  if (terminal.includes(applied.span.status)) {
+  if (isWorkflowTerminalStatus(applied.span.status)) {
     await finishTrace(db, ctx, applied.span.status === "completed" ? "ok" : "denied");
   }
 }
@@ -3236,6 +3238,36 @@ export async function checkWorkflowTemplateReferences(
   return null;
 }
 
+/**
+ * ADR-0022 retire, the write itself (the route's core, shared with ADR-0357's governance-config apply): under the
+ * template's row lock, mark it retired with the reason, delete the rules of a retired shadow-AI default (ADR-0195 A4)
+ * and audit it. Runs in the caller's transaction. An intake template's retire is gated by the caller
+ * (`writeIntakeTemplateGated`), never here.
+ */
+export async function retireWorkflowTemplateLocked(tx: Db, templateId: string, reason: string, actorUserId: string | null) {
+  const [tpl] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
+  if (!tpl) return { ok: false as const, status: 404, body: { error: "unknown_template" } };
+  if (tpl.retiredAt) return { ok: false as const, status: 409, body: { error: "already_retired" } };
+  const [row] = await tx
+    .update(workflowTemplates)
+    .set({ retiredAt: new Date(), retiredReason: reason })
+    .where(eq(workflowTemplates.id, templateId))
+    .returning();
+  const ruleIds = await deleteRulesOfRetiredDefault(tx, tpl);
+  await tx.insert(auditLog).values({
+    userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
+    objectType: "workflow_template",
+    objectId: templateId,
+    // ADR-0195 A4: retiring the shadow-AI default also deletes its rules (an empty list for any other template)
+    detail: { phase: "template-retired", name: tpl.name, reason, ...(ruleIds.length > 0 ? { ruleId: ruleIds[0], ruleIds } : {}) },
+    effect: "allow",
+    ruleId: "workflow-template-retired",
+    ruleChain: [],
+    reason: `workflow template '${tpl.name}' retired: ${reason}`,
+  });
+  return { ok: true as const, value: row! };
+}
+
 async function insertWorkflowTemplate(
   db: Db,
   name: string,
@@ -3301,9 +3333,18 @@ export async function startWorkflowInstanceWithTemplates(
      * (the use-case registry) passes its own, since the default looks the
      * object up by instance and finds nothing yet. */
     executor?: ExecutorHooks;
+    /** ADR-0349 slice 2: the PM work item this start is for. With it, at most one open instance per template set +
+     * target + work item (`workflow-start-conflict.ts`); without it, nothing is deduplicated. */
+    workItemRef?: string | null;
   },
 ): Promise<
-  | { ok: true; instance: { id: string; status: string; state: unknown }; executorRefusal: ExecutorRefusal | null }
+  | {
+      ok: true;
+      instance: { id: string; status: string; state: unknown };
+      executorRefusal: ExecutorRefusal | null;
+      /** ADR-0349 slice 2: the open instance was returned under the `use_existing` policy; nothing was started */
+      reused?: true;
+    }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const { templateIds, initiatorUserId, change } = input;
@@ -3365,18 +3406,39 @@ export async function startWorkflowInstanceWithTemplates(
       return { ok: false, status: attribution.status, body: { error: attribution.error } };
     }
   }
-  const [instance] = await db
-    .insert(workflowInstances)
-    .values({
-      templateIds,
-      definition: merged,
-      initiatorUserId,
-      change,
-      projectId: input.projectId ?? null,
-      state: initialState(merged),
-      status: "running",
-    })
-    .returning();
+  // ADR-0349 slice 2: one open instance per start key. The read answers the common case; the unique index answers a
+  // race (the insert runs under a savepoint, so a caller's own transaction survives the violation).
+  const workItemRef = input.workItemRef ?? null;
+  const startKey = workItemRef ? startKeyOf(templateIds, change, workItemRef) : null;
+  const conflict = async (existing: Awaited<ReturnType<typeof openInstanceForStartKey>>) => {
+    const answer = await answerStartConflict(db, startKey!, existing, { userId: initiatorUserId, isAdmin: input.isAdmin ?? false });
+    return answer.kind === "reused"
+      ? { ok: true as const, instance: answer.instance, executorRefusal: null, reused: true as const }
+      : { ok: false as const, status: answer.status, body: answer.body };
+  };
+  if (startKey) {
+    const existing = await openInstanceForStartKey(db, startKey);
+    if (existing) return conflict(existing);
+  }
+  const values = {
+    templateIds,
+    definition: merged,
+    initiatorUserId,
+    change,
+    projectId: input.projectId ?? null,
+    workItemRef,
+    state: initialState(merged),
+    status: "running",
+  };
+  let instance: typeof workflowInstances.$inferSelect | undefined;
+  try {
+    [instance] = startKey
+      ? await db.transaction((tx) => tx.insert(workflowInstances).values(values).returning())
+      : await db.insert(workflowInstances).values(values).returning();
+  } catch (err) {
+    if (!startKey || !isUniqueViolation(err, WORKFLOW_START_KEY_INDEX)) throw err;
+    return conflict(await openInstanceForStartKey(db, startKey));
+  }
 
   const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
   const executed = await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey, 0, input.executor ?? {});
@@ -3388,7 +3450,7 @@ export async function startWorkflowInstanceWithTemplates(
 }
 
 /** ADR-0207 (G5): the workflow statuses after which an instance never runs another stage */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "aborted", "denied", "rolled_back"] as const;
+const TERMINAL_INSTANCE_STATUSES = WORKFLOW_TERMINAL_STATUSES;
 /** a git stage naming the connection `$name`, anywhere in a definition's stage list */
 const GIT_STAGE_NAMING = '$.stages[*] ? (@.type == "git_operation" && @.connection == $name)';
 
@@ -3841,29 +3903,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const body = retireTemplateSchema.parse(rest);
     const acceptance = parseAcceptance(raw);
     if (!acceptance.ok) return reply.status(422).send({ error: "invalid_regression_acceptance", issues: acceptance.issues });
-    const retire = async (tx: Db) => {
-      const [tpl] = await tx.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId)).for("update");
-      if (!tpl) return { ok: false as const, status: 404, body: { error: "unknown_template" } };
-      if (tpl.retiredAt) return { ok: false as const, status: 409, body: { error: "already_retired" } };
-      const [row] = await tx
-        .update(workflowTemplates)
-        .set({ retiredAt: new Date(), retiredReason: body.reason })
-        .where(eq(workflowTemplates.id, templateId))
-        .returning();
-      const ruleIds = await deleteRulesOfRetiredDefault(tx, tpl);
-      await tx.insert(auditLog).values({
-        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-        objectType: "workflow_template",
-        objectId: templateId,
-        // ADR-0195 A4: retiring the shadow-AI default also deletes its rules (an empty list for any other template)
-        detail: { phase: "template-retired", name: tpl.name, reason: body.reason, ...(ruleIds.length > 0 ? { ruleId: ruleIds[0], ruleIds } : {}) },
-        effect: "allow",
-        ruleId: "workflow-template-retired",
-        ruleChain: [],
-        reason: `workflow template '${tpl.name}' retired: ${body.reason}`,
-      });
-      return { ok: true as const, value: row! };
-    };
+    const retire = (tx: Db) => retireWorkflowTemplateLocked(tx, templateId, body.reason, req.authCtx.userId ?? null);
     const [tpl] = await db.select({ name: workflowTemplates.name }).from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
     if (!tpl || !isIntakeTemplateName(tpl.name)) {
       const out = await db.transaction((tx) => retire(tx as unknown as Db));
@@ -3999,8 +4039,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       change,
       projectId: body.projectId ?? null,
       isAdmin: req.authCtx.isAdmin,
+      workItemRef: body.workItem ?? null,
     });
     if (!started.ok) return reply.status(started.status).send(started.body);
+    // ADR-0349 slice 2: under `use_existing` a conflicting start answers 200 with the open instance it found
+    if (started.reused) return reply.status(200).send({ ...started.instance, reused: true });
     return reply.status(201).send(started.instance);
   });
 
