@@ -22,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/contract"
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
 // Gateway is the fake. Fields are read and written under mu by the tests.
@@ -40,11 +41,42 @@ type Gateway struct {
 	Reports      []contract.Report
 	ReportBodies [][]byte
 	Config       contract.ConfigResponse
+	// ConfigStatus, when set, answers the (authorized) config route with that status and ConfigCode instead of Config,
+	// as the real gateway answers 503 collection_pack_unavailable while it has no pack to serve.
+	ConfigStatus int
+	ConfigCode   string
 	Nonce        string
 	usedJTI      map[string]bool
 	tokens       map[string]string // access token -> client id
 	RotateAfter  int64
 	Revoked      bool
+	// Batches are the accepted decision batches (ADR-0310 addendum), BatchBodies their exact bytes.
+	Batches     []contract.DecisionBatch
+	BatchBodies [][]byte
+	// DecisionsStatus, when set, answers every decisions request with that status and DecisionsCode (after the
+	// request is verified), so a test can make the route fail.
+	DecisionsStatus int
+	DecisionsCode   string
+	// ADR-0331: Directives is served when DirectiveSigner is true; otherwise the route answers 503
+	// directive_signer_unavailable, as the real gateway does until SD4. Outcomes collects what the agent posted.
+	DirectiveSigner bool
+	Directives      []json.RawMessage
+	Outcomes        []contract.DirectiveOutcome
+	// ADR-0360 §4 (slice 1c): RouteUpdate answers {"update": Update} when UpdateSigner is true, otherwise 503
+	// update_signer_unavailable. RouteUpdateBinary serves UpdateBinary as UpdateBinaryType (application/octet-stream
+	// when empty). UpdateResults collects the results posted; UpdateResultStatus and UpdateResultCode, when set, answer
+	// every result post with that refusal instead.
+	UpdateSigner       bool
+	Update             *contract.UpdateOffer
+	UpdateBinary       []byte
+	UpdateBinaryType   string
+	UpdateResults      []contract.UpdateResultRequest
+	UpdateResultStatus int
+	// UpdateResultHalts answers a recorded result with rolloutHalted, as the gateway does when it halted the rollout.
+	UpdateResultHalts bool
+	UpdateResultCode  string
+	// OnUpdateBinary, when set, runs (under the lock) before the binary is served, so a test can see the spool mid-sync.
+	OnUpdateBinary func()
 }
 
 // Request is what one call carried, for assertions.
@@ -96,10 +128,75 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		g.token(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == contract.RouteConfig:
 		if _, ok := g.authorized(w, r); ok {
+			if g.ConfigStatus != 0 {
+				refuse(w, g.ConfigStatus, g.ConfigCode)
+				return
+			}
 			writeJSON(w, http.StatusOK, g.Config)
 		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteReports:
 		g.report(w, r, body)
+	case r.Method == http.MethodPost && r.URL.Path == contract.RouteDecisions:
+		g.decisions(w, r, body)
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteDirectives:
+		if _, ok := g.authorized(w, r); ok {
+			if !g.DirectiveSigner {
+				refuse(w, http.StatusServiceUnavailable, "directive_signer_unavailable")
+				return
+			}
+			d := g.Directives
+			if d == nil {
+				d = []json.RawMessage{}
+			}
+			writeJSON(w, http.StatusOK, contract.DirectivesResponse{Directives: d})
+		}
+	case r.Method == http.MethodPost && r.URL.Path == contract.RouteDirectiveOutcomes:
+		if _, ok := g.authorized(w, r); ok {
+			var req contract.DirectiveOutcomesRequest
+			dec := json.NewDecoder(bytes.NewReader(body))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&req) != nil || len(req.Outcomes) == 0 || len(req.Outcomes) > contract.MaxDirectivesPerSync {
+				refuse(w, http.StatusBadRequest, "invalid_body")
+				return
+			}
+			g.Outcomes = append(g.Outcomes, req.Outcomes...)
+			writeJSON(w, http.StatusOK, map[string]any{"accepted": len(req.Outcomes), "refused": []any{}})
+		}
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteUpdate:
+		if _, ok := g.authorized(w, r); ok {
+			if !g.UpdateSigner {
+				refuse(w, http.StatusServiceUnavailable, contract.ErrUpdateSignerUnavailable)
+				return
+			}
+			writeJSON(w, http.StatusOK, contract.UpdateResponse{Update: g.Update})
+		}
+	case r.Method == http.MethodGet && r.URL.Path == contract.RouteUpdateBinary:
+		if _, ok := g.authorized(w, r); ok {
+			if g.OnUpdateBinary != nil {
+				g.OnUpdateBinary()
+			}
+			ct := g.UpdateBinaryType
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(g.UpdateBinary)
+		}
+	case r.Method == http.MethodPost && r.URL.Path == contract.RouteUpdateResults:
+		if _, ok := g.authorized(w, r); ok {
+			var req contract.UpdateResultRequest
+			if fsutil.StrictJSON(body, &req) != nil || req.AttemptID == "" || req.Result.Schema == "" {
+				refuse(w, http.StatusBadRequest, "invalid_body")
+				return
+			}
+			if g.UpdateResultStatus != 0 {
+				refuse(w, g.UpdateResultStatus, g.UpdateResultCode)
+				return
+			}
+			g.UpdateResults = append(g.UpdateResults, req)
+			writeJSON(w, http.StatusOK, contract.UpdateResultResponse{Recorded: true, State: "installed", RolloutHalted: g.UpdateResultHalts})
+		}
 	case r.Method == http.MethodPost && r.URL.Path == contract.RouteCredentials:
 		g.rotate(w, r, body)
 	default:
@@ -125,7 +222,7 @@ func (g *Gateway) tickets(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	var req contract.TicketRequest
-	if err := strictJSON(body, &req); err != nil || req.Hostname == "" || req.OS == "" {
+	if err := fsutil.StrictJSON(body, &req); err != nil || req.Hostname == "" || req.OS == "" {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -137,7 +234,7 @@ func (g *Gateway) tickets(w http.ResponseWriter, r *http.Request, body []byte) {
 	t := fmt.Sprintf("ticket-%d-%s", g.Devices, randomish())
 	exp := time.Now().Add(7 * 24 * time.Hour).UTC()
 	g.Tickets[t] = exp
-	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("tkt_%d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8})
+	writeJSON(w, http.StatusCreated, contract.TicketResponse{Ticket: t, TicketID: fmt.Sprintf("00000000-0000-4000-8000-%012d", g.Devices), ExpiresAt: exp.Format(time.RFC3339), IdentityCap: 8}) // a device id is a uuid, as the gateway's
 }
 
 func (g *Gateway) register(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -151,7 +248,7 @@ func (g *Gateway) register(w http.ResponseWriter, r *http.Request, body []byte) 
 		return
 	}
 	var req contract.RegisterRequest
-	if err := strictJSON(body, &req); err != nil {
+	if err := fsutil.StrictJSON(body, &req); err != nil {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -311,7 +408,7 @@ func (g *Gateway) report(w http.ResponseWriter, r *http.Request, body []byte) {
 		return
 	}
 	var rep contract.Report
-	if err := strictJSON(body, &rep); err != nil || rep.Schema != contract.SchemaReport || claims["snapshotId"] != rep.SnapshotID {
+	if err := fsutil.StrictJSON(body, &rep); err != nil || rep.Schema != contract.SchemaReport || claims["snapshotId"] != rep.SnapshotID {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
@@ -326,13 +423,64 @@ func (g *Gateway) report(w http.ResponseWriter, r *http.Request, body []byte) {
 	writeJSON(w, http.StatusAccepted, contract.ReportResponse{Accepted: true})
 }
 
+func (g *Gateway) decisions(w http.ResponseWriter, r *http.Request, body []byte) {
+	clientID, ok := g.authorized(w, r)
+	if !ok {
+		return
+	}
+	d := sha256.Sum256(body)
+	digest := "sha-256=:" + base64.StdEncoding.EncodeToString(d[:]) + ":"
+	if r.Header.Get(contract.HeaderContentDigest) != digest {
+		refuse(w, http.StatusBadRequest, "content_digest_mismatch")
+		return
+	}
+	claims, kid, err := verifyKid(r.Header.Get(contract.HeaderDecisionsSignature), contract.TypDecisionsSignature, g.Registered[clientID])
+	if err != nil || claims["contentDigest"] != digest || claims["aud"] != g.Issuer+contract.RouteDecisions || claims["iss"] != clientID ||
+		contract.JWKThumbprintURIPrefix+kid != clientID || !g.once(claims["jti"]) {
+		refuse(w, http.StatusBadRequest, "invalid_decisions_signature")
+		return
+	}
+	var b contract.DecisionBatch
+	if err := fsutil.StrictJSON(body, &b); err != nil || b.Schema != contract.SchemaDecisions || claims["batchId"] != b.BatchID ||
+		len(b.Events) > contract.MaxDecisionEvents || b.Events == nil || b.Integrity == nil {
+		refuse(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	if g.DecisionsStatus != 0 {
+		refuse(w, g.DecisionsStatus, g.DecisionsCode)
+		return
+	}
+	for _, prev := range g.Batches {
+		if prev.BatchID == b.BatchID {
+			writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "duplicate": true})
+			return
+		}
+	}
+	g.Batches = append(g.Batches, b)
+	g.BatchBodies = append(g.BatchBodies, body)
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "duplicate": false, "audited": len(b.Events), "refused": 0})
+}
+
+// verifyKid is verifyJWS under a known key that also returns the protected header's kid.
+func verifyKid(compact, typ string, key *ecdsa.PublicKey) (map[string]any, string, error) {
+	if key == nil {
+		return nil, "", errors.New("no key")
+	}
+	claims, _, err := verifyJWS(compact, typ, key)
+	if err != nil {
+		return nil, "", err
+	}
+	obj, _ := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.ES256})
+	return claims, obj.Signatures[0].Protected.KeyID, nil
+}
+
 func (g *Gateway) rotate(w http.ResponseWriter, r *http.Request, body []byte) {
 	current, ok := g.authorized(w, r)
 	if !ok {
 		return
 	}
 	var req contract.RotateRequest
-	if err := strictJSON(body, &req); err != nil {
+	if err := fsutil.StrictJSON(body, &req); err != nil {
 		refuse(w, http.StatusBadRequest, "invalid_body")
 		return
 	}

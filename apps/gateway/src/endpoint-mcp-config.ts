@@ -60,7 +60,18 @@ const SECRET_TYPES_MAX = 32;
 // The wire shape (agents/endpoint/internal/contract: MCPServer)
 // ---------------------------------------------------------------------------
 
-const keyFoundSchema = z.object({ keyName: z.string().min(1).max(128), ruleId: z.string().max(64).optional(), present: z.boolean() }).strict();
+/** One reported key (presence, never the value), used by every fact that carries keys. */
+export const keyFoundSchema = z
+  .object({
+    keyName: z.string().min(1).max(128),
+    ruleId: z.string().max(64).optional(),
+    present: z.boolean(),
+    // ADR-0350 §11: the keyed HMAC of the value under the tenant's credential-reuse key, never the value
+    fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    fingerprintKeyId: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+  })
+  .strict()
+  .refine((k) => (k.fingerprint === undefined) === (k.fingerprintKeyId === undefined), { message: "a fingerprint names its key id, and only then" });
 
 export const mcpServerSchema = z
   .object({
@@ -291,6 +302,9 @@ const listQuery = z
     limit: z.coerce.number().int().min(1).max(200).default(50),
   })
   .strict();
+
+/** an admin-typed server identity: the shapes the agent reports for a package, a host or a command (never free text) */
+export const mcpIdentityInput = z.string().regex(ENDPOINT_IDENTITY_RE);
 
 const linkBody = z
   .object({

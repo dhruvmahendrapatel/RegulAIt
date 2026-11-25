@@ -25,6 +25,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PR_WORKFLOWS = Object.freeze([
   "ci.yml", "ui-enterprise.yml", "security.yml", "import-cycles.yml", "integrations.yml", "client-compat.yml",
   "endpoint-agent.yml", "engine-images-build.yml", "operator.yml", "helm-chart.yml", "infra-terraform.yml",
+  "ha-failover.yml", "robot-egress.yml",
 ]);
 /** PR-triggered workflows outside the dry run: Dependabot automation, which runs no suite */
 export const PR_WORKFLOWS_EXCLUDED = Object.freeze(["dependabot-auto-merge.yml"]);

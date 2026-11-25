@@ -58,6 +58,7 @@ import {
   invokeAgentSchema,
   invokeConnectorSchema,
   reportChecksSchema,
+  startInstanceSchema,
   retireTemplateSchema,
 } from "@regulait/shared";
 import { routeAuthClass, type RouteAuthClass } from "./route-classes.js";
@@ -276,6 +277,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
 
   "GET /v1/projects": { summary: "Projects visible to the caller." },
   "POST /v1/projects": { summary: "Create a project.", body: createProjectSchema },
+  "GET /v1/projects/:projectId/content-inspection": { summary: "A project's content-inspection setting (ADR-0362): stored values, the effective policy and whether the compliance floor forces it." },
+  "PUT /v1/projects/:projectId/content-inspection": { summary: "Change a project's content-inspection setting (ADR-0362). Turning it off or passing unreadable files is a settings_relax step-up; every change is audited." },
   "GET /v1/projects/:projectId/costs": { summary: "Per-project AI spend, attributed at the point of every gateway call (pillar 5)." },
   "GET /v1/projects/:projectId/costs.csv": { summary: "The same ledger as a streamed CSV export." },
   "GET /v1/cost-events": { summary: "The raw cost ledger, one row per priced gateway call." },
@@ -294,8 +297,17 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "MCP tool breakdowns plus `other` add up to `ledger`.",
   },
 
-  "GET /v1/workflows/instances": { summary: "Workflow instances." },
-  "POST /v1/workflows/instances": { summary: "Start a workflow instance from a template." },
+  "GET /v1/workflows/instances": {
+    summary: "Workflow instances. ADR-0349: typed search fields `status`, `template`, `target`, `workItem`, `owner` (initiator), `stage` (current stage id) and `complianceTag` (the attributed project's classification), each index-served. A non-admin sees only their own instances. Add any ADR-0226 list parameter (`sort`, `cursor`, `offset`, `count`) for the paginated contract.",
+  },
+  "GET /v1/workflows/instances/:instanceId/pending": {
+    summary: "ADR-0349: what this instance is waiting for (`version: 1`). `waitingOn` is one of approval, artifact, plan, trigger, execution, retry, check_report, advance, check_failed, deploy_handoff or nothing, with a plain `detail` sentence. It also carries the current stage, pending approvers, the execution claim (holder, renewal, lease expiry, live), the queued retry (attempt, next run), the stage deadline when one is set, and the last error. Read-only; the same readers as the instance.",
+  },
+  "POST /v1/workflows/instances": {
+    summary:
+      "Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.",
+    body: startInstanceSchema,
+  },
   "POST /v1/workflows/templates/:templateId/retire": {
     summary:
       "Retire a workflow template; the reason is recorded. Retiring the template that decides use-case sign-off " +
@@ -304,6 +316,14 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     body: retireTemplateSchema.extend(decisionRegressionAcceptanceFields),
   },
   // ADR-0341 — the visual pipeline builder (admin)
+  "POST /v1/workflows/schedules": { summary: "ADR-0349: create a workflow schedule. It starts its template on a five-field cron calendar in an IANA time zone, AS the admin who creates it, through the governed start path. Refused 422 `invalid_schedule` when it would fire more often than every 5 minutes. An overlap policy other than `skip` is a `settings_relax` step-up, audited." },
+  "GET /v1/workflows/schedules": { summary: "ADR-0349: workflow schedules, `limit` (1-200) and `after` keyset paginated, versioned (`version: 1`). `state` is `active` or `paused`." },
+  "GET /v1/workflows/schedules/:scheduleId": { summary: "ADR-0349: one workflow schedule and its 50 most recent fire times (`started`, `reused`, `skipped_overlap`, `buffered`, `skipped_missed`, `refused`)." },
+  "PATCH /v1/workflows/schedules/:scheduleId": { summary: "ADR-0349: edit a workflow schedule. A moved calendar starts again from now. A relaxed overlap policy is a step-up; a concurrent edit is refused 409 `changed_concurrently`." },
+  "POST /v1/workflows/schedules/:scheduleId/pause": { summary: "ADR-0349: pause a workflow schedule with a note, audited." },
+  "POST /v1/workflows/schedules/:scheduleId/resume": { summary: "ADR-0349: resume a paused workflow schedule from now (fires missed while paused are not caught up), with a note, audited." },
+  "POST /v1/workflows/schedules/:scheduleId/backfill": { summary: "ADR-0349: start one instance per fire time in a past range (at most 100), under the schedule's overlap policy, audited." },
+  "POST /v1/workflows/schedules/run-due": { summary: "ADR-0349: run the workflow schedule sweep now. It is the same code the `workflow-schedules` scheduler job runs." },
   "GET /v1/workflows/builder/templates": { summary: "Workflow templates as the pipeline builder lists them: live version, open draft, whether the builder may edit it." },
   "POST /v1/workflows/builder/templates/:templateId/draft": {
     summary:

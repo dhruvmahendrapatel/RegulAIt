@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"os"
@@ -53,4 +54,29 @@ func TestGoldenBodies(t *testing.T) {
 		Gaps:        []Gap{{Kind: KindLocalRuntime, Reason: "other_users_listeners_port_only"}},
 		FactsDigest: "1111111111111111111111111111111111111111111111111111111111111111",
 	})
+}
+
+// The decisions fixture is the gateway's (ADR-0310 addendum): this agent's types must read it with no unknown field
+// and write it back byte for byte, so the two sides cannot drift apart silently.
+func TestDecisionsBatchFixtureRoundTrips(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("testdata", "decisions-batch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(want))
+	dec.DisallowUnknownFields()
+	var b DecisionBatch
+	if err := dec.Decode(&b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Schema != SchemaDecisions || len(b.Events) != 4 || len(b.Integrity) != 2 || b.Events[0].Decision != nil || b.Events[3].SessionRef != nil {
+		t.Fatalf("decoded %+v", b)
+	}
+	got, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(want), got) {
+		t.Fatalf("round trip differs:\n got %s\nwant %s", got, bytes.TrimSpace(want))
+	}
 }

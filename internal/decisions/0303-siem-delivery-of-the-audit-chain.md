@@ -65,3 +65,10 @@ time, scope, effect, rule, object identity and chain position only, so it is lef
 - The five admin routes are API-only. The screen is a known UI gap tracked on #453 (`KNOWN_UI_GAPS_MAX` raised by
   exactly five).
 - ADR-0135 moves to "Accepted (delivery built by ADR-0303)". Its outbound secret gate stays proposed.
+
+## Amendments
+
+- 2026-11-17, [ADR-0351](0351-evidence-extras-syslog-deployer-register-endpoint-benchmark.md) slice 1: a second
+  destination kind, `syslog_tls` (RFC 5424 over RFC 5425 TLS), reuses this ADR's cursor, ordering, backoff,
+  dead-letter and allow-listed event. It has no signing secret, because the receiver is authenticated by its TLS
+  certificate.

@@ -17,8 +17,9 @@
  * The inputs are what the build reads that can change the image (engines/<engine>/Dockerfile and its COPY lines):
  *   - engines/<engine>/ and any file directly in engines/ (never another engine's directory, the lock or the
  *     signatures: the lock-update PR changes only those, and must not count);
- *   - the engine's workspace package and its workspace dependency closure (dependencies of every kind, transitively),
- *     whole: the shim stage builds them and `pnpm deploy` ships them;
+ *   - the engine's workspace package (`enginePackage`: `@regulait/engine-<engine>`, or the admission-scan shim both
+ *     ADR-0242 images build) and its workspace dependency closure (dependencies of every kind, transitively), whole:
+ *     the shim stage builds them and `pnpm deploy` ships them;
  *   - every workspace package.json (apps/*, packages/*): `pnpm install` reads them all, and a lifecycle script in any
  *     of them would run in the shim stage;
  *   - the root files the Dockerfiles COPY (package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json),
@@ -41,12 +42,28 @@ import { fileURLToPath } from "node:url";
 import { ENGINE_IDS } from "./engine-images-lock.mjs";
 
 /**
- * ADR-0242: engines whose images CI builds twice and compares (engine-images-build.yml), but which are NOT
- * published and have no lock entry yet (phase 2 adds their runner shim, lock entry and publish). They have no
- * `@regulait/engine-<id>` workspace package: their images are built from engines/<id> alone. `--plan` never
- * publishes them, because it only walks ENGINE_IDS.
+ * Engines whose images CI builds twice and compares (engine-images-build.yml), but which are NOT published and have
+ * no lock entry. `--plan` never publishes them, because it only walks ENGINE_IDS. mcpscanner and skillscanner left
+ * this list for ENGINE_IDS in ADR-0242 L4.5 (2026-11-17). ADR-0364 S3 (2026-11-19): the robot runner and its per-run
+ * Smokescreen egress proxy (robot_browser sandbox images, not scan engines) are built and compared here until a later
+ * slice publishes them; they are not in ENGINE_IDS, the lock, its generated module or the compose defaults.
  */
-export const UNPUBLISHED_ENGINE_IDS = ["mcpscanner", "skillscanner"];
+// ADR-0364 S3: the robot images; ADR-0362: contentextract until the owner decides its libpdfium licences (owner question 1)
+export const UNPUBLISHED_ENGINE_IDS = ["robot-runner", "robot-egress", "contentextract"];
+/**
+ * ADR-0242 §6.1: the workspace package an engine's shim stage builds, where it is not `@regulait/engine-<id>`. The two
+ * admission-scan images share one runner and task shim. ADR-0364 S3: the robot runner builds `@regulait/robot-runner`;
+ * the robot egress image builds no workspace package at all (`null`: one Go binary from its published module).
+ */
+export const ENGINE_PACKAGES = {
+  mcpscanner: "@regulait/engine-admission-scan",
+  skillscanner: "@regulait/engine-admission-scan",
+  "robot-runner": "@regulait/robot-runner",
+  "robot-egress": null,
+  // ADR-0362: the content extractor is the admission-scan shim's third subject engine
+  contentextract: "@regulait/engine-admission-scan",
+};
+export const enginePackage = (engine) => (Object.prototype.hasOwnProperty.call(ENGINE_PACKAGES, engine) ? ENGINE_PACKAGES[engine] : `@regulait/engine-${engine}`);
 /** every engine the reproducible-build check covers */
 export const REPRO_ENGINE_IDS = [...ENGINE_IDS, ...UNPUBLISHED_ENGINE_IDS];
 
@@ -88,9 +105,10 @@ export function readWorkspace(root = ROOT) {
   return pkgs;
 }
 
-/** the directories of `@regulait/engine-<engine>` and its workspace dependencies, transitively, sorted */
+/** the directories of the engine's package (`enginePackage`) and its workspace dependencies, transitively, sorted */
 export function workspaceClosure(engine, pkgs) {
-  const start = `@regulait/engine-${engine}`;
+  const start = enginePackage(engine);
+  if (start === null) return [];
   if (!pkgs.has(start)) throw new GateError(`no workspace package ${start}`);
   const seen = new Set();
   const walk = (name) => {
@@ -110,8 +128,7 @@ export function inputPathspecs(engine, pkgs = readWorkspace()) {
   return [
     ":(glob)engines/*",
     `engines/${engine}`,
-    // an unpublished engine's image copies nothing from the workspace (ADR-0242)
-    ...(UNPUBLISHED_ENGINE_IDS.includes(engine) ? [] : workspaceClosure(engine, pkgs)),
+    ...workspaceClosure(engine, pkgs),
     ...WORKSPACE_DIRS.map((b) => `:(glob)${b}/*/package.json`),
     ...ROOT_INPUTS,
     ":(exclude)engines/images.lock.json",

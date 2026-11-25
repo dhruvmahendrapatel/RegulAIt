@@ -165,10 +165,18 @@ export default function GuardrailsPage() {
   const [effProject, setEffProject] = useState("");
   const [effAgent, setEffAgent] = useState("");
   const [sample, setSample] = useState("");
+  // CXR-ADM-006: the sandbox runs the LOCAL rules for one phase; the phase is sent, never assumed
+  const [samplePhase, setSamplePhase] = useState<"input" | "output">("input");
+  // CXR-ADM-005: the result remembers the text and phase it was run on, so an edit marks it stale
   const [sampleOut, setSampleOut] = useState<{
     clean: boolean;
     findings: Array<{ detector: string; category: string; count: number }>;
+    text: string;
+    phase: "input" | "output";
   } | null>(null);
+  // CXR-ADM-005: its own action, so a failed run shows in the Sample card, not only in a toast
+  const sampleAct = useAction();
+  const sampleStale = sampleOut !== null && (sampleOut.text !== sample || sampleOut.phase !== samplePhase);
   const [outcome, setOutcome] = useState("");
 
   const effective = useQuery({
@@ -377,7 +385,7 @@ export default function GuardrailsPage() {
               { id: "overrides", label: `Overrides (${overrideCount})` },
               { id: "trained", label: tabLabel("Trained detectors", trainedUnresolved) },
               { id: "content", label: tabLabel("Detection content", contentUnresolved) },
-              { id: "sample", label: "Try a sample" },
+              { id: "sample", label: "Test local rules" },
               { id: "decisions", label: "Decisions" },
             ]}
             active={tab}
@@ -590,41 +598,65 @@ export default function GuardrailsPage() {
 
           <TabPanel idPrefix="guardrails" id="sample" active={tab}>
             <Card
-              title="Try a sample"
+              title="Test local rules"
               info={
                 <p>
-                  Runs every detector over the text and reports what WOULD fire. Nothing is enforced,
-                  dispatched or recorded as a violation — this is how you measure a layer's
-                  false-positive rate on your own text before moving it off &lsquo;log&rsquo;.
+                  Runs the local rule-based detectors over the text, for the phase you pick, and reports what WOULD
+                  fire. Nothing is enforced, dispatched or recorded as a violation, and the text does not leave the
+                  gateway. Not included: trained detectors, external scorers, and the effective policy of any one
+                  agent or connector (overrides are ignored; every local rule runs as if on &lsquo;log&rsquo;). Use
+                  this to measure a layer&apos;s false-positive rate on your own text before moving it off
+                  &lsquo;log&rsquo;.
                 </p>
               }
             >
               <div className={v.stack}>
+                <p className={v.faint}>
+                  Local rules only. Trained detectors, external scorers and per-agent overrides are not run here.
+                </p>
+                <Field label="Phase">
+                  <Select
+                    value={samplePhase}
+                    onChange={(e) => setSamplePhase(e.target.value === "output" ? "output" : "input")}
+                  >
+                    <option value="input">Input (prompt)</option>
+                    <option value="output">Output (completion)</option>
+                  </Select>
+                </Field>
                 <Textarea
                   rows={4}
+                  aria-label="Sample text"
                   value={sample}
                   onChange={(e) => setSample(e.target.value)}
                   placeholder="Paste a representative prompt or completion…"
                 />
                 <div className={v.row}>
                   <Button
-                    disabled={act.busy || !sample.trim()}
-                    onClick={() =>
-                      void act.run(async () => {
-                        setSampleOut(
-                          await api.post<{
-                            clean: boolean;
-                            findings: Array<{ detector: string; category: string; count: number }>;
-                          }>("/v1/guardrails/sample", { text: sample }),
-                        );
-                      }, null)
-                    }
+                    disabled={sampleAct.busy || !sample.trim()}
+                    onClick={() => {
+                      const text = sample;
+                      const phase = samplePhase;
+                      void sampleAct.run(async () => {
+                        const out = await api.post<{
+                          clean: boolean;
+                          findings: Array<{ detector: string; category: string; count: number }>;
+                        }>("/v1/guardrails/sample", { text, phase });
+                        setSampleOut({ ...out, text, phase });
+                      }, null);
+                    }}
                   >
-                    Detect
+                    {sampleAct.busy ? "Testing…" : "Test local rules"}
                   </Button>
-                  {sampleOut &&
+                  {sampleAct.busy && <span className={v.faint} role="status">Running the local rules…</span>}
+                  {!sampleAct.busy && sampleStale && (
+                    <Badge tone="neutral">Stale: the text or phase changed since this result. Run it again.</Badge>
+                  )}
+                  {!sampleAct.busy &&
+                    sampleOut &&
+                    !sampleStale &&
+                    !sampleAct.error &&
                     (sampleOut.clean ? (
-                      <Badge tone="ok">No detector fired</Badge>
+                      <Badge tone="ok">No local rule fired ({sampleOut.phase})</Badge>
                     ) : (
                       sampleOut.findings.map((f, i) => (
                         <Badge key={i} tone="warn">
@@ -633,6 +665,11 @@ export default function GuardrailsPage() {
                       ))
                     ))}
                 </div>
+                {sampleAct.error && (
+                  <div className={v.errLine} role="alert">
+                    The test did not run: {sampleAct.error}
+                  </div>
+                )}
               </div>
             </Card>
           </TabPanel>

@@ -14,6 +14,10 @@
  *    sha256; the run's `done.json` last), then `end`.
  *
  * stdout is the task's frames and nothing else: logs go to stderr (which the executor discards).
+ *
+ * ADR-0242 L4.3 (`subjectFiles`, task-subject.ts): a SUBJECT task's input root holds exactly one plain file, the
+ * gateway's subject (one of the names given), and no run directory. Its results go under `subject/` (the bridge maps
+ * them to the run's own); `ctx.subjectFile` is the subject's path.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -23,6 +27,7 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { SUBJECT_TASK_RUN_DIR } from "./task-subject.js";
 import {
   ENGINE_TASK_CHUNK_MAX_BYTES,
   ENGINE_TASK_HTTP_BODY_MAX_BYTES,
@@ -49,6 +54,8 @@ export interface SandboxTaskContext {
   secret: string | null;
   /** the loopback origin of the gateway channel (`http://127.0.0.1:<port>`), or null when the engine calls nothing */
   gatewayOrigin: string | null;
+  /** ADR-0242 L4.3: a subject task's one input file (`<jobsRoot>/<name>`), or null for every other task */
+  subjectFile: string | null;
   log: (m: string) => void;
 }
 
@@ -56,6 +63,11 @@ export interface SandboxTaskOptions {
   run: (ctx: SandboxTaskContext) => Promise<void>;
   /** does the engine call models (the gateway channel is opened)? */
   gateway: boolean;
+  /**
+   * ADR-0242 L4.3: a subject task (an admission scan). The input root must hold exactly one plain file, named one of
+   * these, and nothing else; the results go under `subject/`. Absent: the input holds exactly one run directory.
+   */
+  subjectFiles?: readonly string[];
   jobsRoot?: string;
   workRoot?: string;
   /** seams (tests): where the frames go, where answers come from, the secret */
@@ -78,7 +90,7 @@ export function readTaskSecretFd(): string | null {
 }
 
 /** one frame per line on stdout, in order, honouring backpressure */
-function frameWriter(out: Writable) {
+export function frameWriter(out: Writable) {
   let chain = Promise.resolve();
   return (f: EngineTaskOutFrame): Promise<void> => {
     chain = chain.then(
@@ -163,6 +175,42 @@ async function startGatewayProxy(write: (f: EngineTaskOutFrame) => Promise<void>
   return { server, origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
 }
 
+/** an open gateway channel: the loopback origin a sandboxed process sends its gateway requests to */
+export interface GatewayChannel {
+  /** `http://127.0.0.1:<port>`: each request becomes an `http` stdout frame, answered by an `http_res`/`http_err` stdin frame */
+  origin: string;
+  close: () => void;
+}
+
+/**
+ * Open the sandbox's gateway channel (decision 4, `gateway_only`): the loopback proxy that turns each request into an
+ * `http` frame on `write` (stdout) and answers it from the matching `http_res` / `http_err` frame read from `stdin`.
+ * Engine tasks use it through `runSandboxTask`. ADR-0364 S3's robot runner opens it directly: its trusted side is the
+ * gateway's own stdio session (no runner, no job directory, no result files).
+ */
+export async function openGatewayChannel(opts: { write: (f: EngineTaskOutFrame) => Promise<void>; stdin: Readable; timeoutMs: number }): Promise<GatewayChannel> {
+  const answers = new Map<string, (f: EngineTaskInFrame) => void>();
+  const rl = createInterface({ input: opts.stdin, crlfDelay: Infinity });
+  rl.on("line", (line) => {
+    let f: EngineTaskInFrame | null = null;
+    try {
+      const p = engineTaskInFrameSchema.safeParse(JSON.parse(line));
+      f = p.success ? p.data : null;
+    } catch {
+      f = null;
+    }
+    if (f) answers.get(f.id)?.(f);
+  });
+  const proxy = await startGatewayProxy(opts.write, answers, opts.timeoutMs);
+  return {
+    origin: proxy.origin,
+    close: () => {
+      proxy.server.close();
+      rl.close();
+    },
+  };
+}
+
 /**
  * Run the engine's one job inside the sandbox and send its results. Returns the exit code the task-main exits with
  * (0 when every result was sent; the results themselves say how the engine did).
@@ -174,41 +222,42 @@ export async function runSandboxTask(opts: SandboxTaskOptions & { doneFile?: str
   const jobsRoot = opts.jobsRoot ?? "/jobs";
   const workRoot = opts.workRoot ?? "/work";
   const secret = (opts.readSecret ?? readTaskSecretFd)();
-  const runs = (await readdir(jobsRoot).catch(() => [] as string[])).filter((n) => UUID.test(n));
-  if (runs.length !== 1) {
-    log(`task: expected exactly one job under ${jobsRoot}, found ${runs.length}`);
-    await write({ t: "end", code: 2 });
-    return 2;
+  let runId: string;
+  let subjectFile: string | null = null;
+  if (opts.subjectFiles) {
+    // the gateway's one subject file at the input root, a plain file, and nothing else (fail closed)
+    const entries = await readdir(jobsRoot, { withFileTypes: true }).catch(() => []);
+    if (entries.length !== 1 || !entries[0]!.isFile() || !opts.subjectFiles.includes(entries[0]!.name)) {
+      log(`task: expected exactly one subject file (${opts.subjectFiles.join(" or ")}) under ${jobsRoot}, found ${entries.length} entries`);
+      await write({ t: "end", code: 2 });
+      return 2;
+    }
+    runId = SUBJECT_TASK_RUN_DIR;
+    subjectFile = path.join(jobsRoot, entries[0]!.name);
+  } else {
+    const runs = (await readdir(jobsRoot).catch(() => [] as string[])).filter((n) => UUID.test(n));
+    if (runs.length !== 1) {
+      log(`task: expected exactly one job under ${jobsRoot}, found ${runs.length}`);
+      await write({ t: "end", code: 2 });
+      return 2;
+    }
+    runId = runs[0]!;
   }
-  const runId = runs[0]!;
   const resultsRoot = path.join(workRoot, "out");
   await rm(resultsRoot, { recursive: true, force: true });
   await mkdir(path.join(resultsRoot, runId), { recursive: true, mode: 0o700 });
 
   // the gateway channel: answers arrive on stdin
-  const answers = new Map<string, (f: EngineTaskInFrame) => void>();
-  const rl = createInterface({ input: opts.stdin ?? process.stdin, crlfDelay: Infinity });
-  rl.on("line", (line) => {
-    let f: EngineTaskInFrame | null = null;
-    try {
-      const p = engineTaskInFrameSchema.safeParse(JSON.parse(line));
-      f = p.success ? p.data : null;
-    } catch {
-      f = null;
-    }
-    if (f) answers.get(f.id)?.(f);
-  });
-  const proxy = opts.gateway ? await startGatewayProxy(write, answers, opts.httpTimeoutMs ?? 300_000) : null;
+  const channel = opts.gateway ? await openGatewayChannel({ write, stdin: opts.stdin ?? process.stdin, timeoutMs: opts.httpTimeoutMs ?? 300_000 }) : null;
   let code = 0;
   try {
-    await opts.run({ runId, jobsRoot, resultsRoot, workRoot: path.join(workRoot, "run"), secret, gatewayOrigin: proxy?.origin ?? null, log });
+    await opts.run({ runId, jobsRoot, resultsRoot, workRoot: path.join(workRoot, "run"), secret, gatewayOrigin: channel?.origin ?? null, subjectFile, log });
   } catch (e) {
     // the engine's own failure: whatever it wrote is still sent (its done file says what happened, or is absent)
     log(`task: the engine failed: ${e instanceof Error ? e.message : String(e)}`);
     code = 1;
   } finally {
-    proxy?.server.close();
-    rl.close();
+    channel?.close();
   }
   for (const f of await resultFiles(resultsRoot, runId, opts.doneFile ?? "done.json")) await sendFile(write, f.rel, f.abs);
   await write({ t: "end", code });

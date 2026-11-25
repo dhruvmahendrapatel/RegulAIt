@@ -11,35 +11,46 @@ image-level scan (OS layer, vulnerabilities, licences) has not run, and 11 npm p
 the ADR-0176 list (below), which need an owner decision. The shipped manifest carries no digest, so the engine cannot be
 enabled (ADR-0187 decision 3).
 
-**Advisories with no patched release, re-checked 2026-10-16 for Dependabot alerts #80 and #81, accepted until
-2026-11-16** (ADR-0187 decisions 177 and 225). Read from the npm registry, OSV and `npm audit` on 2026-10-16:
-- node-forge GHSA-86w9-cpqp-85rv (high): fixed. 1.4.1 and 1.4.2 were released on 2026-10-27, and the lockfile now
-  resolves 1.4.2 inside `jks-js`'s declared `^1.4.0`, with no override (2026-10-30). It is still optional and still
-  not installed.
-- deepmerge GHSA-gcqx-w48m-w2h4 (low): 4.3.1 is both the latest release and inside the affected range, so there is
-  no version to move to (re-checked 2026-11-15: 4.3.1, released 2023-03-16, is still the latest). It is reached only through `puppeteer-extra-plugin-stealth` →
-  `puppeteer-extra-plugin-user-preferences`, all optional and never installed (`npm audit --omit=optional
-  --package-lock-only`: 0 vulnerabilities, 2026-10-30).
-- braces GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, high): stack exhaustion on deeply nested patterns. 3.0.3 (2024-05-21) is
-  both the latest release and `last_affected`. It is reached only through chokidar 3.6.0, the optional peer of
-  nunjucks 3.2.4 (its latest, still `chokidar ^3.3.0`). promptfoo's own chokidar is 5.0.0, which has no glob or braces
-  dependency. No newer micromatch or fast-glob path applies: neither is in this lockfile's chain to braces.
-- Neither ships: both are `optional` in the lockfile and the image installs with `npm ci --omit=optional`.
-  `npm audit --omit=optional --package-lock-only` reports 0 vulnerabilities; `npm audit --omit=dev` reports these 6
-  high (braces, chokidar, nunjucks; node-forge, jks-js, promptfoo), and its only offer is promptfoo 0.116.7, a downgrade
-  that is not taken. `packages/engine-promptfoo/src/image.test.ts` fails if any of them stops being optional. Even if
-  braces were installed, it would see only promptfoo's own globs from our generated config, never a run's input, and
-  since ADR-0190 I5 the engine runs in a sandboxed task, so a crash ends only that task.
-- Not done: no override forcing nunjucks' peer to chokidar 5 (outside nunjucks' declared range, for a package that is
-  never installed) and no fork of node-forge. Re-check at each promptfoo, jks-js, nunjucks, node-forge or braces
-  release, and by 2026-11-16 at the latest.
+**Advisories with no patched release: removed, not accepted (E25, 2026-11-16).** The acceptance recorded here (ADR-0187
+decisions 177 and 225, to 2026-11-16) is ended, not extended (owner decision 2026-11-16). Its three entries:
+- deepmerge GHSA-gcqx-w48m-w2h4 (low): no fixed release (4.3.1, 2023-03-16, is the latest and affected). It came only
+  through promptfoo's OPTIONAL peer `puppeteer-extra-plugin-stealth` → `puppeteer-extra-plugin-user-preferences`.
+  Removed: that peer now resolves to the empty placeholder below, so deepmerge, the puppeteer-extra plugins and their
+  closure (`merge-deep`, `clone-deep`, `fs-extra`, `rimraf` and 16 more) are no longer in the lockfile.
+- braces GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, high): no fixed release (3.0.3 is the latest and `last_affected`). It came
+  only through chokidar 3.6.0, the OPTIONAL peer of nunjucks 3.2.4. Removed the same way: nunjucks' chokidar peer resolves
+  to the placeholder, so chokidar 3, braces, `fill-range`, `picomatch`, `anymatch`, `readdirp` 3 and their closure are no
+  longer in the lockfile. promptfoo's own chokidar 5.0.0 (no glob or braces dependency) is unchanged.
+- node-forge GHSA-86w9-cpqp-85rv (high): fixed upstream (1.4.1 and 1.4.2, 2026-10-27); the lockfile resolves 1.4.2
+  inside `jks-js`'s `^1.4.0` with no override, still optional and never installed. Nothing left to accept.
+- **How (a standard npm mechanism, `overrides` with a `$` reference):** `package.json` lists both peers as root
+  `optionalDependencies` on `file:absent-optional-peer`, and `overrides` points promptfoo's
+  `puppeteer-extra-plugin-stealth` and nunjucks' `chokidar` at them (`$puppeteer-extra-plugin-stealth`, `$chokidar`).
+  [`absent-optional-peer/package.json`](absent-optional-peer/package.json) is an empty, private manifest (no code, no
+  dependencies, no entry point). It is optional, so `npm ci --omit=optional` never installs it, and the Dockerfile
+  needs no change and does not copy it. Both peers are optional upstream (`peerDependenciesMeta`), and promptfoo
+  and nunjucks load them only for features the worker never uses (stealth browser automation; `watch: true`
+  templates), so the engine behaves as when they are absent.
+- **Also moved:** the `glob` 14.0.3 and `minimatch` 11.0.5 overrides moved from promptfoo's scope to the top level.
+  With the promptfoo-scoped form, npm 10.9 re-resolves the optional `@modelcontextprotocol/server-filesystem` to a
+  nested glob 13.0.7 (GHSA-3g3m-2fjr-6pw4, moderate). The top-level form keeps the single glob 14.0.3 the lockfile
+  already had. Regenerated with the image's npm 10.9 (`npm install --package-lock-only --ignore-scripts`, run to a fixed
+  point). npm 11 writes a lockfile that npm 10's `npm ci` rejects, so it is not used.
+- **Verified 2026-11-16:** `npm audit --package-lock-only` reports 0 vulnerabilities, with and without `--omit=optional`
+  (before: 3 low, all deepmerge). `npm ls --package-lock-only` reports a valid tree. 36 lockfile entries are removed, all
+  optional, and the only one added is the placeholder. Every non-optional entry is unchanged (version and integrity).
+  `npm ci --omit=optional --ignore-scripts` installs the same 355 packages, byte-identical file by file (sha256 of every
+  file, `.package-lock.json` aside). `npm sbom --omit=optional` lists the same 353 components, the licence gate
+  passes, and `promptfoo --version` prints 0.125.1. `packages/engine-promptfoo/src/image.test.ts` pins the
+  placeholder, the overrides and the absence of both chains, and still fails if `jks-js` or `node-forge` stops being
+  optional.
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `promptfoo` (npm, github.com/promptfoo/promptfoo, © Promptfoo 2025) | `0.125.1` (released 2026-10-25; release tag `0.125.1` = commit `8569e72ed6cf7737082a6042be8d925e40f9739d`, read from the upstream tag; the same release as the vendored OWASP tables in `packages/shared`, whose file is byte-identical to 0.124.1's and 0.123.1's; upgraded from 0.123.1 in B5-P2, ADR-0187 decisions 176 and 177, and from 0.124.1 on 2026-11-06, Dependabot #666) | MIT | The engine (ADR-0187 B5-P): `promptfoo redteam generate` and `promptfoo eval`, driven by the generated config; every model call goes to the gateway's compat route on the run's virtual key. Remote generation, sharing, telemetry, update checks, moderation and the cache are switched off (`PROMPTFOO_USAGE_DATA_ENV`); only the plugins and strategies the shared catalogue admits are run. One local patch (`patches/telemetry-disabled-sends-nothing.mjs`, one statement per copy of `sendEvent`) stops the disabled-telemetry path from attempting a request; it is listed on the image label `org.regulait.patches`; re-checked on 0.124.1 (four copies, the same code; measured: unpatched, each run connects to the vendor's event collector, patched none) and on 0.125.1 (four copies, the patch applies, 2026-11-06). Runs only in the worker container (B5-P2), which holds the run's virtual key and never the runner's key. Its optional dependencies (427 lockfile entries at 0.125.1) (browser automation, cloud SDKs, image and ML runtimes) are NOT installed. |
+| `promptfoo` (npm, github.com/promptfoo/promptfoo, © Promptfoo 2025) | `0.125.1` (released 2026-10-25; release tag `0.125.1` = commit `8569e72ed6cf7737082a6042be8d925e40f9739d`, read from the upstream tag; the same release as the vendored OWASP tables in `packages/shared`, whose file is byte-identical to 0.124.1's and 0.123.1's; upgraded from 0.123.1 in B5-P2, ADR-0187 decisions 176 and 177, and from 0.124.1 on 2026-11-06, Dependabot #666) | MIT | The engine (ADR-0187 B5-P): `promptfoo redteam generate` and `promptfoo eval`, driven by the generated config; every model call goes to the gateway's compat route on the run's virtual key. Remote generation, sharing, telemetry, update checks, moderation and the cache are switched off (`PROMPTFOO_USAGE_DATA_ENV`); only the plugins and strategies the shared catalogue admits are run. One local patch (`patches/telemetry-disabled-sends-nothing.mjs`, one statement per copy of `sendEvent`) stops the disabled-telemetry path from attempting a request; it is listed on the image label `org.regulait.patches`; re-checked on 0.124.1 (four copies, the same code; measured: unpatched, each run connects to the vendor's event collector, patched none) and on 0.125.1 (four copies, the patch applies, 2026-11-06). Runs only in the worker container (B5-P2), which holds the run's virtual key and never the runner's key. Its optional dependencies (427 lockfile entries at 0.125.1; 382, the placeholder included, since E25 removed the deepmerge and braces chains on 2026-11-16) (browser automation, cloud SDKs, image and ML runtimes) are NOT installed. |
 | `@libsql/linux-x64-gnu` (npm, github.com/tursodatabase/libsql-js) | `0.5.29` (released 2026-03-25) | MIT | The native binding of `libsql` (promptfoo's local sqlite store, kept on tmpfs). It is an optional dependency upstream, so it is pinned as a DIRECT dependency here to survive `--omit=optional`. Makes the image linux/amd64 only. |
 | `simple-git` (npm) | `4.0.2` (released 2026-09-26) | MIT | promptfoo 0.124.1 and 0.125.1 require `^4.0.2`, past GHSA-x6jw-m9v5-85vh, GHSA-g4wm-2vf7-vfgr, GHSA-858h-whjf-mvg5 and (through `@simple-git/argv-parser` 2.0.1) GHSA-v5rq-49vh-5v5c, so the override 0.123.1 needed was dropped in B5-P2 (ADR-0187 decision 177). Used by promptfoo's git and code-scan commands, which the worker never invokes. |
-| `basic-ftp` (npm, override) | `6.2.6` (released 2026-11-04) | MIT | Overrides 5.3.1 (GHSA-c475-qrg2-pj4r, high, reached through `proxy-agent` → `pac-proxy-agent` → `get-uri`). Raised from 6.2.2 to 6.2.6 on 2026-11-15 for GHSA-5pm8-86m8-9m6r (moderate, MLSD parser DoS, fixed in 6.2.4) and GHSA-r4jh-29pc-gfqr (moderate, affects <=6.2.2). The runner sets no proxy variable, so the path is unreachable; overridden for the same reason. Still needed at 0.124.1 (without it 5.3.1 resolves). `npm audit --omit=optional` on the pinned closure (what `npm ci --omit=optional` installs): 0 vulnerabilities (2026-10-10, 0.124.1). `npm audit --omit=dev` also counts optional packages the image never installs: 6 high, all from braces (<=3.0.3, its latest release) and node-forge (<=1.4.0, its latest release), neither with a patched release, reached only through optional packages (chokidar 3 as nunjucks' optional peer, jks-js) that are never installed; `image.test.ts` fails if any of them stops being optional (ADR-0187 decision 177). |
+| `basic-ftp` (npm, override) | `6.2.6` (released 2026-11-04) | MIT | Overrides 5.3.1 (GHSA-c475-qrg2-pj4r, high, reached through `proxy-agent` → `pac-proxy-agent` → `get-uri`). Raised from 6.2.2 to 6.2.6 on 2026-11-15 for GHSA-5pm8-86m8-9m6r (moderate, MLSD parser DoS, fixed in 6.2.4) and GHSA-r4jh-29pc-gfqr (moderate, affects <=6.2.2). The runner sets no proxy variable, so the path is unreachable; overridden for the same reason. Still needed at 0.124.1 (without it 5.3.1 resolves). `npm audit --omit=optional` on the pinned closure (what `npm ci --omit=optional` installs): 0 vulnerabilities (2026-10-10, 0.124.1). `npm audit --omit=dev` also counts optional packages the image never installs: 6 high, all from braces (<=3.0.3, its latest release) and node-forge (<=1.4.0, its latest release), neither with a patched release at the time, reached only through optional packages (chokidar 3 as nunjucks' optional peer, jks-js) that are never installed (ADR-0187 decision 177). Since then node-forge is fixed (1.4.2) and the braces chain is removed (E25, 2026-11-16, above): `npm audit --package-lock-only` reports 0, with or without `--omit=optional`. |
 | `body-parser` (npm, override) | `2.4.0` (released 2026-10-22) | MIT | Overrides 2.3.0 (CVE-2026-111181 / GHSA-27r3-jxmh-p828, high: denial of service through trailing bytes after a compressed request body). Reached through promptfoo's bundled express server, which the worker never starts. Overridden because the Trivy image gate (ADR-0184) fails on it (2026-10-24). |
 | `zod` (npm, override) | `4.6.7` | MIT | Overrode 4.6.5 (CVE-2023-54404 / GHSA-mrhx-c7xc-m3w5, high: denial of service through unbounded array validation). Same fix as the workspace (#537), 2026-10-24. On 2026-11-06 it moved to 4.6.7, because promptfoo 0.125.1 declares `^4.6.7` and an override below that would break its range. |
 | `follow-redirects` (npm, override) | `1.16.2` (released 2026-10-25) | MIT | Overrides 1.16.1 (GHSA-mrwp-f3q8-3g9p, high, affects 1.16.0 to 1.16.1), a patch release inside `axios`'s declared `^1.16.0`. Both are optional and `npm ci --omit=optional` never installs them, so the image never contained follow-redirects; overridden to clear the lockfile alert (2026-11-06). |
@@ -54,5 +65,5 @@ enabled (ADR-0187 decision 3).
 | `zod` (npm, a direct dependency of the runner shim) | `4.6.5` (the version `@regulait/shared` already locks; ADR-0192) | MIT | Parses promptfoo's result JSON in the mapper (`packages/engine-promptfoo/src/mapper.ts`). |
 | `write-file-atomic` (npm, through `@regulait/engine-runner`) | `8.0.0` (exact; released 2026-05-08) | ISC | ADR-0187 decision 96: the runner's key (ADR-0188 S7), the pending enrolment record and a retained result envelope are written temp-file, fsync, rename (plus a directory fsync of our own), so a crash never leaves a truncated file. See `packages/engine-runner/THIRD_PARTY.md`. |
 | `signal-exit` (npm, the only dependency of `write-file-atomic`) | `4.1.0` (as locked; released 2023-07-29) | ISC | Removes `write-file-atomic`'s temp file on an exit mid-write. Stable, no open advisory; see `packages/engine-runner/THIRD_PARTY.md`. |
-| `jose` 6.2.14 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |
+| `jose` 6.2.17 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner key's RFC 7638 thumbprint and the compact JWS a key rotation carries. No dependencies; no network. |
 | `oauth4webapi` 3.8.8 (npm, through `@regulait/engine-runner`) | as locked (exact) | MIT | ADR-0188 S7: the runner's OAuth client (client_credentials with private_key_jwt and DPoP, then DPoP-bound requests). It calls only the gateway it is given; no discovery or JWKS fetch. |

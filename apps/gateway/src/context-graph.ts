@@ -1,0 +1,314 @@
+/**
+ * ADR-0365 (lane E46, slice 1): the live synced context graph (pillar 4, PENDING P2).
+ *
+ * - `syncContextGraphSource`: incremental, idempotent sync of one bound PM connection's imported work items into graph
+ *   nodes, their scope rows and `contains` edges, in one transaction with its audit row. The cursor is a keyset over
+ *   `(first_seen_at, id)`, re-read with a 10-minute overlap so an import that committed late with an earlier timestamp
+ *   is still seen; every insert is ON CONFLICT DO NOTHING, so the overlap costs nothing.
+ * - `nodeReadable`: the ONE readable rule, the same SQL function the row-level security policies call
+ *   (`regulait_context_graph_node_readable`): an admin, or a member of the project of EVERY scope row of a node that
+ *   has at least one. Every query below applies it, so a caller never sees a node (or an edge to one) they cannot read.
+ *
+ * Nodes store no copy of the source's facts; the label, URL, type and missing state are joined at read (3NF), and
+ * nothing PM-authoritative (title, state, fields) is stored or returned (pillar 8: read through live).
+ */
+import {
+  and,
+  auditLog,
+  contextGraphEdges,
+  contextGraphNodeScopes,
+  contextGraphNodes,
+  contextGraphSources,
+  eq,
+  inArray,
+  ne,
+  pmImportedWorkItems,
+  sql,
+  type Db,
+  type SQL,
+} from "@regulait/db";
+
+/** the re-read window behind the cursor (ADR-0365 §2) */
+export const CONTEXT_GRAPH_SYNC_OVERLAP_MS = 10 * 60_000;
+/** items per page, and the most NEW items (past the old cursor) one sync call processes; the rest waits for the next
+ * call (`more: true`). Re-read overlap rows do not count, so consecutive capped calls always progress. */
+export const CONTEXT_GRAPH_SYNC_PAGE = 500;
+export const CONTEXT_GRAPH_SYNC_MAX_ITEMS = 5_000;
+/** the deepest neighbourhood a reader may ask for, and the most nodes it returns */
+export const CONTEXT_GRAPH_MAX_DEPTH = 2;
+export const CONTEXT_GRAPH_MAX_NEIGHBOURHOOD = 500;
+
+export interface GraphCaller {
+  userId: string | null;
+  isAdmin: boolean;
+}
+
+/** The readable predicate for a node id column or value. Fail closed: no user and not admin reads nothing. */
+export function nodeReadable(caller: GraphCaller, nodeId: SQL | ReturnType<typeof sql.raw>): SQL {
+  if (caller.isAdmin) return sql`true`;
+  if (!caller.userId) return sql`false`;
+  return sql`regulait_context_graph_node_readable(${nodeId}, ${caller.userId}::uuid)`;
+}
+
+export type SyncResult =
+  | { ok: true; sourceId: string; created: { nodes: number; edges: number; scopes: number }; scanned: number; more: boolean; cursor: { firstSeenAt: string; itemId: string } | null }
+  | { ok: false; status: 404; error: "source_not_found"; detail: string };
+
+/**
+ * Sync one source. `full` starts from the beginning (the cursor is ignored) instead of from the cursor minus the
+ * overlap. Runs inside the caller's transaction when given one; the route wraps it in its own.
+ */
+export async function syncContextGraphSource(
+  tx: Db,
+  args: { sourceId: string; actorUserId: string; full?: boolean; pageSize?: number; maxItems?: number },
+): Promise<SyncResult> {
+  const pageSize = args.pageSize ?? CONTEXT_GRAPH_SYNC_PAGE;
+  const maxItems = args.maxItems ?? CONTEXT_GRAPH_SYNC_MAX_ITEMS;
+  const [src] = await tx.select().from(contextGraphSources).where(eq(contextGraphSources.id, args.sourceId)).for("update");
+  if (!src) return { ok: false, status: 404, error: "source_not_found", detail: "no such context graph source" };
+
+  const created = { nodes: 0, edges: 0, scopes: 0 };
+  // the source's PM project node and its scope row
+  const madeProject = await tx.insert(contextGraphNodes).values({ sourceId: src.id, kind: "pm_project" }).onConflictDoNothing().returning({ id: contextGraphNodes.id });
+  created.nodes += madeProject.length;
+  const [projectNode] = await tx
+    .select({ id: contextGraphNodes.id })
+    .from(contextGraphNodes)
+    .where(and(eq(contextGraphNodes.sourceId, src.id), eq(contextGraphNodes.kind, "pm_project")));
+  created.scopes += (await tx.insert(contextGraphNodeScopes).values({ nodeId: projectNode!.id, projectId: src.projectId }).onConflictDoNothing().returning()).length;
+
+  // keyset paging over the connection's imported items. The page position is the timestamp's exact text: a JS Date
+  // keeps milliseconds and Postgres microseconds, so a Date-based keyset would re-read the same rows forever.
+  // the old cursor, exactly: re-read rows at or before it (the overlap) do not count toward `maxItems`, so a call that
+  // resumes after a capped one always makes progress
+  const [old] = await tx
+    .select({ at: sql<string | null>`${contextGraphSources.cursorFirstSeenAt}::text`, id: contextGraphSources.cursorItemId })
+    .from(contextGraphSources)
+    .where(eq(contextGraphSources.id, src.id));
+  const oldCursor = !args.full && old?.at && old.id ? { at: old.at, id: old.id } : null;
+  let after: { at: string; id: string } | null = null;
+  let scanned = 0;
+  let past = 0;
+  let more = false;
+  for (;;) {
+    const page: { id: string; at: string; past: boolean }[] = await tx
+      .select({
+        id: pmImportedWorkItems.id,
+        at: sql<string>`${pmImportedWorkItems.firstSeenAt}::text`,
+        past: oldCursor
+          ? sql<boolean>`(${pmImportedWorkItems.firstSeenAt}, ${pmImportedWorkItems.id}) > (${oldCursor.at}::timestamptz, ${oldCursor.id}::uuid)`
+          : sql<boolean>`true`,
+      })
+      .from(pmImportedWorkItems)
+      .where(
+        and(
+          eq(pmImportedWorkItems.connectionId, src.pmConnectionId),
+          // the overlap is computed on the database clock's own values, never the app's (mistakes.md)
+          oldCursor
+            ? sql`${pmImportedWorkItems.firstSeenAt} >= ${oldCursor.at}::timestamptz - make_interval(secs => ${CONTEXT_GRAPH_SYNC_OVERLAP_MS / 1000})`
+            : undefined,
+          after ? sql`(${pmImportedWorkItems.firstSeenAt}, ${pmImportedWorkItems.id}) > (${after.at}::timestamptz, ${after.id}::uuid)` : undefined,
+        ),
+      )
+      .orderBy(pmImportedWorkItems.firstSeenAt, pmImportedWorkItems.id)
+      .limit(pageSize);
+    if (page.length === 0) break;
+    scanned += page.length;
+    past += page.filter((p) => p.past).length;
+    const itemIds = page.map((p) => p.id);
+    created.nodes += (
+      await tx
+        .insert(contextGraphNodes)
+        .values(itemIds.map((pmImportedWorkItemId) => ({ sourceId: src.id, kind: "pm_work_item" as const, pmImportedWorkItemId })))
+        .onConflictDoNothing()
+        .returning({ id: contextGraphNodes.id })
+    ).length;
+    const nodes = await tx
+      .select({ id: contextGraphNodes.id })
+      .from(contextGraphNodes)
+      .where(and(eq(contextGraphNodes.sourceId, src.id), inArray(contextGraphNodes.pmImportedWorkItemId, itemIds)));
+    if (nodes.length) {
+      created.scopes += (
+        await tx.insert(contextGraphNodeScopes).values(nodes.map((n) => ({ nodeId: n.id, projectId: src.projectId }))).onConflictDoNothing().returning()
+      ).length;
+      created.edges += (
+        await tx
+          .insert(contextGraphEdges)
+          .values(nodes.map((n) => ({ fromNodeId: projectNode!.id, toNodeId: n.id, kind: "contains" as const })))
+          .onConflictDoNothing()
+          .returning({ id: contextGraphEdges.id })
+      ).length;
+    }
+    const last: { id: string; at: string } = page[page.length - 1]!;
+    after = { at: last.at, id: last.id };
+    if (page.length < pageSize) break;
+    if (past >= maxItems) {
+      more = true;
+      break;
+    }
+  }
+
+  // The cursor is the last item read (rows come in order, and the read starts at or before the old cursor, so this
+  // never skips an unread item); a call that stopped early keeps exactly its place. Nothing read: unchanged.
+  await tx
+    .update(contextGraphSources)
+    .set(
+      after
+        ? { cursorFirstSeenAt: sql`${after.at}::timestamptz`, cursorItemId: after.id, lastSyncedAt: sql`now()` }
+        : { lastSyncedAt: sql`now()` },
+    )
+    .where(eq(contextGraphSources.id, src.id));
+  const [now] = await tx
+    .select({ at: sql<string | null>`${contextGraphSources.cursorFirstSeenAt}::text`, id: contextGraphSources.cursorItemId })
+    .from(contextGraphSources)
+    .where(eq(contextGraphSources.id, src.id));
+  const cursor = now?.at && now.id ? { at: now.at, id: now.id } : null;
+  await tx.insert(auditLog).values({
+    userId: args.actorUserId,
+    objectType: "context_graph_source",
+    objectId: src.id,
+    detail: { subsystem: "context-graph", pmConnectionId: src.pmConnectionId, projectId: src.projectId, full: Boolean(args.full), scanned, created, more },
+    effect: "allow",
+    ruleId: "context-graph-synced",
+    ruleChain: [],
+    reason: `context graph source ${src.id} synced${args.full ? " (full)" : ""}: ${scanned} item(s) read, ${created.nodes} node(s), ${created.edges} edge(s), ${created.scopes} scope row(s) created${more ? "; more remain" : ""}`,
+  });
+  return {
+    ok: true,
+    sourceId: src.id,
+    created,
+    scanned,
+    more,
+    cursor: cursor ? { firstSeenAt: new Date(cursor.at).toISOString(), itemId: cursor.id } : null,
+  };
+}
+
+/**
+ * Move every node of a source to the source's current project (after a rebinding), in the caller's transaction: scope
+ * rows for any other project are removed and the current one is added, so the old project's members lose sight at
+ * once. Returns how many scope rows were removed.
+ */
+export async function rescopeContextGraphSource(tx: Db, sourceId: string, projectId: string): Promise<number> {
+  const nodeIds = tx.select({ id: contextGraphNodes.id }).from(contextGraphNodes).where(eq(contextGraphNodes.sourceId, sourceId));
+  const removed = await tx
+    .delete(contextGraphNodeScopes)
+    .where(and(inArray(contextGraphNodeScopes.nodeId, nodeIds), ne(contextGraphNodeScopes.projectId, projectId)))
+    .returning();
+  await tx.execute(sql`
+    INSERT INTO context_graph_node_scopes (node_id, project_id)
+    SELECT n.id, ${projectId}::uuid FROM context_graph_nodes n WHERE n.source_id = ${sourceId}::uuid
+    ON CONFLICT DO NOTHING`);
+  return removed.length;
+}
+
+export interface GraphNodeView {
+  id: string;
+  kind: "pm_project" | "pm_work_item";
+  sourceId: string;
+  label: string;
+  provider: string;
+  externalUrl: string | null;
+  itemType: string | null;
+  missing: boolean;
+  createdAt: string;
+}
+
+const NODE_SELECT = sql`
+  SELECT n.id, n.kind, n.source_id, n.created_at,
+         CASE n.kind WHEN 'pm_project' THEN c.project ELSE w.external_id END AS label,
+         c.provider, w.external_url, w.item_type, (w.missing_since IS NOT NULL) AS missing
+  FROM context_graph_nodes n
+  JOIN context_graph_sources s ON s.id = n.source_id
+  JOIN pm_connections c ON c.id = s.pm_connection_id
+  LEFT JOIN pm_imported_work_items w ON w.id = n.pm_imported_work_item_id`;
+
+type NodeRow = { id: string; kind: GraphNodeView["kind"]; source_id: string; created_at: Date | string; label: string; provider: string; external_url: string | null; item_type: string | null; missing: boolean };
+const toView = (r: NodeRow): GraphNodeView => ({
+  id: r.id,
+  kind: r.kind,
+  sourceId: r.source_id,
+  label: r.label,
+  provider: r.provider,
+  externalUrl: r.external_url,
+  itemType: r.item_type,
+  missing: r.missing,
+  createdAt: new Date(r.created_at).toISOString(),
+});
+
+/**
+ * For a non-admin, start from the caller's own memberships (index `(project_id, node_id)`), so a member who can read
+ * few nodes never makes the database test every node in the table; `nodeReadable` stays the final, conjunctive check.
+ */
+function candidateNodes(caller: GraphCaller): SQL {
+  if (caller.isAdmin || !caller.userId) return sql``;
+  return sql`AND n.id IN (SELECT s.node_id FROM context_graph_node_scopes s
+    JOIN project_members m ON m.project_id = s.project_id WHERE m.user_id = ${caller.userId}::uuid)`;
+}
+
+/** A page of the nodes the caller may read, in id order. */
+export async function listReadableNodes(
+  db: Db,
+  caller: GraphCaller,
+  q: { kind?: GraphNodeView["kind"]; sourceId?: string; after?: string; limit: number },
+): Promise<{ items: GraphNodeView[]; nextAfter: string | null }> {
+  const r = await db.execute<NodeRow>(sql`${NODE_SELECT}
+    WHERE ${nodeReadable(caller, sql.raw("n.id"))}
+      ${candidateNodes(caller)}
+      ${q.kind ? sql`AND n.kind = ${q.kind}` : sql``}
+      ${q.sourceId ? sql`AND n.source_id = ${q.sourceId}::uuid` : sql``}
+      ${q.after ? sql`AND n.id > ${q.after}::uuid` : sql``}
+    ORDER BY n.id
+    LIMIT ${q.limit + 1}`);
+  const items = r.rows.slice(0, q.limit).map(toView);
+  return { items, nextAfter: r.rows.length > q.limit ? items[items.length - 1]!.id : null };
+}
+
+/** One node, or null when it does not exist OR the caller may not read it (the same answer: no existence leak). */
+export async function readableNode(db: Db, caller: GraphCaller, nodeId: string): Promise<GraphNodeView | null> {
+  const r = await db.execute<NodeRow>(sql`${NODE_SELECT} WHERE n.id = ${nodeId}::uuid AND ${nodeReadable(caller, sql.raw("n.id"))}`);
+  return r.rows[0] ? toView(r.rows[0]) : null;
+}
+
+/**
+ * The neighbourhood of a readable node up to `depth` hops, over readable nodes only: a node the caller cannot read is
+ * never returned and never a hop, and an edge is returned only when both its ends are. Null when the start node is
+ * not readable.
+ */
+export async function readableNeighbourhood(
+  db: Db,
+  caller: GraphCaller,
+  nodeId: string,
+  depth: number,
+): Promise<{ node: GraphNodeView; nodes: GraphNodeView[]; edges: { id: string; fromNodeId: string; toNodeId: string; kind: string }[]; truncated: boolean } | null> {
+  const node = await readableNode(db, caller, nodeId);
+  if (!node) return null;
+  const walk = await db.execute<{ node_id: string }>(sql`
+    WITH RECURSIVE walk(node_id, depth) AS (
+      SELECT ${nodeId}::uuid, 0
+      UNION
+      SELECT CASE WHEN e.from_node_id = w.node_id THEN e.to_node_id ELSE e.from_node_id END, w.depth + 1
+      FROM walk w
+      JOIN context_graph_edges e ON e.from_node_id = w.node_id OR e.to_node_id = w.node_id
+      WHERE w.depth < ${depth}
+        AND ${nodeReadable(caller, sql.raw("CASE WHEN e.from_node_id = w.node_id THEN e.to_node_id ELSE e.from_node_id END"))}
+    )
+    SELECT DISTINCT node_id FROM walk WHERE node_id <> ${nodeId}::uuid LIMIT ${CONTEXT_GRAPH_MAX_NEIGHBOURHOOD + 1}`);
+  const truncated = walk.rows.length > CONTEXT_GRAPH_MAX_NEIGHBOURHOOD;
+  const ids = walk.rows.slice(0, CONTEXT_GRAPH_MAX_NEIGHBOURHOOD).map((r) => r.node_id);
+  const all = [nodeId, ...ids];
+  const nodes = ids.length
+    ? (await db.execute<NodeRow>(sql`${NODE_SELECT} WHERE n.id IN (${sql.join(ids.map((i) => sql`${i}::uuid`), sql`, `)}) AND ${nodeReadable(caller, sql.raw("n.id"))} ORDER BY n.id`)).rows.map(toView)
+    : [];
+  const inSet = sql.join(all.map((i) => sql`${i}::uuid`), sql`, `);
+  const edges = await db.execute<{ id: string; from_node_id: string; to_node_id: string; kind: string }>(sql`
+    SELECT e.id, e.from_node_id, e.to_node_id, e.kind FROM context_graph_edges e
+    WHERE e.from_node_id IN (${inSet}) AND e.to_node_id IN (${inSet})
+      AND ${nodeReadable(caller, sql.raw("e.from_node_id"))} AND ${nodeReadable(caller, sql.raw("e.to_node_id"))}
+    ORDER BY e.id`);
+  return {
+    node,
+    nodes,
+    edges: edges.rows.map((e) => ({ id: e.id, fromNodeId: e.from_node_id, toNodeId: e.to_node_id, kind: e.kind })),
+    truncated,
+  };
+}

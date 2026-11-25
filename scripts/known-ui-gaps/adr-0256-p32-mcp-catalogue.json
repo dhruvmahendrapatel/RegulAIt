@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0256",
+  "lane": "P32",
+  "tracking": "ADR-0256 (P32): the brief is API and backend only; the deduped catalogue page, preset buttons and bundle upload are posted on #453. RAISED FROM 7 for review: the master decides on the PR whether to keep this or build the screen first",
+  "gaps": {
+    "POST /v1/mcp-catalogue/presets/:preset": "seeds the official MCP Registry or awesome-mcp-servers as a disabled catalogue source",
+    "POST /v1/mcp-catalogue/bundles": "imports a signed offline catalogue bundle (air-gapped installs)",
+    "GET /v1/mcp-catalogue/bundle": "exports one source as an unsigned bundle, to be signed offline",
+    "GET /v1/mcp-catalogue": "reads the deduped catalogue: sources, vetting, paid/x402 flag and admission state"
+  }
+}

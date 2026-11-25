@@ -203,7 +203,7 @@ export default function BuilderAgentEditorPage() {
               placeholder={threadId && thread.data?.pending ? "Answer the tool request above first" : `Message ${agent.name}…`}
               busy={send.isPending}
               disabled={!!(threadId && thread.data?.pending)}
-              onSend={(m) => send.mutate(m)}
+              onSend={(m) => send.mutateAsync(m)}
             />
           </div>
         </section>

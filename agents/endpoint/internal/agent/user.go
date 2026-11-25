@@ -4,12 +4,14 @@ import (
 	"os"
 	"os/user"
 	"runtime"
+
+	"github.com/dhruvmahendrapatel/regulait/agents/endpoint/internal/fsutil"
 )
 
-// ownUID is the uid the user's own state files must belong to (ownerCurrentUser on Windows, checked by SID).
+// ownUID is the uid the user's own state files must belong to (fsutil.OwnerCurrentUser on Windows, checked by SID).
 func ownUID() int {
 	if runtime.GOOS == "windows" {
-		return ownerCurrentUser
+		return fsutil.OwnerCurrentUser
 	}
 	return os.Getuid()
 }
