@@ -2522,6 +2522,9 @@ export const updateOrgSettingsSchema = z
     semanticCacheSimilarityEnabled: z.boolean().optional(),
     semanticCacheSimilarityMin: z.number().min(0.8).max(0.999).optional(),
     semanticCacheEmbedderId: z.string().uuid().nullable().optional(),
+    /** ADR-0352 slice 3: `buffer` (strict default) or `incremental` windowed release of a
+     * stream under an output-phase block policy; turning it to incremental is audited */
+    streamOutputInspection: z.enum(["buffer", "incremental"]).optional(),
     envFallbackProviders: z
       .array(z.enum(ENV_FALLBACK_MODEL_PROVIDERS))
       .max(ENV_FALLBACK_MODEL_PROVIDERS.length)

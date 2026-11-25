@@ -104,6 +104,12 @@ export type { OrgSettingsRow };
 /** The singleton row, created on first read if migration seeding was skipped
  * (belt-and-braces; 0038 inserts it) — byte-for-byte the
  * loadInterceptionSettings pattern. */
+/** ADR-0352 slice 3: whether a stream under an output-phase block policy is released
+ * incrementally (windowed scans) instead of suppressed or buffered. Strict default: no. */
+export async function incrementalStreamInspection(db: Db): Promise<boolean> {
+  return (await loadOrgSettings(db)).streamOutputInspection === "incremental";
+}
+
 export async function loadOrgSettings(db: Db): Promise<OrgSettingsRow> {
   const [row] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   if (row) return row;

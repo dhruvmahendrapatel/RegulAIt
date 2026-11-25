@@ -184,6 +184,7 @@ import {
 import {
   effectiveTechniqueMode,
   envFallbackAllowed,
+  incrementalStreamInspection,
   loadOrgSettings,
 } from "./org-settings.js";
 import {
@@ -194,6 +195,7 @@ import {
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
 import { storeSimilarEmbedding, type SimilarityProbe } from "./semantic-cache-similarity.js";
+import { IncrementalStreamReleaser } from "./stream-inspection.js";
 import {
   type NativeCacheRequest,
   type SemanticCacheKey,
@@ -2303,11 +2305,30 @@ async function dispatchAttempt(
   // response so this is disclosed rather than silent. With every output
   // detector at `off`/`log`/`warn` (the shipped posture) nothing is buffered and
   // streaming is byte-identical to before.
-  const bufferStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  const holdStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  // ADR-0352 slice 3: the org may opt in to INCREMENTAL release instead of the whole-result
+  // buffer. Text deltas are then released after windowed scans by the same detectors (no
+  // character before a scan that covered it), the full scan below stays authoritative, and a
+  // block ends the stream with an explicit error event. Thinking deltas have no windowed path,
+  // so a request that streams thinking keeps the buffer.
+  const incremental =
+    holdStream && !args.onThinking && !!args.onText && (await loadOrgSettings(db)).streamOutputInspection === "incremental";
+  const bufferStream = holdStream && !incremental;
+  const releaser = incremental
+    ? new IncrementalStreamReleaser(args.onText!, async (window) => {
+        if (piiMode === "block" && enforcePII(piiMode, { output: window }, piiIntl).action === "block") {
+          return { block: true, reason: "pii" };
+        }
+        if (guardrails.active && (await runGuardrailsAsync(guardrails, "output", window)).action === "block") {
+          return { block: true, reason: "guardrail" };
+        }
+        return { block: false };
+      })
+    : null;
   // Release only the complete result that was scanned, never a separate delta
   // transcript that a faulty provider could make disagree with its result.
   // Omitting both callbacks also avoids an unbounded duplicate delta buffer.
-  const providerOnText = bufferStream ? undefined : args.onText;
+  const providerOnText = releaser ? releaser.push : bufferStream ? undefined : args.onText;
   const providerOnThinking = bufferStream ? undefined : args.onThinking;
 
   let result;
@@ -2460,6 +2481,21 @@ async function dispatchAttempt(
       // withheld markers, and this one names the layer that refused.
       outputText = guardrailWithheldMarker(guardrailOutput.blocking);
     }
+  }
+  // ADR-0352 slice 3: wait for the windowed scans, then hold the result to the same bar.
+  // A window block, a scanner failure, or a delta transcript that disagrees with the result
+  // that was scanned all withhold (fail closed); only then is the held-back tail released.
+  let streamViolation: "guardrail" | "pii" | null = null;
+  if (releaser) {
+    try {
+      await releaser.settle();
+      streamViolation = releaser.violation;
+    } catch {
+      streamViolation = "guardrail";
+    }
+    if (!streamViolation && releaser.text !== result.outputText) streamViolation = "guardrail";
+    if (!streamViolation && (withheld || guardrailWithheld)) streamViolation = guardrailWithheld ? "guardrail" : "pii";
+    if (!streamViolation) releaser.flushTail();
   }
   // Flush (or drop) the buffered stream. This is the line that makes the
   // streaming guarantee real: on a block the deltas are simply never written.
@@ -2681,12 +2717,37 @@ async function dispatchAttempt(
   // cap, the softer configurable threshold raises a distinct non-blocking signal.
   const budgetSignal = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
 
+  // ADR-0352 slice 3: an incremental stream that was blocked ends with an explicit error event.
+  // The spend and the guardrail / PII decisions above are already recorded (bill-and-withhold);
+  // this only changes how the client learns of the block, since pieces may already be on its screen.
+  if (releaser && streamViolation) {
+    const pieceSent = releaser.emittedAny;
+    const detail =
+      `the streamed answer was stopped by the output ${streamViolation === "pii" ? "PII policy" : "guardrail policy"}` +
+      (pieceSent ? "; discard the partial text already received" : "");
+    return streamViolation === "pii"
+      ? {
+          ok: false,
+          status: 403,
+          error: "pii_blocked",
+          detail,
+          ...(pii ? { pii } : {}),
+        }
+      : {
+          ok: false,
+          status: 403,
+          error: "guardrail_blocked",
+          detail,
+          ...(dispatchGuardrails ? { guardrails: { ...dispatchGuardrails, withheld: true } } : {}),
+        };
+  }
   return {
     ok: true,
     result: {
       servedAgentId: served.id,
       model: served.model,
       servedModel: result.servedModel ?? null,
+      ...(releaser ? { streamInspection: { mode: "incremental" as const, scans: releaser.stats.scans } } : {}),
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
@@ -4216,8 +4277,11 @@ export function registerAgentConnectorRoutes(
     // agent's own override is still caught by the core's buffer-and-flush in
     // executeGovernedDispatch, which is the actual guarantee — this one is the
     // early, disclosed refusal.
+    // ADR-0352 slice 3: under incremental output inspection the stream stays live, because
+    // the core releases it only after windowed scans and ends it with an error event on a block
     const streamSuppressed =
       body.stream === true &&
+      !(await incrementalStreamInspection(db)) &&
       ((await projectPiiMode(db, projectId)) === "block" ||
         (await resolveGuardrailPolicy(db, { projectId, agentId: agent.id })).blocksOutput);
     // ADR-0021: 'suppress' (default) keeps ADR-0019's buffer-and-disclose;
