@@ -2035,3 +2035,13 @@ after `spa-journeys` passed. #1236 now runs the check on UI and gateway PRs.
 Rule: before releasing a PR, compare the checks that ran on it with the checks main runs. A check that main runs and the
 PR skipped blocks the release until it has passed on the PR's head, if necessary through a dispatched `ci.yml` run on the
 branch. "All checks green" includes checking that none of them was skipped.
+
+### M-123 (2026-11-18) - A sub-agent's worktree branch was merged into a lane branch
+
+Lane E27 built the fairlearn engine package in a sub-agent worktree (`builder/e27-fairlearn-engine-pkg`) and brought it
+back with `git merge` (1875afb2 merging fe343996) before opening #996. The branch-merge preflight refuses any merge of a
+non-main branch, a revert does not remove the merge from `base..head`, and the rules forbid a force-push. So #996 could
+never go green: every build and test job was skipped behind `ci / scope`, and a linear replacement branch was needed.
+
+Rule: work from a sub-agent or worktree comes back by `git cherry-pick`, never by `git merge`. Before opening a PR, run
+`node scripts/preflight-branch-merges.mjs origin/main HEAD --main origin/main` and open it only when that passes.

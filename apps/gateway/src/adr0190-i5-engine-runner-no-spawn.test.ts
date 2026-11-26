@@ -5,8 +5,8 @@
  * starts engine processes (`@regulait/engine-runner/worker`: the process-group runner and the in-sandbox task helper)
  * is reached only from each engine's TASK entry, which only a sandbox init runs.
  *
- * What it checks, for garak, modelscan, promptfoo, spikee and the subject-engine shim (mcpscanner, skillscanner and,
- * ADR-0362, contentextract):
+ * What it checks, for garak, modelscan, promptfoo, spikee, fairlearn and the subject-engine shim (mcpscanner, skillscanner
+ * and, ADR-0362, contentextract):
  *  - the RUNNER entry point's static import closure (static and side-effect imports, re-exports, dynamic `import()`
  *    and `require`, followed through relative modules and into `@regulait/engine-runner`) contains no module that
  *    names a process-spawning API (`child_process`) and no edge into `@regulait/engine-runner/worker`;
@@ -26,7 +26,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const PKG = (name: string) => path.join(ROOT, "packages", name, "src");
-const ENGINES = ["engine-garak", "engine-modelscan", "engine-promptfoo", "engine-spikee", "engine-admission-scan"] as const;
+const ENGINES = ["engine-garak", "engine-modelscan", "engine-promptfoo", "engine-spikee", "engine-fairlearn", "engine-admission-scan"] as const;
 
 const SPAWN_IMPORT = /["'`](?:node:)?child_process["'`]/;
 /** every import edge of one module, by specifier; type-only imports and re-exports are left out (TypeScript erases them) */

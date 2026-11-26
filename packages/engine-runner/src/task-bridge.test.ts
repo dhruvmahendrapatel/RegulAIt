@@ -22,7 +22,7 @@ import { ENGINE_TASK_HTTP_BODY_MAX_BYTES, ENGINE_TASK_HTTP_MAX_IN_FLIGHT, type E
 import { ExecutorTaskBridge, forwardGatewayRequest, taskInputFromJobDir } from "./task-bridge.js";
 import { prepareJobCopy, runSandboxTask, viaGatewayChannel } from "./sandbox-task.js";
 import { onTaskOver } from "./task-signal.js";
-import { parseSubjectJob, SUBJECT_JOB_FILE, subjectJobJson } from "./task-subject.js";
+import { GATEWAY_INPUT_JOB_FILE, parseSubjectJob, SUBJECT_JOB_FILE, subjectJobJson } from "./task-subject.js";
 
 const RUN = "0f1e2d3c-4b5a-4968-8776-655443322110";
 // a synthetic run key, derived at run time (never a secret-shaped literal)
@@ -403,5 +403,33 @@ describe("ADR-0242 L4.3 a subject task (an admission scan) on the bridge", () =>
       expect(ran).toBe(false);
       expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ t: "end", code: 2 }]);
     }
+  });
+});
+
+describe("ADR-0346 an agent run whose gateway places one data file (the fairness evaluation input)", () => {
+  it("the marker becomes the upload's subject; job.json still travels with the key taken out as the secret", async () => {
+    const jobs = tmp("e27-jobs-");
+    await mkdir(path.join(jobs, RUN));
+    await writeFile(path.join(jobs, RUN, "job.json"), JSON.stringify({ runId: RUN, apiKey: "run-key" }));
+    await writeFile(path.join(jobs, RUN, GATEWAY_INPUT_JOB_FILE), subjectJobJson("fairness-input.json"));
+    const input = await taskInputFromJobDir(jobs, RUN);
+    expect(input.subject).toEqual({ path: "fairness-input.json" });
+    expect(input.secret).toBe("run-key");
+    expect(input.files.map((f) => f.path)).toEqual([`${RUN}/job.json`]);
+    expect(Buffer.from(input.files[0]!.data, "base64").toString("utf8")).not.toContain("run-key");
+  });
+
+  it("refuses a marker alone, a bad marker, or a marker beside an artifact", async () => {
+    const jobs = tmp("e27-jobs-");
+    await mkdir(path.join(jobs, RUN));
+    await writeFile(path.join(jobs, RUN, GATEWAY_INPUT_JOB_FILE), subjectJobJson("fairness-input.json"));
+    await expect(taskInputFromJobDir(jobs, RUN)).rejects.toThrow(/beside a job/);
+    for (const bad of ['{"path":"a/x.json"}', '{"path":"gateway-input.json"}', '{"path":"subject.json"}', "nope"]) {
+      await writeFile(path.join(jobs, RUN, GATEWAY_INPUT_JOB_FILE), bad);
+      await expect(taskInputFromJobDir(jobs, RUN), bad).rejects.toThrow(/one file at the input root/);
+    }
+    await writeFile(path.join(jobs, RUN, GATEWAY_INPUT_JOB_FILE), subjectJobJson("fairness-input.json"));
+    await writeFile(path.join(jobs, RUN, "artifact.bin"), "x");
+    await expect(taskInputFromJobDir(jobs, RUN, (n) => n.startsWith("artifact."))).rejects.toThrow(/never beside an artifact/);
   });
 });

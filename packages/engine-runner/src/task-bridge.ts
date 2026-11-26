@@ -44,7 +44,7 @@ import {
 } from "@regulait/shared";
 import type { RunnerClient } from "./runner.js";
 import { signalTaskOver } from "./task-signal.js";
-import { parseSubjectJob, SUBJECT_JOB_FILE, SUBJECT_TASK_RUN_DIR } from "./task-subject.js";
+import { GATEWAY_INPUT_JOB_FILE, parseSubjectJob, SUBJECT_JOB_FILE, SUBJECT_TASK_RUN_DIR } from "./task-subject.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** the top-level result files a task may write besides its run's own (the worker's in-sandbox self-test) */
@@ -89,7 +89,15 @@ export async function taskInputFromJobDir(jobsRoot: string, runId: string, isArt
     if (!subject) throw new TaskBridgeError("the subject marker does not name one file at the input root");
     return { files: [], artifact: null, subject, secret: null };
   }
+  // ADR-0346: an agent run whose gateway places one data file of its own at the input root (the job's files still travel)
+  let subject: EngineTaskInputUpload["subject"] = null;
   for (const e of entries) {
+    if (e.name === GATEWAY_INPUT_JOB_FILE) {
+      if (!e.isFile()) throw new TaskBridgeError("the gateway input marker is not a plain file");
+      subject = parseSubjectJob(await readFile(path.join(dir, e.name), "utf8"));
+      if (!subject) throw new TaskBridgeError("the gateway input marker does not name one file at the input root");
+      continue;
+    }
     const rel = `${runId}/${e.name}`;
     if (!e.isFile() || !isEngineTaskPath(rel)) throw new TaskBridgeError(`job entry ${e.name} is not a plain file`);
     if (isArtifact(e.name)) {
@@ -111,7 +119,8 @@ export async function taskInputFromJobDir(jobsRoot: string, runId: string, isArt
     if (inline > ENGINE_TASK_INLINE_MAX_BYTES) throw new TaskBridgeError("the job's inline files are too large");
     files.push({ path: rel, data: bytes.toString("base64") });
   }
-  return { files, artifact, secret };
+  if (subject && (artifact || files.length === 0)) throw new TaskBridgeError("a gateway input file goes beside a job, never beside an artifact");
+  return subject ? { files, artifact, subject, secret } : { files, artifact, secret };
 }
 
 /** ADR-0242 L4.3: a subject task's `subject/<file>` is the run's own `<runId>/<file>`; any other path is unchanged */

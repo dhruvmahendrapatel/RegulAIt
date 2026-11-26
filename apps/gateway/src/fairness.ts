@@ -49,8 +49,10 @@ import {
   auditLog,
   desc,
   eq,
+  fairnessDatasetInputColumns,
   fairnessDatasets,
   fairnessRuns,
+  projects,
   isNotNull,
   lte,
   modelCards,
@@ -66,6 +68,7 @@ import {
   FAIRNESS_LIMITS,
   computeFairness,
   createFairnessDatasetSchema,
+  createModelInputDatasetSchema,
   fairnessOutcomeBlocks,
   fairnessRunRelaxed,
   fairnessSettingsRelaxed,
@@ -77,7 +80,9 @@ import {
   type FairnessRows,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { loadOrgSettings } from "./org-settings.js";
+import { loadOrgSettings, orgDefaultPiiMode, orgPiiInternationalCategories } from "./org-settings.js";
+import { projectPiiMode } from "./projects.js";
+import { checkModelInputPii, encodeModelInputRows, parseModelInputCsv, signFairnessRunEvidenceTx, strictestPiiMode } from "./fairness-evaluation.js";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -527,6 +532,91 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
     return settingsView(updated);
   });
 
+  /**
+   * ADR-0346 decision 2–3: a model-input upload. Only the label, the protected attributes and the input columns are
+   * kept; every input cell is checked under the stricter of the project's cascade PII mode and the org default
+   * (block refuses, redact stores redacted text, warn/log keep it and count). The mode and the count are kept on the
+   * row as a snapshot; the audit row carries counts per category, never a cell.
+   */
+  async function uploadModelInputs(req: FastifyRequest, reply: FastifyReply, retentionDays: number, international: Parameters<typeof checkModelInputPii>[2]) {
+    const parsedBody = createModelInputDatasetSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      return reply.status(400).send({ error: "invalid_request", issues: parsedBody.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })) });
+    }
+    const body = parsedBody.data;
+    if (!opts.dataKey) return reply.status(503).send({ error: "no_data_key", detail: "datasets are stored encrypted, and this deployment has no data key configured" });
+    const [card] = await db.select({ id: modelCards.id, agentId: modelCards.agentId }).from(modelCards).where(eq(modelCards.id, body.cardId));
+    if (!card) return reply.status(404).send({ error: "unknown_model_card" });
+    if (!card.agentId) return reply.status(422).send({ error: "model_card_has_no_agent", detail: "a model run calls the card's agent through the gateway; this card names a custom provider, not an agent" });
+    if (body.projectId) {
+      const [p] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
+      if (!p) return reply.status(404).send({ error: "unknown_project" });
+    }
+    const parsed = parseModelInputCsv(body);
+    if (!parsed.ok) return reply.status(parsed.status).send({ error: parsed.error, detail: parsed.detail });
+    // ADR-0346 decision 3: the stricter of the named project's cascade mode and the org default. A classified project's
+    // profile (onboarding ships one at `warn`) never lowers the org's `block` (review R8 [1], ADR-0180).
+    const piiMode = strictestPiiMode(await projectPiiMode(db, body.projectId ?? null), orgDefaultPiiMode(await loadOrgSettings(db)));
+    const pii = checkModelInputPii(parsed.rows, piiMode, international);
+    if (!pii.ok) return reply.status(pii.status).send({ error: pii.error, detail: pii.detail });
+    const csvBytes = Buffer.byteLength(body.csv, "utf8");
+    const csvSha256 = createHash("sha256").update(body.csv, "utf8").digest("hex");
+    const ciphertext = encryptSecret(opts.dataKey, encodeModelInputRows(pii.rows));
+    const row = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [d] = await tx
+        .insert(fairnessDatasets)
+        .values({
+          name: body.name,
+          description: body.description ?? null,
+          kind: "model_inputs",
+          labelColumn: body.labelColumn,
+          predictionColumn: null,
+          favourableLabel: body.favourableLabel,
+          protectedAttributes: body.protectedAttributes,
+          rowCount: parsed.rowCount,
+          csvBytes,
+          csvSha256,
+          rowsCiphertext: ciphertext,
+          piiMode,
+          piiFindings: pii.findings,
+          expiresAt: sql`now() + make_interval(days => ${retentionDays})` as unknown as Date,
+          uploadedByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await tx.insert(fairnessDatasetInputColumns).values(body.inputColumns.map((columnName, position) => ({ datasetId: d!.id, columnName, position })));
+      await tx.insert(auditLog).values({
+        userId: actor(req),
+        objectType: "fairness_dataset",
+        objectId: d!.id,
+        detail: {
+          phase: "dataset",
+          action: "uploaded",
+          kind: "model_inputs",
+          name: d!.name,
+          cardId: card.id,
+          projectId: body.projectId ?? null,
+          rowCount: d!.rowCount,
+          csvBytes,
+          csvSha256,
+          protectedAttributes: body.protectedAttributes,
+          inputColumns: body.inputColumns,
+          groupCounts: parsed.groups,
+          piiMode,
+          piiFindings: pii.findings,
+          piiCategories: pii.categories,
+          expiresAt: d!.expiresAt,
+        },
+        effect: "allow",
+        ruleId: FAIRNESS_RULE_IDS.uploaded,
+        ruleChain: [],
+        reason: `a model-input fairness dataset of ${d!.rowCount} rows was uploaded; only the label, protected attribute and input columns were kept, encrypted, under PII mode ${piiMode}`,
+      });
+      return d!;
+    });
+    return reply.status(201).send({ dataset: { ...datasetView(row), inputColumns: body.inputColumns } });
+  }
+
   app.post(
     "/v1/mrm/fairness/datasets",
     { bodyLimit: FAIRNESS_LIMITS.maxCsvBytes + 64 * 1024 },
@@ -534,6 +624,8 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
       const org = await loadOrgSettings(db);
       if (!org.fairnessTestingEnabled) return featureOff(reply);
       if (await rateLimited(req, reply, "upload")) return reply;
+      // ADR-0346: a model-input dataset (RegulAIt runs the model on its inputs) has its own shape and PII check
+      if ((req.body as { kind?: unknown } | null)?.kind === "model_inputs") return uploadModelInputs(req, reply, org.fairnessDatasetRetentionDays, orgPiiInternationalCategories(org));
       const parsedBody = createFairnessDatasetSchema.safeParse(req.body);
       if (!parsedBody.success) {
         // the issue paths and messages only: zod never echoes the CSV
@@ -649,6 +741,10 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
       .where(eq(fairnessDatasets.id, body.datasetId));
     if (!found) return reply.status(404).send({ error: "unknown_fairness_dataset" });
     const dataset = found.row;
+    // ADR-0346: a model-input dataset has no predictions; it is measured by running the model (a fairness evaluation)
+    if (dataset.kind !== "supplied_predictions") {
+      return reply.status(422).send({ error: "fairness_dataset_needs_model_run", detail: "this dataset holds model inputs, not predictions; run it through a fairness evaluation" });
+    }
     // the sweep's own condition (the current, possibly shortened, retention), not only the stored expiry
     if (dataset.rowsCiphertext === null || found.expired === true) {
       return reply.status(410).send({
@@ -709,6 +805,8 @@ export function registerFairnessRoutes(app: FastifyInstance, db: Db, opts: { dat
           `fairness test on model card '${card.intendedUse}': ${result.outcome}` +
           (Object.keys(relaxed).length > 0 ? " (thresholds looser than the strict defaults, stepped up)" : ""),
       });
+      // ADR-0346 decision 7: every run is signed evidence on its card (never stored unsigned: no key, no evidence row)
+      await signFairnessRunEvidenceTx(tx, r!);
       return r!;
     });
     return reply.status(201).send({ run: runView(run), note: PREDICTIONS_NOTE });

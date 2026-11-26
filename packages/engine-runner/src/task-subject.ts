@@ -16,12 +16,19 @@ import { isEngineTaskPath } from "@regulait/shared";
 
 /** the runner's marker in a subject run's job directory (its only entry) */
 export const SUBJECT_JOB_FILE = "subject.json";
+/**
+ * ADR-0346: the marker an AGENT run's job directory holds, beside `job.json`, when the gateway places one data file of
+ * its own at the input root (a fairness evaluation's `fairness-input.json`, built from the gateway's encrypted dataset
+ * so the runner never sees the rows). Same content as `subject.json` (`{"path": "<root name>"}`); unlike a subject
+ * run, the job's other files and the run's key still travel.
+ */
+export const GATEWAY_INPUT_JOB_FILE = "gateway-input.json";
 /** the results directory a subject task writes under (the bridge maps it to the run's own) */
 export const SUBJECT_TASK_RUN_DIR = "subject";
 
 /** a subject file's place: one plain segment at the input root (never nested, never `subject.json` itself) */
 export function isSubjectRootName(name: unknown): name is string {
-  return typeof name === "string" && isEngineTaskPath(name) && !name.includes("/") && name !== SUBJECT_JOB_FILE;
+  return typeof name === "string" && isEngineTaskPath(name) && !name.includes("/") && name !== SUBJECT_JOB_FILE && name !== GATEWAY_INPUT_JOB_FILE;
 }
 
 /** the marker's content for one subject file (the bridge parses it back with `parseSubjectJob`) */

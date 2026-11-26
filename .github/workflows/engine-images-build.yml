@@ -21,6 +21,7 @@ on:
       - engines/**
       - packages/engine-garak/**
       - packages/engine-spikee/**
+      - packages/engine-fairlearn/**
       - packages/engine-modelscan/**
       - packages/engine-admission-scan/**
       - packages/engine-promptfoo/**
@@ -62,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress, contentextract]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress, contentextract, fairlearn]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress, contentextract]
+        engine: [promptfoo, modelscan, garak, mcpscanner, skillscanner, spikee, robot-runner, robot-egress, contentextract, fairlearn]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
