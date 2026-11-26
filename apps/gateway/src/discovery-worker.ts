@@ -76,6 +76,7 @@ import {
   isEnvName,
   keyMatchesSignature,
   presenceSignatureById,
+  REPO_SCAN_CATALOG_VERSIONS,
   redactKeyFragment,
   scrubAuditText,
   scrubSecrets,
@@ -523,6 +524,14 @@ export function checkObservations(
     if (o.actorPseudonym !== undefined && (typeof o.actorPseudonym !== "string" || !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym))) {
       throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
     }
+    // ADR-0083 §2: a repo scan names the compiled catalogue it matched against, so its evidence tells v2 from v3
+    if (o.evidenceKind === "repo_scan") {
+      if (typeof o.catalogVersion !== "number" || !REPO_SCAN_CATALOG_VERSIONS.includes(o.catalogVersion)) {
+        throw new ObservationRefused(`observation ${i}: a repo_scan observation must name its catalogue version (one of ${REPO_SCAN_CATALOG_VERSIONS.join(", ")})`);
+      }
+    } else if (o.catalogVersion !== undefined) {
+      throw new ObservationRefused(`observation ${i}: catalogVersion is only reported on a repo_scan observation`);
+    }
     const count = Number.isInteger(o.count) && (o.count as number) > 0 ? Math.min(o.count as number, 1_000_000_000) : 1;
     return {
       subjectKind: o.subjectKind,
@@ -542,6 +551,7 @@ export function checkObservations(
       actorPseudonym: o.actorPseudonym ?? null,
       os: o.os ?? null,
       ecosystem: o.ecosystem ? o.ecosystem.trim().toLowerCase() : null,
+      catalogVersion: o.evidenceKind === "repo_scan" ? (o.catalogVersion as number) : null,
     };
   });
 }
