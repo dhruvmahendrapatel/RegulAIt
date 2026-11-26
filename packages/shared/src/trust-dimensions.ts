@@ -26,6 +26,7 @@ import { PRIVACY_PACK_DIMENSIONS } from "./privacy-packs.js";
 import { SECTOR_PACK_DIMENSIONS } from "./sector-packs.js";
 import { AIUC_PACK_DIMENSIONS } from "./aiuc-packs.js";
 import { EU_AI_ACT_DEPLOYER_DIMENSIONS } from "./eu-ai-act-deployer.js";
+import { ENDPOINT_BENCHMARK_DIMENSIONS } from "./endpoint-benchmark-pack.js";
 
 export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension>> = {
   // ADR-0295 (P18 B4): the attestation-only ISO/IEC 42001@2, 23894 and 42005 controls (classified in iso-packs.ts)
@@ -38,6 +39,8 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   ...AIUC_PACK_DIMENSIONS,
   // ADR-0351 slice 2: the attestation-only deployer duties (eu-ai-act-deployer.ts)
   ...EU_AI_ACT_DEPLOYER_DIMENSIONS,
+  // ADR-0351 slice 3: the attestation-only endpoint benchmark recommendations (endpoint-benchmark-pack.ts)
+  ...ENDPOINT_BENCHMARK_DIMENSIONS,
   // EU AI Act — attestation-only
   "eu-ai-act:art-72-post-market-monitoring": "reliability",
   "eu-ai-act:art-4-ai-literacy": "compliance",
@@ -109,6 +112,8 @@ export function dimensionForControl(c: ControlForDimension): TrustDimension {
     case "compliance_profile_cascade":
       return p.cascadeAspect === "pii_block" ? "privacy" : "compliance";
     case "abac_policies_active":
+    // ADR-0351: endpoint hardening checks (device liveness, key protection, MCP configuration, credentials)
+    case "endpoint_benchmark_check":
       return "security";
     case "audit_decisions":
       // a DENIAL trail, a user-lifecycle trail or an egress trail evidences
