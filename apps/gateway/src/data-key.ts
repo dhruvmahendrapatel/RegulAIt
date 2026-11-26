@@ -248,6 +248,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
   { table: "pm_connections", column: "previous_webhook_secret_ciphertext", what: "PM webhook secrets in a rotation window" },
+  // ADR-0356 PR 3 (lane E37): an Atlassian organisation audit feed's admin API key (never returned)
+  { table: "pm_audit_sources", column: "api_key_ciphertext", what: "Atlassian organisation audit feed API keys (ADR-0356)" },
   // ADR-0364 (lane E45 S2): a robot's live and test secrets, filled only on their bound origin by the runner (S3)
   { table: "robot_secrets", column: "value_ciphertext", what: "robot secrets (live and test)" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
