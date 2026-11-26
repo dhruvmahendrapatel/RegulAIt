@@ -232,9 +232,14 @@ describe("(a) a granted tool drives the loop end-to-end, governed + metered per 
     // each model turn is a measured usage row billed to the run's project
     const ledger = await app.inject({ method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${uid}` });
     const runRows = ledger.json().events.filter(
-      (e: { detail: { runId?: string } | null }) => e.detail?.runId === runId,
+      (e: { objectType: string; detail: { runId?: string } | null }) => e.objectType === "agent" && e.detail?.runId === runId,
     );
     expect(runRows).toHaveLength(2);
+    // ADR-0313 / ADR-0312: the run's governed tool call carries the run id on its usage row too
+    const runToolRows = ledger.json().events.filter(
+      (e: { objectType: string; detail: { runId?: string } | null }) => e.objectType === "mcp_tool" && e.detail?.runId === runId,
+    );
+    expect(runToolRows).toHaveLength(1);
     expect(runRows.every((e: { projectId: string | null }) => e.projectId === projectId)).toBe(true);
 
     // ADR-0019: the worker's MCP TOOL call now bills to the run's project too,

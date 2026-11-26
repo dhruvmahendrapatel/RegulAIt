@@ -1972,6 +1972,26 @@ export class MockModelProvider implements ModelProvider {
     // but the reply emits a well-known INVALID test SSN — letting a suite
     // exercise the OUTPUT bill-and-withhold path deterministically. Never real
     // PII. Mirrors the "<<refuse>>" / "<<use-tool:…>>" sentinels above.
+    // ADR-0352 slice 3 affordance: a LONG streamed answer, for incremental output inspection.
+    // `<<emit-long>>` streams about 3,000 characters of clean prose; `<<emit-long-ssn>>` streams the
+    // same and then the invalid test SSN near the end. Never real PII.
+    if (lastUser.includes("<<emit-long>>") || lastUser.includes("<<emit-long-ssn>>")) {
+      const filler = Array.from({ length: 60 }, (_, i) => `Sentence ${i + 1} of a long, harmless answer. `).join("");
+      const outputText = lastUser.includes("<<emit-long-ssn>>")
+        ? `${filler}The flagged identifier is 123-45-6789. ${filler.slice(0, 200)}`
+        : filler;
+      if (req.onText) {
+        const chunkSize = 40;
+        for (let i = 0; i < outputText.length; i += chunkSize) req.onText(outputText.slice(i, i + chunkSize));
+      }
+      return {
+        outputText,
+        stopReason: "end_turn",
+        refusal: false,
+        usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(outputText) },
+        providerMessageId: `mock-msg-${seq}`,
+      };
+    }
     if (lastUser.includes("<<emit-ssn>>")) {
       const outputText = "For your records, the flagged identifier is 123-45-6789 — handle per policy.";
       if (req.onText) {

@@ -29,7 +29,7 @@
 # linux/amd64 ONLY: the hashes in requirements.txt are the cp312 manylinux x86_64 wheels.
 
 # ---- stage 1: the Python closure ----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS closure
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /build
@@ -52,7 +52,7 @@ RUN --network=none cd "$(mktemp -d)" \
  && /opt/fairlearn/venv/bin/python -I -B -c "import json, sys; got = json.load(open('out.json')); want = {'fairlearn': '0.15.0', 'attributes': {'g': {'demographic_parity_difference': 0.5, 'disparate_impact_ratio': 0.0, 'equal_opportunity_difference': 1.0, 'equalized_odds_difference': 1.0}}}; sys.exit(0 if got == want else f'offline proof: got {got}')"
 
 # ---- stage 2: the runner and worker shim --------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -61,7 +61,7 @@ COPY apps ./apps
 # reproducible builds (ADR-0187 addendum 2026-10-21): the normaliser sorts .modules.yaml and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-fairlearn..." build \
  && pnpm --filter @regulait/engine-fairlearn deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
@@ -75,8 +75,10 @@ LABEL org.opencontainers.image.title="regulait-engine-fairlearn" \
 # as the other engine images (#735). The pinned base digest ships 1:1.3.dfsg+really1.3.1-1+b1; the fix is in Debian
 # trixie-security. Upgrade exactly that package to exactly the fixed version, then drop what apt and dpkg wrote with
 # wall-clock content, so the layer stays byte-reproducible. Remove this when a rebuilt base digest carries the fix.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 # no package installer at run time: the base image's pip goes too
 RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-* \

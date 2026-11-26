@@ -25,7 +25,8 @@
  * leaves no audit row.
  */
 import { STEP_UP_HEADER } from "@regulait/shared";
-import { matchingApprovalRules, type ApprovalRule } from "@regulait/policy-kernel";
+import { matchingApprovalRulesWith, type ApprovalRule } from "@regulait/policy-kernel";
+import { cedarApprovalRuleEvaluator } from "@regulait/policy-kernel/approval-rule-cedar";
 import { DEMO_BEATS_ROUTE, ENFORCE_IT_BEAT_ID, demoTargetRefusal } from "./demo-beat-switch.js";
 import type { DemoCheck } from "./demo-check-lib.js";
 
@@ -185,11 +186,15 @@ export async function enforceBeatApprover(
   const dana = byEmail.get(ENFORCE_BEAT_CALL.callerEmail);
   const server = ((servers.body.servers ?? []) as Json[]).find((s) => s.name === ENFORCE_BEAT_CALL.serverName);
   if (!dana || !server) return { ok: false, detail: `no ${!dana ? ENFORCE_BEAT_CALL.callerEmail : `'${ENFORCE_BEAT_CALL.serverName}' server`} on this stack` };
-  const top = matchingApprovalRules((rules.body.rules ?? []) as ApprovalRule[], {
+  // ADR-0239 P8a: the same Cedar match the gateway runs (the hand-written predicate is gone); an engine error is a
+  // failed check, never "no rule matches"
+  const matched = matchingApprovalRulesWith(cedarApprovalRuleEvaluator, (rules.body.rules ?? []) as ApprovalRule[], {
     userId: dana,
     serverId: String(server.id),
     tool: { serverId: String(server.id), name: ENFORCE_BEAT_CALL.toolName, kind: "write" },
-  })[0];
+  });
+  if (matched.kind === "error") return { ok: false, detail: `approval-rule match failed: ${matched.message}` };
+  const top = matched.rules[0];
   if (!top) return { ok: false, detail: `no approval rule matches Dana's ${ENFORCE_BEAT_CALL.toolName}, so nothing would queue` };
   const emailById = new Map([...byEmail].map(([e, id]) => [id, e]));
   const scope = top.scope ?? "user";

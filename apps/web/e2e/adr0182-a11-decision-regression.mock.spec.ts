@@ -183,7 +183,7 @@ test.describe("ADR-0182 A11: decision regression", () => {
     await page.goto("/ui/admin/governance/decision-regression");
     await expect(page.getByRole("heading", { level: 1, name: "Decision regression" })).toBeVisible();
     await expect(page.getByText("1 of 18", { exact: true })).toBeVisible();
-    await page.getByRole("link", { name: /Open the preview run of review policy/ }).first().click();
+    await page.getByRole("button", { name: /Open the preview run of review policy/ }).first().click();
     const changed = page.getByRole("listitem", { name: "Changed case: High: consumer credit scoring with profiling" });
     await expect(changed).toBeVisible();
     await expect(changed.getByRole("rowheader", { name: "Screening tier" })).toBeVisible();

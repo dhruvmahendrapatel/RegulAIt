@@ -88,6 +88,7 @@ import { buildAgentDecider } from "./evals.js";
 import { artifactAccessible, type ArtifactStore } from "./model-artifacts.js";
 import { ADMISSION_SCAN_SENSITIVITY, subjectInputTx } from "./admission-scan-runs.js";
 import { fairnessInputTx } from "./fairness-evaluation.js";
+import { CONTENTEXTRACT_ENGINE_ID, contentExtractRunSensitivity } from "./content-inspection-runs.js";
 import { assertProjectAttribution } from "./projects.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -497,13 +498,15 @@ async function startEngineTaskTx(
     // 2. the placement (decision 7), keyed to the decision written below
     const image = m.taskImage ?? "";
     let placed: { kind: "offered"; placementId: string; offerId: string; executorId: string } | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null };
-    // ADR-0242 L4.3: an admission scan belongs to no project; it names its own sensitivity (ADMISSION_SCAN_SENSITIVITY)
+    // ADR-0242 L4.3: an admission scan belongs to no project; it names its own sensitivity (ADMISSION_SCAN_SENSITIVITY).
+    // ADR-0362: a content-extraction run with a project is placed by the project's sensitivity (resolveRequirement, as
+    // every project run, an unresolved one refusing); with none, by the sensitivity it was queued with
     const requirement = await resolveRequirement(txDb, {
       workloadKind: "engine_worker",
       projectId: run.projectId,
       agent: null,
       parentGrantId: null,
-      ...(isSubjectRun ? { sensitivity: ADMISSION_SCAN_SENSITIVITY } : {}),
+      ...(isSubjectRun ? { sensitivity: run.engineId === CONTENTEXTRACT_ENGINE_ID ? contentExtractRunSensitivity(run) : ADMISSION_SCAN_SENSITIVITY } : {}),
     });
     if (requirement.kind !== "required") {
       placed = { kind: "refused", code: "policy_unresolved", placementId: await refusedLinkedPlacement(txDb, decisionAuditId, { workloadKind: "engine_worker", imageDigest: image }, "policy_unresolved") };

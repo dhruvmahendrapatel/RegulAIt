@@ -136,3 +136,69 @@ export const VENDOR_ACTION_MACHINE = defineMachine({
     },
   },
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0338 slice 1c: connecting a delegated (named admin) control credential
+// ---------------------------------------------------------------------------
+
+export const VENDOR_CONTROL_DELEGATED_STATES = [
+  "awaiting_sign_in",
+  "awaiting_approval",
+  "connected",
+  "denied",
+  "failed",
+  "expired",
+  "cancelled",
+] as const;
+export type VendorControlDelegatedState = (typeof VENDOR_CONTROL_DELEGATED_STATES)[number];
+
+/**
+ * `vendor_control_delegated_requests.status`. One admin starts a sign-in for a named account and signs in as it; a
+ * second, distinct administrator in the approval's pool approves it before the credential exists. Every terminal row
+ * holds no secret (the PKCE verifier and the held refresh token are destroyed on the move that leaves them).
+ */
+export const VENDOR_CONTROL_DELEGATED_MACHINE = defineMachine({
+  id: "vendor_control_delegated",
+  stored: "vendor_control_delegated_requests.status",
+  states: VENDOR_CONTROL_DELEGATED_STATES,
+  initial: ["awaiting_sign_in"],
+  terminal: ["connected", "denied", "failed", "expired", "cancelled"],
+  transitions: {
+    sign_in: {
+      from: ["awaiting_sign_in"],
+      to: "awaiting_approval",
+      by: ["user"],
+      summary: "The requester signed in as the named account; its refresh token is held encrypted until a second administrator approves.",
+    },
+    sign_in_fail: {
+      from: ["awaiting_sign_in"],
+      to: "failed",
+      by: ["user"],
+      summary: "The sign-in was declined, came back as another account or tenant, or gave no refresh token; nothing is stored.",
+    },
+    approve: {
+      from: ["awaiting_approval"],
+      to: "connected",
+      by: ["approver"],
+      summary: "A second administrator in the approval's pool approved it with a step-up; the delegated control credential is stored and the held token destroyed.",
+    },
+    deny: {
+      from: ["awaiting_approval"],
+      to: "denied",
+      by: ["approver"],
+      summary: "The approver refused it; the held refresh token is destroyed and nothing is stored.",
+    },
+    cancel: {
+      from: ["awaiting_sign_in", "awaiting_approval"],
+      to: "cancelled",
+      by: ["user", "admin"],
+      summary: "The requester or an admin withdrew it before it was approved; anything held is destroyed.",
+    },
+    expire: {
+      from: ["awaiting_sign_in", "awaiting_approval"],
+      to: "expired",
+      by: ["system"],
+      summary: "The 10-minute sign-in window or the approval window passed; anything held is destroyed and a new sign-in is needed.",
+    },
+  },
+});

@@ -267,3 +267,42 @@ moves that match onto Cedar. Behaviour does not change.
 - **Not in this slice.** Resource rate limits stay on the `resource.ts` predicate. That predicate is reached only
   when a limit binds, and it has no wasm cost today. Moving it into the same request is the next step if a third
   rule type joins. No migration.
+
+## As built: P8a and P8b, the hand-written approval-rule matchers are removed (2026-11-21, lane E48)
+
+Slices 2 and 2b each kept the hand-written approval-rule predicate as the kernel's default "for one release". The
+owner approved removing them on 2026-11-21. This does what decision 4 did for rate limits.
+
+- **MCP path (P8a).** `matchingApprovalRules` is deleted from `packages/policy-kernel/src/index.ts`. With approval
+  rules and **no** evaluator, `matchingApprovalRulesWith` returns an error verdict ("no approval-rule evaluator is
+  configured"), and `evaluate` refuses the call with `approval-rule-engine-error`. An unconfigured engine is never an
+  allow (ADR-0180). A call with no approval rules needs no engine and makes no engine call, as before.
+  `EvaluationInput.approvalRuleEvaluator` stays optional, as `rateLimitEvaluator` did after decision 4. The only
+  production caller (`governedEvaluate`) always passes the Cedar evaluator.
+- **Decision core (P8b).** `matchingResourceApprovalRules` is deleted from `resource.ts`, with the same refusal. This
+  also closes review #1093 finding 1 (issue #1097): `ComposeResourceInput.approvalRuleEvaluator` is now a
+  **required** field (`ResourceApprovalRuleEvaluator | null`), so the compiler finds every caller of
+  `composeResourceDecision`. The only production caller (`governedEvaluateResource`) passes the per-call Cedar
+  evaluator from `ResourceRestrictions`.
+- **Other callers.** The demo check `demo-relax-e-lib.ts` (`enforceBeatApprover`) now runs the gateway's Cedar match.
+  An engine error there is a failed check, never "no rule matches".
+- **The differential tests stay.** `approval-rule-cedar.test.ts` and `resource-approval-rule-cedar.test.ts` each keep
+  an independent transcription of the old predicate as their oracle (`referenceMatchingApprovalRules`,
+  `referenceMatchingResourceApprovalRules`). The property counts are unchanged: 5,000 match sets, 2,000 whole
+  decisions and the past-the-cache runs. They still hold Cedar to the exact pre-move answers. The whole-decision
+  properties now compare Cedar with the oracle used as an engine, because "no engine" refuses.
+- **Tests that called the kernel directly** now inject the Cedar evaluator. The ADR-0229 precedence cases in
+  `index.test.ts` run through it, and their assertions are unchanged. New cases pin that a missing evaluator refuses
+  when rules are present and does not refuse when there are none. A probe that turned the refusal back into "nothing
+  matched" failed both new cases.
+- **Never widens access (owner requirement, 2026-11-24).** Each differential file has a "never widens access"
+  property, using the strictness order allow < require_approval < deny:
+  - It runs 3,000 generated cases. On the MCP path, the generator also varies the grant and the kill-switch posture.
+    On the decision core, it varies the entitlement base, the attribution mandate, rate limits, ABAC verdicts,
+    consents and queueability.
+  - For every case, the decision on Cedar, and the decision with no engine at all, must be at least as strict as the
+    legacy decision. Every legacy deny must still be a deny.
+  - The Cedar decision must also equal the legacy one exactly.
+  - Each run must contain more than 100 legacy denies, 100 holds and 100 allows, so the property cannot pass vacuously.
+  - Two probes widened access on purpose: one made Cedar match nothing, the other returned "nothing matched" with no
+    engine. Each probe failed both properties.

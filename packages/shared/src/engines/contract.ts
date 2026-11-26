@@ -28,13 +28,15 @@ import { compactJwsSchema, workloadPublicJwkSchema } from "../identity/contract.
 
 /** the engines this build knows (`engines.id`); an admin cannot add one. ADR-0242 (pending migration `admission_engine_scans`): the two
  * admission-scan engines (Cisco mcp-scanner and skill-scanner). ADR-0245 (pending migration
- * `spikee_engine_and_engine_retest`): spikee joins as a red-team engine (PyRIT follows in its own slice). ADR-0346
+ * `spikee_engine_and_engine_retest`): spikee joins as a red-team engine (PyRIT follows in its own slice). ADR-0362
+ * (pending migration `content_extract_engine`): the sandboxed content extractor (`engines/contentextract`). ADR-0346
  * (pending migration `fairlearn_engine`): fairlearn joins as an `eval` engine (fairness evaluation). */
-export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "mcpscanner", "skillscanner", "spikee", "fairlearn"] as const;
+export const ENGINE_IDS = ["promptfoo", "modelscan", "garak", "mcpscanner", "skillscanner", "spikee", "contentextract", "fairlearn"] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 
 /** what an engine measures (`engines.kind`) */
-export const ENGINE_KINDS = ["redteam", "eval", "model_scan", "admission_scan"] as const;
+/** ADR-0362: `content_extract` turns a request's files into text for the gateway's own detectors; it judges nothing */
+export const ENGINE_KINDS = ["redteam", "eval", "model_scan", "admission_scan", "content_extract"] as const;
 export type EngineKind = (typeof ENGINE_KINDS)[number];
 
 /**
@@ -64,8 +66,12 @@ export const ENGINE_RESULT_STATUSES = ENGINE_TERMINAL_RUN_STATUSES;
 export type EngineResultStatus = EngineTerminalRunStatus;
 
 /** how a run was started (`engine_runs.trigger`); owner decision 4: all three */
-export const ENGINE_RUN_TRIGGERS = ["manual", "workflow", "scheduled", "admission"] as const;
-/** ADR-0242 L4.3: `admission` = started by the gateway's own admission gate (a `subject` run), never by a person */
+export const ENGINE_RUN_TRIGGERS = ["manual", "workflow", "scheduled", "admission", "inspection"] as const;
+/**
+ * ADR-0242 L4.3: `admission` = started by the gateway's own admission gate (a `subject` run), never by a person.
+ * ADR-0362: `inspection` = started by the gateway's content inspection on a request path (a `contentextract` subject
+ * run whose subject is the request's file bundle), never by a person.
+ */
 export type EngineRunTrigger = (typeof ENGINE_RUN_TRIGGERS)[number];
 
 /** one item's verdict. Only `pass` is clean; `unknown` and `not_run` never are. */
@@ -96,6 +102,7 @@ export const ENGINE_TARGET_KINDS = ["agent", "artifact", "subject"] as const;
 /**
  * ADR-0242 L4.3: a `subject` run scans an admission subject (an MCP server's manifest or a builder skill at one
  * digest). Only the gateway starts one (trigger `admission`), never POST /v1/engine-runs or a schedule.
+ * ADR-0362: a `contentextract` subject run (trigger `inspection`) reads one request's file bundle at its sha256 digest.
  */
 export type EngineTargetKind = (typeof ENGINE_TARGET_KINDS)[number];
 

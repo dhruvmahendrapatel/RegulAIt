@@ -241,6 +241,38 @@ agents' own (allow, ask, deny), and the mapping is agreed with E35 through the m
 "advise" with confirmation, deny as a block of the call, and block-session and disable as control-plane responses
 the device carries out by refusing every call (as a missing policy already does). Slice 2 builds that mapping.
 
+### 11. Credential reuse across endpoints (owner-approved addition, 2026-11-17)
+
+The same credential on several devices or users is a finding, found without anyone, including us, learning it.
+
+- **On the device:** every reported key carries `fingerprint`, an HMAC-SHA256 (domain-separated) of the credential
+  under the tenant's **credential-reuse key**, and `fingerprintKeyId`, a 16-hex name of that key. The value is used
+  only to compute the HMAC and is never reported or kept. What is fingerprinted is the credential, not its field: a
+  recognised token is cut out of a header, URL or quoted value, and an auth scheme (`Bearer`, `Basic`, `token`) is
+  dropped, so one token in a header on one device and in an env var on another is one fingerprint. Values shorter
+  than 8 characters, with fewer than 5 distinct characters, or on a placeholder list (`changeme`, `your-key-here`, …)
+  get none. The key is 32 random bytes made by `regulait-agent credential-reuse-key` and deployed by the admin, the
+  same on every device of the tenant, in the agent config (`credentialReuseKey`). No key: no fingerprints. A malformed
+  key refuses the config.
+- **The device key is not a secret from the device's users.** It is on every enrolled device, the config is
+  world-readable (0644) and on macOS the collector runs as the user, so anyone with one enrolled laptop can compute
+  device fingerprints of guesses. It keeps the values from anyone without an enrolled device, nothing more.
+- **On the control plane:** the device fingerprint is never stored. The gateway stores
+  `HMAC(serverKey, keyId ‖ 0x00 ‖ fingerprint)`, with `serverKey` derived from its deploy-time data key by HKDF-SHA-256
+  under its own label (`regulait/adr0350/credential-reuse/v1`), per agent identity (device and user pseudonym joined,
+  never copied: `endpoint_credential_fingerprints`, migration `pending/endpoint_credential_fingerprints.sql`, RLS
+  admin-only). Without a data key nothing is stored. A copy of the table plus a laptop's key is therefore not enough
+  to test guesses offline; the gateway's data key is needed too. A value held by two or more active devices or users
+  under the same key id is a finding: raised once per identity in the audit trail (`endpoint-credential-reuse-detected`)
+  and listed by `GET /v1/endpoint-credential-reuse`, which shows a 12-character prefix of the server-keyed value only
+  and at most 50 holders per group. Revoked devices stop counting, in the groups, their holders and the detection.
+  Env-name facts and switched-off MCP facts, which the report path refuses, contribute nothing.
+- **Pruning:** a report with no collection gaps replaces the identity's set, so a rotated or removed secret stops
+  counting on the next complete report; a report with gaps never prunes by value. Rows under a key id the identity no
+  longer reports are dropped on its next report, so a tenant-key rotation clears the old comparison. A rotation has no
+  overlap window: while the fleet moves to the new key, devices on different keys compare nothing. Rotating the data
+  key likewise starts a fresh comparison, and the old rows are pruned as devices report.
+
 ### Slices
 
 1. **This PR:** §1–4 and §8 in `agents/endpoint` (the engine, the four adapters, fixtures, the matrix). Default off.
@@ -251,6 +283,7 @@ the device carries out by refusing every call (as a missing policy already does)
       (§10).
 3. Device groups and exceptions (§5): migration, routes (known UI gaps on #453), the lifecycle table, step-up, audit.
    Built. Folding approved exceptions and group rules into each device's compiled policy is part of 2b.
+4. Credential reuse across endpoints (§11). Built.
 
 ## Owner questions open (built with the secure default)
 
