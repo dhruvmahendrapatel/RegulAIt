@@ -100,7 +100,7 @@ import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
-import { directoryTokensProblem, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, loadDiscoverySettings, salesforceOrgTokensProblem } from "./discovery-posture.js";
 import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
@@ -679,14 +679,19 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   // ADR-0337 §4: the Directory token listing switched off after the run was queued stops here, before any credential
   const directoryOff = directoryTokensProblem(source.kind, source.target, runSettings);
   if (directoryOff) return fail("directory_tokens_not_allowed", directoryOff);
+  const orgTokensOff = salesforceOrgTokensProblem(source.kind, source.target, runSettings);
+  if (orgTokensOff) return fail("salesforce_org_tokens_not_allowed", orgTokensOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 
   const [cred] = await db
     .select()
     .from(discoveryCredentials)
-    .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
+    // ADR-0338 §2: the scanner loads only the READ credential; a control (platform_write) credential never reaches a scan
+    .where(and(eq(discoveryCredentials.sourceId, source.id), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
+  // a read row is federated or static (the delegated CHECK holds `delegated` to control rows); refused all the same
+  if (cred && cred.credentialMode === "delegated") return fail("credential_refused", "a delegated credential is never used to scan");
   // decision 7 (review of #403): a credential found to grant write access is never used again
   if (cred && discoveryWriteScopeFinal(cred.writeScope)) {
     return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
@@ -757,7 +762,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         target: Object.fromEntries(Object.entries(source.target).map(([k, v]) => [k, String(v)])),
         scope: { orgLevel: source.scope.orgLevel === true, include: [...(source.scope.include ?? [])] },
       },
-      credential: cred ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
+      credential: cred && cred.credentialMode !== "delegated" ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
       // ADR-0195 SD2b: federation tokens, for a federated credential only, bound to this source and its audiences
       ...(cred?.credentialMode === "federated" ? { federation: scanFederation(db, opts.dataKey, source.id, source.kind, cred.publicConfig) } : {}),
       fetch: ((input: string | URL | Request, init?: RequestInit) =>

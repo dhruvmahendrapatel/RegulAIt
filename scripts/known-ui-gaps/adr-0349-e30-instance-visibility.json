@@ -1,0 +1,8 @@
+{
+  "adr": "ADR-0349",
+  "lane": "E30",
+  "tracking": "lane E30 slice 5 (decision in PR #925): the brief is API-only (lane rule 3); the pending-work panel on the instance screen is for the design builder on #453",
+  "gaps": {
+    "GET /v1/workflows/instances/:instanceId/pending": "says what a workflow instance is waiting for (approval, artifact, plan, trigger, execution, retry, check report, advance, deploy handoff) with its claim, lease, retry and deadline, machine-readable"
+  }
+}

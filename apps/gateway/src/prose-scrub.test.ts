@@ -501,6 +501,8 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    // ADR-0361 slice 3: a conversation-deletion request's reason
+    "ai_saas_remediations.request_reason",
     // ADR-0187: engine item text and runner revocation
     "engine_run_items.reason",
     "engine_run_items.verdict_note",
@@ -511,6 +513,19 @@ describe("6. the covered / NOT-covered inventory", () => {
     "endpoint_addon_removals.reason",
     // ADR-0338: the admin's reason for a vendor agent control action
     "vendor_agent_actions.reason",
+    // ADR-0360 slice 2: the admin's reason for an EDR isolation request
+    "edr_isolation_requests.reason",
+    // ADR-0313: the admin's note on a paid-call price
+    "paid_call_prices.note",
+    // ADR-0337 §5: a SaaS finding review's reason and its rendered rationale; a reader's usage note
+    "saas_finding_reviews.reason",
+    "saas_finding_reviews.rationale",
+    "saas_entitlement_usage_reads.note",
+    // ADR-0366: a builder agent's halt reason and a containment's release reason
+    "builder_agents.halted_reason",
+    "agent_containments.release_reason",
+    "agent_containments.explanation",
+    "virtual_keys.halted_reason",
     // ADR-0175: a held skill's admission reason and a release-age override reason
     "builder_skills.admit_reason",
     "release_overrides.reason",
@@ -536,6 +551,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0350 (lane E31): per-device command-rule exceptions
     "endpoint_command_exceptions.reason",
     "endpoint_command_exceptions.decision_reason",
+    // ADR-0333 §5b (pending migration `agent_detection_suppressions`)
+    "detection_suppressions.reason",
     "approvals.decision_reason",
     "billing_statements.issue_reason",
     "cert_rotations.reason",
@@ -548,6 +565,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "a2a_agent_revocations.reason",
     // ADR-0327 addendum — a decision-table version's proposal reason
     "decision_table_versions.reason",
+    // ADR-0340 slice 3 — why an admin asked to migrate a running instance, and why a canary ended
+    "workflow_instance_migrations.reason",
+    "workflow_template_canaries.end_reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
     "connectors.disabled_reason",
     "copilot_proposals.rationale",
@@ -613,6 +633,7 @@ describe("6. the covered / NOT-covered inventory", () => {
     "risk_acceptances.rationale",
     "risk_acceptances.revoke_reason",
     "builder_agents.autonomy_note",
+    "builder_agents.autonomy_enforcement_reason",
     // ADR-0339 slice 2: an admin's note staging an agent identity link, and the deciding admin's note
     "agent_identity_links.note",
     "agent_identity_links.decision_note",
@@ -660,6 +681,10 @@ describe("6. the covered / NOT-covered inventory", () => {
     // ADR-0224 (migration 0252)
     "data_subject_requests.close_note",
     "data_subject_tombstones.reason",
+    // ADR-0349 slice 4
+    "workflow_schedules.pause_note",
+    // ADR-0359 (lane E40)
+    "behaviour_anomaly_findings.explanation",
   ];
 
   it("covers exactly the enumerated columns — the ADR's list is this list", () => {
@@ -679,6 +704,8 @@ describe("6. the covered / NOT-covered inventory", () => {
       "fairness_datasets.purge_reason",
       "mcp_registry_entries.conflict_reason",
       "migration_audit_outbox.reason",
+      // ADR-0313: a CHECK-constrained three-member release code
+      "paid_call_holds.release_reason",
       "risk_acceptances.compensating_controls",
       "trace_retention_holds.release_reason",
       "usage_events.stop_reason",

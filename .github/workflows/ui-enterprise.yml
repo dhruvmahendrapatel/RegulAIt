@@ -39,6 +39,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
+
 jobs:
   # ADR-0262: what this run must cover (.github/actions/ci-scope)
   scope:
@@ -68,7 +72,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -101,7 +105,9 @@ jobs:
 
       - name: Build the web app
         if: success() || failure()
-        run: pnpm --filter @regulait/web build
+        # --manifest writes dist/.vite/manifest.json, which ui-chunk-budgets.mjs reads for the first-load and first-paint
+        # totals (ADR-0344 addendum); only the bundle checks in this job read it.
+        run: pnpm --filter @regulait/web build --manifest
 
       - name: Bundle-size ceilings (size-limit)
         if: success() || failure()
@@ -135,7 +141,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -256,7 +262,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

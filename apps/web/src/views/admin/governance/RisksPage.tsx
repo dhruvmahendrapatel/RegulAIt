@@ -21,15 +21,19 @@
  *    capped by the residual level (6 months for high or critical, 12
  *    otherwise); history is kept, and an expired acceptance reopens the risk.
  *    The admin's tolerance editor sits at the top of the page.
+ *  - **The register is paged, never cut short silently** (CXR-REV-003): it is
+ *    the shared DataList over `GET /v1/risks` (ADR-0226), with a total, server
+ *    sort and the Excel export; rows still expand in place.
  */
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Textarea, type Tone } from "../../../ui/kit";
-import { ExpandableTable } from "../../../ui/ExpandableTable";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Textarea, type TableProps, type Tone } from "../../../ui/kit";
+import { ExpandableTable, type ExpandableTableProps } from "../../../ui/ExpandableTable";
+import { DataList } from "../../../ui/DataList";
 import { QueryGate, optionEls, useAction, useAgents, useProjects, agentOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -123,6 +127,14 @@ function measuredCells(m: Record<string, unknown>): string {
     .join("  ·  ");
 }
 
+/** The register's table: the DataList's page in an ExpandableTable. One stable component (the expansion comes from
+ * context), so a re-render never remounts the table and the opened row keeps its focus handling. */
+const RiskExpand = createContext<ExpandableTableProps<RiskRow>["expand"] | null>(null);
+function RiskRegisterTable(props: TableProps<RiskRow>) {
+  const expand = useContext(RiskExpand);
+  return expand ? <ExpandableTable {...props} expand={expand} /> : null;
+}
+
 export default function RisksPage() {
   const [searchParams] = useSearchParams();
   const agents = useAgents();
@@ -133,10 +145,9 @@ export default function RisksPage() {
     queryKey: ["admin", "risk-library"],
     queryFn: () => api.get<{ library: LibraryEntry[]; disclaimer: string }>("/v1/risks/library"),
   });
-  const list = useQuery({
-    queryKey: ["admin", "risks"],
-    queryFn: () => api.get<{ risks: RiskRow[] }>("/v1/risks"),
-  });
+  const qc = useQueryClient();
+  // the register rows on screen (the DataList's current page), for the "linked to directly" card below
+  const [onScreen, setOnScreen] = useState<RiskRow[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(searchParams.get("riskId"));
   const detail = useQuery({
     queryKey: ["admin", "risk", openId],
@@ -161,8 +172,10 @@ export default function RisksPage() {
   const toggle = (next: typeof panel) => setPanel((cur) => (cur === next ? "none" : next));
   const relaxed = (tolerances.data?.tolerances ?? []).filter((t) => t.relaxed);
 
-  // detail actions
-  const [transitionReason, setTransitionReason] = useState("");
+  // detail actions. CXR-REV-004: one draft reason per risk, so a reason typed for one risk never moves another
+  const [transitionReasons, setTransitionReasons] = useState<Readonly<Record<string, string>>>({});
+  const reasonFor = (riskId: string) => transitionReasons[riskId] ?? "";
+  const setReasonFor = (riskId: string, text: string) => setTransitionReasons((cur) => ({ ...cur, [riskId]: text }));
   const { auth } = useSession();
 
   const seedFromLibrary = (key: string) => {
@@ -178,7 +191,7 @@ export default function RisksPage() {
   };
 
   const refreshAll = async () => {
-    await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
+    await Promise.all([qc.invalidateQueries({ queryKey: ["admin", "risks"] }), openId ? detail.refetch() : Promise.resolve(null)]);
   };
   const d = detail.data;
 
@@ -245,21 +258,21 @@ export default function RisksPage() {
                     <div className={a.formRow}>
                       <Field label="Transition reason — required and audited" grow>
                         <Input
-                          value={transitionReason}
-                          onChange={(e) => setTransitionReason(e.target.value)}
+                          value={reasonFor(d.risk.id)}
+                          onChange={(e) => setReasonFor(d.risk.id, e.target.value)}
                           placeholder="guardrail rollout under way"
                         />
                       </Field>
                       <Field label=" ">
                         <Button
-                          disabled={act.busy || !transitionReason.trim()}
+                          disabled={act.busy || !reasonFor(d.risk.id).trim()}
                           onClick={() =>
                             void act.run(async () => {
                               await api.post(`/v1/risks/${d.risk.id}/transition`, {
                                 status: d.risk.status === "open" ? "mitigating" : "open",
-                                reason: transitionReason.trim(),
+                                reason: reasonFor(d.risk.id).trim(),
                               });
-                              setTransitionReason("");
+                              setReasonFor(d.risk.id, "");
                               await refreshAll();
                             }, "Risk transitioned — the move and its reason are on the audit trail")
                           }
@@ -270,14 +283,14 @@ export default function RisksPage() {
                       <Field label=" ">
                         <Button
                           variant="ghost"
-                          disabled={act.busy || !transitionReason.trim()}
+                          disabled={act.busy || !reasonFor(d.risk.id).trim()}
                           onClick={() =>
                             void act.run(async () => {
                               await api.post(`/v1/risks/${d.risk.id}/transition`, {
                                 status: "closed",
-                                reason: transitionReason.trim(),
+                                reason: reasonFor(d.risk.id).trim(),
                               });
-                              setTransitionReason("");
+                              setReasonFor(d.risk.id, "");
                               await refreshAll();
                             }, "Risk closed")
                           }
@@ -452,55 +465,69 @@ export default function RisksPage() {
         )}
 
         {/* ---------------- register list ---------------- */}
-        <QueryGate query={list}>
-          <Card title="Register">
-            {(list.data?.risks ?? []).length === 0 ? (
+        <Card title="Register">
+          <RiskExpand.Provider
+            value={{
+              open: (r) => r.id === openId,
+              toggle: (r) => setOpenId(openId === r.id ? null : r.id),
+              label: (r) => r.title,
+              render: () => renderDetail(),
+            }}
+          >
+          <DataList<RiskRow>
+            listId="risks"
+            noun="risks"
+            endpoint="/v1/risks"
+            exportPath="/v1/risks/export.xlsx"
+            queryKey={["admin", "risks", "list"]}
+            legacyKey="risks"
+            defaultSort={{ key: "created", dir: "desc" }}
+            rowKey={(r) => r.id}
+            onRows={(rows) => setOnScreen(rows)}
+            empty={
               <EmptyState
                 title="No risks registered yet"
                 body="Register one above — the library seeds the scenarios this deployment's ledgers can evidence."
               />
-            ) : (
-              <ExpandableTable
-                rows={list.data?.risks ?? []}
-                rowKey={(r) => r.id}
-                expand={{
-                  open: (r) => r.id === openId,
-                  toggle: (r) => setOpenId(openId === r.id ? null : r.id),
-                  label: (r) => r.title,
-                  render: () => renderDetail(),
-                }}
-                columns={[
-                  { key: "title", header: "Risk", render: (r) => <strong>{r.title}</strong> },
-                  {
-                    key: "status",
-                    header: "Status",
-                    render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
-                  },
-                  {
-                    key: "category",
-                    header: "Category",
-                    render: (r) => <Badge tone="neutral">{r.category.replace(/_/g, " ")}</Badge>,
-                  },
-                  {
-                    key: "declared",
-                    header: "Declared L/I",
-                    render: (r) => (
-                      <span className={v.faint}>
-                        {r.likelihood} / {r.impact}
-                      </span>
-                    ),
-                  },
-                  { key: "owner", header: "Owner", render: (r) => r.ownerName ?? r.ownerUserId },
-                  { key: "mitigation", header: "Mitigating control", render: (r) => <span className={v.faint}>{r.mitigation ?? "none recorded"}</span> },
-                  { key: "created", header: "Registered", render: (r) => ago(r.createdAt) },
-                ]}
-              />
-            )}
-          </Card>
-        </QueryGate>
+            }
+            table={RiskRegisterTable}
+            columns={[
+              { key: "title", header: "Risk", main: true, sortable: true, render: (r) => <strong>{r.title}</strong> },
+              {
+                key: "status",
+                header: "Status",
+                main: true,
+                sortable: true,
+                render: (r) => <Badge tone={statusTone(r.status)}>{r.status}</Badge>,
+              },
+              {
+                key: "category",
+                header: "Category",
+                main: true,
+                sortable: true,
+                render: (r) => <Badge tone="neutral">{r.category.replace(/_/g, " ")}</Badge>,
+              },
+              {
+                key: "declared",
+                header: "Declared L/I",
+                main: true,
+                sortable: true,
+                render: (r) => (
+                  <span className={v.faint}>
+                    {r.likelihood} / {r.impact}
+                  </span>
+                ),
+              },
+              { key: "owner", header: "Owner", main: true, sortable: true, render: (r) => r.ownerName ?? r.ownerUserId },
+              { key: "mitigation", header: "Mitigating control", main: true, render: (r) => <span className={v.faint}>{r.mitigation ?? "none recorded"}</span> },
+              { key: "created", header: "Registered", main: true, sortable: true, render: (r) => ago(r.createdAt) },
+            ]}
+          />
+          </RiskExpand.Provider>
+        </Card>
 
-        {/* a risk linked to directly that the register list does not show still opens, as its own card */}
-        {openId && list.data && !(list.data.risks ?? []).some((r) => r.id === openId) && (
+        {/* a risk linked to directly that the register page on screen does not show still opens, as its own card */}
+        {openId && onScreen && !onScreen.some((r) => r.id === openId) && (
           <Card
             title={d ? `Risk: ${d.risk.title}` : "Risk"}
             actions={<Button variant="ghost" onClick={() => setOpenId(null)}>Close</Button>}

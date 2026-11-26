@@ -1,0 +1,16 @@
+{
+  "adr": "ADR-0358",
+  "lane": "E39",
+  "tracking": "ADR-0358 (lane E39) part 2: API-only by the lane brief (rule 3); the CMDB connector screen is for the design builder on #453",
+  "gaps": {
+    "GET /v1/cmdb/connectors": "lists CMDB connectors with their posture (export only, egress allowed, air-gapped), credential user name and last run (never the secret)",
+    "POST /v1/cmdb/connectors": "creates a CMDB connector (ServiceNow), disabled and export only",
+    "PUT /v1/cmdb/connectors/:connectorId/config": "sets the instance, IRE source name, CI class per asset kind and the ownership read-back (a relaxation, step-up); moving the instance revokes the credential",
+    "PUT /v1/cmdb/connectors/:connectorId/credential": "stores or rotates the CMDB integration credential (compare-and-set, step-up, reason)",
+    "DELETE /v1/cmdb/connectors/:connectorId/credential": "revokes the CMDB credential: destroys the secret and disables the connector",
+    "PUT /v1/cmdb/connectors/:connectorId/enabled": "turns CMDB export on (step-up, reason, a live credential, not air-gapped) or off",
+    "POST /v1/cmdb/connectors/:connectorId/sync": "pushes the AI asset inventory to the CMDB now (the scheduled sweep's function)",
+    "GET /v1/cmdb/connectors/:connectorId/runs": "lists the connector's sync runs (paginated)",
+    "GET /v1/cmdb/connectors/:connectorId/links": "lists the exported configuration items and the ownership the CMDB reported (recorded, never applied)"
+  }
+}

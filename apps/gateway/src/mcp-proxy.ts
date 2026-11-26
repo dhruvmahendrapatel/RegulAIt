@@ -1,6 +1,6 @@
 import { engineKeyWorkflowInstance, guardProjectPlanOnly } from "./plan-only.js";
 import { MCP_BATCH_REFUSAL, mcpBatchRefused, mcpOriginRefusal } from "./mcp-conformance.js";
-import { isModernMcpRequest, serveModernMcp } from "./mcp-modern.js";
+import { isModernMcpRequest, modernProtocolMethods, serveModernMcp } from "./mcp-modern.js";
 import { resolvePublicUrl } from "./public-url.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -12,6 +12,7 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
+  type ServerNotification,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -33,8 +34,9 @@ import {
   usageEvents,
   userAgentPolicies,
   type Db,
+  type PaidCallPriceRow,
 } from "@regulait/db";
-import { scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { agentResponseAuditFacts, agentResponseBody, scopeCovers, visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 import { actorEntitlementsReach, DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
 import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import { selectTools } from "@regulait/optimizer-kernel";
@@ -91,6 +93,7 @@ import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { armUpstreamExchange, UpstreamExchangeHolder } from "./upstream-token-exchange.js";
 import { timeouts } from "./timeouts.js";
+import { isRobotsServerRow, ROBOT_TOOL_CALL_DEADLINE_MS } from "./robots-mcp.js";
 import {
   attemptsForToolKind,
   classifyUpstreamError,
@@ -126,6 +129,7 @@ import { loadEntitlements } from "./entitlements.js";
 import {
   executeGovernedProtocolCall,
   installProtocolSurface,
+  trackCallerRequest,
   isReservedToolName,
   protocolCapabilities,
   protocolOutcomeResult,
@@ -153,6 +157,17 @@ import {
 } from "./projects.js";
 import { z } from "zod";
 import { errMessage } from "./err-serializer.js";
+import {
+  PAID_CALL_BUDGET_WARNING_META_KEY,
+  type PaidCallBudgetWarning,
+  paidPriceForMcpTool,
+  releasePaidCall,
+  reportedChargeOf,
+  reservePaidCall,
+  runIdOfCall,
+  settlementAmount,
+  settlePaidCall,
+} from "./paid-calls.js";
 import { governedProcessingLimit, processingRefusalDecision } from "./governed-core.js";
 import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 
@@ -237,6 +252,16 @@ function toolKind(tool: Tool): "read" | "write" {
  * both gates on its own (a retry attempt must never become a bypass); on the
  * allow path that is one extra read, on the refuse path it is never reached.
  */
+/**
+ * ADR-0364 S3: the deadline one tools/call gets. A robot tool runs a whole sandboxed browser run (placement, up to a
+ * 5-minute wall clock, its margin), which the generic `mcpCallToolMs` would sever mid-run; it gets the run's own
+ * bound instead (never less than the generic one). Every tool still has one attempt.
+ */
+export function toolCallBudgetMs(serverRow: { transport: string; url: string }): number {
+  const generic = timeouts().mcpCallToolMs;
+  return isRobotsServerRow(serverRow) ? Math.max(generic, ROBOT_TOOL_CALL_DEADLINE_MS) : generic;
+}
+
 export async function preflightUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
@@ -383,8 +408,9 @@ export async function connectUpstream(
       await assertAdmitted(db, serverRow.id);
       return guardedMcpConnect(db, serverRow, {
         connectDeadlineMs: deadlineMs,
-        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt
-        ...(serverRow.transport === "stdio" && opts.placement
+        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt. ADR-0364 S3: the first-party
+        // Robots server gets the same context, because a tools/call there places a robot_browser run for that call
+        ...((serverRow.transport === "stdio" || serverRow.transport === "first_party") && opts.placement
           ? { placement: { ...(await stdioPlacementContext(db, opts.placement)), linkedOfferId: opts.placement.linkedOfferId ?? null } }
           : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
@@ -422,6 +448,10 @@ export type GovernedToolCallOutcome =
       pii?: McpPii;
       guardrails?: DispatchGuardrails;
       costUsd?: number | null;
+      /** ADR-0354 — an `advise` policy allowed this call and returns static guidance to the agent */
+      advice?: ReturnType<typeof agentResponseBody>;
+      /** D-2026-11-22-05 — a paid call over its project budget that the org's warn-only enforcement let through */
+      budgetWarning?: PaidCallBudgetWarning;
     }
   | { kind: "unknown_tool" }
   /**
@@ -735,6 +765,13 @@ export async function executeGovernedToolCall(
      * exception). Absent = a caller gated elsewhere (a run's worker loop: its run was gated when it was planned).
      */
     planGate?: { engineInstanceId: string | null } | undefined;
+    /**
+     * ADR-0364 S3 (review B) — the caller's abort: its cancellation, its own request timeout (the SDK client's default
+     * is 60 s, below a robot run's bound) or its connection closing. Passed to the upstream `tools/call` with the
+     * deadline, so the upstream is told to stop (`notifications/cancelled`); a robot tool's run is cancelled by it
+     * (`startRobotRun`). Absent = only the deadline bounds the call (a worker loop).
+     */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -976,6 +1013,8 @@ async function executeGovernedToolCallInner(
     await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "definition-pins", status: pinned.status, receiptClass: "decision" } });
     return { kind: "denied", decision };
   };
+  // ADR-0313: this call's paid-call hold, once reserved (settled with the usage row, else released in `finally`)
+  let paidHold: { holdId: string; heldUsd: number; price: PaidCallPriceRow; budgetWarning?: PaidCallBudgetWarning } | null = null;
 
   try {
     if (kind) {
@@ -1248,6 +1287,8 @@ async function executeGovernedToolCallInner(
         ...(approvedApprovalId ? { approvedApprovalId } : {}),
         policyEpoch,
         killSwitch,
+        // ADR-0354: every decision row records the response the agent was given (allow, advise, correct, ...)
+        agentResponse: agentResponseAuditFacts(decision),
         receiptClass: "decision",
         // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
         ...(stdioPlacement
@@ -1631,18 +1672,37 @@ async function executeGovernedToolCallInner(
     // retry can open two pull requests or charge two cards, and it does so
     // precisely when the network is unreliable. AER-038: readOnlyHint is not
     // an idempotency contract either, so every tool receives one attempt.
+    // ADR-0313: a PAID tool reserves its worst-case charge against the call's project budget and run cap before the
+    // upstream is contacted, under the envelopes' locks. Over budget, or no budget at all, is a refusal routed to the
+    // approvals queue: nothing runs and nothing bills. Placed after every other gate, so a refused call holds nothing.
+    const paidPrice = await paidPriceForMcpTool(db, serverId, toolRow?.id ?? null);
+    if (paidPrice) {
+      const reserved = await reservePaidCall(db, {
+        price: paidPrice,
+        userId,
+        projectId: projectId ?? null,
+        runId: runIdOfCall(args),
+        subject: { kind: "mcp_tool", serverId, toolName },
+      });
+      if (!reserved.ok) return { kind: "budget_blocked", status: reserved.status, error: reserved.error, detail: reserved.detail };
+      paidHold = reserved;
+    }
+
     let content: Awaited<ReturnType<typeof upstream.callTool>>;
     try {
       content = await withUpstreamRetry(
         ({ deadlineMs }) =>
           upstream!.callTool({ name: toolName, arguments: preparedPii?.effectiveArguments ?? args.arguments }, undefined, {
             timeout: deadlineMs,
+            // the caller's abort beside the deadline: whichever comes first ends the call, and the SDK tells the
+            // upstream (`notifications/cancelled`)
+            ...(args.signal ? { signal: args.signal } : {}),
           }),
         {
           // G2: by far the most generous of the three deadlines, because this is
           // the upstream doing real work — a build, a query, a scan. A bound that
           // severs legitimate work is worse than the hang it replaced.
-          budgetMs: timeouts().mcpCallToolMs,
+          budgetMs: toolCallBudgetMs(serverRow),
           maxAttempts: attemptsForToolKind(kind),
           // ADR-0185 G5: the call is one upstream operation on /metrics. The
           // connect before it is observed separately, once per attempt, inside
@@ -1659,7 +1719,24 @@ async function executeGovernedToolCallInner(
       // A `try`/`catch` rather than `.catch()`: an async `.catch` handler that
       // rethrows still widens the inferred type to include `undefined`, which
       // no longer satisfies the SDK's `tools/call` handler signature.
-      await operationFailed(err);
+      // A caller that gave up is not the upstream failing: nothing is charged to its breaker, and the cancel is
+      // audited (the upstream was told to stop; what it had done by then is its own).
+      if (args.signal?.aborted) {
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          effect: "deny",
+          ruleId: "mcp-call-cancelled-by-caller",
+          ruleChain: [],
+          reason: "the caller cancelled the tools/call (or its connection closed) before the upstream answered; the upstream was told to stop",
+          detail: { projectId, phase: "tools/call", receiptClass: "decision" },
+        });
+      } else {
+        await operationFailed(err);
+      }
+      // ADR-0313: a failed (or cancelled) call bills nothing, so its hold is released
+      if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed");
       if (redactActive) throw new Error("MCP upstream call failed under PII redaction");
       throw err;
     }
@@ -1757,8 +1834,18 @@ async function executeGovernedToolCallInner(
     // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
     // ADR-0230 A3: an SAP business call's outcome (document number, replay, SAP error code), from the raw result
     const sapOutcome = sapFacts ? readSapOutcome(sapFacts, content) : null;
-    // an idempotent replay returned an earlier result and did no new work: recorded, not charged
-    const chargedUsd = sapOutcome?.replayed ? 0 : pricePerCallUsd;
+    // ADR-0313: a paid call bills what it settles at (the upstream-reported charge, never above its hold, else the
+    // quoted price) instead of the flat list price. ADR-0230 A3: an idempotent replay returned an earlier result and
+    // did no new work, so it is recorded, not charged (a paid hold on a replay settles at zero)
+    const paidSettlement = paidHold
+      ? sapOutcome?.replayed
+        ? { amountUsd: 0, capped: false, reported: false }
+        : settlementAmount(paidHold.price, paidHold.heldUsd, reportedChargeOf(content), { toolError: (content as { isError?: unknown }).isError === true })
+      : null;
+    // ADR-0313 / ADR-0312: a call made inside an orchestration run carries the run id on its usage row, so the run's cap
+    // and its cost per outcome both see the spend
+    const callRunId = runIdOfCall(args);
+    const chargedUsd = sapOutcome?.replayed ? 0 : paidSettlement ? paidSettlement.amountUsd : pricePerCallUsd;
     const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
       ...actorColumns(),
       userId,
@@ -1767,12 +1854,14 @@ async function executeGovernedToolCallInner(
       // (as it carries the operation on connector rows) and the server id
       // rides the detail jsonb.
       operation: toolName,
-      // O10: tool-first price, server-flat fallback (resolved above); ADR-0230 A3: a replay is not charged
+      // O10: tool-first price, server-flat fallback (resolved above); ADR-0313: a paid call's settlement; ADR-0230 A3:
+      // a replay is not charged
       costUsd: chargedUsd,
       projectId,
       detail: {
         serverId,
         toolName,
+        ...(callRunId ? { runId: callRunId } : {}),
         ...(sapOutcome ? { sap: sapOutcome } : {}),
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
@@ -1789,13 +1878,20 @@ async function executeGovernedToolCallInner(
       },
     }).returning({ id: usageEvents.id });
     const toolGrantId = args.delegationGrantId;
+    let toolUsageId: string | null = null;
     if (toolGrantId) {
       await db.transaction(async (tx) => {
         const [u] = await toolUsageWrite(tx as unknown as Db);
+        toolUsageId = u?.id ?? null;
         if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(chargedUsd) });
       });
     } else {
-      await toolUsageWrite(db);
+      const [u] = await toolUsageWrite(db);
+      toolUsageId = u?.id ?? null;
+    }
+    if (paidHold && paidSettlement) {
+      await settlePaidCall(db, { holdId: paidHold.holdId, userId, amountUsd: paidSettlement.amountUsd, usageEventId: toolUsageId,
+        capped: paidSettlement.capped, reported: paidSettlement.reported });
     }
     if (sapOutcome) {
       await recordSapOutcome(db, { userId, serverId, toolName, projectId: projectId ?? null, approvalId: approvedApprovalId ?? null, decisionAuditId }, sapOutcome);
@@ -1878,10 +1974,15 @@ async function executeGovernedToolCallInner(
       ...(pii ? { pii } : {}),
       ...(mcpGuardrailView ? { guardrails: mcpGuardrailView } : {}),
       // ADR-0024 (O11): every executed call is metered, so the cost is always
-      // reported back — attributed or not. O10: tool-first resolution.
-      costUsd: pricePerCallUsd,
+      // reported back — attributed or not. O10: tool-first resolution. ADR-0313: a paid call's settlement.
+      costUsd: chargedUsd,
+      ...(decision.response?.kind === "advise" ? { advice: agentResponseBody(decision.response) } : {}),
+      ...(paidHold?.budgetWarning ? { budgetWarning: paidHold.budgetWarning } : {}),
     };
   } finally {
+    // ADR-0313: a hold neither settled nor released above (an exit that billed nothing) is released here; if even that
+    // fails, the sweeper releases it at its TTL, and until then it still counts (the safe direction)
+    if (paidHold) await releasePaidCall(db, paidHold.holdId, userId, "call_failed").catch(() => undefined);
     await closeUpstream();
   }
 }
@@ -2549,6 +2650,8 @@ export async function callToolForCaller(
   ctx: McpToolCaller,
   toolName: string,
   args: Record<string, unknown> | undefined,
+  /** ADR-0364 S3 (review B): the caller's abort (cancel, timeout, closed connection), passed to the upstream */
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const { db, userId, serverId, projectId, workloadGrantId, planGateEngineInstance } = ctx;
   // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
@@ -2579,6 +2682,7 @@ export async function callToolForCaller(
     // ADR-0188 S4 (for S5): a WORKLOAD caller's call is decided with its stored delegation chain; one
     // with no grant resolves to no grant and is refused in the core (never decided as the person)
     ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+    ...(signal ? { signal } : {}),
   }).catch(async (err: unknown) => {
     // AER-024: the reply is already hijacked, so the primitive's admission
     // hold / egress refusal cannot be the pre-hijack 403 the manifest path
@@ -2604,10 +2708,69 @@ export async function callToolForCaller(
     case "unknown_tool":
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${toolName}`);
     case "allowed":
-      return outcome.content as Record<string, unknown>;
+      return withBudgetWarning(withPolicyAdvice(outcome.content as Record<string, unknown>, outcome.advice), outcome.budgetWarning);
     default:
       throw mcpErrorForGovernanceOutcome(outcome);
   }
+}
+
+/**
+ * One governed non-tool protocol request (ADR-0185 G3: resources, prompts, completion, logging) for one caller:
+ * `executeGovernedProtocolCall` in its own trace, mapped to the MCP result or error. Moved out of the v1 route's
+ * inline `call` unchanged (ADR-0311 decision 4, slice 2); the 2026-07-28 path (`mcp-modern.ts`) calls the same
+ * function, so entitlements, data scopes, approvals, scans and audit cannot differ between eras.
+ */
+export async function protocolCallForCaller(
+  ctx: McpToolCaller,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  extra: {
+    relay: (n: ServerNotification) => Promise<void>;
+    progressToken?: string | number;
+    /** ADR-0311 d4 slice 2: false on the 2026-07-28 path, which emits no `notifications/message` (logging removed) */
+    relayLogMessages?: boolean;
+    /** ADR-0364 S3 (review B): the caller's abort (cancel, timeout, closed connection), passed to the upstream */
+    signal?: AbortSignal;
+  },
+): Promise<Record<string, unknown>> {
+  const { db, userId, serverId, projectId, workloadGrantId } = ctx;
+  const protocolTrace = await beginTrace(db, {
+    kind: "tool",
+    name: `mcp ${method.slice(0, 120)}`,
+    userId,
+    projectId,
+    sessionId: `mcp:${serverId}`,
+    rootRefId: serverId,
+  });
+  const outcome = await executeGovernedProtocolCall(db, {
+    userId,
+    serverId,
+    method,
+    dataKey: ctx.dataKey,
+    params,
+    projectId,
+    principal: ctx.principal(),
+    trace: protocolTrace,
+    relay: extra.relay,
+    progressToken: extra.progressToken,
+    signal: extra.signal,
+    ...(extra.relayLogMessages === false ? { relayLogMessages: false } : {}),
+    // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
+    ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
+  }).catch(async (err: unknown) => {
+    // the same named policy refusal a tools/call raises post-hijack
+    if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
+      await finishTrace(db, protocolTrace, "denied");
+      throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
+    }
+    throw err;
+  });
+  await finishTrace(
+    db,
+    protocolTrace,
+    outcome.kind === "allowed" ? "ok" : outcome.kind === "method_not_found" || outcome.kind === "invalid_params" ? "error" : "denied",
+  );
+  return protocolOutcomeResult(outcome, method, mcpErrorForGovernanceOutcome);
 }
 
 /** `dataKey`: ADR-0188 S8, the pairwise subject of an outbound identity assertion is keyed from it */
@@ -2948,7 +3111,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         serverId,
         projectId,
         listTools: () => listToolsForCaller(caller),
-        callTool: (name, args) => callToolForCaller(caller, name, args),
+        callTool: (name, args, signal) => callToolForCaller(caller, name, args, signal),
+        // ADR-0311 d4 slice 2: the same capabilities input as the v1 path below, minus logging (removed in 2026-07-28)
+        capabilities: protocolCapabilities(modernProtocolMethods(orgForProtocol.mcpProtocolMethods ?? [])),
+        protocolCall: (method, params, extra) => protocolCallForCaller(caller, method, params, extra),
         closeUpstream: closeUpstreamSession,
       });
     }
@@ -2958,54 +3124,35 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     );
     // ADR-0185 G3: every non-tool request is decided by the protocol primitive
     // (refused, disabled, or governed exactly like a tool call)
+    // ADR-0364 S3 (review B): the caller's cancellation scope. A client cancels (or times out) with a
+    // `notifications/cancelled` on a LATER HTTP request; it reaches the call only within the same user, server and
+    // credential, so no caller can cancel another's call
+    const cancelScope = [
+      userId,
+      serverId,
+      req.authCtx.via,
+      req.authCtx.apiKeyId ?? req.authCtx.virtualKeyId ?? req.authCtx.delegationGrantId ?? req.authCtx.workloadCredentialId ?? "",
+    ].join("\u0000");
     const protocolSurface = installProtocolSurface(proxy, {
       db,
       userId,
       serverId,
       projectId,
-      call: async (method, params, extra) => {
-        const protocolTrace = await beginTrace(db, {
-          kind: "tool",
-          name: `mcp ${method.slice(0, 120)}`,
-          userId,
-          projectId,
-          sessionId: `mcp:${serverId}`,
-          rootRefId: serverId,
-        });
-        const outcome = await executeGovernedProtocolCall(db, {
-          userId,
-          serverId,
-          method,
-          dataKey: opts.dataKey,
-          params,
-          projectId,
-          principal: abacPrincipalFromRequest(req),
-          trace: protocolTrace,
-          relay: extra.relay,
-          progressToken: extra.progressToken,
-          // ADR-0188 S4 (for S5): every protocol method of a workload caller is decided with its chain
-          ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
-        }).catch(async (err: unknown) => {
-          // the same named policy refusal a tools/call raises post-hijack
-          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
-            await finishTrace(db, protocolTrace, "denied");
-            throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
-          }
-          throw err;
-        });
-        await finishTrace(
-          db,
-          protocolTrace,
-          outcome.kind === "allowed" ? "ok" : outcome.kind === "method_not_found" || outcome.kind === "invalid_params" ? "error" : "denied",
-        );
-        return protocolOutcomeResult(outcome, method, mcpErrorForGovernanceOutcome);
-      },
+      cancelScope,
+      call: (method, params, extra) => protocolCallForCaller(caller, method, params, extra),
     });
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => listToolsForCaller(caller));
-    proxy.setRequestHandler(CallToolRequestSchema, async (request) =>
-      callToolForCaller(caller, request.params.name, request.params.arguments),
-    );
+    proxy.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      // ADR-0364 S3 (review B): the call ends when the caller cancels it (by id, from any later request of the same
+      // caller), times out on its side, or closes its connection; the abort reaches the upstream (a robot run cancels)
+      const tracked = trackCallerRequest(cancelScope, extra.requestId, extra.signal, db);
+      try {
+        return await callToolForCaller(caller, request.params.name, request.params.arguments, tracked.signal);
+      } finally {
+        tracked.done();
+      }
+    });
 
     // Stateless mode: one transport per request, no session tracking yet.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -3032,20 +3179,67 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
  * unchanged, so `mcp-protocol.ts` names every refusal exactly as a tool call
  * does (ADR-0185 G3).
  */
+/** ADR-0354 — the `_meta` key the graduated response travels under (structured data, never mixed into markup) */
+export const AGENT_RESPONSE_META_KEY = "regulait.ai/response";
+
+/**
+ * ADR-0354 — an `advise` answer: the upstream result unchanged, plus the policy's static guidance as structured
+ * `_meta` and as one clearly-labelled text item appended AFTER the upstream content, so an agent that reads only text
+ * still sees it and can never mistake it for tool output. The guidance is validated plain text (parseAgentGuidance).
+ */
+export function withPolicyAdvice(
+  result: Record<string, unknown>,
+  advice: ReturnType<typeof agentResponseBody> | undefined,
+): Record<string, unknown> {
+  if (!advice?.message) return result;
+  const meta = (result._meta && typeof result._meta === "object" ? result._meta : {}) as Record<string, unknown>;
+  const content = Array.isArray(result.content) ? result.content : [];
+  return {
+    ...result,
+    content: [...content, { type: "text", text: `[RegulAIt policy advice] ${advice.message}` }],
+    _meta: { ...meta, [AGENT_RESPONSE_META_KEY]: advice },
+  };
+}
+
+/**
+ * D-2026-11-22-05: a paid call that warn-only let through over its project budget says so to the agent, the same way
+ * policy advice does: a text block it reads and the structured warning under `_meta["io.regulait/budget-warning"]`.
+ */
+export function withBudgetWarning(
+  result: Record<string, unknown>,
+  warning: PaidCallBudgetWarning | undefined,
+): Record<string, unknown> {
+  if (!warning) return result;
+  const meta = (result._meta && typeof result._meta === "object" ? result._meta : {}) as Record<string, unknown>;
+  const content = Array.isArray(result.content) ? result.content : [];
+  return {
+    ...result,
+    content: [...content, { type: "text", text: `[RegulAIt budget warning] ${warning.message}` }],
+    _meta: { ...meta, [PAID_CALL_BUDGET_WARNING_META_KEY]: warning },
+  };
+}
+
 export function mcpErrorForGovernanceOutcome(
   outcome: Exclude<GovernedToolCallOutcome, { kind: "allowed" | "unknown_tool" }>,
 ): McpError {
   switch (outcome.kind) {
-    case "denied":
+    case "denied": {
+      // ADR-0354: a `correct` refusal also tells the agent the approved route, as validated plain text in the
+      // message and as structured error data. It carries no grant: the agent's retry is decided afresh.
+      const steer = outcome.decision.response?.kind === "correct" ? agentResponseBody(outcome.decision.response) : null;
       return new McpError(
         ErrorCode.InvalidRequest,
-        `Denied by policy: ${outcome.decision.reason}`,
+        `Denied by policy: ${outcome.decision.reason}` +
+          (steer ? ` — ${steer.message ?? ""} Instead: ${steer.alternative ?? ""}` : ""),
         // ADR-0186 decision 32: the connector route's 403 code, carried in the
         // error data (a JSON-RPC answer has no HTTP status of its own)
         outcome.decision.ruleId === CREDENTIAL_AUDIENCE_RULE_ID
           ? { error: CREDENTIAL_AUDIENCE_ERROR, status: 403 }
-          : undefined,
+          : steer
+            ? { [AGENT_RESPONSE_META_KEY]: steer }
+            : undefined,
       );
+    }
     // §8.4 input block: denied pre-call, nothing executed, nothing billed.
     // The message names CATEGORIES only, never the matched content.
     case "pii_blocked":

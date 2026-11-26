@@ -43,6 +43,7 @@ import {
   type AppliedIsolationKind,
 } from "./contract.js";
 import { ISOLATION_ENFORCEMENT_MODES } from "./settings.js";
+import { robotEgressSchema } from "../robots-run.js";
 import { REPORT_FAILURE_CODES, signedExecutorReportSchema } from "./attestation.js";
 
 export const EXECUTOR_CHANNEL_PREFIX = "/v1/executor-channel" as const;
@@ -115,8 +116,18 @@ export const executionOfferSchema = z
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     /** ISO time on the database clock */
     expiresAt: z.string().datetime({ offset: true }),
+    /**
+     * ADR-0364 S3: the run's egress, REQUIRED on a `robot_browser` offer and refused on every other kind. The gateway
+     * sends hosts and ports (from the version's allowed sites); the executor generates the run's Smokescreen ACL from
+     * them (`smokescreenAclForTargets`, the one place an ACL is built) and the sandbox's only peer is that proxy.
+     */
+    egress: robotEgressSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((o) => (o.workloadKind === "robot_browser") === (o.egress !== undefined), {
+    message: "egress is required on a robot_browser offer and refused on every other kind",
+    path: ["egress"],
+  });
 export type ExecutionOffer = z.infer<typeof executionOfferSchema>;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +149,18 @@ export const executorSelfTestSchema = z.object({ reports: z.array(signedExecutor
 
 export const executorDeclineSchema = z.object({ reason: z.enum(EXECUTION_OFFER_DECLINE_REASONS) }).strict();
 export const executorPlacementReportSchema = z.object({ report: signedExecutorReportSchema }).strict();
-export const executorEndSchema = z.object({ outcome: z.enum(EXECUTION_OFFER_END_OUTCOMES) }).strict();
+/** ADR-0364 S3: the most of a robot run's Smokescreen log an end carries (the executor keeps the head, then a marker) */
+export const ROBOT_EGRESS_LOG_MAX_BYTES = 256 * 1024;
+export const executorEndSchema = z
+  .object({
+    outcome: z.enum(EXECUTION_OFFER_END_OUTCOMES),
+    /**
+     * ADR-0364 S3: a `robot_browser` placement's per-run Smokescreen log (its egress evidence, §7), captured by the
+     * executor before it removed the proxy. Refused by the gateway on every other kind.
+     */
+    egressLog: z.string().max(ROBOT_EGRESS_LOG_MAX_BYTES).optional(),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // Answers
