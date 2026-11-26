@@ -50,7 +50,7 @@ export const shortId = (id: string) => id.slice(0, 8) + "…";
  * reader can scan: separators become spaces, "signoff" becomes "sign-off", first letter up.
  * Display only — never parse the result back. */
 const ACRONYMS: Record<string, string> = {
-  ai: "AI", api: "API", aws: "AWS", byoc: "BYOC", cli: "CLI", dlp: "DLP", eu: "EU", gcp: "GCP", github: "GitHub", hipaa: "HIPAA",
+  ai: "AI", api: "API", aws: "AWS", byoc: "BYOC", ci: "CI", cli: "CLI", dlp: "DLP", eu: "EU", gcp: "GCP", github: "GitHub", hipaa: "HIPAA",
   id: "ID", ide: "IDE", iso: "ISO", llm: "LLM", mcp: "MCP", mrm: "MRM", nist: "NIST", openai: "OpenAI", pci: "PCI",
   phi: "PHI", pii: "PII", saas: "SaaS", sdk: "SDK", sla: "SLA", soc: "SOC", sso: "SSO", url: "URL", usd: "USD",
 };

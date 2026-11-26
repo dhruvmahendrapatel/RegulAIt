@@ -36,15 +36,29 @@ import { Badge, Button, Card, EmptyState, Field, Input, Table, Textarea } from "
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 
-type Parent = { objectType: "run"; objectId: string } | { objectType: "workflow_instance"; objectId: string };
+export type PmParent = { objectType: "run"; objectId: string } | { objectType: "workflow_instance"; objectId: string };
+type Parent = PmParent;
 
 /** the query the links endpoint wants for this parent (exactly one of the two) */
 const linkQuery = (p: Parent) =>
-  p.objectType === "run" ? `runId=${p.objectId}` : `instanceId=${p.objectId}`;
+  p.objectType === "run" ? `runId=${encodeURIComponent(p.objectId)}` : `instanceId=${encodeURIComponent(p.objectId)}`;
 
-interface LiveLink extends PmLink {
+export interface LiveLink extends PmLink {
   live?: { state?: string; fields?: Record<string, unknown>; comments?: unknown[] } | null;
   liveError?: string;
+}
+
+/** The one read of a parent's PM links. PmLinksCard and the governed-change chain share it, so the page
+ * makes one request, and a change to the key or URL reaches both. */
+export function usePmLinks(parent: PmParent, live = false) {
+  return useQuery({
+    queryKey: ["pm-links", parent.objectType, parent.objectId, live],
+    queryFn: () =>
+      api.get<{ links: LiveLink[] }>(`/v1/pm/links?${linkQuery(parent)}${live ? "&live=true" : ""}`),
+    // a run with no PM connection configured is the normal case, not an error
+    // — an empty list renders as an honest empty state
+    retry: false,
+  });
 }
 
 export function PmLinksCard(props: { parent: Parent }) {
@@ -53,14 +67,7 @@ export function PmLinksCard(props: { parent: Parent }) {
   const { toast } = useToast();
   const [live, setLive] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const q = useQuery({
-    queryKey: ["pm-links", parent.objectType, parent.objectId, live],
-    queryFn: () =>
-      api.get<{ links: LiveLink[] }>(`/v1/pm/links?${linkQuery(parent)}${live ? "&live=true" : ""}`),
-    // a run with no PM connection configured is the normal case, not an error
-    // — an empty list renders as an honest empty state
-    retry: false,
-  });
+  const q = usePmLinks(parent, live);
   const links = q.data?.links ?? [];
   const anyDrift = links.some((l) => l.drift);
   const anyOrphan = links.some((l) => l.orphanedAt);

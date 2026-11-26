@@ -1,0 +1,12 @@
+/* The governed-change chain (ChangeTimeline.tsx). The boxes are the Pipeline rail's (workflows.module.css); this
+   file only makes the rail a list and marks a step the template lacks. Tokens only (ADR-0196). */
+.chain {
+  composes: stageRail from "./workflows.module.css";
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.absent {
+  composes: stage from "./workflows.module.css";
+  border-style: dashed;
+}
