@@ -54,7 +54,8 @@ describe("the pack", () => {
 
   it("is pinned: a published version is never edited (ADR-0058)", () => {
     expect(Object.fromEntries(ENDPOINT_BENCHMARK_PACKS.map((p) => [`${p.framework}@${p.version}`, digest(p)]))).toEqual({
-      "ai-coding-endpoint-benchmark@1": "e49c36f0fd79b53039d1fe095926046c813d7265b64e424213a87e80733f7387",
+      // re-pinned before first release (R3 review on #961 changed the evidence text); @1 has never reached main
+      "ai-coding-endpoint-benchmark@1": "c982bb51522c0d9eea365861bf1fb193a2adaa29d6d01d6f15cc4433c30926ed",
     });
   });
 });

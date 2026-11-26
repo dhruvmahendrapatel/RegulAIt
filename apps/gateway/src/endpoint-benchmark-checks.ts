@@ -5,7 +5,15 @@
  * definition pins (ADR-0246) already keep. A check answers 1 (pass) or 0 (fail). It fails when no unrevoked device is
  * enrolled, so an empty fleet never reads as hardened. "Recent" is the last 30 days by the database clock, and a
  * disabled MCP server entry is out of scope for the MCP checks. Nothing here writes.
+ *
+ * THE STATE WHEN THE REPORT IS GENERATED. The ledgers keep each device's and server's latest state, not its history,
+ * so every window is measured back from now, not from the report's period end; the pack's evidence text says so.
  */
+
+/** the registry admission states that count as admitted for 2.4: a scan verdict of clean, an audited admin clearance,
+ * or a server that predates the scanner. `held` is refused by the gateway, and `unscanned` has no verdict yet, so
+ * neither is evidence of admission (ADR-0180: fail closed) */
+export const ENDPOINT_BENCHMARK_ADMITTED_STATES = ["clean", "cleared", "grandfathered"] as const;
 import {
   and,
   count,
@@ -18,6 +26,7 @@ import {
   eq,
   isNull,
   mcpDefinitionPins,
+  mcpServers,
   sql,
   type Db,
 } from "@regulait/db";
@@ -76,14 +85,21 @@ export async function runEndpointBenchmarkCheck(db: Db, check: EndpointBenchmark
     case "mcp_no_risky_servers":
       return none(await recentMcpServers(db, sql`cardinality(${endpointMcpServers.risks}) > 0`));
     case "mcp_servers_registered":
-      // an entry with no usable identity cannot be linked, so it counts as unregistered
+      // an entry with no usable identity cannot be linked, so it counts as unregistered; so does one linked only to a
+      // registry server that is disabled or not admitted (held, or not yet scanned)
       return none(
         await recentMcpServers(
           db,
           sql`(${endpointMcpServers.identityKind} = 'unknown' OR NOT EXISTS (
             SELECT 1 FROM ${endpointMcpServerLinks}
+            INNER JOIN ${mcpServers} ON ${mcpServers.id} = ${endpointMcpServerLinks.mcpServerId}
             WHERE ${endpointMcpServerLinks.identityKind} = ${endpointMcpServers.identityKind}
-              AND ${endpointMcpServerLinks.identity} = ${endpointMcpServers.identity}))`,
+              AND ${endpointMcpServerLinks.identity} = ${endpointMcpServers.identity}
+              AND ${mcpServers.disabledAt} IS NULL
+              AND ${mcpServers.admissionState} IN (${sql.join(
+                ENDPOINT_BENCHMARK_ADMITTED_STATES.map((s) => sql`${s}`),
+                sql`, `,
+              )})))`,
         ),
       );
     case "addons_no_secrets": {
@@ -96,12 +112,15 @@ export async function runEndpointBenchmarkCheck(db: Db, check: EndpointBenchmark
       return none(r?.n ?? 0);
     }
     case "mcp_definitions_unchanged": {
+      // only pins of servers in use: a disabled server's stale pin is not a definition anything runs
       const [r] = await db
         .select({
           pinned: count(),
           drifted: sql<number>`count(*) FILTER (WHERE ${mcpDefinitionPins.approvedDigest} IS NULL OR (${mcpDefinitionPins.observedDigest} IS NOT NULL AND ${mcpDefinitionPins.observedDigest} <> ${mcpDefinitionPins.approvedDigest}))`.mapWith(Number),
         })
-        .from(mcpDefinitionPins);
+        .from(mcpDefinitionPins)
+        .innerJoin(mcpServers, eq(mcpServers.id, mcpDefinitionPins.serverId))
+        .where(isNull(mcpServers.disabledAt));
       return (r?.pinned ?? 0) > 0 && (r?.drifted ?? 0) === 0 ? 1 : 0;
     }
     default: {

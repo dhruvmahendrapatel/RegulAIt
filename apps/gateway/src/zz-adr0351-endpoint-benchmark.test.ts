@@ -172,6 +172,19 @@ describe("with one enrolled device", () => {
     serverId = srv!.id;
     await db.insert(endpointMcpServerLinks).values({ identityKind: "package", identity: "@example/mcp-files", mcpServerId: serverId });
     expect(await run("mcp_servers_registered")).toBe(1);
+    // R3 [1]: a link counts only while the linked server is admitted and enabled
+    for (const state of ["held", "unscanned"] as const) {
+      await db.update(mcpServers).set({ admissionState: state }).where(eq(mcpServers.id, serverId));
+      expect(await run("mcp_servers_registered"), state).toBe(0);
+    }
+    for (const state of ["clean", "cleared", "grandfathered"] as const) {
+      await db.update(mcpServers).set({ admissionState: state }).where(eq(mcpServers.id, serverId));
+      expect(await run("mcp_servers_registered"), state).toBe(1);
+    }
+    await db.update(mcpServers).set({ disabledAt: new Date() }).where(eq(mcpServers.id, serverId));
+    expect(await run("mcp_servers_registered")).toBe(0);
+    await db.update(mcpServers).set({ disabledAt: null }).where(eq(mcpServers.id, serverId));
+    expect(await run("mcp_servers_registered")).toBe(1);
 
     const flag = async (set: Partial<typeof endpointMcpServers.$inferInsert>, check: (typeof ENDPOINT_BENCHMARK_CHECKS)[number]) => {
       await db.update(endpointMcpServers).set(set).where(eq(endpointMcpServers.id, mcpEntryId));
@@ -210,6 +223,17 @@ describe("with one enrolled device", () => {
       .returning({ id: mcpDefinitionPins.id });
     expect(await run("mcp_definitions_unchanged")).toBe(1);
     await db.update(mcpDefinitionPins).set({ observedDigest: "b".repeat(64) }).where(eq(mcpDefinitionPins.id, pin!.id));
+    expect(await run("mcp_definitions_unchanged")).toBe(0);
+    // R3 [3]: a disabled server's drifted pin is out of scope; the enabled server's matching pin still counts
+    const [live] = await db.insert(mcpServers).values({ name: `e32-live-${Date.now()}`, url: "https://mcp.example.com/live" }).returning({ id: mcpServers.id });
+    await db
+      .insert(mcpDefinitionPins)
+      .values({ serverId: live!.id, kind: "tool", name: "read", approvedDigest: "c".repeat(64), approvedDefinition: def, observedDigest: "c".repeat(64), observedDefinition: def });
+    expect(await run("mcp_definitions_unchanged")).toBe(0);
+    await db.update(mcpServers).set({ disabledAt: new Date() }).where(eq(mcpServers.id, serverId));
+    expect(await run("mcp_definitions_unchanged")).toBe(1);
+    // with only disabled servers pinned there is nothing in use to show, so it fails closed
+    await db.update(mcpServers).set({ disabledAt: new Date() }).where(eq(mcpServers.id, live!.id));
     expect(await run("mcp_definitions_unchanged")).toBe(0);
   });
 });

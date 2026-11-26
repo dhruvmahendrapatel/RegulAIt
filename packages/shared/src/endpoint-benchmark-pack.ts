@@ -13,7 +13,8 @@
  * definition pins. It counts 1 only when the check passes over at least one enrolled device, so an empty fleet never
  * passes. The gateway ones use the existing collectors. What the platform cannot check is attestation-required and
  * the owner note says what to attest. A passed check is evidence the condition held when evaluated, not an audit
- * opinion.
+ * opinion. The endpoint ledgers keep the latest state, not history, so an endpoint check reports the fleet as it stands
+ * when the report is generated, not as it stood at the period's end, and its evidence text says so.
  *
  * Imports from `compliance-packs.ts` are TYPE-ONLY: that file imports this one to append the pack.
  */
@@ -34,51 +35,51 @@ export const ENDPOINT_BENCHMARK_CONTROLS: CreateCompliancePackInput["controls"] 
   ev(ref("1.1", "endpoints-enrolled-and-reporting"), title("1.1", "L1", "Every coding-agent endpoint is enrolled and reported in the last 7 days"), {
     coverage: "evidenced",
     ...check("devices_reporting_7d"),
-    evidence: "1 when every unrevoked enrolled device reported in the last 7 days, 0 otherwise",
+    evidence: "1 when every unrevoked enrolled device reported in the last 7 days, 0 otherwise, as the fleet stands when the report is generated",
     note: "Devices that were never enrolled are outside the check: compare the enrolled count with your device inventory.",
   }),
   ev(ref("1.2", "agent-keys-in-hardware"), title("1.2", "L2", "The endpoint agent's signing key is held in hardware"), {
     coverage: "evidenced",
     ...check("agent_keys_hardware"),
-    evidence: "1 when every agent identity on an unrevoked device uses a TPM or Secure Enclave key, 0 otherwise",
+    evidence: "1 when every agent identity on an unrevoked device uses a TPM or Secure Enclave key, 0 otherwise, as the fleet stands when the report is generated",
     note: "A software key can be copied off the device. Machines with no TPM or Secure Enclave fail this check by design.",
   }),
   // --- 2. MCP server configuration ------------------------------------------------------------------------------------
   ev(ref("2.1", "no-auto-approved-tools"), title("2.1", "L1", "No MCP server is configured to run tools without asking"), {
     coverage: "evidenced",
     ...check("mcp_no_auto_approved_tools"),
-    evidence: "1 when no enabled MCP server seen in the last 30 days auto-approves any tool, 0 otherwise",
+    evidence: "1 when no enabled MCP server seen in the last 30 days auto-approves any tool, 0 otherwise, as the fleet stands when the report is generated",
     note: "Auto-approval lets an agent call a tool with no person in the loop. Remove the auto-approve entries from the agent's configuration.",
   }),
   ev(ref("2.2", "no-inline-credentials"), title("2.2", "L1", "No credential is written into an MCP server configuration"), {
     coverage: "evidenced",
     ...check("mcp_no_inline_secrets"),
-    evidence: "1 when no enabled MCP server configuration seen in the last 30 days carries a credential, 0 otherwise",
+    evidence: "1 when no enabled MCP server configuration seen in the last 30 days carries a credential, 0 otherwise, as the fleet stands when the report is generated",
     note: "The agent reports the credential's type, never its value. Move credentials to the OS keychain or a governed connector.",
   }),
   ev(ref("2.3", "no-high-risk-launchers"), title("2.3", "L1", "No MCP server is launched in a high-risk way"), {
     coverage: "evidenced",
     ...check("mcp_no_risky_servers"),
-    evidence: "1 when no enabled MCP server seen in the last 30 days has a flagged risk (shell launcher, privileged container, host root mount and the like), 0 otherwise",
+    evidence: "1 when no enabled MCP server seen in the last 30 days has a flagged risk (shell launcher, privileged container, host root mount and the like), 0 otherwise, as the fleet stands when the report is generated",
     note: "Each flag comes from the endpoint agent's static analysis of the configuration, not from watching the process run.",
   }),
   ev(ref("2.4", "mcp-servers-admitted"), title("2.4", "L2", "Every MCP server in use is admitted to the governed registry"), {
     coverage: "evidenced",
     ...check("mcp_servers_registered"),
-    evidence: "1 when every enabled MCP server seen in the last 30 days is linked to an admitted registry server, 0 otherwise",
+    evidence: "1 when every enabled MCP server seen in the last 30 days is linked to an enabled registry server whose admission is clean, cleared or grandfathered (not held or unscanned), 0 otherwise, as the fleet stands when the report is generated",
     note: "An unlinked server is shadow MCP: its calls do not pass the gateway's governance. Link or remove it.",
   }),
   ev(ref("2.5", "mcp-definitions-unchanged"), title("2.5", "L1", "MCP tool definitions match the version an admin approved"), {
     coverage: "enforced",
     ...check("mcp_definitions_unchanged"),
-    evidence: "1 when at least one MCP definition is pinned and none differs from its approved digest, 0 otherwise",
+    evidence: "1 when at least one MCP definition is pinned on an enabled server and none of those differs from its approved digest, 0 otherwise, as the fleet stands when the report is generated",
     note: "A changed definition is blocked until an admin re-approves it against the diff (ADR-0246).",
   }),
   // --- 3. IDE and agent add-ons -----------------------------------------------------------------------------------
   ev(ref("3.1", "addons-no-credentials"), title("3.1", "L1", "No IDE or agent add-on carries a credential"), {
     coverage: "evidenced",
     ...check("addons_no_secrets"),
-    evidence: "1 when no add-on sighting in the last 30 days carries a credential, 0 otherwise",
+    evidence: "1 when no add-on sighting in the last 30 days carries a credential, 0 otherwise, as the fleet stands when the report is generated",
     note: "The type of credential is recorded, never the value. Rotate any credential an add-on held.",
   }),
   // --- 4. Governed agent traffic ----------------------------------------------------------------------------------
