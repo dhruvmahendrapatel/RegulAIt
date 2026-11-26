@@ -122,7 +122,7 @@ async function mockApi(page: Page, opts: Opts = {}) {
 
 async function openServer(page: Page, name = SERVER.name) {
   await page.goto("/ui/admin/mcp-servers");
-  await page.getByRole("link", { name: `Show tools on ${name}` }).click();
+  await page.getByRole("button", { name: `Show tools on ${name}` }).click();
 }
 
 const form = (page: Page, name = SERVER.name) => page.getByRole("form", { name: `Token exchange for ${name}` });
@@ -258,8 +258,8 @@ test("a failed read is an error with Retry, and a stdio server has no card", asy
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("Not configured (default)")).toBeVisible();
 
-  await page.getByRole("link", { name: `Show tools on ${SERVER.name}` }).click();
-  await page.getByRole("link", { name: `Show tools on ${STDIO.name}` }).click();
+  await page.getByRole("button", { name: `Show tools on ${SERVER.name}` }).click();
+  await page.getByRole("button", { name: `Show tools on ${STDIO.name}` }).click();
   await expect(page.getByText("Token exchange", { exact: true })).toHaveCount(0);
 });
 
