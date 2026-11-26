@@ -2,7 +2,6 @@
 export { default as AbacPoliciesPage } from "../views/admin/governance/AbacPoliciesPage";
 export { default as ContentTrustPage } from "../views/admin/governance/ContentTrustPage";
 export { default as GuardrailsPage } from "../views/admin/governance/GuardrailsPage";
-export { default as SensitivityLabelsPage } from "../views/admin/governance/SensitivityLabelsPage";
 export { default as ModelPolicyPage } from "../views/admin/governance/ModelPolicyPage";
 export { default as PromptVersionsPage } from "../views/admin/governance/PromptVersionsPage";
 export { default as RulesEnginePage } from "../views/admin/governance/RulesEnginePage";
