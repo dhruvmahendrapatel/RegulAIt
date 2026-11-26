@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
-import { CEILING_EXCEPTIONS, ceilingExceptionProblems, growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
+import { CEILING_EXCEPTIONS, CEILING_REMOVALS, ceilingExceptionProblems, ceilingRemovalProblems, FIRST_LOAD_NAME, FIRST_PAINT_NAME, growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
 import { recordMode } from "../apps/web/e2e/enterprise/record-mode.ts";
 import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
@@ -214,6 +214,55 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
   it("fails a removed entry; a new entry is allowed", () => {
     expect(sizeLimitLoosened(base, base.slice(1))).toEqual(['"entry JS": entry removed']);
     expect(sizeLimitLoosened(base, [...base, { name: "new", path: "dist/x.js", limit: "1 kB" }])).toEqual([]);
+  });
+
+  describe("first-load JS gate (ADR-0344 addendum, owner decision 2026-11-21)", () => {
+    const decision = "owner decision 2026-11-21: the JS bundle gate counts first-load JS only";
+    const allJs = { name: "all JS", path: "dist/assets/*.js", gzip: true, limit: "1170 kB" };
+    const removal = [{ name: "all JS", date: "2026-11-21", decision }];
+    const adr = `- ${decision}, so \`all JS\` leaves the file.`;
+    const fl = (path, limit = "139.5 kB") => ({ name: FIRST_LOAD_NAME, path, gzip: true, limit });
+    const chunkEntry = { name: "chunk: x", path: "dist/assets/x-????????.js", gzip: true, limit: "3 kB" };
+
+    it("allows removing an entry only through a dated removal row whose decision a line of ADR-0344 names", () => {
+      expect(sizeLimitLoosened([...base, allJs], base, [], "", removal, adr)).toEqual([]);
+      expect(sizeLimitLoosened([...base, allJs], base)).toEqual(['"all JS": entry removed']);
+      expect(sizeLimitLoosened([...base, allJs], base, [], "", removal, "")).toEqual(['"all JS": entry removed']);
+      // a row for one entry removes no other
+      expect(sizeLimitLoosened(base, base.slice(1), [], "", removal, adr)).toEqual(['"entry JS": entry removed']);
+      expect(ceilingRemovalProblems([{ ...removal[0], date: "" }], adr)[0]).toMatch(/no dated owner decision/);
+      expect(ceilingRemovalProblems(removal, `${decision} (no entry named)`)[0]).toMatch(/no line of/);
+    });
+
+    it("allows removing a chunk ceiling, which the coverage check refuses while the chunk is built", () => {
+      expect(sizeLimitLoosened([...base, chunkEntry], base)).toEqual([]);
+    });
+
+    it("lets first-load JS follow the build's path list, never its limit, gzip or path shape", () => {
+      const before = [...base, fl(["dist/assets/index-????????.js"])];
+      const grown = [...base, fl(["dist/assets/index-????????.js", "dist/assets/react-????????.js"])];
+      expect(sizeLimitLoosened(before, grown)).toEqual([]);
+      expect(sizeLimitLoosened(before, [...base, fl(["dist/assets/index-????????.js"], "140 kB")])).toEqual(['"first-load JS": limit raised 139.5 kB -> 140 kB']);
+      expect(sizeLimitLoosened(before, [...base, { ...fl(["dist/assets/index-????????.js"]), gzip: false }])).toEqual(['"first-load JS": path, gzip or another option changed']);
+      // a glob, or a list without the entry chunk, is not a first-load list
+      expect(sizeLimitLoosened(before, [...base, fl(["dist/assets/*.js"])])).toEqual(['"first-load JS": path, gzip or another option changed']);
+      expect(sizeLimitLoosened(before, [...base, fl(["dist/assets/react-????????.js"])])).toEqual(['"first-load JS": path, gzip or another option changed']);
+      expect(sizeLimitLoosened(before, base)).toEqual(['"first-load JS": entry removed']);
+    });
+
+    it("treats first-paint JS the same way: its path list follows the build, its limit stays guarded", () => {
+      const fp = (path, limit = "182 kB") => ({ name: FIRST_PAINT_NAME, path, gzip: true, limit });
+      const before = [...base, fp(["dist/assets/index-????????.js"])];
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/index-????????.js", "dist/assets/HomePage-????????.js"])])).toEqual([]);
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/index-????????.js"], "190 kB")])).toEqual(['"first-paint JS": limit raised 182 kB -> 190 kB']);
+      expect(sizeLimitLoosened(before, [...base, fp(["dist/assets/*.js"])])).toEqual(['"first-paint JS": path, gzip or another option changed']);
+      expect(sizeLimitLoosened(before, base)).toEqual(['"first-paint JS": entry removed']);
+    });
+
+    it("records every real removal in ADR-0344", () => {
+      const real = readFileSync(new URL("../internal/decisions/0344-per-route-bundle-budgets.md", import.meta.url), "utf8");
+      expect(ceilingRemovalProblems(CEILING_REMOVALS, real)).toEqual([]);
+    });
   });
 
   it("fails a changed path or gzip; a path written as a one-item array is the same path", () => {

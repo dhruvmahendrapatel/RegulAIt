@@ -145,6 +145,17 @@ export interface ScanObservation {
   os?: "macos" | "windows" | "linux";
   /** Optional: the package ecosystem (npm, pypi…); a catalogue row scoped to an ecosystem matches only it */
   ecosystem?: string;
+  /**
+   * ADR-0083 §2: the compiled shadow-AI catalogue version the scanner matched against. REQUIRED on a `repo_scan`
+   * observation (one of `REPO_SCAN_CATALOG_VERSIONS`) and refused on any other evidence kind.
+   */
+  catalogVersion?: number;
+  /**
+   * ADR-0336 slice 4, evidence `agent_config` only: the id of the vendored secret rule (`VENDORED_SECRET_RULES`) that
+   * matched a field of a staged agent's configuration; `location.path` names the field and `subject` is the staged
+   * record's external id. It carries no value, excerpt, offset or hash, and nothing else may ride with it.
+   */
+  secretRule?: string;
 }
 
 /**

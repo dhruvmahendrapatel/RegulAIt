@@ -18,6 +18,598 @@ this file.
 
 <!-- fold:pending newest-first -->
 
+- **AI SaaS monitoring follow-ups (ADR-0361, lane E42).** (a) The AI SaaS monitoring screen on #453 (ten API-only
+  routes). (b) Run the ADR-0220 trained detectors on monitored text, with their cost attribution. (c) A federated
+  (client-assertion) Entra credential for the Copilot connector, so no client secret is stored. (d) Gemini for
+  Workspace, which needs its own review of the Workspace audit and Vault APIs. Slices 2 (ChatGPT Enterprise, Claude
+  Enterprise) and 3 (remediation) are in flight on the lane.
+
+- **Rogue-agent containment follow-ups (ADR-0366, lane E52):** lane E40's behaviour-baseline findings (open PR #966) as a signal source once it merges; containing a virtual key or project for `unregistered_ai_traffic`; re-deciding a refreshed episode whose severity escalated; the containments screen and policy settings (#453).
+
+**E12 / ADR-0328 — repetitive ask → smaller model, remaining slices.**
+- (2) A settings singleton, off by default, with step-up and audit, plus a background scan of captured `trace_spans`
+  for one agent through `findRepetitiveAsks`. It stores clusters as span ids, fingerprints and counts only, never text.
+  Each cluster gets a suggested cheaper entitled agent from `routeModel` and a projected monthly saving. A read-only
+  admin route, with a route census entry and a KNOWN_UI_GAPS entry for UI-D.
+- (3) The eval gate: a sample of the cluster becomes an eval dataset, and `runEvalSuite` must pass for the candidate.
+  Then a shadow period.
+- (4) The switch: a step-up request decided by a named administrator in the approvals queue. Serving narrows
+  `routeModel`'s candidates to the approved agent for asks in the cluster, recorded as a `model_routing` cost event.
+  One-action revert.
+
+**E10 — BYOC rehearsal parked (ADR-0325, 2026-11-21, lane E10).** Owner question open: rehearsal role deferred
+2026-11-18 (D-2026-11-18-09). The owner has not applied the one-time rehearsal role
+(`docs/ops/BYOC_REHEARSAL_ROLE.md`), so items (3) and (4) of the 2026-11-15 E10 pending fragment (the first
+rehearsal in regulait-dev and the `aws:FederatedProvider` check) are parked. No AWS step and no `terraform apply` has
+been run. When the owner applies the role and sets the `regulait-dev` account alias, the lane runs `byoc-rehearsal`
+and reports timing and snags in a PR. Item (2b), operator backups to S3, needs no AWS access and is still open.
+
+- **MCP 2026-07-28, after slice 1 (ADR-0311 decision 4).** Slice 1 serves `tools/*` on the 2026-07-28 path. Still to
+  do, in slices:
+  - resources, prompts, completions and logging on the new path (the 2025-era path keeps the ADR-0185 G3 surface);
+  - subscriptions (`subscriptions/listen` is refused and audited today);
+  - `InputRequiredResult`;
+  - `Mcp-Param-*` header validation (the SDK checks it only for its high-level `McpServer`);
+  - the upstream client side: speak 2026-07-28 to upstreams that offer it, fall back to 2025-11-25 (d);
+  - the governance of MCP Apps `ui://` resources, default-deny (e);
+  - dropping 2024-11-05 and 2024-10-07 once telemetry shows no clients use them (f).
+
+**Agentic-governance checklist gaps (owner request, 2026-11-20).** The owner compared the product against a 20-term
+agentic AI governance checklist. Against the code on main at `05aa62930`, 16 terms are met and 4 are partial, with no
+term missing. The new items are below; items already in flight are listed for completeness.
+- **New: memory poisoning (OWASP ASI06).** The ADR-0193 content-trust floor gates only write tool calls. The
+  shared-context and memory write route is not gated yet (`packages/shared/src/agent-risk-proofs.ts`, the
+  `memory.untrusted_context_write` proof). Put memory and shared-context writes behind the floor plus an injection
+  scan, then widen that proof to cover them. Secure by default (ADR-0180): blocking is on unless an admin relaxes it.
+- **New: oversight levels enforced at runtime.** The autonomy classes assist, supervised, delegated and autonomous map
+  onto in-the-loop, on-the-loop and out-of-the-loop, and each agent has its class (`/v1/builder/agents/:id/autonomy`).
+  An unmet floor, though, becomes only a use-case condition or a monitor finding (`apps/gateway/src/autonomy.ts`). Make
+  an unmet floor block dispatch for `delegated` and `autonomous` agents until the floors for their risk tier are met.
+  An admin may relax this, and the change is audited.
+- **In flight: goal hijack (OWASP ASI01).** A runtime check that each tool call fits the agent's declared purpose,
+  steering or blocking it when it diverges. Graduated steering responses are open PR #960 (its ADR is in that PR); the
+  goal-alignment check itself is not yet specified.
+- **In flight: rogue agent (OWASP ASI10).** Per-install behaviour baselines with explainable findings in shadow mode
+  are open PR #966 (its ADR is in that PR).
+- **New: rogue-agent containment.** An automatic safe-mode trigger when an agent acts out of role. It is not yet
+  specified, and #966 does not include it.
+- **In flight: scoped credentials and sandboxing.** Credential revocation and the status list are open PR #1117
+  (ADR-0315 slice 2). The sandboxed browser robot runner is open PR #1082 (ADR-0364 S3).
+
+- **E49 pipeline runtime follow-ups (ADR-0232 As built, E49 slice 1):** triggers (schedule, webhook, PM event; §12 slice 6); packages, deployments and run-as owners (slice 2); calls, control-flow and data steps (slices 3, 4, 7); `pipeline_run_id`/`pipeline_step_id` on `usage_events`; the step-row lease queue and retries (slice 5); the pipeline runs and run detail screens (#453).
+
+**P8b — Remove the hand-written resource approval-rule matcher (ADR-0239 slice 2b follow-up, 2026-11-20, lane E48).**
+The gateway has matched model, connector and A2A approval rules on Cedar since slice 2b. The kernel keeps
+`matchingResourceApprovalRules` as `composeResourceDecision`'s default for one release. In the next release, together
+with P8a: refuse when no evaluator is given, and keep a transcription as the differential oracle. Resource rate
+limits are still hand-written, and they move into the same request if a third rule type joins.
+
+**E47 follow-ups — ADR-0224 records of processing (2026-11-20).** A2A calls and training-corpus ingest
+(`regulait-llm.ts`) are not yet limited by records of processing; per-call declared purpose, per-subject objection
+enforcement and an erasure step-up kind remain open. Owner question: should `privacy_ops_enabled` stay default-off
+(owner rule 2026-10-30) or move to on under ADR-0180?
+
+- **P2 context graph follow-ups (ADR-0365, lane E46):** a scheduled sync (incremental hourly, full daily); a git source (repositories and pull requests, with per-repository scope rows); identity and connector sources; edges from work items to RegulAIt runs (`pm_links`); a live title read-through via the PM adapters; the admin bindings screen and the member graph view (#453); provenance and retention by the compliance cascade.
+
+**E19 slice 1b — vendor agent control credentials and the first vendor member (ADR-0338, 2026-11-20, lane E19).**
+Slice 1 ships the vendor-neutral framework only: the `vendor_agent_actions` lifecycle, the request, approval, execute,
+settle and cancel routes, the kill-switch guard and the `vendor_agent_control.apply` dial exemption. In production no
+registry offers a control and no control credential resolves, so every request answers `409 control_not_offered`.
+Slice 1b, after lane E17's adapter code lands: the `discovery_credentials.purpose` column (`discovery_read` |
+`platform_write`, fixed at insert) with the live-unique index on `(source_id, purpose)`, the delegated mode behind its
+admin opt-in and mandatory expiry (owner decision 1), the control-credential loader wired as `credentialFor`, and the
+Copilot Studio `control` member (`VendorAgentControl` in apps/gateway/src/vendor-agent-control-contract.ts). Slice 2:
+Agentforce, OpenAI and n8n members. The admin screen is requested on #453 (KNOWN_UI_GAPS
+`adr-0338-e19-vendor-agent-control.json`).
+
+- **E45 Robots S2 follow-ups (ADR-0364):** S3 adds the runner, the evidence table and the run columns S2 left out (`mcp_call_audit_id`, `placement_id`, `proposed_version_id`), and writes the passing test runs the submit gate needs. A review that expires leaves its version `in_review` until the robot is retired; S3 should move it back on expiry. Still open with the owner: the free-form browsing budget requirement and the maximum run time.
+
+- **Agent-risk proofs, slice 3b (ADR-0345, lane E26).** The jurisdiction admin APIs, carrying the #1019 notes:
+  narrowing is a relaxation, the feed key is validated, and #1036 and #1037 apply. The register view is for the
+  design builder on #453.
+
+- **Agent-risk proofs, slice 2c part 2 and slice 3 (ADR-0345, lane E26).**
+  - 2c part 2: the `approval_replay`, `approval_expired` and `loop_turn_cap` probes (full dispatch path, sandbox
+    fixtures).
+  - Slice 3: the read and settings APIs.
+  - Owner question: should the ADR-0193 trust floor also gate the shared-context write route?
+
+- **Agent-risk proofs, slice 3 (ADR-0345, lane E26).** The read and settings APIs, with the `settings_relax` step-up,
+  the route census and a KNOWN_UI_GAPS entry on #453.
+
+- **Capability-combination follow-ups (ADR-0339 addendum, lane E20).**
+  - Owner questions:
+    - Should the ADR-0193 write floor count as a mitigation once it also gates calls made without a run context?
+    - Should per-call approval rules count as Ask-first for registry agents? Today neither counts (strict default).
+    - May a ranked way to break a combination be applied from the agent risk screen, and by whom? It is shown
+      read-only until this is decided.
+
+- **MCP 2026-07-28 stateless protocol (ADR-0311 decision 4, proposed).** The work is a staged move to the
+  `@modelcontextprotocol/server` and `/client` v2 SDK (Apache-2.0). It serves both protocol generations on
+  `/mcp/:serverId`, adds `server/discover`, `resultType`, `ttlMs`/`cacheScope` and the renumbered errors, speaks
+  2026-07-28 to upstreams with a fallback to 2025-11-25, and decides the governance of MCP Apps `ui://` resources. It
+  needs an owner or master decision on scope and timing; nothing in the spec is removed before 2027-07-28.
+- **`outputSchema` on stdio stored manifests (ADR-0311).** A stdio server with a stored manifest has its `tools/list`
+  rebuilt with only `readOnlyHint`, so `outputSchema` and the other annotations are lost. Keep the whole tool
+  definition from the manifest.
+
+- **E45 Robots (ADR-0364), open owner questions with the secure default built:** (1) should free-form browser control also require a project with a budget? Default yes. (2) Maximum robot run wall-clock: default 5 minutes, admins may lower it without step-up; raising it is a stepped-up relaxation. Slices S2 to S4 follow when rule 15 lifts. S5 (the desktop engine and the workflow "Robot step") comes later. Review follow-ups recorded in the ADR for S2 and S3: the composite secret foreign keys, the evidence digests in the audit chain, and the trace canary test.
+
+- **Agent-risk proofs, slice 2b (ADR-0345, lane E26).** The gateway-probe harness for the eight probes, the ADR-0058
+  pack collector, the ADR-0214 posture input, and the `unverifiable` label for a result whose audit row is gone.
+  Owner question: should `ai_risks` gain a review-date column? Until then, register hygiene reads `updated_at` as the
+  last review.
+
+- **Agent-risk proofs, slice 2c and owner questions (ADR-0345, lane E26).**
+  - Slice 2c: the gateway-probe harness for the eight probes.
+  - Owner questions:
+    - Should OWASP pack versions name the `agent_risk_proofs` collector?
+    - Should the proofs carry weight in the posture estimate?
+
+- **Endpoint decision screens (ADR-0310 addendum, lane E1).** `GET /v1/endpoint-decisions/sessions` (permission-bypass
+  sessions) and `GET /v1/endpoint-decisions/tamper` (managed-file changes and hook status) are API-only. The screens
+  are requested on #453 (Governed Designer).
+- **Restore of a changed managed file (ADR-0310 addendum (c)).** Not built. Restoring needs admin approval through the
+  Approvals Queue, and an agent-side write of a root-owned file. It is a later step, with its own review.
+- **Hook registration in the managed bundle (ADR-0310 addendum, limit).** Bundles do not compile the ADR-0330 hook
+  registration, so an admin merges it by hand, and the tamper view's bundle match then reads `none`. Emitting the
+  registration in the Claude Code and Codex bundle files would make the bundle hash the tamper baseline. This is a
+  bundle-format change and needs a new version.
+- **Spool deletion by the device user (ADR-0310 addendum, limit).** The spool lives in the user's state directory, so
+  the user can delete unsent events. Counting gaps needs a per-device sequence that the gateway checks, or a
+  root-owned spool written by a privileged helper.
+- **Lane E31 emits through `decisionlog.Emitter` (ADR-0350 §7).** Command, file and package decisions use emitter
+  `command-rules` and the action kinds `command`, `file_read`, `file_write` and `package`. No second audit path.
+
+- **Move the four older engines onto engine-runner's shared helpers (ADR-0242 L4.4, #874 review).** garak, spikee,
+  modelscan and promptfoo each still carry their own job-directory exchange (`jobDirRunId`, staging to live, the cancel
+  poll, release, reconcile) in `src/exchange.ts`, and garak and spikee their own worker self-test in `src/selftest.ts`.
+  Replace them with `@regulait/engine-runner`'s `JobExchange` and worker self-test helpers (`workerSelfTestSchema`,
+  `observeWorkerSandbox`, `writeWorkerSelfTestFile`, `readWorkerSelfTest`, `workerSelfTestFresh`,
+  `workerIsolationFailures`), keeping each engine's done-file schema, job files and switches in its package. Note the
+  shared `release` also removes the run's results directory, which none of the four copies does today (decide per engine whether its worker or the runner owns that removal).
+
+- **E44 follow-up (ADR-0363): sensitivity labels on the other content paths.** MCP tool results (`decodeMcpBlobs`),
+  browser-extension uploads and endpoint hooks reuse `readEmbeddedLabels` and `decideLabels` unchanged; only the
+  model-dispatch path is gated today. Also a Google Workspace (Drive labels) `LabelProvider`, and the screen for the four
+  `/v1/sensitivity-labels` routes (#453).
+
+- **E44 follow-up (ADR-0363 slice 2): classifiers on the browser and endpoint rules, and redaction.** Customer
+  classifiers run at every gateway guardrail site (block, warn, log). Sharing them with the browser extension (E16) and
+  the endpoint hooks needs a signed distribution of the compiled set (regex, keyword and dictionary only: EDM digests
+  stay server side). A `redact` verb would reuse the ADR-0140 span-union redactor once the guardrail engine gains one.
+  The classifier editor and review screen are on #453.
+
+- **E44 follow-up (ADR-0363 slice 3): AI app risk dataset v2.** Fill the `unknown` values v1 could not verify on the
+  vendor's own page (retention for Vertex, Azure OpenAI, Amazon Q, Cursor, Windsurf, JetBrains; SSO for Google Cloud,
+  Azure, Windsurf, JetBrains; Anthropic's commercial no-training statement from its commercial terms; Copilot IDE
+  retention; certifications held in Microsoft's and AWS's trust-portal PDFs), add more catalogue providers, and ship
+  updates through Codex lane C2's signed feed once it exists (owner question on #973: build it in E44 if C2 slips?).
+
+**E43 — content inspection beyond text (owner, 2026-11-17; Forcepoint review gap 2).** In progress
+([ADR-0362](../decisions/0362-content-inspection-beyond-text.md)).
+- Merged: slice 1a, the sandbox-only extractor and its image (#967); 1b, the engine registration and the gateway's
+  sandboxed call (#989); 1b-ii, the per-project setting and the detector wiring (#998); and 2, local Tesseract OCR (#993).
+- Slice 3, latency and throughput measured with the cost note, is #994.
+- The image stays held unpublished.
+- Owner questions open:
+  1. the permissive non-ADR-0176 licences bundled in `libpdfium.so` (FreeType, ICU, libpng, libtiff, zlib, AGG, Boost,
+     IJG);
+  2. whether a guardrail at `block` should also force inspection on;
+  3. Debian Tesseract's LGPL OS libraries;
+  4. whether the org-default PII mode should force it on.
+
+**E40 — behaviour analytics (owner, 2026-11-17).** Slice 1 built ([ADR-0359](../decisions/0359-behaviour-baselines-and-rule-suggestions.md)):
+per-install baselines per user and agent, explainable shadow findings. Open: slice 2 rule suggestions (lane E15's pack
+format, deterministic templates, backtest with hits and false positives, proposed → backtested → approved → active →
+retired with step-up); a day-of-week baseline if findings show weekday seasonality matters; merging ADR-0049's
+hand-written median/MAD (`packages/shared/src/forecasting.ts`) onto `simple-statistics`; the findings, baseline and
+settings screens (#453).
+
+- **E39 adoption analytics follow-ups (ADR-0358).** (a) The screen for the six `/v1/adoption/*` routes (#453). (b) Once
+  ADR-0322's seat connectors (Copilot seats, Cursor members) land, their pulled lines feed `/v1/adoption/seats` with no
+  code change; confirm with a fixture. (c) `imported_cost_lines` and `cost_import_batches` are not under row-level
+  security yet (tracked by ADR-0322's follow-up).
+
+- **Enforce the effective policy at call time (ADR-0357 §4, lane E38 follow-up).** `effectivePolicyAt(db, level, id)`
+  (`apps/gateway/src/governance-policy.ts`) gives the effective org → business unit → project → use case policy, but no
+  call path reads it yet. Wire it into the governed decision core (ADR-0251), keyed by the call's attributed project or
+  use case:
+  - `allowedAgents`, `allowedConnectors` and `allowedMcpServers` deny outside the list;
+  - `deniedTools` denies;
+  - `maxCallsPerHour` is a rate limit;
+  - `maxBudgetUsd` caps a project budget write;
+  - `auditRetentionDays` and `minApprovers` are floors on retention and on sign-off;
+  - `requireHumanSignoff` and `requirePlanGate` are workflow-assignment checks;
+  - `maxDataSensitivity` and `piiMode` feed the data-scope and PII paths.
+
+  The decision core belongs to its own lane, so this lane did not change it. Also open: policy layers as a section of
+  the governance-config document.
+
+  When this lands, flip `POLICY_ENFORCEMENT` in the same file. Until then it tells every layer and effective-policy
+  response that stored rules are not applied at call time (review R2 B1 on #984). Two review notes from S4 on #984
+  belong to that slice:
+  - the layer tables are admin-only under FORCE RLS, so a non-admin call path needs a system reason or a definer
+    read, and must fail closed when the read returns nothing (an empty read is a looser policy);
+  - re-parenting outside this module (a use case's `project_id` changed through the use-case routes, or a unit deleted
+    directly) changes the effective policy without the move's loosening check; route it through `effectiveLoosening`.
+
+- **E35 slice 2: block_session and disable side effects (ADR-0354 §7).** Disable through `haltAgentInTx`
+  (narrowing only, applies under every dial, as #881's `kill_switch_narrowing_only`); block_session ends the
+  orchestration run of a delegated worker, and is recorded with `sessionEnded: false` where no session exists. Then
+  lift the route's `response_not_yet_enforced` refusal. Also render advise/correct on the model, connector and A2A
+  refusal bodies (`governedEvaluateResource`, ADR-0251).
+- **E35 slice 3: endpoint hook adapters (ADR-0354 §8), after lane E31 (on-device command rules) merges.** Map a signed policy's
+  graduated response onto the Go `Decision`; render guidance only into each agent's documented plain-text fields;
+  Claude Code `continue: false` for block_session.
+- **UI (design builder, #453): the ABAC policy editor** needs the six response modes and the guidance message and
+  alternative fields, with the validator's errors shown inline.
+
+- **ADR-0352 follow-ups (lane E33 slice 1).** (a) Admin screens: the Model credentials and Register an agent forms do
+  not yet offer `bedrock`, `vertex`, `mistral`, `cohere` or `qwen`, and a Bedrock/Vertex secret is a JSON document that
+  needs its own input (design builder, #453; the API is complete). (b) BYOC workload identity: an opt-in, audited org
+  setting to let Bedrock use the AWS default credential chain (instance role, IRSA) and Vertex use workload identity
+  instead of a stored key; ambient by nature, so off by default like the env fallback. (c) Verify `thinking` and
+  structured output per vendor against live endpoints, then add each to the ADR-0020 capability sets.
+
+**E31 — on-device command, file and package rules ([ADR-0350](../decisions/0350-endpoint-command-file-package-rules.md)).**
+Slice 1 (device engine, four adapters, matrix) built. Open: slice 2, the policy compiler from per-user entitlements,
+signed by the B4 device-policy signer (#867), with delivery of the device id beside the policy; slice 3, device
+groups and expiring exceptions (step-up approval, lifecycle table, audit). Owner questions open: the compiled default
+for unmatched commands (ask) and the maximum exception length (24 hours, raisable to seven days). Vendor follow-ups:
+Cursor pre-write paths, Copilot CLI `toolArgs` and file-tool fields, Codex ask and read hooks, once documented.
+
+- **Declared state machines, follow-ups (ADR-0348, lane E29).** Once the owning lanes merge: config-version canary
+  (#894), PM inbound state (#828), one exported workflow terminal set (E21), and a scheduler reaper for eval runs whose
+  process died mid-run (after the open PRs changing `scheduler-jobs.ts`). A CHECK-constraint migration batch
+  (expand-contract) for `approvals.status` and the infra status columns, which then declares the infra machines. Move
+  the already-guarded machines (STATE_MACHINES.md §2) onto declared tables as their files are next touched. UI: screens
+  move to the `lifecycle` field (STATE_MACHINES.md §6, #453).
+
+- **Agent memory quarantine and admin controls (ADR-0347 slice 2, lane E28).** Turn the slice-1 refusal into
+  quarantine with a finding; admin list, expire-now and purge (step-up, evidence hold); the expiry sweep beside the
+  ADR-0185 I3 sweeps; the false-instruction proof test, registered in lane E26's risk/control/test registry once it is
+  on main. UI tracked on #453.
+
+**E27 / ADR-0346 — fairness evaluation, remaining slice and follow-ups.** (3) evaluation and schedule APIs (a definition
+looser than the strict defaults behind a `settings_relax` step-up), breach approvals through the one Approvals Queue
+(time-boxed acceptance, the ADR-0348 machine), the promotion gate at sign-off, and the card fairness view with
+red-team `bias` results and which evidence kind a pack found; routes as known UI gaps on #453. Then: the first signed
+publish of the `fairlearn` image (CI). Answered by the owner 2026-11-21: `libgomp` is a narrow pinned exception
+(ADR-0346 decision 13), and the high-risk tiers force the promotion gate by default (decision 9 amended); slice 3's
+gate and settings route use the new `fairness_gate_tier_*` settings and `fairnessGateRequirement`.
+
+- **Agent risk proofs, slices 2 and 3 (ADR-0345, lane E26).** Slice 2: a scheduler job that runs each due proof
+  (ADR-0180 metric specs, the eight sandboxed gateway probes, the two ledger checks), writes the signed, chained result
+  (its hash also in the audit row's detail; unsigned and unverifiable results labelled as such) and
+  raises an alert plus an approvals item on failure; a pack collector and posture input from the latest results.
+  Slice 3: read and settings APIs, route census and a `KNOWN_UI_GAPS` entry on #453. Owner questions: a numeric
+  range control on tool arguments; whether a failed proof blocks promotion; the governance review window.
+- **Geography in tiering, follow-ups (ADR-0345 §9, lane E26).** Owner questions: should review routing (`tierKeyFor`)
+  read the effective tier (screened tier plus jurisdiction floor), and which floors should the seeded jurisdictions
+  carry? The admin APIs for jurisdictions, obligations and a use case's jurisdictions come with slice 3.
+
+| **E23 slice 2** | **Human-task priority and due dates (ADR-0342 §8).** Built: priority and due source on the approval assignment, one setter for admins and stage timers, relaxations behind a step-up, the declared SLA transition table. | Remaining: lane E21 reworks its stage-timer slice to call `scheduleStageApprovals`; the queue's priority and due-date controls (#453, closes one KNOWN_UI_GAPS entry); slice 3 (value view joined to #848). |
+
+- **Managed-settings drift screen (ADR-0310 slice 2, lane E1).** `GET /v1/managed-settings/drift` is API-only; the
+  drift list with its vendor and device filters is requested on #453 (Governed Designer).
+- **Per-server drift (ADR-0310 slice 2).** ADR-0259 reports a remote server's host, never its path, so drift is per
+  gateway host, not per `/mcp/<serverId>`. A device carrying a gateway server it is not entitled to is not drift (the
+  gateway still refuses its calls). Revisit if the endpoint agent ever reports a path shape-checked against `/mcp/<uuid>`.
+- **Catalogue rows for Copilot and Codex MCP configs (ADR-0310 slice 2, #902 review).** The shipped endpoint catalogue
+  has no `assistant_config` row for `Code/User/mcp.json`, `Code/User/settings.json`, `.vscode/mcp.json` or
+  `.codex/config.toml` (only the `.codex` directory), so the drift route reports those vendors as `not_collected` with
+  unknown drift. Adding the rows is a catalogue change (ADR-0195 decision 15: a new pinned seed version or admin seed
+  rows, each path checked against vendor documentation), with a test that every `MANAGED_VENDOR_CONFIG_PATHS` entry
+  is covered. An admin can add the rows today; the coverage turns `collected` at once.
+
+- **SoD rules cannot name a remote (A2A) agent yet** (lane L2, from the PR #810 review). The A2A grant mints call
+  `refuseSodMint` with the mint kinds `a2a` and `role_a2a`, but `selectorSchema.kind` in `apps/gateway/src/sod.ts` covers
+  only `agent`, `connector`, `mcp_tool` and `mcp_server`. So `mintFootprint` gives these mints no capability that a rule
+  can match, and no SoD rule can separate a remote agent from another capability. Adding an `a2a_agent` selector kind
+  needs four things: the selector schema and DB enum, `resolveSelectorObjects`, `holdersOfSelector` (direct A2A grants plus
+  role grants, less revocations) and the two `mintFootprint` cases. ADR-0219 amendment of 2026-11-14.
+
+- **Control-plane HA follow-ups (ADR-0343 §4 "As built", lane E24).** (1) The operator (`deploy/operator`) still caps
+  `spec.replicas` at 1. Relax it with the chart's checks: a ReadWriteMany install-secrets claim, `RollingUpdate`, a
+  PDB, zone spread and the `/ready` probe, with envtest coverage. (2) An opt-in CloudNativePG `Cluster` in the chart
+  (3 instances, `synchronous: {method: any, number: 1, dataDurability: required}`, zone anti-affinity, the Barman Cloud
+  plugin `ObjectStore` and a `ScheduledBackup`), with the NetworkPolicies its instances, operator and object store
+  need under the default-deny baseline. Prove both on a kind cluster in CI before they ship.
+
+- **Control-plane HA, slices 2 and 3 (ADR-0343, lane E24).** Slice 2: Postgres HA Terraform modules for AWS, Azure and
+  GCP (synchronous zone-redundant standby, PITR, CMK, TLS only), and the chart's CloudNativePG cluster with the
+  replica cap lifted once the install-secrets volume is shared and the artifact store is S3; a boot check refuses N > 1
+  without them. Slice 3: the Compose failover suite (kill a replica, then the primary; no committed decision or audit
+  row lost; the hash chain verifies). Owner questions: the hosted SLA figure, manual or automatic cross-region
+  failover, and synchronous replication's write latency as the default.
+- **Scheduler exemption for controls (ADR-0343 §3, lane E24).** The audit anchor, audit prune and backup-verify timers
+  run on one replica through `ClusterLeader` rather than as ADR-0064 scheduler jobs, because `REGULAIT_SCHEDULER=off`
+  must not stop them and their intervals live in the org settings. Decide whether the scheduler gains an "exempt from
+  the off switch" kind of job, with the interval read from its source setting. If it does, move the three timers onto
+  it for the run ledger and drop `ClusterLeader`.
+
+| **E23** | **Process analytics and human-task SLAs (owner, 2026-11-16, Camunda gap analysis rows 5 and 9).** Slice 1 built by [ADR-0342](../decisions/0342-process-analytics-and-human-task-slas.md): replayed read model, four scoped analytics reads, projector job and refresh. | Remaining: slice 2 (approval priority and explicit due date over the ADR-0046 SLA sweep; the contract with lane E21's stage timers, one escalation mechanism); slice 3 (value view joined to cost per outcome, #848, metered only); the analytics dashboard (#453, closes five KNOWN_UI_GAPS entries); a per-instance sequence on `workflow_events` so replay ordering is exact (engine owner). |
+
+**E22 / ADR-0341 — visual pipeline builder, remaining slices.** (2) the canvas editing UI at `/builder/pipelines`
+(lazy chunk sharing the RunGraphCanvas split, its own size-limit entry; palette, canvas, property sheet, Outline view
+as the keyboard, screen-reader and phone path; skeletons). (3) diff view, version history and the publish flow
+(relaxation acceptance, step-up). Later: publishing an `ai-use-case-intake` template through the decision-regression
+gate (refused by the builder today); owner questions on a second approver for publish, non-admin draft editing and a
+dedicated step-up kind.
+
+**E21 — compensation follow-ups (ADR-0340, 2026-11-16).** (1) A compensation undoes only the current round's records: an earlier round's branch or pull request (moved to `effects:history` by a re-open) is not closed or deleted; decide whether a cancel should also close earlier rounds' unmerged pull requests. (2) The template editor (`WorkflowTemplatesPage`) does not offer `compensates`, `delete_branch` or `close_pr` yet (screens are tracked on #453); templates are authored through the API. (3) The PM-tool mirror (pillar 8) shows a compensating instance by its status only (`awaiting_execution`), not as "compensating".
+
+- **Agent risk score follow-ups (ADR-0339, lane E20).**
+  - Once the vendor registry import (PR #855) merges, its import route marks the new agent `imported` (today the agents
+    trigger marks it `created`).
+
+- **Agent identity follow-ups (ADR-0339 slice 2, lane E20).**
+  - Once the vendor registry import (PR #855) merges: write `vendor_record` authorship with the vendor creator's
+    pseudonym, and stage the vendor identity it read (Entra Agent ID object id, AgentCore runtime ARN, Gemini agent
+    resource name) as an `importer` link.
+  - Owner question: make the 90-day inactive-owner window an org setting (strict default kept).
+
+| **E18** | **SaaS entitlement graph and usage-based least privilege (owner, 2026-11-16; Obsidian gap analysis item 2).** Slice 1 built by [ADR-0337](../decisions/0337-saas-entitlement-graph.md): M365 Graph and Google Workspace readers as read-only discovery sources, a 3NF entitlement graph, a frozen scope classifier. | Remaining: slice 2 (Salesforce, Slack readers), slice 3 (usage comparison and findings through the approvals queue, routes and screens via #453). Owner decisions 2026-11-17 built in slice 1 (ADR-0337 §4, §6): Google Directory token listing as an admin opt-in (GET-only); vendor-app auto-link to agents on an exact identifier match, admin link and unlink (6 API-only routes, KNOWN_UI_GAPS on #453). |
+
+| **E17** | **Agent platform discovery connectors (owner, 2026-11-16; [ADR-0336](../decisions/0336-agent-platform-discovery-connectors.md)).** Copilot Studio, Agentforce, OpenAI (ChatGPT GPTs) and n8n agents staged in the agent registry importer, default-deny, with normalised components; one adapter per vendor for read and lane E19's governed write. | Slices 1 to 3 built: the adapter contract, the component table, Copilot Studio, Agentforce, OpenAI custom GPTs and n8n (with the recorded `credentialScope: unverified` relaxation). Slice 4 built for OpenAI and n8n: plaintext-credential findings in agent configurations, by field path and rule only. Slice 5 (owner yes, 2026-11-21) extends the scan to Copilot Studio topic and instruction YAML and Agentforce planner, topic and action text. Then: Agentforce topic instructions once `GenAiPluginInstructionDef` is documented as queryable; OpenAI workspace agents and plugins (the Compliance API lists them separately; custom GPTs are being migrated to them); the Power Platform inventory API once it accepts app-only tokens; AgentKit Agent Builder once listable; the import and components screens (#453). |
+
+- **Apply a privacy-law preset from the console (ADR-0296 §7, #830 review).** `privacyPresetPatch` has no caller yet.
+  The planned console action: pick one or more laws, preview the org-settings patch (it only tightens), and apply it
+  through the existing `PUT /v1/org/settings`, which audits the change. No new route.
+
+- **AIUC-1 follow-ups (ADR-0319).** Check the 15 January 2027 AIUC-1 release and publish `aiuc-1@2` with its diff.
+  Open gaps:
+  - per-numbered-control mapping;
+  - detectors for cyber misuse (F001) and catastrophic misuse (F002);
+  - a topic-scope filter (C004);
+  - an AI disclosure mechanism (E016);
+  - source and licence verification for open-weight models (E006.2).
+
+**ADR-0234 PM batch follow-ups (lane L6, #828 code re-review, 2026-11-15).** The PM tables are under forced
+row-level security (`rls_pm_tables`). Two follow-ups remain open:
+
+- **The `reencrypt` CLI** (`data-key-reencrypt.ts`) walks the `pm_connections.*_ciphertext` columns with no RLS
+  scope. Like the existing `users.totp_secret_ciphertext` case, this is safe only on a superuser or owner login. On
+  a non-superuser login it would silently skip the PM secrets.
+  - Fix: run its pass under the `migration` reason (or a dedicated key-rotation reason).
+  - Fix: make it fail loudly when a table it must rewrite reads as empty.
+- **`pmSyncRoute` scope.** It wraps the whole handler of each of the five non-admin PM routes, so every
+  `pm_connections` row (ciphertext columns included) is visible for that handler's duration. The application
+  predicate still decides what is returned.
+  - Fix: narrow the step to the PM statements of each handler, so RLS stops a forgotten predicate there too.
+
+**S3 follow-ups (ADR-0324, 2026-11-15, lane E9).** (1) The operator (ADR-0304) verifies `keyring.json` (roots,
+threshold, revocations) instead of trusting every `.pub` in the directory (`apply-update-bundle.sh` already calls
+`verify-release.sh`, #853 review). (1a) `--online` compares the attested predicate with the local provenance, and an
+`--expect-root-fingerprint` option pins the roots on first install (#853 review C8, C3). (1b) The licence
+verifier (ADR-0052, `infra/license-keys/`) accepts a licence key only if the root-signed statement lists it with
+purpose `license`; the ceremony makes the licence key (runbook 4.2b) but it is pinned directly until then. (2) First proof of the keyless `attest` job and `--online` on the first owner-approved tag
+(`RELEASE_PROVENANCE_PUBLISH_APPROVED`). (3) Run the hardware-token (PKCS#11) path once against a real token before
+relying on it. (4) Owner: run the ceremony (runbook parts 2-5) and publish the root fingerprints out of band.
+
+- **ADR-0322 vendor usage pull — slice 2 built (lane E7).** Left: GitHub Copilot and Cursor connectors (slice 3); AWS
+  CUR 2.0 Bedrock spend and OpenAI Codex analytics (slice 4); Google Vertex/Gemini billing export if time allows;
+  Claude Code per-user attribution (needs an attribution-only design: its API-billed cost is already in the cost
+  report); moving Anthropic to the Analytics API once it leaves beta; the settings screen (#453); live-tenant tests with
+  the owner's test keys (lane E11). From the #861 review: row-level security on
+  `imported_cost_lines` and `cost_import_batches` (the ADR-0069 import surface; the four vendor-usage tables are under
+  RLS already); a per-vendor rate limit with in-run backoff on 429 (today a 429 fails the run and the next pass resumes
+  from `pulled_through`); the §5 vendor-against-metered variance report.
+
+**G5 — cloud coding agents as governed workers (ADR-0320, 2026-11-15, lane E5).** (1) Slice 2: tables
+(`cloud_worker_providers`, `cloud_worker_grants`, `cloud_worker_credentials`, `cloud_worker_dispatches`), the
+`cloud_workers_enabled` org flag and `executeGovernedCloudWorkerDispatch`, against fake servers. (2) Slice 3: the
+`cloudWorker` task-graph node in `planRun` and the build stage, polling, PR capture, cost settlement. (3) Slice 4:
+verify the Copilot coding agent REST fields and the OpenAI Agents API repository and usage contract, then adapters.
+(4) Before any live use, confirm the UNVERIFIED fields (Cursor's initial run id in the create reply and the usage reply;
+Devin's base URL, cancel endpoint and v1 deprecation). (5) A credential ADR (this lane's second reserved number) once lane E3's
+portable credential lands. (6) Admin screens go to #453. Owner answers (2026-11-15): approvals follow the project's rules plus
+`require_approval` queueing; fake servers only (no GitHub or Cursor sandbox accounts); slices 2–4 paused until the
+master resumes the lane (pilot first). A slice 2 draft, unreviewed, is kept on branch `builder/e5-cloud-workers-s2-wip`.
+
+**E4a — Build session distillation (ADR-0316, 2026-11-15, lane E4), paused for the pilot.** Resume when the master says so. The parked branch `builder/e4-session-distillation` predates the #856 security review and must first be changed to ADR-0316 decisions 4 to 10: preview then commit by digest with output guardrails, lineage-only inputs with fail-closed refusal of tool, connector and attachment turns, the strictest PII mode across inputs, the enumerated-reader guard test, distilled text supplied only as untrusted data, the arbiter re-check in the inbox, and author erasure. Then merge main, run the full gateway suite and open the PR. RLS: the six new tables join the RLS batch for `project_context_items`; the build PR merges only once that batch has landed, or while this item stays open and names the tables. Open owner question: automatic distillation at session end (default: author-triggered only).
+
+**G6 follow-ups ([ADR-0314](../decisions/0314-vendor-agent-registry-import.md), lane E3).**
+- The registry import screen: a list of staged records and the import form (#453).
+- An Atlassian agent account adapter: a new kind, an `AGENT_REGISTRIES` value and a scanner.
+- An Agent 365 instance listing, once the Agent 365 Graph APIs leave preview.
+- Optionally, linking an imported Entra agent to a workload identity (ADR-0188) as an explicit grant step.
+- A live-tenant check of each adapter (owner-gated).
+
+**G7 follow-ups ([ADR-0315](../decisions/0315-portable-agent-credential.md), lane E3).**
+- **Issued-credential screen:** a tab on the Agent credentials page listing issued credentials and revoking one by
+  `jti` (known UI gap `scripts/known-ui-gaps/adr-0315-e3-agent-credential-issued.json`, posted on #453).
+- **Re-check the status-list library** when a maintained Token Status List package without `pako` exists (ADR-0315).
+
+**G9 — paid-call budgets: built 2026-11-15 ([ADR-0313](../decisions/0313-paid-call-budgets.md)).** Open:
+- an x402 wire adapter for HTTP connectors (parse a 402 quote and the payment response) behind the same reservation;
+- a charge reported by the connector;
+- holds for A2A calls;
+- the price and hold screens (#453);
+- owner question: should the org's `warn_only` budget enforcement let paid calls through over budget (today it does not).
+
+**G3 — cost per outcome and budget alerts: built 2026-11-15 ([ADR-0312](../decisions/0312-cost-per-outcome.md)).**
+Open:
+- the dashboard cards for the seven `/v1/cost-outcomes` and spend-budget routes (#453);
+- attributing spend made outside an orchestration run (workflow review-check agents) once those calls carry the
+  instance id;
+- an imported-spend alert for a project budget, once imported lines can carry a project (today they carry none);
+- converting non-USD imported lines for the imported alert (they are counted, not converted).
+
+G9 (paid-call budgets) is paused until after the pilot (owner, 2026-11-15). It is built on
+`builder/e2-paid-call-budgets`, unmerged.
+
+**E16 — Firefox build of the managed browser extension (owner decision B3, 2026-11-15; [ADR-0334](../decisions/0334-managed-browser-extension-governance.md)).**
+Surface (a) ships for Chromium-based browsers only. A later slice adds Firefox: its enterprise policy channel
+(`policies.json` `ExtensionSettings` force-install and `3rdparty` managed storage), MV3 `declarativeNetRequest`
+redirects to an extension page, the identity read it offers in place of `chrome.identity.getProfileUserInfo`, and its
+own signing and update channel. The governed catalogue, policy envelope, DLP table and gateway routes are unchanged.
+
+**E16 — Managed browser extension follow-ups ([ADR-0334](../decisions/0334-managed-browser-extension-governance.md), lane E16).**
+Surface (a) is built and off by default. Left: the admin screens on #453 (11 KNOWN_UI_GAPS); retention for
+`browser_events` (captured prompts are deleted after 30 days by default, owner decision B2); the device-policy signer's
+adoption by the endpoint agent (lane E13, owner decision B4) and an in-app audited rotation; verified attribution (an
+identity-provider ID token from `chrome.identity` checked by the gateway, replacing today's device-asserted account,
+which is bound per device since review #867); (the gateway origin is pinned at build time since #1029, so no CORS is
+needed); feeding breach events into the
+shadow-AI inventory and detection engine through their contracts; per-role site rules; a browser opt-out for single DLP
+rules (an audited relaxation); hardware-bound device keys through the endpoint agent; DLP for script-sent prompts and
+file uploads; Firefox (its own fragment, owner decision B3) and Safari; surface (b), browser-driving agents, is superseded by
+ADR-0364 (lane E45, owner decision 2026-11-21) and is not an E16 follow-up. Owner decisions B1 to B4 are in the ADR.
+
+**E15 — agent behaviour detection (owner, 2026-11-15).** Slice 1 built ([ADR-0333](../decisions/0333-agent-behaviour-detection-engine.md)):
+engine, signed rule pack, five default rules, incidents with evidence, SIEM export through the audit chain. Slice 2 adds
+the configured responses. Open: endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); a per-rule
+suppression list; a dry-run of a pack over a past window; the incident and rule-pack screens (#453).
+
+| **E14** | **Endpoint AI add-on inventory (owner, 2026-11-15).** Built by [ADR-0332](../decisions/0332-endpoint-ai-addon-inventory.md): the inventory is read at call time from the discovery evidence, plus direct-record tables for skills and plugins. Each version is joined to the scan of its exact digest by the gate's own helper. Admin-only routes and the flagged contract. | Remaining: **(I1, owner 2026-11-15)** narrow visibility to the dedicated security-admin role once it exists (routes and RLS policies). **(I2, owner)** lane E13's device-scoped, audited read of the flagged list, decided in its own ADR. The ADR-0195 90-day retention for directly recorded sightings (endpoint lane). An `(engine_id, subject_digest)` index on `admission_engine_scans`, or a measured read model, if the inventory grows. MCP content digests from the endpoint agent (endpoint lane). The inventory screen (#453), which closes three KNOWN_UI_GAPS entries. |
+
+**P1 follow-ups from governed add-on removal ([ADR-0331](../decisions/0331-governed-addon-removal.md), lane E13, 2026-11-15).**
+- **Skills and plugins.** Removal needs a discovery kind first: a collection-manifest kind for skill and plugin
+  directories, and per-device evidence on the gateway. Then the same directive can gain an action. Until then, only
+  MCP server entries are removable.
+- **Enforcing the reinstall block.** Each active removal with `blockReinstall` should add its server to the enforcement
+  policy's `denyServers` once ADR-0298 policy content is delivered (SD4).
+- **JSONC and TOML configs.** VS Code `settings.json`, Zed and Codex `config.toml` are reported `unsupported_format`.
+  Editing them safely needs a format-preserving editor that meets ADR-0176.
+- **Device-policy key for directives.** Built in slice 3 (ADR-0331 addendum): the shared ADR-0334 key signs them. The
+  key is not created when removal is turned on; it comes from the operator's file or from turning browser governance
+  on. Generating it on the removal switch's first enable is a small follow-up if an org uses removal alone.
+- **Restore a removed entry** (review of #871, F6 × S4). Keep the removed entry's JSON in the agent's state directory
+  and add a signed restore directive; recorded as a decision in ADR-0331 ("Not in this slice").
+
+**E12 / ADR-0327 — rule-step suggestions: retention, erasure and RLS — DONE in slice 3 (first part).** Suggestions
+are pruned on the §8.3 floor with traces, located and deleted by a data-subject erasure, and classified deployment-wide
+in ADR-0234.
+Also from review #862 (second round, non-blocking): `POST /v1/rule-steps/scan` answers when the scan finishes; move it
+to 202 with the scan's audit id (the console reads the audit row and suggestions) together with the scheduler entry.
+Also from review #901 (security, non-blocking): the §8.3 prune pass swallows a failed trace or suggestion prune and
+reports 0, so retention can fail silently. Record a content-free error code on the prune's audit row for both, in one
+change.
+
+**E12 / ADR-0327 — rule-like AI step → deterministic rule, remaining slices.** (2) settings singleton (off by default,
+step-up, audited) plus a background detection job over captured `trace_spans` for builder and workflow AI steps, and
+stored suggestions with a readable table, history test cases and projected monthly savings from `usage_events`; a
+read-only admin route (route census + KNOWN_UI_GAPS entry for UI-D). (3) shadow mode recording live agreement. (4) the
+`rule_step_switch` approval, the switch, one-action revert, AI fallback for uncovered inputs, and a `rule_replacement`
+`cost_events` technique. Later: a scikit-learn engine image for numeric thresholds if exact-match tables prove narrow.
+
+**E11-1 — Native Bedrock and Vertex inference (PILOT_READINESS G2-1, G2-2; ADR-0326).** The pilot uses AWS Bedrock and Google Vertex, but `packages/model-provider` routes only to Anthropic, OpenAI and Gemini (API key). Add a Bedrock provider signed with SigV4 from the deployment's IAM role (no access keys; the AWS SDK credential chain) and a Vertex provider using a service account or workload identity, each with cost attribution, egress posture and a live test in `apps/gateway/live/` (groups already declared).
+
+**E11-2 — Budget alerts delivered, not only recorded (G2-4).** `budget-threshold-alert` and the Approvals Queue escalation are written but sent nowhere. Route both through `notifyGovernanceAlerts` (Slack, Teams, email, webhook) with a test that proves delivery, plus a per-user grouping in `/v1/usage-events/summary` (G2-5).
+
+**E11-3 — ADO work item drives the workflow (G3-1, G3-2, G3-4 to G3-7).** If L6 assignability does not cover them: a Boards service hook that starts or binds a governed instance; ADO PR statuses as a check gate and a RegulAIt status posted back through the Status API; ADO reviewer votes and branch policy in the merge gate; an `AB#<id>` link in the PR body; Entra service-principal or workload-identity auth instead of a PAT.
+
+**E11-4 — A commit primitive for the build stage (G3-3).** `GitProvider` has no commit or push, so an agent build cannot land code on the branch. Needed with (or by) E5 #847.
+
+**E11-5 — Coding-tool coverage beyond Claude Code (G1-3 to G1-7).** Codex runbook and client-compat test (`config.toml` `base_url`, `wire_api = "responses"`); a key-pinned default project so Cursor's header-less calls are attributed; audit reporting and a signer key for the ADR-0298 on-device hook; an owner decision on Copilot model calls (MCP-only governance, or ingesting GitHub audit and usage data).
+
+**E11-6 — Entra SCIM default mapping and groups overage (G0-2, G0-3).** Accept (store or ignore) the core User attributes Entra's default mapping PATCHes (`name.*`, `title`, ...), and follow the groups overage claim. The live SCIM test pins today's 400 and flips with the fix.
+
+**E11-7 — AWS BYOC runbook (G4-1, G4-3, G4-4, G4-6).** An AWS-specific install guide (VPC, EC2 or EKS sizing, RDS, IAM, DNS/TLS) and customer Terraform, a published operator image, a decision on GHCR package visibility, and scripted IdP, egress and backup setup after install.
+
+**E10 — BYOC on AWS follow-ups (ADR-0325, 2026-11-15, lane E10).** (1) PR 2 merged (#868). (2) PR 3: the customer runbook, the smoke test and the `byoc-rehearsal` workflow, which
+always destroys and sweeps leftover tagged roles. (2b) Operator backups to S3 (ADR-0305 §2): extend
+`backup-target-s3` with a Pod Identity writer mode (PutObject plus S3-conditioned GenerateDataKey/Decrypt, no
+ListBucket) and compose it in `byoc-aws`. (3) The first rehearsal in regulait-dev, after the
+owner applies the role; its timing and snags go in the PR. (4) Confirm in the rehearsal that `aws:FederatedProvider` is
+populated for GitHub OIDC sessions (the workload boundary's federated deny depends on it).
+
+**G2 follow-ups (ADR-0310, lane E1, 2026-11-15).** (a) Emit a VS Code device policy (`ChatMCP`,
+`ChatAllowedMcpServers`, `/etc/vscode/policy.json`) once its value encodings are confirmed from primary docs. (b) Push
+the servers themselves (Claude Code `managedMcpServers` / `managed-mcp.json`) with each vendor's client auth header,
+which then makes per-tool `mcp__<server>__<tool>` rules possible. (c) The managed-settings export screen on #453.
+
+**P18 follow-up — the `iso-42001` impact-assessment ref (ADR-0295).** `iso-42001@1` cites the impact assessment as
+`iso-42001:8.3-ai-system-impact-assessment`; ISO/IEC 42001:2023 numbers it 8.4, and `iso-42001@2` uses
+`8.4-ai-system-impact-assessment`. intake-assist (`bias_fairness`), the demo regulatory feed and the
+decision-regression goldens still cite the v1 ref. Move them to the 8.4 ref when v2 becomes the pack the demo
+activates (a golden-expected change, so its own reviewed PR).
+
+- **§3 0045 per-project MRM and §3 0057/0058 pack red-team preset hook — built (lane L7 slice 1, ADR-0045 amendment 2026-11-14).** Left: the launch packs' presets do not yet set `mrmRequired` or red-team presets (catalogue content, Lane L8); the compliance profile editor does not show `mrmRequired` (UI, #453); owner question whether a profile should require MRM by default.
+
+- **P14 lineage and P16 merge/quantize lineage events — built (lane L7 slice 3, ADR-0216 and ADR-0217 amendments 2026-11-14).** Left: the lineage panel UI (#453). Owner question: should a repackaging of a signed file inherit its parent's signature verdict? Built as no, so each file is judged on its own.
+
+- **ADR-0056 L6 residual "enrolment in ADR-0057 red-teaming with a promotion-blocking gate" — built (lane L7 slice 2, ADR-0056 amendment 2026-11-14).** The settings card (library picker, trials, window, floor) and the per-narrator check for `GET/PUT /v1/copilot/redteam-gate` are built (lane UI-B, the Copilot page's "Narrator red-team gate" card). Left: a seeded copilot red-team library with audit-log-borne injection probes whose probes reach the model under the strict data posture (until one is designated, every narrator is refused); keying on the full measured configuration hash rather than the `system_prompt` column; real-model verification waits on P1.
+
+**P25 follow-up: AgentDojo task-dependent attacks — built 2026-11-14 ([ADR-0244](../decisions/0244-injection-detector-eval-baselines.md), amendment of 2026-11-14; no migration, no UI).** A sixth pinned snapshot, `agentdojo-task-dependent` (158 cases: 81 goals in the named `important_instructions` variants and `tool_knowledge`, 39 injections rendered inside the environment field AgentDojo places them in, 38 benign copies of those fields at their defaults), from the same AgentDojo commit, read with `ast` and a narrow YAML reader, no upstream code run. The heuristic is gated on it at the 2-point tolerance: precision 100%, recall 17.5% (21/120), FPR 0% (0/38). Remaining for P25: HackAPrompt (owner to accept its gate); measuring the trained classifier on the new set offline (listed under `notYetMeasured`) and gating it once its image builds in CI.
+
+**P19 follow-ups from Lane L3, first PR ([ADR-0230 amendment](../decisions/0230-sap-business-agents-over-mcp.md)).**
+Open: identity release, subject-token
+retention and confirm-by-fresh-step-up (need slice A0); the screen for the three `system-class` routes (#453); a create
+and edit path for `rate_limits.write_only` in the rule API (today only the SAP seeding writes it); a tool-kind
+dimension for the policy-replay counter, so a simulated write-only limit counts writes only (it over-counts today); cross-check an SAP `replayed: true` result against the stored key's claim before charging it 0 (code review #882). An admin-confirmed read allow-list per SAP business server (today every tool on a marked server is a write, review #798), and a registration-time prompt or a hint when a server's tools look like SAP business tools, so an SAP server is not left unmarked (security review #798). The screen for the four `sap*` org settings (owner decision 2026-11-15; API only today, #453).
+
+**P22 and the Helm row: Kubernetes self-install (lane L12, 2026-11-14).** Built ([ADR-0304](../decisions/0304-kubernetes-operator-and-helm-chart.md)).
+`deploy/operator/` is a controller-runtime operator. Its `RegulaitInstallation` CRD rolls out only a version whose signed
+update-bundle manifest verifies, and it migrates by Job before the image moves. It corrects drift and reports it, keeps
+the install-secrets claim when the CR is deleted, and has no Secret RBAC. `deploy/helm/regulait/` is the plain-Helm
+path, with a pre-install/pre-upgrade migration Job, a hook default-deny NetworkPolicy and an opt-in operator. Both
+are tested on envtest and render tests only; neither has been run on a real cluster.
+Open, for the owner:
+- image digests in the bundle manifest (schema `/2`);
+- the API group domain;
+- where the operator image is published (the chart's distribution and the S3 backup target are decided:
+  [ADR-0305](../decisions/0305-helm-oci-distribution-and-s3-backups.md));
+- multi-replica HA (P2).
+
+**P18 C6 — SIEM delivery: built 2026-11-14 ([ADR-0303](../decisions/0303-siem-delivery-of-the-audit-chain.md)).** Open: the admin screen for the five `/v1/siem/destinations` routes (#453); vendor adapters (Azure Monitor Logs Ingestion, AWS Security Lake OCSF/Parquet, Splunk HEC, Sentinel), each with its own receiver contract test before it is claimed; owner question whether the envelope should carry the acting user or agent id; ADR-0135's outbound secret gate (still proposed).
+
+- **ADR-0234 batch 7 (RLS runtime cut-over): register the `certification-deadline-notify-sweep` job.** It reads `audit_log` (its delivery markers) and `users` (`activeUserEmail`), both FORCE RLS. Under `regulait_app` with no system reason, de-duplication silently fails and every target is resent hourly. Add an RLS-scoped test at the cut-over. (Review of #825, ADR-0090 amendment.)
+
+**P35 follow-up: shadow-AI catalogue v3 (lane L10, review of #802, 2026-11-14).**
+- **Google Opal host re-check.** Opal leaves Google Labs on 2026-11-17. Re-check that `opal.google` and
+  `opal.google.com` still serve it (developers.google.com/opal). Catalogue v3 is frozen, so a changed host means a v4,
+  not an edit. This is tracked here and not in the entry's note.
+
+**P-01a — Approvals screen: filter by the `model_call` kind (ADR-0251, 2026-11-14, lane L1).** Model calls matched by
+an approval rule are now held as `model_call` approvals. `ApprovalsAdminPage.tsx` mirrors the approval kinds for its
+filter and does not list `model_call` (nor the other kinds added since the list was written). The rows are in the
+queue and decidable; only the kind filter cannot reach them. For the UI builder on #453: add the missing kinds, or read
+the list from the API.
+
+**P-01b — Hard windows for model and MCP tool rate limits (ADR-0251, 2026-11-14, lane L1).** Connector and A2A limits
+are hard since slice 3 (a reservation under a lock). `model_rate_limits` (counted from `usage_events`, written after
+the call) and the MCP path's `rate_limits` are still soft under concurrency: calls decided at the same moment can each
+see the same count, bounded by the calls in flight. Apply the same reservation pattern, with its own latency
+measurement.
+
+**P8a — Remove the hand-written approval-rule matcher (ADR-0239 slice 2 follow-up, 2026-11-14, lane L1).** MCP
+approval rules are matched on Cedar in the gateway since slice 2; the kernel keeps `matchingApprovalRules` as its
+default (and `demo-relax-e-lib.ts` reads it) for one release. Next release: delete it as decision 4 did for rate
+limits (no evaluator = refuse), keeping a transcription as the differential oracle. Data scope (slice 3) still waits
+for a typed argument model.
+
+**P-01c — ABAC v5 follow-ups (ADR-0251 slice 4a, 2026-11-14, lane L1).** (1) An ABAC `require_approval` on a model,
+connector or A2A call refuses: queue it once the consent's context digest binds the policy version, as the MCP path
+does. (2) Done 2026-11-21 (slice 4b): the governed core receives the request's session facts and the delegation chain,
+each actor evaluated as `Agent`; a missing fact reads as its strict value. `context.rateLimitUsagePct` is still not
+supplied for these calls, and the write-time guard still refuses a v5 policy on a governed action that reads it. (3) Make v5 the default schema version once the policy editor has an action
+picker (UI builder, #453).
+
+**P36 — Review workflow patterns (OneRedOak/claude-code-workflows, MIT; owner 2026-11-07).** Built by [ADR-0260](../decisions/0260-review-workflow-patterns.md): the reviewer checklists and briefs (`internal/process/REVIEW_CHECKLISTS.md`, the `regulait-review` skill), and review-bound checks (`reviews` on an `automated_check` stage: code, OWASP Top 10 security, design/UI) run as governed dispatches with numbered structured findings, plus four gallery shapes, off unless assigned. **Still open:** (1) the reviewer reads the instance's evidence (change, requirements artifact, PR reference), not the PR diff; (2) the design review does not drive a browser; (3) UI. **What it would take:** (1) A diff read on each git provider (GitHub, GitLab, Bitbucket, Azure DevOps) through the guarded fetch, bounded and fed into the evidence block. (2) A governed, air-gapped Playwright step in the sandbox executor (pinned Chromium, no runtime download) whose screenshots and console log join the design review's evidence. (3) The stage rail and approval view list the numbered findings; the gallery create dialog gets a reviewer-agent picker (posted to #453). Until (1) lands a review-bound check fails closed unless its binding sets `allowEvidenceOnly` (review of #732); when the diff read lands, the PR head SHA joins the evidence and the reuse fingerprint.
+
+| **P31** | **A governed connector catalogue from Activepieces community pieces (owner, 2026-11-07).** Built by [ADR-0255](../decisions/0255-governed-connector-catalogue.md) as a clean-room adapter: five curated pieces (Slack, Jira Cloud, GitHub, Google Sheets, Gmail) behind the governed connector call and the guarded fetch, admin enablement (step-up, audited), the rest listed "available, not enabled", and an EE-path guard in CI. | Remaining: the catalogue screen (Governed Designer, #453; it closes the two KNOWN_UI_GAPS entries), triggers, an access-token cache for the Google pieces, and one adapter per further piece on demand. |
+
+~~**S8**~~ — ~~**Grant mints had no step-up; the plan-only gate was opt-in**~~ (whole-build review 2026-11-07, S-04 and P-02). **CLOSED 2026-11-07 by [ADR-0250](../decisions/0250-grant-mint-step-up-and-forced-plan-gate.md) (no migration).** The eight grant-mint POSTs take a `settings_relax` step-up; the plan-only gate keys on the project on invoke, runs, compat and MCP. Remaining limits, in ADR-0250: an invoke or run naming no project is not plan-gated, and an instance without a project is gated only when named.
+
+**P32 — Seed the admin MCP catalogue from the official MCP Registry, with community lists as unvetted entries (SDK and
+platform review, owner 2026-11-07).** Building on `builder/p32-mcp-catalogue-seed`
+([ADR-0256](../decisions/0256-mcp-catalogue-seed.md), migration `mcp_catalogue_seed`). API and backend: presets (the
+official registry, `awesome-mcp-servers`) created disabled behind the egress check; snapshot refreshes (scheduled or
+admin-triggered) through guarded egress; signed offline bundles for air-gapped installs; cross-source dedupe with
+provenance per source; paid and x402 flagged; every entry "available, not admitted" until ADR-0101's import and the
+admission scan (P23 scanners, P27 pinning). Left: the UI, posted on #453.
+
+**P29 — AI SDK provider packages as the vendor-neutral model layer (owner, 2026-11-07; SDK and platform review).**
+Built ([ADR-0253](../decisions/0253-ai-sdk-provider-packages.md), #723). `@ai-sdk/provider` and `@ai-sdk/google`,
+never the `ai` core or Vercel's AI Gateway. The hand-written Gemini adapter is replaced through one bridge; Anthropic,
+OpenAI, xAI and custom stay on their official vendor SDKs, with the reason and re-check triggers recorded. Guards and
+an egress test enforce the no-gateway rule. Open: whether pillar 5 should count Gemini `thoughtsTokenCount` and
+`toolUsePromptTokenCount`, which have never been counted (a P21 usage-extractor decision, #453). P30–P33 from the same
+review are added by other builders.
+
 **P30 — Durable execution for pillar 2's stages (SDK and platform review, owner, 2026-11-07).** The stage runner is
 request-driven: there is no fan-out inside a stage and no automatic retry with backoff. **Spiked 2026-11-07
 ([ADR-0254](../decisions/0254-workflow-durable-execution-spike.md)): `vercel/workflow` with `@workflow/world-postgres`

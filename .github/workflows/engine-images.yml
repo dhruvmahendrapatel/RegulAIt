@@ -89,6 +89,7 @@ on:
       - engines/**
       - packages/engine-garak/**
       - packages/engine-spikee/**
+      - packages/engine-fairlearn/**
       - packages/engine-modelscan/**
       - packages/engine-admission-scan/**
       - packages/engine-promptfoo/**

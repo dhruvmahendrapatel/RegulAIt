@@ -78,6 +78,7 @@ import {
   type EngineTaskInputManifest,
   type EngineTaskState,
   type ExecutionRefusalReason,
+  FAIRLEARN_INPUT_FILE,
 } from "@regulait/shared";
 import { databaseWallNow } from "./delegation.js";
 import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement, type EngineTaskChannelHooks } from "./executor-channel.js";
@@ -86,6 +87,8 @@ import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSessio
 import { buildAgentDecider } from "./evals.js";
 import { artifactAccessible, type ArtifactStore } from "./model-artifacts.js";
 import { ADMISSION_SCAN_SENSITIVITY, subjectInputTx } from "./admission-scan-runs.js";
+import { fairnessInputTx } from "./fairness-evaluation.js";
+import { CONTENTEXTRACT_ENGINE_ID, contentExtractRunSensitivity } from "./content-inspection-runs.js";
 import { assertProjectAttribution } from "./projects.js";
 import { errMessage } from "./err-serializer.js";
 
@@ -379,8 +382,10 @@ async function startEngineTaskTx(
     }
     // ADR-0242 L4.3: a subject run's input places its one subject file (written by the gateway); no other run's does
     const isSubjectRun = run.targetKind === "subject";
-    if (isSubjectRun !== Boolean(body.subject)) {
-      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's input places the run's subject file; no other run's does" };
+    // ADR-0346: a fairness evaluation run (an agent run of the fairlearn engine) also places one gateway-built file
+    const isFairnessRun = run.engineId === "fairlearn" && run.targetKind === "agent";
+    if ((isSubjectRun || isFairnessRun) !== Boolean(body.subject)) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an admission scan's or a fairness evaluation's input places the gateway's own file; no other run's does" };
     }
     // security review of #843: the gateway's subject file is a subject run's ONLY input. The drivers read fixed names
     // at the input root, so a runner file there (or anywhere) could stand in for, or add to, what is scanned
@@ -409,6 +414,17 @@ async function startEngineTaskTx(
       // refused start that rolls back leaves no expectation behind). A later start overwrites it on purpose: the last
       // placement is the one the engine scans
       await tx.update(engineRuns).set({ targetSubjectInputSha256: subjectInput.sha256 }).where(eq(engineRuns.id, run.id));
+    }
+
+    // ADR-0346: the fairness evaluation's input, built from the gateway's encrypted dataset and pinned on the run (the
+    // runner never sees a row); a refusal ends the run `not_run` with its code, after the entitlement checks below
+    // the path is checked first: a refused start returns (and so commits) without having pinned anything
+    if (isFairnessRun && body.subject!.path !== FAIRLEARN_INPUT_FILE) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: `the fairness input is placed as ${FAIRLEARN_INPUT_FILE}, at the input root` };
+    }
+    const fairnessInput = isFairnessRun ? await fairnessInputTx(txDb, run) : null;
+    if (fairnessInput?.ok) {
+      files.push({ meta: { path: body.subject!.path, size: fairnessInput.bytes.length, sha256: fairnessInput.sha256 }, source: { kind: "inline", bytes: fairnessInput.bytes } });
     }
 
     const userId = run.runAsUserId ?? NO_IDENTITY;
@@ -454,6 +470,9 @@ async function startEngineTaskTx(
         const attribution = await assertProjectAttribution(txDb, run.projectId!, person.id, person.isAdmin);
         if (!attribution.ok) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person may no longer attribute to the run's project", code: "project_not_attributable" };
       }
+      if (!deny && fairnessInput && !fairnessInput.ok) {
+        deny = { ruleId: "fairness-model-input", ruleChain: [], reason: `the fairness evaluation's input cannot be built (${fairnessInput.code})`, code: `fairness_${fairnessInput.code}` };
+      }
     } else if (!artifactRow) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run's artifact is gone", code: "artifact_gone" };
     else if (!artifactAccessible(artifactRow, { userId: person.id, isAdmin: person.isAdmin })) {
       deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person may no longer use the run's artifact", code: "artifact_not_accessible" };
@@ -479,13 +498,15 @@ async function startEngineTaskTx(
     // 2. the placement (decision 7), keyed to the decision written below
     const image = m.taskImage ?? "";
     let placed: { kind: "offered"; placementId: string; offerId: string; executorId: string } | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null };
-    // ADR-0242 L4.3: an admission scan belongs to no project; it names its own sensitivity (ADMISSION_SCAN_SENSITIVITY)
+    // ADR-0242 L4.3: an admission scan belongs to no project; it names its own sensitivity (ADMISSION_SCAN_SENSITIVITY).
+    // ADR-0362: a content-extraction run with a project is placed by the project's sensitivity (resolveRequirement, as
+    // every project run, an unresolved one refusing); with none, by the sensitivity it was queued with
     const requirement = await resolveRequirement(txDb, {
       workloadKind: "engine_worker",
       projectId: run.projectId,
       agent: null,
       parentGrantId: null,
-      ...(isSubjectRun ? { sensitivity: ADMISSION_SCAN_SENSITIVITY } : {}),
+      ...(isSubjectRun ? { sensitivity: run.engineId === CONTENTEXTRACT_ENGINE_ID ? contentExtractRunSensitivity(run) : ADMISSION_SCAN_SENSITIVITY } : {}),
     });
     if (requirement.kind !== "required") {
       placed = { kind: "refused", code: "policy_unresolved", placementId: await refusedLinkedPlacement(txDb, decisionAuditId, { workloadKind: "engine_worker", imageDigest: image }, "policy_unresolved") };

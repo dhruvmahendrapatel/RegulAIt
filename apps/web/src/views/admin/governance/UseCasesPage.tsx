@@ -228,7 +228,8 @@ export default function UseCasesPage() {
               rowKey={(row) => row.id}
               rowLabel={(row) => `${row.name}, ${rowStatus(row).label} — open preview`}
               onRowClick={(row) => {
-                opener.current = document.activeElement instanceof HTMLElement && document.activeElement.tagName === "TR" ? document.activeElement : null;
+                // the row's button (UIS-04), focused by the click too; the preview hands focus back to it on close
+                opener.current = document.activeElement instanceof HTMLElement && document.activeElement.matches("[data-row-control]") ? document.activeElement : null;
                 setOpenId(openId === row.id ? null : row.id);
               }}
               onRows={onRows}

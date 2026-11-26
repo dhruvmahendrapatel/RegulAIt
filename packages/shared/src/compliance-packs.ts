@@ -65,6 +65,10 @@ import { PRIVACY_PACKS } from "./privacy-packs.js";
 import { SECTOR_PACKS } from "./sector-packs.js";
 // ADR-0319 (gap G11): the AIUC-1 AI agent standard, ID-only (`aiuc-packs.ts`, type-only imports back)
 import { AIUC_PACKS } from "./aiuc-packs.js";
+// ADR-0351 slice 2: the EU AI Act deployer-obligation register (`eu-ai-act-deployer.ts`, type-only imports back)
+import { EU_AI_ACT_DEPLOYER_PACKS } from "./eu-ai-act-deployer.js";
+// ADR-0351 slice 3: the CIS-style AI coding-agent endpoint benchmark (`endpoint-benchmark-pack.ts`, type-only imports back)
+import { ENDPOINT_BENCHMARK_PACKS } from "./endpoint-benchmark-pack.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -109,6 +113,10 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "nyc-ll144",
   // ADR-0319 (gap G11): the AIUC-1 AI agent standard (`aiuc-packs.ts`)
   "aiuc-1",
+  // ADR-0351 slice 2: the EU AI Act deployer-obligation register (`eu-ai-act-deployer.ts`)
+  "eu-ai-act-deployer",
+  // ADR-0351 slice 3: the CIS-style AI coding-agent endpoint benchmark (`endpoint-benchmark-pack.ts`)
+  "ai-coding-endpoint-benchmark",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -192,6 +200,11 @@ export const EVIDENCE_COLLECTORS = [
    * counted. Org-wide (a placement row carries no project): counted under an
    * org-scoped report only. Software-attested evidence (ADR-0190 decision 6). */
   "isolation_placements",
+  /** ADR-0351 slice 3: one fleet-wide check over the endpoint agent's ledgers (ADR-0298, ADR-0259, ADR-0332), named
+   * by `endpointCheck` from `ENDPOINT_BENCHMARK_CHECKS`. Counts 1 when the check passes over at least one enrolled,
+   * unrevoked device and 0 otherwise, so the ordinary threshold of 1 IS the check. Org-wide (endpoint rows carry no
+   * project): counted under an org-scoped report only. */
+  "endpoint_benchmark_check",
   /** ADR-0345 (lane E26): agent-risk proof results in the period that PASSED and whose evidence still holds (hash,
    * chained audit row, signature when signed). Scoped to the proofs whose risk cites the control being evaluated
    * (`controlRef`, an ADR-0243 OWASP pack control). Org-wide: counted under an org-scoped report only. */
@@ -200,6 +213,30 @@ export const EVIDENCE_COLLECTORS = [
   "none",
 ] as const;
 export type EvidenceCollectorId = (typeof EVIDENCE_COLLECTORS)[number];
+
+/**
+ * ADR-0351 slice 3 — the closed list of fleet-wide endpoint checks the `endpoint_benchmark_check` collector runs.
+ * Each is one query in the gateway (`runCollector`); "recent" is the last 30 days of sightings unless stated.
+ */
+export const ENDPOINT_BENCHMARK_CHECKS = [
+  /** every unrevoked enrolled device sent a report in the last 7 days */
+  "devices_reporting_7d",
+  /** every agent identity on an unrevoked device keeps its key in hardware (TPM, Secure Enclave) */
+  "agent_keys_hardware",
+  /** no enabled MCP server in a coding agent's configuration, seen recently, auto-approves tools */
+  "mcp_no_auto_approved_tools",
+  /** no enabled MCP server configuration seen recently carries an inline credential */
+  "mcp_no_inline_secrets",
+  /** no enabled MCP server seen recently has a flagged risk (shell launcher, privileged container, host root mount…) */
+  "mcp_no_risky_servers",
+  /** every enabled MCP server seen recently is linked to a server admitted to the gateway's registry */
+  "mcp_servers_registered",
+  /** no IDE or agent add-on sighting seen recently carries a credential */
+  "addons_no_secrets",
+  /** at least one MCP definition is pinned and none differs from its approved digest (ADR-0246) */
+  "mcp_definitions_unchanged",
+] as const;
+export type EndpointBenchmarkCheck = (typeof ENDPOINT_BENCHMARK_CHECKS)[number];
 
 /**
  * The mapping author's DECLARED posture for a control — how far platform
@@ -280,6 +317,8 @@ export const collectorParamsSchema = z
     cascadeAspect: z.enum(["pii_block", "retention", "guardrail_floor", "budget_ceiling"]).optional(),
     /** lineage_edges: exact kind match */
     edgeKind: z.string().min(1).max(64).optional(),
+    /** ADR-0351 endpoint_benchmark_check: which fleet-wide check */
+    endpointCheck: z.enum(ENDPOINT_BENCHMARK_CHECKS).optional(),
   })
   .strict();
 export type CollectorParams = z.infer<typeof collectorParamsSchema>;
@@ -303,6 +342,13 @@ export const packControlSchema = z
   })
   .strict()
   .superRefine((c, ctx) => {
+    // ADR-0351: the endpoint collector without a named check would count nothing meaningful; refuse it at authoring
+    if ((c.collector === "endpoint_benchmark_check") !== (c.collectorParams?.endpointCheck !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "the endpoint_benchmark_check collector needs collectorParams.endpointCheck, and only it takes one",
+      });
+    }
     if (c.attestationRequired && c.collector !== "none") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -1838,4 +1884,8 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ...SECTOR_PACKS,
   // ADR-0319 (gap G11): aiuc-1@1 (15 October 2026 release)
   ...AIUC_PACKS,
+  // ADR-0351 slice 2: eu-ai-act-deployer@1 (the deployer-obligation register)
+  ...EU_AI_ACT_DEPLOYER_PACKS,
+  // ADR-0351 slice 3: ai-coding-endpoint-benchmark@1
+  ...ENDPOINT_BENCHMARK_PACKS,
 );

@@ -95,27 +95,43 @@ describe("affordance census: a notBuilt route counts only when the file defines 
   });
 
   it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
-    // real handlers, not stubs: ADR-0246 (P27) authorised-targets, raised for the master's review (the two ADR-0236
-    // bundle routes left this list when the #453 bundle screen landed), the ADR-0230 A2 SAP business unmark until its
-    // #453 screen, ADR-0312's spend-budget removal until its #453 screen, ADR-0322 (lane E7) vendor usage credential
+    // real handlers, not stubs (the two ADR-0236 bundle routes left this list when the #453 bundle screen landed, and the
+    // ADR-0246 authorised-targets entry left with its screen, #823): lane L2 (ADR-0219 follow-up) remote-agent role grant
+    // and revocation removal until the controls on #453, the ADR-0230 A2 SAP business unmark until its
+    // #453 screen, ADR-0312's spend-budget removal and ADR-0313's paid-call price removal until their #453 screens, ADR-0322 (lane E7) vendor usage credential
     // revoke until the #453 vendor usage screen, the ADR-0337 §6 identifier removal and agent unlink until the
     // entitlement graph screen on #453, ADR-0364 S2's robot secret clear until the robot detail screen on #453, and the
     // three ADR-0350 (lane E31) device-group removals until the device-group screen on #453, and the ADR-0365 (lane
-    // E46) context graph source unbind until the bindings screen on #453
+    // E46) context graph source unbind until the bindings screen on #453, and the two ADR-0251 (lane L1) resource-rule
+    // removals until the screen on #453, and the ADR-0357 §4 (lane E38) policy-layer removal until the
+    // policy hierarchy screen on #453, and the ADR-0361 (lane E42) AI SaaS monitor credential revoke until the AI SaaS
+    // monitoring screen on #453, and the ADR-0358 (lane E39) CMDB credential revoke until the CMDB connector screen on #453,
+    // and the ADR-0356 (lane E37) PM identity-link removal until its screen on #453
     // ADR-0311 (lane E1): the MCP endpoint's session-end DELETE, a 405 protocol answer that deletes nothing
+    // CXR-REV-002 (ADR-0047 addendum): the report-definition DELETE, which archives and deletes nothing
     expect([...DELIBERATELY_API_ONLY.keys()]).toEqual([
       "/mcp/:x",
-      "/v1/mcp/authorised-targets/:x",
+      "/v1/ai-saas-monitoring/connectors/:x/credential",
+      "/v1/reports/definitions/:x",
+      "/v1/a2a/agents/:x/role-grants/:x",
+      "/v1/a2a/agents/:x/revocations/:x",
       "/v1/endpoint-device-groups/:x",
       "/v1/endpoint-device-groups/:x/members/:x",
       "/v1/endpoint-device-groups/:x/rules/:x",
+      "/v1/governance-policy/layer",
       "/v1/discovery/agent-identifiers/:x",
       "/v1/discovery/entitlements/apps/:x/agent-link",
+      "/v1/discovery/sources/:x/control-credential",
       "/v1/servers/:x/system-class",
       "/v1/users/:x/spend-budget",
+      "/v1/paid-call-prices/:x",
       "/v1/vendor-usage/connectors/:x/credential",
       "/v1/context-graph/sources/:x",
       "/v1/robots/:x/secrets/:x/:x",
+      "/v1/rules/resource/approval-rules/:x",
+      "/v1/rules/resource/rate-limits/:x",
+      "/v1/cmdb/connectors/:x/credential",
+      "/v1/pm/identity-links/:x",
     ]);
   });
 });

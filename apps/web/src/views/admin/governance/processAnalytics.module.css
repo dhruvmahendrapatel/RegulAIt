@@ -1,0 +1,34 @@
+/* Process analytics (ADR-0342): the stage x period heatmap. Tokens only. The cell's text carries its values, so the
+   fill (wait, in four steps of one hue) never carries the meaning alone. */
+.heatWrap {
+  overflow-x: auto;
+}
+.heat {
+  border-collapse: separate;
+  border-spacing: 2px;
+  font-size: var(--text-xs);
+}
+.heat th {
+  font-weight: 500;
+  text-align: left;
+  padding: 0 var(--s1);
+  white-space: nowrap;
+}
+.heat td {
+  min-width: 72px;
+  padding: var(--s1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  vertical-align: top;
+}
+.heat td strong {
+  display: block;
+  font-weight: 600;
+}
+.heat td.l1 { background: color-mix(in srgb, var(--rg-high-tint) 30%, var(--surface-1)); color: var(--rg-high-deep); }
+.heat td.l2 { background: color-mix(in srgb, var(--rg-high-tint) 55%, var(--surface-1)); color: var(--rg-high-deep); }
+.heat td.l3 { background: color-mix(in srgb, var(--rg-high-tint) 80%, var(--surface-1)); color: var(--rg-high-deep); }
+.heat td.l4 { background: var(--rg-high-tint); color: var(--rg-high-deep); }
+.none {
+  color: var(--rg-ink-muted);
+}
