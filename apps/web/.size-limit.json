@@ -355,6 +355,12 @@
     "limit": "5.5 kB"
   },
   {
+    "name": "chunk: SensitivityLabelsPage",
+    "path": "dist/assets/SensitivityLabelsPage-????????.js",
+    "gzip": true,
+    "limit": "5.7 kB"
+  },
+  {
     "name": "chunk: SpdxFieldsPanel",
     "path": "dist/assets/SpdxFieldsPanel-????????.js",
     "gzip": true,
