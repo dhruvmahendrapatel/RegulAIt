@@ -36,3 +36,25 @@ func TestConfigPinsDevicePolicyKeys(t *testing.T) {
 		}
 	}
 }
+
+// ADR-0350 §11: the tenant credential-reuse key is read from the same root-owned config; a malformed one refuses
+// the config rather than silently turning fingerprints off.
+func TestConfigCredentialReuseKey(t *testing.T) {
+	dir := t.TempDir()
+	write := func(extra string) string {
+		p := filepath.Join(dir, "config.json")
+		os.WriteFile(p, []byte(`{"schema":"regulait.endpoint-agent-config/1","issuer":"https://gw.example.test"`+extra+`}`), 0o644)
+		return p
+	}
+	key := base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("r", 32)))
+	cfg, err := LoadConfig(write(`,"credentialReuseKey":"`+key+`"`), os.Getuid())
+	if err != nil || cfg.CredentialReuse == nil || len(cfg.CredentialReuse.KeyID()) != 16 {
+		t.Fatalf("key not loaded: %v", err)
+	}
+	if cfg, err := LoadConfig(write(""), os.Getuid()); err != nil || cfg.CredentialReuse != nil {
+		t.Fatalf("no key should mean no fingerprints: %v", err)
+	}
+	if _, err := LoadConfig(write(`,"credentialReuseKey":"short"`), os.Getuid()); err == nil {
+		t.Error("a malformed key was accepted")
+	}
+}

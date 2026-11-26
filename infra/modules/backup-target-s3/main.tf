@@ -41,14 +41,21 @@
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
+data "aws_region" "current" {}
 
 locals {
   prefix = trim(var.prefix, "/")
 
-  writer_role_arns = [
+  writer_role_arns = concat([
     for r in var.writer_role_names :
     "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${r}"
-  ]
+  ], var.writer_role_arns)
+
+  kubernetes_job = var.writer_profile == "kubernetes_job"
+
+  # Built from the name, not read from the bucket, so the kubernetes_job grant
+  # is fully known at plan time (and reviewable in the plan).
+  bucket_arn_from_name = "arn:${data.aws_partition.current.partition}:s3:::${var.bucket_name}"
 
   # Every object this module expects to exist lives under here.
   object_arn_pattern = "${aws_s3_bucket.backup.arn}/${local.prefix}/*"
@@ -285,11 +292,53 @@ data "aws_iam_policy_document" "writer" {
   }
 }
 
+# The operator's backup Job (ADR-0305 §2). Exactly the contract ADR-0305 names
+# and no more: PutObject on the prefix, and the two KMS actions an SSE-KMS
+# upload needs, each pinned to S3 in this region and to this bucket's
+# encryption context. The context is the bucket ARN under an S3 Bucket Key and
+# the object ARN without one; both are allowed, nothing else is.
+data "aws_iam_policy_document" "writer_kubernetes_job" {
+  count = local.kubernetes_job ? 1 : 0
+
+  statement {
+    sid       = "PutBackupsUnderOnePrefixOnly"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${local.bucket_arn_from_name}/${local.prefix}/*"]
+  }
+
+  statement {
+    sid       = "UseTheKeyOnlyForUploadsToThisBucket"
+    effect    = "Allow"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [coalesce(var.kms_key_arn, "unset")]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:aws:s3:arn"
+      values   = [local.bucket_arn_from_name, "${local.bucket_arn_from_name}/${local.prefix}/*"]
+    }
+  }
+}
+
 resource "aws_iam_policy" "writer" {
   name        = "${var.name}-backup-writer"
   description = "Write-only access to s3://${var.bucket_name}/${local.prefix}/. No Get, no Delete."
-  policy      = data.aws_iam_policy_document.writer.json
+  policy      = local.kubernetes_job ? data.aws_iam_policy_document.writer_kubernetes_job[0].json : data.aws_iam_policy_document.writer.json
   tags        = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = !local.kubernetes_job || var.kms_key_arn != null
+      error_message = "writer_profile = \"kubernetes_job\" needs kms_key_arn: the operator uploads with SSE-KMS under the customer's key (ADR-0305)."
+    }
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "writer" {

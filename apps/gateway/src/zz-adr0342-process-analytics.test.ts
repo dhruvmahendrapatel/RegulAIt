@@ -152,10 +152,12 @@ async function projectMine() {
   throw new Error("projection did not converge");
 }
 
+let restoreAdminKeyMfa: (() => Promise<void>) | undefined;
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await useTestIssuerKey(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.ready();
@@ -195,6 +197,7 @@ afterAll(async () => {
   if (templateId) await db.delete(workflowTemplates).where(eq(workflowTemplates.id, templateId));
   if (projectA) await db.delete(projects).where(inArray(projects.id, [projectA, projectB]));
   if (teamId) await db.delete(teams).where(eq(teams.id, teamId));
+  await restoreAdminKeyMfa?.(); // the deployment-wide MFA posture must not leak into later suites
   await app?.close();
 });
 

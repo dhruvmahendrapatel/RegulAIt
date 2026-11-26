@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
 import {
+  AI_USE_CASE_STATUSES,
   aiUseCases,
   aiVendors,
   approvalDelegations,
@@ -307,6 +308,37 @@ describe("ADR-0226: per-route specifics", () => {
     expect(review.summary.headline.total).toBeGreaterThanOrEqual(N);
     // `%` and `_` in a search are literal
     expect((await get(`/v1/use-cases?limit=10&count=exact&q=${encodeURIComponent("%")}`)).json().total).toBe(0);
+  });
+
+  // CR-01 (#1262): pins the registry summary the "In review" tile and the lifecycle card read. `in_review` is the
+  // aggregate of the three review statuses, the per-status counts add up to it and to the total, and the summary
+  // covers the caller's whole scope whatever filter the page carries.
+  it("the registry summary: in_review is proposed + under_review + needs_info, and filters never change it", async () => {
+    const [extra] = await db
+      .insert(aiUseCases)
+      .values({ name: `lcg cr01 ${RUN}`, description: "x", businessContext: "x", ownerUserId: who.a.id, dataSensitivity: "internal", status: "needs_info" })
+      .returning({ id: aiUseCases.id });
+    try {
+      const all = (await get("/v1/use-cases?limit=10&count=exact")).json() as Json;
+      const s = all.summary as { headline: Json; statusCounts: Record<string, number> };
+      const n = (k: string) => s.statusCounts[k] ?? 0;
+      expect(n("needs_info")).toBeGreaterThanOrEqual(1);
+      expect(n("in_review")).toBe(n("proposed") + n("under_review") + n("needs_info"));
+      expect(s.headline.underReview).toBe(n("in_review"));
+      expect(s.headline.total).toBe(n("all"));
+      expect(s.headline.total).toBe(all.total);
+      const perStatus = AI_USE_CASE_STATUSES.reduce((t, k) => t + n(k), 0);
+      expect(perStatus).toBe(n("all"));
+      const filtered = (await get(`/v1/use-cases?limit=10&count=exact&status=approved&q=${encodeURIComponent(`lcg use case ${RUN}`)}`)).json() as Json;
+      expect(filtered.total).toBeLessThan(all.total);
+      expect(filtered.summary).toEqual(all.summary);
+      // a non-admin's summary covers only their own use cases
+      const mine = (await get("/v1/use-cases?limit=10&count=exact", who.b.auth)).json() as Json;
+      expect(mine.summary.statusCounts.all).toBe(mine.total);
+      expect(mine.summary.statusCounts.needs_info ?? 0).toBe(0);
+    } finally {
+      await db.delete(aiUseCases).where(eq(aiUseCases.id, extra!.id));
+    }
   });
 
   it("the audit trail keeps its cursor: a caller paging with `cursor` alone gets the old shape", async () => {

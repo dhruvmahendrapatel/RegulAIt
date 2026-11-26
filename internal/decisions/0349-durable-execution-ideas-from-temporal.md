@@ -108,7 +108,8 @@ Temporal's activity heartbeat lets a short timeout detect a dead worker while a 
 Temporal Schedules start a workflow on a calendar, with overlap, catch-up, pause and backfill.
 
 - **A schedule** belongs to one template and holds a cron expression and time zone, the change it starts (validated
-  as a start body is), a project, and a run-as user. The run-as user is the admin who created it; a schedule never
+  as a start body is), a project, and a run-as user. The run-as user is the admin who created it, or the admin who
+  last changed what or when it starts (see the decision 4 notes below); a schedule never
   runs as a system identity. Each start goes through the normal governed start path (entitlements, project
   attribution, budget, assignment, audit) as that user. A disabled or deleted user, a retired template or a refused
   start pauses the schedule with the reason, audited.
@@ -123,8 +124,8 @@ Temporal Schedules start a workflow on a calendar, with overlap, catch-up, pause
   fire time, so it is deterministic and spreads schedules that share a cron expression.
 - **Pause, resume and backfill.** Pause and resume each take a note and are audited. Backfill starts one instance per
   fire time in a range (at most 100), as the schedule's user, under the overlap policy, and is audited.
-- **Exactly once per fire time.** A row in `workflow_schedule_runs`, unique on (schedule, fire time), is inserted in
-  the start's transaction.
+- **At most once per fire time.** A row in `workflow_schedule_runs`, unique on (schedule, fire time), is inserted
+  before the start, so a fire time never starts twice.
 
 ### 5. Visibility: typed search and a pending-work view (slice 5)
 
@@ -192,9 +193,52 @@ above, it is recorded here, against the decision it refers to.
     schedule: the open instance is the schedule's overlap, not a broken schedule.
   - `POST /v1/workflows/schedules/run-due` runs the same sweep on demand, as the other ADR-0064 jobs have.
   - There is no delete route: pause is enough, and a schedule's runs are its evidence.
+  - *Who it runs as, after an edit* (review of #930, 2026-11-25, four-eyes): an edit by an admin other than the
+    run-as user to what or when the schedule starts (the change, project, work item, calendar, overlap, catch-up or
+    jitter) re-binds `run_as_user_id` to the editing admin, audited with both identities (`runAsRebound`). The admin
+    who chose a start is then its initiator, so an `admin_not_initiator` approver can never be that same admin. A
+    rename does not re-bind. The bootstrap identity can neither edit nor backfill a schedule, and only the run-as
+    user may backfill it (`schedule_run_as_only`); another admin takes it over with an edit first. Re-binding was
+    chosen over "only the creator may edit" so that another admin can still fix or take over a schedule whose
+    creator has left, without recreating it and losing its run history.
+  - *Jitter and the catch-up window* (review of #930): a fire time is due at its jittered time, and both "not yet
+    due" and "missed" are measured from there, so a jitter larger than the window never turns an on-time fire into
+    a missed one.
+  - *The run row* (`workflow_schedule_runs.outcome`) is declared as `WORKFLOW_SCHEDULE_RUN_MACHINE` (ADR-0348):
+    `starting` settles once, through `whereFrom`, to `started`, `reused` or `refused`; every other outcome is final as
+    recorded. A `starting` row left by a process that died before the start answered stays `starting` and that fire
+    time is not retried: a schedule fires each time at most once, never twice.
 - **Decision 5 (visibility).**
   - The search fields are query parameters of the existing list (legacy answer and ADR-0226 contract).
   - *Deadline* is in the pending view, read from lane E21's `sla:<stage>` marker (PR #891). It is not yet a search
     field, because that marker is a context key. It becomes one when the due time is a column, which is recorded as
     a PENDING item.
   - The `describe` transitions of lane E29 (PR #920) join the pending view once that helper merges.
+
+## Addition: the incident console (owner, 2026-11-17; competitor gap audit, Camunda row 7)
+
+The master folded this into decision 5 (visibility); no separate ADR. It builds on the pending-work view:
+
+- **What is an incident.** `GET /v1/workflows/incidents` lists instances that wait on one of four things:
+  - a failed executed stage with no retry queued (`failed_stage`);
+  - a failed required check (`check_failed`);
+  - a deploy parked for a manual handoff (`deploy_handoff`);
+  - a claim whose lease lapsed without a result (`stuck_claim`).
+
+  Each entry carries the pending-work view and, for each action, whether it is allowed now and why not.
+- **Three actions**, each admin-only (server-side, the default admin gate), with a note, audited
+  `workflow:incident-<action>`, and run through the kernel's declared transitions:
+  - **retry**: `recheck` for a failed check, or the executor for an executed stage;
+  - **skip**: the new kernel event `stage_skipped`;
+  - **cancel**: `abort`.
+
+  Retry and skip are refused while an executor holds a live claim.
+- **Skip is narrow.**
+  - It is accepted only on an `automated_check` stage with named checks whose template sets `skippable: true`
+    (absent is the strict default), and only while the instance waits on that stage.
+  - A review, an approval, an artifact, a git or a deploy stage can never carry `skippable`; template validation
+    refuses it.
+  - Skipping completes the stage and runs forward, so the next sign-off still stops the instance.
+  - It needs a `settings_relax` step-up bound to the instance and the stage.
+- **Replay.** `stage_skipped` is a recorded event like any other. The replay check lists it, and the fixture
+  `intake-check-skipped-by-incident-console` pins it.

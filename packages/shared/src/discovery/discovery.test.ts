@@ -50,11 +50,11 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
     }
   });
 
-  it("ADR-0314: every agent registry kind names at least one registry and is gated off by default; only the OpenAI and n8n kinds report agent_config evidence (ADR-0336 slice 4)", () => {
+  it("ADR-0314: every agent registry kind names at least one registry and is gated off by default; only the four E17 kinds report agent_config evidence (ADR-0336 slices 4 and 5)", () => {
     const registryKinds = DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].family === "agent_registry");
     expect([...registryKinds].sort()).toEqual(["agent_registry_agentcore", "agent_registry_agentforce", "agent_registry_copilot_studio", "agent_registry_entra", "agent_registry_gemini", "agent_registry_n8n", "agent_registry_openai"]);
     for (const k of registryKinds) {
-      const e17 = k === "agent_registry_openai" || k === "agent_registry_n8n";
+      const e17 = DISCOVERY_KIND_SPECS[k].slice === "E17";
       expect(DISCOVERY_KIND_SPECS[k].evidenceKinds).toEqual(e17 ? ["agent_config"] : []);
       expect(DISCOVERY_KIND_SPECS[k].subjectKinds).toEqual(e17 ? ["system"] : []);
       expect(AGENT_REGISTRIES_BY_KIND[k]?.length).toBeGreaterThan(0);

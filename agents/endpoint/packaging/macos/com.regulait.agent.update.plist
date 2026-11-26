@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchDaemon (root), ADR-0360 §4: the self-update check, hourly. It installs nothing unless the config pins the
+     device-policy and release keys and the spool holds a directive the gateway signed for this device. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.regulait.agent.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/RegulAIt/Agent/bin/regulait-agent</string>
+    <string>update</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

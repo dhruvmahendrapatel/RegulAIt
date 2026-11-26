@@ -33,6 +33,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { auditLog, eq, externalScorers, type Db, type ExternalScorerRow } from "@regulait/db";
 import {
   createExternalScorerSchema,
+  embeddingClaimRefusal,
+  TEXT_EMBEDDING_SCORER_KIND,
   isVendorAdapter,
   parseExternalScorerResponse,
   vendorAdapterRefusal,
@@ -450,6 +452,9 @@ export function registerExternalScorerRoutes(
     // P7R-01: the fields that change the instrument an enabled trained detector calls (the key's value is never
     // bound into the step-up facts; only that it is replaced or cleared)
     const nextKinds = body.scorerKinds ?? ((row.scorerKinds as string[]) ?? []);
+    // ADR-0352: an embedder claims text_embedding alone, on the RegulAIt contract
+    const embeddingRefusal = embeddingClaimRefusal(nextKinds);
+    if (embeddingRefusal) return reply.status(422).send({ error: "invalid_scorer_kinds", detail: embeddingRefusal });
     const instrumentChanges: Record<string, unknown> = {
       ...(nextBaseUrl !== row.baseUrl ? { baseUrl: nextBaseUrl } : {}),
       ...(nextPlaintext !== row.allowPlaintextHttp ? { allowPlaintextHttp: nextPlaintext } : {}),
@@ -545,6 +550,29 @@ export function registerExternalScorerRoutes(
     const [row] = await db.select().from(externalScorers).where(eq(externalScorers.id, scorerId));
     if (!row) return reply.status(404).send({ error: "unknown_external_scorer" });
 
+    // ADR-0352: an embedder is tested on its own contract (/embed), with the local-only resolver
+    if (((row.scorerKinds as string[]) ?? []).includes(TEXT_EMBEDDING_SCORER_KIND)) {
+      const { embedText, resolveLocalEmbedder } = await import("./semantic-cache-similarity.js");
+      const local = await resolveLocalEmbedder(db, opts.dataKey, scorerId, {
+        connectionTest: true,
+        ...(opts.resolve ? { resolve: opts.resolve } : {}),
+      });
+      try {
+        if (!local.ok) throw new Error(local.reason);
+        const out = await embedText(local.embedder, "connection test: is this endpoint speaking the RegulAIt embed contract?");
+        await recordTest(scorerId, null);
+        await audit(actor(req), scorerId, "external-scorer-tested",
+          `connection test for embedder '${row.name}' passed: ${out.vector.length} dimensions from ${out.model}`,
+          { phase: "connection_test", baseUrl: row.baseUrl, dims: out.vector.length, model: out.model });
+        return { ok: true, dims: out.vector.length, model: out.model };
+      } catch (err) {
+        const message = errMessage(err);
+        await recordTest(scorerId, message);
+        await audit(actor(req), scorerId, "external-scorer-test-failed", `connection test for '${row.name}' failed: ${message}`,
+          { phase: "connection_test", baseUrl: row.baseUrl, error: message }, "deny");
+        return reply.status(502).send({ ok: false, error: "connection_test_failed", detail: message });
+      }
+    }
     const { facts, resolved } = await resolveExternalScorersByName(db, opts.dataKey, [row.name], {
       ...(opts.resolve ? { resolve: opts.resolve } : {}),
       ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),

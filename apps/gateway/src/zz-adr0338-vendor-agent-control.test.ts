@@ -277,7 +277,10 @@ describe("ADR-0338: execute", () => {
     const act = await approved(a.recordId, "quarantine");
     const calls = vendor.calls.length;
     expect((await execute(act, otherAdminId)).res.json().error).toBe("not_the_requester");
+    // review of #1120: without the step-up no vendor token is minted
+    const minted = credentials.acquired;
     expect((await execute(act, adminId, false)).res.statusCode).toBe(403);
+    expect(credentials.acquired).toBe(minted);
     expect(vendor.calls.length).toBe(calls);
     const ran = await execute(act);
     expect(ran.res.statusCode, ran.res.body).toBe(200);

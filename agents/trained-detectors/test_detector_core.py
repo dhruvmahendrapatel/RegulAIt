@@ -129,3 +129,33 @@ class OfflinePublicSuffixList(unittest.TestCase):
         finally:
             socket.socket.connect = real
         self.assertEqual(tuple(tldextract.tldextract.TLD_EXTRACTOR.suffix_list_urls), ())
+
+
+class Embedding(unittest.TestCase):
+    """ADR-0352: the /embed contract and sentence-transformers pooling."""
+
+    def test_parse(self):
+        self.assertEqual(core.parse_embed_request({"scorerKind": "text_embedding", "input": "hi"}), "hi")
+        for body in ([], {"scorerKind": "guardrail_pii", "input": "x"}, {"scorerKind": "text_embedding", "input": ""},
+                     {"scorerKind": "text_embedding", "input": "x" * (core.MAX_EMBED_CHARS + 1)}):
+            with self.assertRaises(core.RequestError):
+                core.parse_embed_request(body)
+
+    def test_mean_pool_honours_the_mask_and_normalises(self):
+        v = core.mean_pool_normalise([[3.0, 0.0], [0.0, 4.0], [100.0, 100.0]], [1, 1, 0])
+        self.assertAlmostEqual(v[0], 0.6)
+        self.assertAlmostEqual(v[1], 0.8)
+        self.assertAlmostEqual(sum(x * x for x in v), 1.0)
+        for vectors, mask in (([[1.0]], [0]), ([[0.0, 0.0]], [1]), ([[1.0], [1.0, 2.0]], [1, 1]), ([[float("nan")]], [1])):
+            with self.assertRaises(ValueError):
+                core.mean_pool_normalise(vectors, mask)
+
+    def test_reply_has_numbers_and_the_model_only(self):
+        out = core.embed("secret text", lambda t: ([1.0, 0.0], False), "m@rev")
+        self.assertEqual(out, {"embedding": [1.0, 0.0], "dims": 2, "model": "m@rev", "truncated": False})
+        # R3 #969 finding 1: an input cut to the window is reported, never hidden
+        self.assertTrue(core.embed("long text", lambda t: ([1.0, 0.0], True), "m@rev")["truncated"])
+        self.assertNotIn("secret", str(out))
+
+    def test_supported_lists_the_embedding_kind(self):
+        self.assertIn("text_embedding", core.supported({"embedding": object()}))

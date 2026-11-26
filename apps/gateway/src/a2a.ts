@@ -87,7 +87,9 @@ import { answerListExport, answerListPage, noListFilters } from "./identity-list
 import type { ListReader, ListSpec } from "./list-contract.js";
 import { timeouts } from "./timeouts.js";
 import { evaluateA2a, governedCoreErrorDecision, RESOURCE_RULE_IDS, type GovernedResource, type GovernedResourceDecision } from "@regulait/policy-kernel";
-import { governedEvaluateResource } from "./governed-core.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
+import { governedEvaluateResource, governedProcessingLimit } from "./governed-core.js";
+import { PRIVACY_RULE_IDS } from "./privacy-ops.js";
 import { loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 
@@ -361,6 +363,8 @@ export interface GovernedA2aCallArgs {
   ceilingAgentIds?: readonly string[] | null;
   /** an admin may attribute to any project; anyone else must be a member of a project that has members (absent = not an admin) */
   callerIsAdmin?: boolean;
+  /** ADR-0251 slice 4b: the request's session facts (`abacPrincipalFromRequest`) for the ABAC v5 request; absent = strict values */
+  principal?: AbacPrincipalContext | null;
 }
 
 export type GovernedA2aCallOutcome =
@@ -447,7 +451,15 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
       grantId = entitlement.ruleId;
       grantSource = grants.find((g) => g.id === grantId)?.source ?? null;
     }
-    core = await governedEvaluateResource(db, { userId: args.userId, resource, projectId, base: entitlement, canQueue: false });
+    core = await governedEvaluateResource(db, {
+      userId: args.userId,
+      resource,
+      projectId,
+      base: entitlement,
+      canQueue: false,
+      // A2A has no delegated path yet (no grant id reaches it), so the actor is the person: an empty chain
+      facts: { principal: args.principal ?? null, actor: null },
+    });
   } catch (err) {
     core = governedCoreErrorDecision(resource, err);
   }
@@ -483,6 +495,19 @@ export async function executeGovernedA2aCall(db: Db, args: GovernedA2aCallArgs, 
     // COUNTS ONLY, never the matched text
     piiDetail = { mode: piiMode, action: chk.action, phase: "input", inputHits: chk.hits };
     if (chk.action === "block") return deny(403, "pii_blocked", A2A_RULE_IDS.piiBlocked, `the message contains PII (${piiCategoryList(chk.hits)})`, label, { pii: piiDetail });
+  }
+
+  // 6a. ADR-0224 addendum (2026-11-21): the records-of-processing limit, the governed core's one check path, on the
+  //     text that would leave. After the PII mode (the cascade decides first), before guardrails and egress. The gate
+  //     writes the one audit row for the refusal, so it is returned here without a second.
+  const processingRefusal = await governedProcessingLimit(db, {
+    userId: args.userId,
+    target: { type: "a2a", agentId: agent.id, agentName: agent.name, skillId },
+    projectId,
+    input: args.text,
+  });
+  if (processingRefusal) {
+    return { kind: "denied", status: processingRefusal.status, error: processingRefusal.error, ruleId: PRIVACY_RULE_IDS.dispatchRefused, reason: processingRefusal.detail, auditId: processingRefusal.auditLogId };
   }
 
   // 6b. the ADR-0042 guardrails on the message (PII has its own path above, so the detectors exclude it). There is no
@@ -1121,7 +1146,7 @@ export function registerA2aRoutes(app: FastifyInstance, db: Db, opts: { dataKey?
     if (!parsed.success) return reply.status(400).send({ error: "invalid_request", detail: `expected { text (1 to ${A2A_MESSAGE_MAX_CHARS} characters), skillId?, projectId? }` });
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "forbidden", detail: "a remote agent is called as a person; this credential has none" });
-    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true }, deps);
+    const out = await executeGovernedA2aCall(db, { userId, agentId, skillId: parsed.data.skillId ?? null, text: parsed.data.text, projectId: parsed.data.projectId ?? null, callerIsAdmin: req.authCtx.isAdmin === true, principal: abacPrincipalFromRequest(req) }, deps);
     if (out.kind === "allowed")
       return { reply: out.reply, taskState: out.taskState, costUsd: out.costUsd, auditId: out.auditId, withheld: out.withheld, ...(out.pii ? { pii: out.pii } : {}), ...(out.guardrails ? { guardrails: out.guardrails } : {}) };
     return reply.status(out.status).send({ error: out.error, detail: out.reason, auditId: out.auditId, ...(out.kind === "denied" ? { ruleId: out.ruleId } : {}) });
