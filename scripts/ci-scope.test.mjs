@@ -252,9 +252,9 @@ describe("the workflows wire the scope fail-closed", () => {
   it("build-and-test checks each part: the gateway job on every code PR, its coverage check when `gateway` is set", () => {
     const jobs = workflow("ci.yml").jobs;
     expect(jobs["gateway-tests"].if).toBe("needs.scope.outputs.code == 'true'");
-    // the one-runner web-only form only on an exact 'false'; an empty or failed output gives the seven shards
+    // the one-runner web-only form only on an exact 'false'; an empty or failed output gives the eight shards
     expect(jobs["gateway-tests"].strategy.matrix.shard).toBe(
-      "${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5, 6, 7]') }}",
+      "${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5, 6, 7, 8]') }}",
     );
     const steps = jobs["gateway-tests"].steps;
     expect(steps.find((s) => s.name?.startsWith("Gateway suite, shard")).if).toBe("matrix.shard != 'web-readers'");
@@ -383,14 +383,14 @@ describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
     }
   });
 
-  it("a gateway-only PR: the seven DB shards and their coverage check, no web suites", () => {
+  it("a gateway-only PR: the eight DB shards and their coverage check, no web suites", () => {
     const plan = planFor(["apps/gateway/src/route-classes.ts"]);
     const ran = ranJobs(plan);
     expect(ran).toEqual(expect.arrayContaining([...REQUIRED, "ci:gateway-tests", "ci:gateway-coverage", "import-cycles:gateway-import-cycles"]));
     expect(ran).not.toContain("ci:spa-mock");
     expect(ran).not.toContain("ui-enterprise:browsers");
     expect(ran, "the journeys boot the real gateway").toContain("ci:spa-journeys");
-    expect(plan.workflows.find((w) => w.file === "ci.yml").jobs["gateway-tests"].runners).toBe(7);
+    expect(plan.workflows.find((w) => w.file === "ci.yml").jobs["gateway-tests"].runners).toBe(8);
   });
 
   it("the real-gateway journeys (#1227): on an e2e-spec PR, not on a docs-only or a gateway-unit-test-only PR", () => {
@@ -426,7 +426,7 @@ describe("the dry run (scripts/ci-plan.mjs) selects the expected jobs", () => {
 describe("the dry run's expressions are GitHub's (@actions/expressions)", () => {
   const ctx = { needs: { scope: { result: "success", outputs: { gateway: "false", code: "true" } } }, github: { event_name: "pull_request" } };
   it("evaluates the workflows' constructs with GitHub's rules", () => {
-    expect(evaluate("${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5, 6, 7]') }}", ctx).value)
+    expect(evaluate("${{ fromJSON(needs.scope.outputs.gateway == 'false' && '[\"web-readers\"]' || '[1, 2, 3, 4, 5, 6, 7, 8]') }}", ctx).value)
       .toEqual(["web-readers"]);
     expect(evaluate("!cancelled() && needs.scope.outputs.code != 'false'", ctx, { cancelled: false }).truthy).toBe(true);
     // a missing output is null on GitHub: != 'false' is true (so the fail-closed gates run), == 'true' is false
