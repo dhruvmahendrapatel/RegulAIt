@@ -283,7 +283,11 @@ export interface PrivacyGateContext {
 export type ProcessingLimitTarget =
   | { type: "model"; agentId: string; agentName: string }
   | { type: "connector"; connectorId: string; connectorName: string; operation: string }
-  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string };
+  | { type: "mcp_tool"; serverId: string; toolName: string; method?: string }
+  /** ADR-0224 addendum 2026-11-21: a call to a remote agent (ADR-0219) */
+  | { type: "a2a"; agentId: string; agentName: string; skillId: string | null }
+  /** ADR-0224 addendum 2026-11-21: rows entering a training corpus (ingest or append), before anything is stored */
+  | { type: "training_dataset"; datasetId: string | null; datasetName: string; phase: "ingest" | "append" | "version" | "train" };
 
 export interface ProcessingLimitInput {
   userId: string;
@@ -298,7 +302,8 @@ export type PrivacyGateResult = {
   status: 409;
   error: typeof PROCESSING_NOT_PERMITTED;
   detail: string;
-  auditLogId: string | null;
+  /** the refusal's own audit row: always present, a refusal that could not be audited throws instead */
+  auditLogId: string;
 } | null;
 
 /** the categories the active records of processing for `projectId` permit, and how many records there are */
@@ -332,6 +337,16 @@ function targetAuditColumns(t: ProcessingLimitTarget) {
       };
     case "mcp_tool":
       return { columns: { serverId: t.serverId, toolName: t.toolName }, detail: t.method ? { method: t.method } : {} };
+    case "a2a":
+      return {
+        columns: { objectType: "a2a_agent" as const, objectId: t.agentId, toolName: t.skillId },
+        detail: { agentId: t.agentId, agentName: t.agentName, skillId: t.skillId },
+      };
+    case "training_dataset":
+      return {
+        columns: { objectType: "training_dataset" as const, objectId: t.datasetId },
+        detail: { datasetName: t.datasetName, phase: t.phase },
+      };
   }
 }
 
@@ -376,7 +391,9 @@ export async function processingLimitGate(db: Db, ctx: ProcessingLimitInput): Pr
       reason: detail,
     })
     .returning({ id: auditLog.id });
-  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row?.id ?? null };
+  // fail loudly rather than refuse without evidence (review #1161 R2 [2]); the caller's error path refuses the call
+  if (!row) throw new Error("processing limit: the refusal's audit row was not written");
+  return { kind: "refuse", status: 409, error: PROCESSING_NOT_PERMITTED, detail, auditLogId: row.id };
 }
 
 /** the model-dispatch form of `processingLimitGate`, kept for the dispatch callers' existing signature */

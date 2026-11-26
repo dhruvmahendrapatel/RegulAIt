@@ -64,16 +64,11 @@ export interface ResourceApprovalRule extends ResourceBound {
   approverName?: string | null;
 }
 
-/** The approval rules that bind this call, most specific first (the first one names the approver). The gateway uses
- * the same predicate to decide whether a consent binding is needed, so the two can never disagree.
- *
- * ADR-0239 slice 2b: the hand-written predicate. The gateway matches on Cedar (`matchingResourceApprovalRulesWith` with
- * `@regulait/policy-kernel/resource-approval-rule-cedar`); this stays the kernel's default for one release, and the
- * differential test holds Cedar to it. */
-export function matchingResourceApprovalRules<R extends ResourceApprovalRule>(resource: GovernedResource, rules: readonly R[]): R[] {
-  const write = resourceIsWrite(resource);
-  return rules.filter((r) => binds(r, resource) && (!r.writeOnly || write)).sort(bySpecificity);
-}
+/** ADR-0239 P8b (2026-11-21): the hand-written resource approval-rule predicate (`matchingResourceApprovalRules`) is
+ * removed. The match runs only on an injected engine (`matchingResourceApprovalRulesWith`, Cedar in the gateway); with
+ * no engine the kernel refuses. `resource-approval-rule-cedar.test.ts` keeps a transcription of the old predicate as
+ * its differential oracle. */
+const NO_RESOURCE_APPROVAL_RULE_EVALUATOR_MESSAGE = "no approval-rule evaluator is configured";
 
 /** ADR-0239 slice 2b — a resource approval-rule engine's answer: the binding rules (any order), or an error (a DENY). */
 export type ResourceApprovalRuleVerdict<R extends ResourceApprovalRule = ResourceApprovalRule> =
@@ -91,16 +86,18 @@ export interface ResourceApprovalRuleEvaluator {
 }
 
 /**
- * ADR-0239 slice 2b — the match on an injected engine, most specific first. No engine = the hand-written predicate.
- * An engine error, a throw, or an answer that is not a subset of the input is an error verdict, never "nothing
- * matched": the kernel turns it into a deny, and a gateway caller must not read it as "no rule binds this call".
+ * ADR-0239 slice 2b — the match on an injected engine, most specific first (the first one names the approver). No
+ * rules = nothing matched, with no engine call. Rules but no engine (P8b), an engine error, a throw, or an answer that
+ * is not a subset of the input is an error verdict, never "nothing matched": the kernel turns it into a deny, and a
+ * gateway caller must not read it as "no rule binds this call".
  */
 export function matchingResourceApprovalRulesWith<R extends ResourceApprovalRule>(
   evaluator: ResourceApprovalRuleEvaluator | null | undefined,
   resource: GovernedResource,
   rules: readonly R[],
 ): ResourceApprovalRuleVerdict<R> {
-  if (!evaluator || rules.length === 0) return { kind: "matched", rules: matchingResourceApprovalRules(resource, rules) };
+  if (rules.length === 0) return { kind: "matched", rules: [] };
+  if (!evaluator) return { kind: "error", message: NO_RESOURCE_APPROVAL_RULE_EVALUATOR_MESSAGE };
   try {
     const v = evaluator.matching(rules, resource);
     if (v.kind === "error") return v;
@@ -167,9 +164,10 @@ export interface ComposeResourceInput {
   attributionRequired: boolean;
   rateLimits?: readonly ResourceRateLimit[];
   approvalRules?: readonly ResourceApprovalRule[];
-  /** ADR-0239 slice 2b: the approval-rule match engine; absent = the hand-written predicate (for one release). An
-   * engine error or throw DENIES the call (`approval-rule-engine-error`). */
-  approvalRuleEvaluator?: ResourceApprovalRuleEvaluator | null;
+  /** ADR-0239 slice 2b: the approval-rule match engine (Cedar in the gateway). REQUIRED (P8b, review #1093 finding 1,
+   * issue #1097), so the compiler finds every caller. null with any approval rule present, an engine error or a throw
+   * DENIES the call (`approval-rule-engine-error`). */
+  approvalRuleEvaluator: ResourceApprovalRuleEvaluator | null;
   /** ADR-0040 verdict for this call; null/undefined = no active policy applies (no rule-chain entry) */
   abacDecision?: AbacDecision | null;
   /** a bound, fresh consent the gateway found for exactly this call */

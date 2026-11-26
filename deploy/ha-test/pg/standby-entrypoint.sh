@@ -11,5 +11,8 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
     -D "$PGDATA" -R -X stream -c fast
   # once promoted it has no standby of its own, so it must not wait for one
   echo "synchronous_standby_names = ''" >> "$PGDATA/postgresql.auto.conf"
+  # a hot standby must allow at least as many connections as the primary (compose.yml runs it with 200), or
+  # recovery aborts with "insufficient parameter settings"
+  echo "max_connections = 200" >> "$PGDATA/postgresql.auto.conf"
 fi
 exec gosu postgres postgres -D "$PGDATA"

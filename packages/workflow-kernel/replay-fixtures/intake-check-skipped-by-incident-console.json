@@ -1,0 +1,89 @@
+{
+  "fixture": 1,
+  "name": "intake-check-skipped-by-incident-console",
+  "note": "ADR-0349 incident console: a failed check stage the template marks skippable is skipped by an admin; the instance runs on to the merge sign-off, which still stops it",
+  "definition": {
+    "workflow": "intake-skip",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "checks",
+        "type": "automated_check",
+        "checks": [
+          "flaky-e2e"
+        ],
+        "skippable": true
+      },
+      {
+        "id": "merge-approval",
+        "type": "human_approval",
+        "approvers": [
+          "00000000-0000-4000-8000-0000000000a1"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    },
+    {
+      "kind": "approval_granted",
+      "stageId": "signoff"
+    },
+    {
+      "kind": "check_failed",
+      "stageId": "checks",
+      "failures": [
+        "flaky-e2e"
+      ]
+    },
+    {
+      "kind": "stage_skipped",
+      "stageId": "checks",
+      "reason": "e2e runner outage; verified by hand"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "blocked_on_approval",
+      "currentStageIndex": 4,
+      "stageStatuses": [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "active"
+      ],
+      "artifactVersions": {
+        "requirements": 1
+      }
+    },
+    "statuses": [
+      "blocked_on_artifact",
+      "blocked_on_approval",
+      "awaiting_execution",
+      "blocked_on_check",
+      "blocked_on_approval"
+    ]
+  }
+}

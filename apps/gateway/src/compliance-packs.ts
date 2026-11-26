@@ -171,12 +171,12 @@ const safeIds = (ids: string[]) => (ids.length ? ids : [ZERO_UUID]);
 /**
  * The jsonb project predicate for `audit_log`, which carries no project column
  * — attribution rides `detail.projectId`, the key every governed path writes.
- * Built by interpolation, so every id is re-validated as a uuid on the way in:
- * a non-uuid here would be an injection primitive, and it throws instead.
+ * Every id is a bound parameter (security checklist: parameterised queries
+ * only, Codex review S-10) and is still validated as a uuid on the way in.
  */
 function auditProjectPredicate(projectIds: string[]) {
-  const ids = safeIds(projectIds).map((p) => `'${assertUuid(p)}'`).join(",");
-  return sql`${auditLogTable.detail} ->> 'projectId' = ANY(${sql.raw(`ARRAY[${ids}]::text[]`)})`;
+  const ids = safeIds(projectIds).map((p) => sql`${assertUuid(p)}`);
+  return sql`${auditLogTable.detail} ->> 'projectId' = ANY(ARRAY[${sql.join(ids, sql`, `)}]::text[])`;
 }
 
 function assertUuid(v: string): string {

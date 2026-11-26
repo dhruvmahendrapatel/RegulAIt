@@ -118,3 +118,136 @@ model ids, no Vercel host in installed provider code) cover the new packages unc
   and make no network call of their own outside the injected fetch.
 - Bedrock and Vertex service-account credentials only work with an explicit, allow-listed baseUrl. That is a deliberate
   cost of keeping every destination adjudicated.
+
+## As built — slice 2: a meaning-based cache tier (2026-11-17)
+
+### What we built
+
+- **A second tier behind the exact cache, off by default.** `org_settings.semantic_cache_similarity_enabled` (default
+  `false`), `semantic_cache_similarity_min` (cosine, default 0.95, CHECK 0.80–0.999) and `semantic_cache_embedder_id`
+  (FK to `external_scorers`, SET NULL on delete), all in the `semantic_cache_similarity` migration. Turning the tier on
+  is a classified loosening in the ADR-0181 strictness registry (`notEqual(false)`); so is lowering the bar
+  (`atLeast(0.95)`). The settings PUT refuses `true` without an embedder (`embedder_required`), an id that is not a
+  `text_embedding` scorer (`unknown_embedder`), or one that has not passed its connection test (`embedder_disabled`).
+  It also needs the exact cache's own policy (`semantic_cache_policy`, ADR-0181 default `off`) to cache at all.
+- **The partition is mandatory and has no setting.** A vector is stored in `semantic_cache_embeddings`, one row per
+  `semantic_cache` row (FK, ON DELETE CASCADE, so the TTL purge and user erasure remove it). Its `partition_key` is a
+  sha256 commitment to the user, the agent, and **everything in the ADR-0146 exact key except the input text**: the
+  attributed project, mode, system, baseline, reference content, attachments, max tokens, cost sensitivity, the
+  planner dials and the serving configuration (provider, model, custom endpoint, system prompt, active config and
+  prompt versions). A lookup filters on the partition key **and** on the parent row's user and agent, the embedder
+  and the embedder's reported model, and the TTL. So a row can only ever be served to the same user, for the same
+  agent, under the same project, options and configuration; an embedder upgrade misses. One deployment is one tenant
+  (ADR-0041), so the deployment is the tenant boundary.
+- **Every hit runs the live gates.** The tier rides inside `lookupSemanticCache`, so the call site keeps the AER-010
+  shape the ADR-0119 AST guard pins: one bound hit, one `if (hit)`, handed to `executeGovernedDispatch` as
+  `cachedResponse`, and only the core's adjudicated output is served. That core re-runs entitlement, ABAC, guardrails,
+  PII mode, budget and the output policy on **this** request's input and the cached output (ADR-0138). The test
+  revokes a grant and the paraphrase is refused with 403, not served. The savings row is
+  `semantic-cache-similar-hit` with the similarity score; the audit row records `tier: "similarity"` and the score,
+  never text.
+- **A local embedder only, enforced in code.** The embedder is the ADR-0247 trained-detectors service with a new
+  opt-in model (`sentence-transformers/all-MiniLM-L6-v2`, Apache-2.0, pinned by revision and sha256, used as its
+  published ONNX export) and a new `POST /embed` route. The gateway registers it as an external scorer claiming
+  `text_embedding` **alone** on the `regulait` contract (vendor adapters cannot claim it), so it reuses the
+  write-only key, the register → connection test → enable lifecycle and the egress allow-list. On top of the guard,
+  the embed fetch's resolver refuses any host that resolves to a public or unclassifiable address, on the very
+  addresses the DNS-pinned fetch then connects to, and an IP-literal URL is classified directly
+  (`localLiteralRefusal`). A SaaS embedding API cannot be configured, and an internal name re-pointed at a public
+  address is refused before a byte of the prompt leaves.
+- **Failure is a miss.** An embedder that is down, slow (2 s budget), non-conforming or not local produces a logged
+  miss and the call is dispatched for real, fully governed. A cache can never fail a call.
+- **The store** writes the vector computed at lookup (one embed call per miss), only on the store path ADR-0146
+  already guards (the requested agent served, no fallback, the configuration unchanged during the dispatch).
+- **Bounded search in the existing Postgres.** Each lookup compares at most the partition's 256 newest live rows,
+  cosine over unit vectors in the gateway. The partition is narrow by construction (one user, one agent, one exact
+  set of options), so an index is not needed for correctness or latency at that size.
+
+### Options compared (ADR-0176, owner rule 9)
+
+| Question | Option A (chosen) | Option B | Option C |
+|---|---|---|---|
+| Embedder | `all-MiniLM-L6-v2` in the existing ONNX sidecar (Apache-2.0; stock tooling) | `BAAI/bge-small-en-v1.5` (MIT; tuned for asymmetric query-to-passage retrieval with a query prefix, which a prompt-to-prompt match does not need) | in-process Node: `@huggingface/transformers` + `onnxruntime-node` (Apache-2.0/MIT), a large native dependency in the gateway image; `fastembed` JS (no release in the maintenance window) |
+| Vector store | `double precision[]` in the existing Postgres, bounded brute force inside the partition | `pgvector` (PostgreSQL licence): needs an extension our stock `postgres:16` images do not ship, and managed or air-gapped Postgres installs may not allow it | Redis vectors (the KrakenD design): a new stateful service, and caches must not cross users, which a shared index makes easy to get wrong |
+
+Repository search first: the exact-cache key, store and purge (ADR-0119/0146/0185), the governed hit path (ADR-0138),
+the external-scorer registry and its guarded fetch (ADR-0088/0220), the egress guard's address classifier
+(ADR-0043) and the ADR-0247 ONNX sidecar were all reused. KrakenD's `key_variants` idea is taken and made mandatory.
+
+### Not built in slice 2, and why
+
+- **The OpenAI/Anthropic compat path** keeps the exact tier only. Its key commits to the whole request
+  (ADR-0136), and choosing which part of a message list is "the input" to compare by meaning is its own decision.
+  Recorded as a pending item.
+- **Row-level security** on `semantic_cache` and its new child table: `semantic_cache` is in ADR-0234's user-owned
+  batch, which has not run yet; the child follows its parent there. The partition is enforced in every query today.
+- **An admin screen** for the three settings and the embedder registration (design builder, #453; the API is complete).
+
+## As built — slice 3: incremental streaming inspection (2026-11-17)
+
+### What we built
+
+- **An opt-in release mode; the strict default is unchanged.** `org_settings.stream_output_inspection` is `buffer`
+  (default) or `incremental` (migration `stream_output_inspection`, CHECK-constrained). `buffer` is today's
+  ADR-0019/0042 behaviour: under an output-phase block policy (the project PII mode at `block`, or a guardrail
+  detector at `block`) the stream is suppressed or rejected at the route, and the core scans the whole completion
+  before one flush. Choosing `incremental` is a classified loosening in the ADR-0181 strictness registry.
+- **The rule that does not change: no character before a scan that covered it.** `IncrementalStreamReleaser`
+  (`apps/gateway/src/stream-inspection.ts`) accumulates the provider's text deltas. Whenever at least 512 characters
+  wait beyond a 256-character hold-back, it scans the window from 256 characters before the released point to the
+  end, with the same detectors the final scan uses (`enforcePII` at `block`, and `runGuardrailsAsync` on the output
+  phase). Only after the window passes is text released, up to 256 characters short of the end. Any finding no longer
+  than the hold-back that touches released text lies inside a scanned window. A scanner failure fails closed, and so
+  does a window scan that has not answered within 15 s (`STREAM_SCAN_TIMEOUT_MS`, above the 10 s ceiling on a trained
+  detector's own timeout, so a slow detector blocks through its `onFailure` first). Either way nothing more is released.
+- **The full scan stays authoritative.** When the provider finishes, the existing whole-result scan runs exactly as
+  before (it also covers thinking and tool-call arguments), and the held-back tail is released only if it passes and
+  the delta transcript equals the result that was scanned. A window block, a final block, a scanner failure or a
+  transcript mismatch all withhold.
+- **On a violation, an explicit error event.** The core then returns `ok: false` (`pii_blocked` or
+  `guardrail_blocked`, 403) after the usage row, the guardrail decision and the audit rows are written
+  (bill-and-withhold), so every streaming surface ends with its own native error: `event: error` on the native SSE
+  invoke route, an OpenAI error chunk then `[DONE]` on the OpenAI edge, `event: error` on the Anthropic edge and the
+  orchestration worker stream. Where nothing had been released yet, the compat edges and the worker route answer with
+  their ordinary HTTP error instead, as they already do for any refusal before the first byte. The detail tells the
+  client to discard any partial text it received. Nothing more is released after a block.
+- **Where it applies.** The native invoke route, both compat edges and the orchestration worker stream keep a live
+  stream under incremental mode (one helper, `incrementalStreamInspection`, read at each of the three pre-dispatch
+  decision points). The guarantee itself is in the one dispatch core (ADR-0251), so a served agent's own stricter
+  policy is still caught there. A request that also streams thinking keeps the buffer: thinking deltas have no
+  windowed path yet.
+
+### Measured overhead
+
+- **Detector cost** (`stream-inspection.test.ts`, the real PII detector, 9,564 characters in 40-character deltas,
+  20 runs): 17 windowed scans costing **0.12 ms** in total, against 0.02 ms for one whole-result scan. The windows
+  overlap, so the scanned volume is about (512 + 2 × 256) / 512 = 2× the text.
+- **Time to first byte**: the first piece is released after about **800 characters** (step plus hold-back) instead of
+  after the whole answer (9,564 characters in that run).
+- **End to end** (`zz-adr0352-stream-inspection.test.ts`, mock provider, one run each, dominated by fixture and
+  database work): buffer 204–217 ms, incremental 119–163 ms for the same 2,700-character answer.
+- **Remote detectors scale with windows.** A guardrail served by an external scorer (ADR-0088/0220) is called once per
+  window, about length / 512 times per answer, so its own latency adds per window. That is a reason the mode is
+  opt-in.
+
+### Options compared
+
+| Approach | Verdict |
+|---|---|
+| Sliding window with a hold-back, same detectors (chosen) | Keeps one set of detectors (no second regex list, the ADR-0137 warning), bounded cost, a stated span bound. |
+| Re-scan the whole accumulated text at each step | Simplest proof, but quadratic cost and a remote scorer call over the whole text at every step. |
+| Per-detector streaming state machines (Aho-Corasick or regex automata carried across chunks) | Exact for pattern detectors, but needs a streaming form of every detector, including classifiers that have none; a second implementation to drift. |
+
+Repository search first: the ADR-0042 buffer-and-flush, the ADR-0019 route suppression, `enforcePII`,
+`runGuardrailsAsync`, and the routes' existing error events were reused. Nothing in open source fits this exact
+contract: KrakenD's streaming manipulation (the design idea credited here) is closed EE code; LLM Guard (MIT) and
+Guardrails AI (Apache-2.0) are Python libraries whose streaming validators also re-validate accumulated chunks, the
+same windowed idea; adopting either would add a second detector stack.
+
+### Residual, stated plainly
+
+A detector that judges the whole text (a classifier score, or a finding longer than 256 characters) can block at the
+end after earlier pieces were released. The client then receives the explicit error event and must discard what it
+showed; the spend is billed and the decision audited. This is why `buffer` stays the default. Redaction (ADR-0137's
+`redact` mode) is still not enabled: on a block the stream stops; it is not rewritten in flight. The provider call is
+not cancelled on a window block (its tokens are billed, as with any bill-and-withhold).

@@ -1384,12 +1384,34 @@ export {
   GENERIC_TIMESTAMP_HEADER,
   PM_WEBHOOK_REPLAY_WINDOW_SECONDS,
   PM_UNSIGNED_DELIVERY_MAX_AGE_DAYS,
+  JIRA_TRIGGER_RULE_EVENT,
   type InboundDeliveryKey,
   type InboundWebhookInput,
   type InboundWebhookResult,
   type NormalizedInboundEvent,
 } from "./inbound.js";
 export { signGenericWebhook } from "./generic-signature.js";
+// ADR-0356: work assigned from the PM tool (trigger signals, settings, the lifecycle table)
+export {
+  canPmTriggerTransition,
+  extractTriggerSignals,
+  matchTrigger,
+  pmTriggerSettingsSchema,
+  pmTriggerSourcesOf,
+  pmWriteBackSettingsSchema,
+  PM_WRITE_BACK_KINDS,
+  PM_TRIGGER_OPEN_STATES,
+  PM_TRIGGER_STATES,
+  PM_TRIGGER_TRANSITIONS,
+  PM_WORK_TRIGGER_MACHINE,
+  type PmTriggerEvent,
+  type PmTriggerMechanism,
+  type PmTriggerSettings,
+  type PmTriggerSignal,
+  type PmTriggerState,
+  type PmWriteBackKind,
+  type PmWriteBackSettings,
+} from "./triggers.js";
 
 // ---------------------------------------------------------------------------
 // Registry

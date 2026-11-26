@@ -71,6 +71,10 @@ import {
   ISOLATION_SETTING_KEYS,
   ISOLATION_STRICT_DEFAULTS,
   type UpdateOrgSettings,
+  CONTAINMENT_AUTO_THRESHOLD_DEFAULT,
+  containmentThresholdLooser,
+  type ContainmentAutoThreshold,
+  PRIVACY_OPS_ENABLED_DEFAULT,
 } from "@regulait/shared";
 
 /** every key `PUT /v1/org/settings` can store (the confirm flag is write-only) */
@@ -249,8 +253,17 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   minPreprocessTokens: exempt(OPTIMISATION),
   summarizerSelection: exempt(OPTIMISATION),
   summarizerAgentId: exempt(OPTIMISATION),
+  // ADR-0353 part 2: a routing classifier sends prompt text to the scorer it names, so naming one is a relaxation
+  routingClassifierScorerId: notEqual(null),
   // ADR-0181: the semantic cache stores prompts and answers — off by default
   semanticCachePolicy: notEqual("off"),
+  // ADR-0352: the meaning-based tier trades exactness for savings — off by default; a lower similarity bar is looser
+  semanticCacheSimilarityEnabled: notEqual(false),
+  semanticCacheSimilarityMin: atLeast(0.95),
+  // which embedder serves is not a loosening by itself (the tier's switch is); naming one is exempt
+  semanticCacheEmbedderId: exempt(OPTIMISATION),
+  // ADR-0352 slice 3: releasing a stream after windowed scans (not one whole-result scan) is looser
+  streamOutputInspection: notEqual("buffer"),
   // ADR-0181: a failed compaction refuses the call rather than sending the full context on
   compactionFailureMode: notEqual("fail_closed"),
 
@@ -285,16 +298,33 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   sapWriteRatePerHour: atMost(10),
   sapUnattributedWritesAllowed: notEqual(false),
   sapReadsApproveFirst: fromStored(false, (v, b) => b === true && v === false),
+  // ADR-0347: a longer memory lifetime and storing flagged memory writes are looser than the default
+  agentMemoryTtlHours: atMost(24),
+  agentMemoryScanMode: notEqual("block"),
   minReleaseAgeDays: atLeast(7),
   credentialUnusedDays: atMost(90),
   staleCredentialAlerts: notEqual(true),
+  // ADR-0366: 'off' (never automatic) is looser than the 'critical' default; raising the threshold is looser than the
+  // stored value (an org that lowered it to 'high' raises it back only with the step-up). Lowering it only tightens.
+  containmentAutoSeverity: rule(
+    CONTAINMENT_AUTO_THRESHOLD_DEFAULT,
+    (v) => containmentThresholdLooser(v as ContainmentAutoThreshold, CONTAINMENT_AUTO_THRESHOLD_DEFAULT),
+    (v, b) => containmentThresholdLooser(v as ContainmentAutoThreshold, b as ContainmentAutoThreshold),
+  ),
+  containmentApproverUserId: exempt(
+    "names the administrator containment proposals go to; it routes a proposal and refuses or allows nothing (automatic containment does not depend on it)",
+  ),
   energyRegion: exempt("reporting only: which grid factor the energy estimate uses"),
   egressCompiledDefaultPolicy: notEqual("strict"),
   useCaseGateMode: notEqual("enforce"),
   dispatchAttributionRequired: notEqual(true),
   // ADR-0224 (P13 c): shipped off (owner 10-30), so nothing is looser than the default; once an org turns the
   // processing limit on, turning it off again is a relaxation
-  privacyOpsEnabled: fromStored(false, (v, b) => b === true && v === false),
+  // the rule follows the one constant: shipped off, nothing is looser than the default and turning it off again is a
+  // relaxation; shipped on, off is relaxed. Flipping PRIVACY_OPS_ENABLED_DEFAULT needs no edit here.
+  privacyOpsEnabled: PRIVACY_OPS_ENABLED_DEFAULT
+    ? notEqual(true)
+    : fromStored(false, (v, b) => b === true && v === false),
   // a longer due date for data-subject requests is looser
   dsrSlaDays: atMost(30),
   certificationReminderHours: exempt(
@@ -318,6 +348,8 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   budgetHardBlockPct: atMost(100),
   approvalQuorum: notEqual("all"),
   checkReportsAllowUnbound: notEqual(false),
+  // ADR-0349 slice 2: use_existing hands a second start the open instance instead of refusing it
+  workflowStartConflictPolicy: notEqual("refuse"),
   // ADR-0046: a larger bulk cap lets one action decide more approvals at once; the fence off lets bulk reach
   // approvals on PII-blocking projects (U3: writable through this PUT, judged like every other key)
   approvalBulkMaxItems: atMost(25),

@@ -1,0 +1,91 @@
+name: Robot egress (real Docker, runc)
+
+# ADR-0364 S3, R3 non-blocking 3: runs packages/sandbox-executor/src/robot-egress.integration.test.ts on a real
+# Docker daemon. The runc backend starts a real robot_browser sandbox (the pinned sandbox init, the robot profile at
+# L1) on its real per-run internal network with its real per-run Smokescreen (the robot-egress image, built here from
+# engines/robot-egress), and from inside the sandbox every way out must be denied while the allowed host on its
+# allowed port is reached.
+#
+# RUNC, NOT gVISOR, said plainly: the sandbox runs under runc on this runner. gVisor's netstack on the same network is
+# NOT verified here (gvisor.yml installs a pinned runsc for the L2 suite, but a robot run under gVisor needs a second
+# runsc runtime registered with `--network=sandbox`, which nothing in CI sets up yet).
+#
+# The test cannot pass vacuously: REGULAIT_TEST_ROBOT_REQUIRED=1 makes it throw (not skip) when the daemon or an image
+# is missing, and the last step fails unless Vitest's JSON report shows every test passed and none skipped.
+#
+# Builds images locally only: no registry login, no push, no secrets. The images it needs:
+#   - robot-egress (engines/robot-egress/Dockerfile), the proxy under test;
+#   - the stdio base (packages/sandbox-executor/stdio-base/Dockerfile), the sandbox's image (it has /usr/local/bin/node,
+#     which is all the test's in-sandbox probe needs; the robot-runner image is not used by this test);
+#   - busybox, pinned by digest, whose httpd is the test's allowed target.
+
+on:
+  pull_request:
+    paths:
+      - packages/sandbox-executor/**
+      - packages/robot-runner/**
+      - engines/robot-*/**
+      - .github/workflows/robot-egress.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: robot-egress-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  robot-egress-runc:
+    name: robot egress on a real daemon (runc, not gVisor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # busybox 1.37.0, the multi-platform index digest (read from the registry 2026-11-21)
+      TARGET_IMAGE: busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the executor and what it imports
+        run: pnpm --filter "@regulait/sandbox-executor..." build
+
+      - name: Build the robot-egress and stdio base images, pull the pinned target (local only, nothing pushed)
+        run: |
+          set -euo pipefail
+          docker build -q -f engines/robot-egress/Dockerfile -t regulait/engine-robot-egress:ci .
+          docker build -q -f packages/sandbox-executor/stdio-base/Dockerfile -t regulait/stdio-base:ci packages/sandbox-executor
+          docker pull -q "$TARGET_IMAGE"
+          {
+            echo "REGULAIT_TEST_ROBOT_EGRESS_IMAGE=$(docker image inspect -f '{{.Id}}' regulait/engine-robot-egress:ci)"
+            echo "REGULAIT_TEST_ROBOT_SANDBOX_IMAGE=$(docker image inspect -f '{{.Id}}' regulait/stdio-base:ci)"
+            echo "REGULAIT_TEST_ROBOT_TARGET_IMAGE=$TARGET_IMAGE"
+          } >> "$GITHUB_ENV"
+          docker info --format 'docker {{.ServerVersion}}, kernel {{.KernelVersion}}, cgroup v{{.CgroupVersion}}'
+
+      # as root, as the test's header asks: the executor chowns the run's ACL to the non-root proxy user, the
+      # product's shape (an executor running as a normal user would make the proxy run as that user instead)
+      - name: Run the robot egress integration test (required; a skip fails)
+        working-directory: packages/sandbox-executor
+        env:
+          REGULAIT_TEST_ROBOT_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/robot-egress-vitest.json"
+          sudo --preserve-env=REGULAIT_TEST_ROBOT_REQUIRED,REGULAIT_TEST_ROBOT_EGRESS_IMAGE,REGULAIT_TEST_ROBOT_SANDBOX_IMAGE,REGULAIT_TEST_ROBOT_TARGET_IMAGE \
+            env "PATH=$PATH" npx vitest run src/robot-egress.integration.test.ts --reporter=default --reporter=json --outputFile.json="$report"
+          jq '{numTotalTests, numPassedTests, numFailedTests, numPendingTests, numTodoTests}' "$report"
+          if ! jq -e '.success == true and .numTotalTests > 0 and .numPassedTests == .numTotalTests and .numPendingTests == 0 and .numTodoTests == 0' "$report" > /dev/null; then
+            echo "::error::the robot egress integration test did not run every test to a pass (skipped, pending or failed)"
+            exit 1
+          fi

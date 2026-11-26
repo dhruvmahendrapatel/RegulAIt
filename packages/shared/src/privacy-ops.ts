@@ -246,6 +246,16 @@ export function dsrIdentifierProblem(kind: DsrIdentifierKind, identifier: string
 // The processing limit at dispatch
 // ---------------------------------------------------------------------------
 
+/**
+ * THE shipped default of `org_settings.privacy_ops_enabled` (ADR-0224: off, the owner's 2026-10-30 rule for new
+ * backlog features, recorded as the ADR-0180 reason; whether to ship it on is an open owner question). The Drizzle
+ * schema and the gateway's strictness registry read this constant. SQL cannot import it, so `privacy-ops.test.ts`
+ * asserts the live column default equals it, and the browser mirror is checked by `orgSettingSpecs.test.ts`. To flip
+ * it: change this constant and add a migration in `packages/db/migrations/pending/` that sets the column default (and
+ * decides existing rows, ADR-0180); those two tests fail until both agree.
+ */
+export const PRIVACY_OPS_ENABLED_DEFAULT: boolean = false;
+
 export const PROCESSING_NOT_PERMITTED = "processing_not_permitted" as const;
 
 /** the categories found that no active record of processing for this dispatch permits */

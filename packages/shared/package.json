@@ -30,7 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@arizeai/openinference-genai": "0.4.0",
+    "@arizeai/openinference-genai": "0.4.3",
     "@arizeai/openinference-semantic-conventions": "2.14.0",
     "@cyclonedx/cyclonedx-library": "10.3.0",
     "@humanwhocodes/momoa": "3.3.13",
