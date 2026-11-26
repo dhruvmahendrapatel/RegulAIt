@@ -121,7 +121,7 @@ const NIL_USER = "00000000-0000-0000-0000-000000000000";
 /** The three tables this module governs, plus the credential side-table of the
  * first. Used for the audit `objectType` and to make refusal messages name the
  * surface a human has to go and fix. */
-export type ConnectionSurface = "connector" | "git_connection" | "pm_connection";
+export type ConnectionSurface = "connector" | "git_connection" | "pm_connection" | "edr_connection";
 
 export interface ConnectionEgressDeps {
   resolve?: EgressResolver;
@@ -230,6 +230,8 @@ const RULE_ID: Record<ConnectionSurface, { blocked: string; call: string }> = {
   connector: { blocked: "connector-egress-blocked", call: "connector-egress-call" },
   git_connection: { blocked: "git-connection-egress-blocked", call: "git-connection-egress-call" },
   pm_connection: { blocked: "pm-connection-egress-blocked", call: "pm-connection-egress-call" },
+  // ADR-0360 slice 2 (lane E41): an EDR connection (Defender for Endpoint, Falcon, SentinelOne)
+  edr_connection: { blocked: "edr-connection-egress-blocked", call: "edr-connection-egress-call" },
 };
 
 /**
@@ -370,7 +372,8 @@ export async function refuseConnectionEgressWrite(
 export async function guardCredentialDerivedCall(
   db: Db,
   args: {
-    surface: ConnectionSurface;
+    /** the compiled-default surfaces only (an EDR connection names its own host, ADR-0360) */
+    surface: Exclude<ConnectionSurface, "edr_connection">;
     kind: string;
     /** the host an admin typed into the credential, or null when the
      * credential names none (teams/outlook with the default login host) */

@@ -63,8 +63,11 @@ import {
   UseDpopNonce,
   type OIDCProviderError,
 } from "oidc-provider/lib/helpers/errors.js";
-import { auditLog, delegationGrants, engineRunners, eq, type Db, type DelegationGrantRow } from "@regulait/db";
+import { agentCredentialAudiences, and, auditLog, delegationGrants, engineRunners, eq, isNull, type Db, type DelegationGrantRow } from "@regulait/db";
 import {
+  AGENT_CREDENTIAL_EXCHANGE_ERROR_CODES,
+  AGENT_CREDENTIAL_TOKEN_TYPE,
+  agentCredentialExchangeRequestSchema,
   CLIENT_ASSERTION_MAX_AGE_SECONDS,
   CLIENT_ASSERTION_TYPE_JWT_SPIFFE,
   CLIENT_CREDENTIALS_GRANT_TYPE,
@@ -88,6 +91,7 @@ import {
   type DelegationBody,
 } from "@regulait/shared";
 import { admitChildGrant, createRootGrant, databaseNow, DelegationRefusedError, revokeDelegationGrant } from "../delegation.js";
+import { AgentCredentialRefused, mintAgentCredential, type AgentCredentialRefusalCode } from "../agent-credential.js";
 import {
   checkDelegationAuthorization,
   claimReplay,
@@ -97,6 +101,7 @@ import {
   TokenMintError,
   WORKLOAD_PROOF_ALGS,
   type IdentitySecrets,
+  verifyHeldDelegatedToken,
 } from "../delegated-token.js";
 import { loadOrgSettings } from "../org-settings.js";
 import {
@@ -177,6 +182,8 @@ interface Preflight {
   child?: { parentGrantId: string; body: DelegationBody; idempotencyKey: string; subjectCredentialId: string | null; claim: { key: string; expiresAt: Date } };
   /** ADR-0188 S7: a self token (`client_credentials`) for an engine runner or a PDP client */
   self?: { kind: WorkloadSelfKind; credentialNotBefore: Date; credentialNotAfter: Date };
+  /** ADR-0315 slice 1b: an agent credential for one registered audience, from the caller's own delegated token */
+  credential?: { audienceId: string; audience: string; grantId: string; holderJkt: string | null };
 }
 
 interface RequestState {
@@ -203,6 +210,12 @@ interface RequestState {
   jwtSvid?: { clientId: string; match: JwtSvidMatch } | null;
   /** what to audit */
   outcome?: { grantId: string; parentGrantId: string | null; jti: string; actorIdentityId: string };
+  /** ADR-0315 slice 1b: the form asked for an agent credential (set at the start, so a refusal is audited as one) */
+  credentialRequest?: boolean;
+  /** ADR-0315 slice 1b: the data key the agent credential's pairwise subject is derived from */
+  dataKey?: string;
+  /** ADR-0315 slice 1b: an agent credential that was issued (its own issuance row is written by the mint) */
+  credentialOutcome?: { grantId: string; jti: string; audienceId: string; actorIdentityId: string };
   /** ADR-0188 S7: a self token that was issued (audited as such, never as a delegation) */
   selfOutcome?: { identityId: string; kind: WorkloadSelfKind; jti: string; credentialId: string };
   /** the grant type the request named (the audit row says which kind of token was asked for) */
@@ -435,7 +448,79 @@ async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Pref
   };
 }
 
+/**
+ * ADR-0315 §3 (slice 1b): exchanging the caller's OWN delegated access token for an agent credential at one
+ * registered audience. Checked here, BEFORE any claim (R11 rule 1):
+ *  - the strict request form (no scope is asked for: it is the grant's, projected through the audience's map);
+ *  - a DPoP proof is required, signed by the very key the subject token is bound to, so only the token's holder can
+ *    exchange it (a stolen token without its key is useless here too);
+ *  - the audience is a registered, ENABLED one (default-deny: none is shipped);
+ *  - the subject token verifies as a delegated token of ours (signature, stored row, binding, live chain), and its
+ *    leaf actor is the workload identity that authenticated this request.
+ * The mint (`mintAgentCredential`) re-checks the chain, the org dial, every agent, the budget and the projection, and
+ * refuses rather than narrows. The request's DPoP `jti` is claimed in the grant handler, so one proof mints once.
+ */
+async function credentialPreflight(ctx: KoaContextLike, s: RequestState): Promise<Preflight> {
+  const raw: Record<string, string> = { grant_type: TOKEN_EXCHANGE_GRANT_TYPE };
+  for (const k of EXCHANGE_PARAMS) {
+    const v = param(ctx, k);
+    if (v !== undefined) raw[k] = v;
+  }
+  const parsed = agentCredentialExchangeRequestSchema.safeParse(raw);
+  if (!parsed.success) throw refuse(new InvalidRequest("the agent credential request is malformed"), "request_malformed");
+  const p = parsed.data;
+  const clientId = ctx.oidc.client.clientId;
+  const client = await findWorkloadClient(s.db, clientId, s.now);
+  if (!client) throw refuse(new InvalidClientAuth("unknown client"), "client_unknown");
+  const authCredentialId = preAuthenticated(s, clientId)?.credentialId ?? s.assertionCredentialId;
+  if (!authCredentialId) throw refuse(new InvalidClientAuth("no authenticating credential"), "credential_unknown");
+
+  const dpop = await requestDpop(ctx, s);
+  if (!dpop) throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
+  s.dpopIat = dpop.iat;
+
+  const [audience] = await s.db
+    .select({ id: agentCredentialAudiences.id, binding: agentCredentialAudiences.binding })
+    .from(agentCredentialAudiences)
+    .where(and(eq(agentCredentialAudiences.audience, p.resource), isNull(agentCredentialAudiences.disabledAt)));
+  if (!audience) throw refuse(new InvalidTarget("the resource is not a registered agent credential audience"), "agent_credential_audience_unknown");
+
+  const held = await verifyHeldDelegatedToken(s.db, { token: p.subject_token, issuer: s.issuer, env: deploymentEnvironment(), now: s.now });
+  if (!held.ok) throw refuse(new InvalidGrant("the subject token is not a live delegated token of this gateway"), "agent_credential_subject_invalid");
+  if (held.binding.thumbprint !== dpop.thumbprint) {
+    throw refuse(new InvalidGrant("the DPoP proof must be signed by the key the subject token is bound to"), "agent_credential_subject_key_mismatch");
+  }
+  if (held.live.leaf.actorIdentityId !== client.identity.id) {
+    throw refuse(new InvalidGrant("the subject token belongs to another agent"), "agent_credential_subject_client_mismatch");
+  }
+  return {
+    client,
+    authCredentialId,
+    binding: { kind: "dpop", thumbprint: dpop.thumbprint, dpopJti: dpop.jti },
+    resource: p.resource,
+    credential: { audienceId: audience.id, audience: p.resource, grantId: held.live.leaf.id, holderJkt: audience.binding === "dpop" ? dpop.thumbprint : null },
+  };
+}
+
+/** a mint refusal, as the token endpoint's error and public code (never a narrower credential) */
+function mapCredentialRefusal(e: AgentCredentialRefused): OIDCProviderError {
+  const code = `agent_credential_${e.code}`;
+  const byCode: Partial<Record<AgentCredentialRefusalCode, () => OIDCProviderError>> = {
+    audience_unknown: () => new InvalidTarget(e.message),
+    audience_disabled: () => new InvalidTarget(e.message),
+    dpop_required: () => new InvalidDpopProof(e.message),
+  };
+  const make = byCode[e.code];
+  if (make) return refuse(make(), code);
+  // issuer, secrets or signing key not configured is the deployment's fault, never the caller's grant
+  if (e.code === "issuer_not_configured" || e.code === "secrets_not_configured" || e.code === "signing_key_unavailable") {
+    return refuse(new InvalidRequest("the agent credential issuer is not available"), code);
+  }
+  return refuse(new InvalidGrant(e.message), code);
+}
+
 async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Preflight> {
+  if (param(ctx, "requested_token_type") === AGENT_CREDENTIAL_TOKEN_TYPE) return credentialPreflight(ctx, s);
   const raw: Record<string, string> = { grant_type: TOKEN_EXCHANGE_GRANT_TYPE };
   for (const k of EXCHANGE_PARAMS) {
     const v = param(ctx, k);
@@ -617,6 +702,24 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
   // the claims, each atomic and in its own statement (decision 14), in R11's order
   s.phase = "as_dpop";
   if (pf.binding.kind === "dpop") await checkDpopReplay(provider, ctx, { jti: pf.binding.dpopJti! }, clientId, InvalidDpopProof);
+  if (pf.credential) {
+    if (s.aborted) throw refuse(new InvalidGrant("request timeout"), "timeout");
+    let minted;
+    try {
+      minted = await mintAgentCredential(s.db, { grantId: pf.credential.grantId, audienceId: pf.credential.audienceId, holderJkt: pf.credential.holderJkt, dataKey: s.dataKey });
+    } catch (e) {
+      if (e instanceof AgentCredentialRefused) throw mapCredentialRefusal(e);
+      throw e;
+    }
+    s.credentialOutcome = { grantId: pf.credential.grantId, jti: minted.jti, audienceId: pf.credential.audienceId, actorIdentityId: pf.client.identity.id };
+    ctx.body = buildTokenResponse(provider, {
+      accessToken: minted.token,
+      tokenType: pf.credential.holderJkt ? "DPoP" : "Bearer",
+      issuedTokenType: AGENT_CREDENTIAL_TOKEN_TYPE,
+      expiresIn: minted.claims.exp - minted.claims.iat,
+    });
+    return;
+  }
   if (pf.root) {
     const ok = await claimReplay(s.db, "human_delegation_proof", pf.root.proof.jti, new Date(pf.root.proof.exp * 1000 + DPOP_PROOF_MAX_FUTURE_SECONDS * 1000));
     if (!ok) throw refuse(new InvalidGrant("the delegation proof was already used"), "proof_replayed");
@@ -854,7 +957,7 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
     await next();
     const s = als.getStore();
     const body = ctx.body as Record<string, unknown> | undefined;
-    if (s?.code && body && typeof body === "object" && typeof body.error === "string" && (DELEGATION_ERROR_CODES as readonly string[]).includes(s.code)) {
+    if (s?.code && body && typeof body === "object" && typeof body.error === "string" && ((DELEGATION_ERROR_CODES as readonly string[]).includes(s.code) || (AGENT_CREDENTIAL_EXCHANGE_ERROR_CODES as readonly string[]).includes(s.code))) {
       ctx.body = { ...body, error_code: s.code };
     }
     if (s && !s.audited) {
@@ -892,6 +995,30 @@ async function auditTokenRequest(db: Db, s: RequestState | null, status: number,
       reason: issued
         ? "a workload self token was issued to an engine runner or a PDP client (ADR-0188 S7)"
         : "a workload self-token request was refused (ADR-0188 S7)",
+    });
+    return;
+  }
+  // ADR-0315 slice 1b: an agent credential exchange is audited as itself (the mint wrote the issuance row and its
+  // refusals; this is the request's row, with the endpoint-level outcome)
+  if (s?.credentialRequest) {
+    const issued = status < 400 && !!s.credentialOutcome;
+    await db.insert(auditLog).values({
+      userId: "00000000-0000-0000-0000-000000000000",
+      objectType: "agent_credential",
+      objectId: s.credentialOutcome?.grantId ?? s.preflight?.credential?.grantId ?? null,
+      detail: {
+        phase: "agent-credential-exchange",
+        route: `POST ${OAUTH_TOKEN_ROUTE_PATH}`,
+        status,
+        code: issued ? null : (s.code ?? (status >= 500 ? "server_error" : "refused")),
+        clientId,
+        audienceId: s.credentialOutcome?.audienceId ?? s.preflight?.credential?.audienceId ?? null,
+        ...(issued ? { credentialJti: s.credentialOutcome!.jti, actorIdentityId: s.credentialOutcome!.actorIdentityId } : {}),
+      },
+      effect: issued ? "allow" : "deny",
+      ruleId: issued ? "agent-credential-exchange-issued" : "agent-credential-exchange-refused",
+      ruleChain: [],
+      reason: issued ? "an agent credential was issued for a registered audience (ADR-0315)" : "an agent credential exchange was refused (ADR-0315)",
     });
     return;
   }
@@ -955,7 +1082,9 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
   const clientId = clientIdOf(form);
   const now = await databaseNow(db);
   const grantTypes = form.getAll("grant_type");
-  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false, clientId, grantType: grantTypes.length === 1 ? grantTypes[0]!.slice(0, 200) : null };
+  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false, clientId, grantType: grantTypes.length === 1 ? grantTypes[0]!.slice(0, 200) : null, ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) };
+  // ADR-0315 slice 1b: the request's kind, from the form, before anything can refuse it
+  if (form.getAll("requested_token_type").includes(AGENT_CREDENTIAL_TOKEN_TYPE)) s.credentialRequest = true;
 
   // decision 21: a client certificate is matched to a registered credential BEFORE the provider sees the request,
   // and only when the client sent no assertion (one mechanism per request)

@@ -22,6 +22,7 @@
  * Every proof result is an ADR-0180 `MeasurementState` (`pass | fail | insufficient | not_run`): nothing but `pass` is
  * a pass. A tenant cannot edit the catalogue; it can only relax a proof's schedule (audited, `agent_risk_proof_settings`).
  */
+import { z } from "zod";
 import { MEASUREMENT_STATES, metricSpecSchema, type MeasurementState, type MetricSpec } from "./assurance.js";
 import { canonicalJson } from "./audit-chain.js";
 import { validateMetricParams } from "./condition-metrics.js";
@@ -31,7 +32,7 @@ import { EU_AI_ACT_TIER_RANK, type EuAiActTier } from "./eu-ai-act.js";
 import { AI_RISK_CATEGORIES, type AiRiskCategory } from "./risks.js";
 
 /** bumped whenever a risk, control or proof changes meaning; every evidence row records the version it ran under */
-export const AGENT_RISK_CATALOG_VERSION = 2;
+export const AGENT_RISK_CATALOG_VERSION = 3;
 
 /**
  * The origin tag on every proof's test traffic. It rides the same `purpose` slot the red-team tag does (ADR-0057 §2),
@@ -333,14 +334,17 @@ export const AGENT_RISKS: readonly AgentRisk[] = [
     owaspAgentic: [asi("ASI06")],
     controls: [
       { kind: "setting", column: "content_trust_settings.write_floor", secure: { oneOf: ["standard", "trusted"] }, adr: "ADR-0193" },
+      { kind: "setting", column: "org_settings.agent_memory_scan_mode", secure: BLOCK, adr: "ADR-0347" },
     ],
     proofs: [
       probeProof(
         "memory.untrusted_context_write",
         "untrusted_context_write",
-        // v2: worded to what the ADR-0193 floor enforces (a write tool call). The shared-context write route is not
-        // gated by the floor yet; until it is, this proof must not claim it.
-        "A write tool call whose causal context holds untrusted content is refused by the trust floor.",
+        // v3 (ADR-0193 addendum, E50, on the ADR-0347 write path): the floor now gates the shared-context and
+        // agent-memory writes too, and ADR-0347's scan refuses a hidden instruction there, so the proof covers both.
+        "A write tool call, a shared-context write or an agent-memory write whose causal context holds untrusted " +
+          "content is refused by the trust floor, and a shared-context or memory write carrying a hidden instruction " +
+          "is refused by the memory scan.",
       ),
     ],
   },
@@ -564,3 +568,21 @@ export function agentRiskProofEvidence(r: {
     detail: r.detail,
   });
 }
+
+/**
+ * ADR-0345 slice 3: `PUT /v1/agent-risks/proofs/:proofKey/settings`. A proof is on at its catalogue interval unless
+ * an admin turns it off or lengthens it (1 to 168 hours; null = the catalogue default). Turning a proof off, or
+ * moving its interval past the catalogue default, is a relaxation: the route asks for a `settings_relax` step-up and
+ * audits the change with its reason.
+ */
+export const agentRiskProofSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    intervalHours: z.number().int().min(AGENT_RISK_PROOF_MIN_INTERVAL_HOURS).max(AGENT_RISK_PROOF_MAX_INTERVAL_HOURS).nullable(),
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+export type AgentRiskProofSettingsInput = z.infer<typeof agentRiskProofSettingsSchema>;
+
+/** a catalogue proof key, as the settings table's CHECK spells it */
+export const AGENT_RISK_PROOF_KEY_PATTERN = /^[a-z_]+[.][a-z_]+$/;

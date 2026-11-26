@@ -157,6 +157,22 @@ describe("the remaining rows follow the gateway's strictness registry", () => {
     expect(needsStepUp(mode, { hosted: 100 }, { hosted: 400 })).toBe(true);
     expect(needsStepUp(mode, {}, { hosted: 400 })).toBe(true);
   });
+  it("privacy operations (ADR-0224 addendum): the limit ships off, and only turning it off again is a step-up", async () => {
+    const limit = CORE_SPECS.privacyOpsEnabled!;
+    // the browser mirror of the one shared constant (review #1161): flipping the constant fails this until it agrees
+    const shared = await import(/* @vite-ignore */ sharedFile("privacy-ops.ts"));
+    expect(limit.strictDefault).toBe(shared.PRIVACY_OPS_ENABLED_DEFAULT);
+    expect(limit.strictDefault).toBe(false);
+    expect(needsStepUp(limit, true, false)).toBe(false);
+    expect(needsStepUp(limit, false, true)).toBe(true);
+    const sla = CORE_SPECS.dsrSlaDays!;
+    expect(sla.strictDefault).toBe(30);
+    expect(sla.control).toMatchObject({ kind: "int", min: 1, max: 90 });
+    expect(needsStepUp(sla, 45, 30)).toBe(true);
+    expect(needsStepUp(sla, 14, 30)).toBe(false);
+    // looser than what is stored is a step-up even under the default
+    expect(needsStepUp(sla, 20, 14)).toBe(true);
+  });
   it("the warn window never asks for a step-up (exempt in the registry)", () => {
     expect(needsStepUp(CORE_SPECS.mrmExpiryWarnDays!, 0, 30)).toBe(false);
   });

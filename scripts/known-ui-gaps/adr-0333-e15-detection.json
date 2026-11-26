@@ -7,6 +7,13 @@
     "PUT /v1/detection/rule-pack": "stores a new signed detection rule pack version (audited; a relaxation needs a settings_relax step-up)",
     "GET /v1/detection/incidents": "pages detection incidents, newest first, filtered by status",
     "GET /v1/detection/incidents/:incidentId": "one detection incident with its evidence chain (audit rows, row hashes, receipts)",
-    "PUT /v1/detection/incidents/:incidentId/status": "acknowledges or closes a detection incident (audited)"
+    "PUT /v1/detection/incidents/:incidentId/status": "acknowledges or closes a detection incident (audited)",
+    "GET /v1/detection/quarantines": "pages device quarantines a quarantine_device response opened, newest first, filtered by status or device",
+    "GET /v1/detection/quarantines/:quarantineId": "one device quarantine with its lifecycle and device-enforcement state",
+    "POST /v1/detection/quarantines/:quarantineId/release": "a human admin releases a device quarantine early (settings_relax step-up; only under the normal execution dial; audited)",
+    "POST /v1/detection/rule-pack/dry-run": "dry-runs the active or a proposed rule pack over a past window, read-only, and returns per-rule hit counts (audited)",
+    "GET /v1/detection/suppressions": "pages per-rule detection suppressions, newest first, with their derived state",
+    "POST /v1/detection/suppressions": "creates a per-rule, per-group detection suppression with an expiry (settings_relax step-up; audited)",
+    "POST /v1/detection/suppressions/:suppressionId/revoke": "revokes a detection suppression early (audited)"
   }
 }

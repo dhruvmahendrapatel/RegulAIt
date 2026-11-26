@@ -33,6 +33,9 @@ import {
   FEDERATION_JWKS_PATH,
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  AGENT_CREDENTIAL_STATUS_PATH,
   IDENTITY_JWKS_PATH,
   SUPPLIER_ROUTE_PATHS,
   SUPPLIER_ROUTES,
@@ -52,6 +55,12 @@ const RUNNER_ROUTE_KEYS: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER
 
 export const AUTH_EXEMPT_ROUTES = new Set([
   "/v1/pm/webhooks/:connectionName",
+  // ADR-0360 slice 2: the EDR vendor webhook, authenticated in-route (HMAC or shared token, freshness, replay table)
+  "/v1/edr-webhooks/:connectionId",
+  // ADR-0338 slice 1c — the vendor's sign-in redirect for a delegated control credential. A cross-site top-level
+  // navigation from Entra never carries the SameSite=Strict session cookie, so it authenticates IN-ROUTE on ADR-0167's
+  // browser binding (an HMAC of the server-side state, set Lax at the admin's start) and acts as that admin.
+  "/v1/discovery/control-credential/delegated/callback",
   // ADR-0061 — the ChatOps interaction callback. Slack/Teams hold no RegulAIt
   // credential, so this route cannot require one: it authenticates IN-ROUTE on
   // the workspace's signing secret over the exact raw body, with a replay
@@ -142,6 +151,14 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   // in NON_ADMIN_ROUTES too, so `public`.
   MCP_IDENTITY_OIDC_DISCOVERY_PATH,
   MCP_IDENTITY_OIDC_JWKS_PATH,
+  // ADR-0315 (G7) — the agent credential issuer's discovery document and JWKS: public by definition (a third-party
+  // enforcement point verifies offline, holding no RegulAIt credential). Public keys and metadata only. Listed in
+  // NON_ADMIN_ROUTES too, so `public`.
+  AGENT_CREDENTIAL_DISCOVERY_PATH,
+  AGENT_CREDENTIAL_JWKS_PATH,
+  // ADR-0315 slice 2 — its signed Token Status List: public by definition (the same verifier fetches it to learn of a
+  // revocation or a kill). Bits and a signature only; no credential, grant or identity is named in it.
+  AGENT_CREDENTIAL_STATUS_PATH,
   // ADR-0182 (D4) A13 — a PUBLIC SIGNED FEEDBACK LINK: the one D4 exemption.
   // People outside the organisation, who hold no RegulAIt credential, report a
   // problem or appeal a decision through a link a use-case owner minted. The
@@ -285,6 +302,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/robots/:robotId/versions/:version/retire",
   "PUT /v1/robots/:robotId/secrets/:name/:scope",
   "DELETE /v1/robots/:robotId/secrets/:name/:scope",
+  // ADR-0364 S3: the author's test run (owner or admin; one of the requester's projects) and one run's record
+  "POST /v1/robots/:robotId/versions/:version/test-runs",
+  "GET /v1/robots/:robotId/runs/:runId",
   // ADR-0173 batch 2b — the run graph. Read-only, and each read is gated in the
   // handler by exactly who may open the underlying object: a builder turn by
   // the thread's person or an admin (404 unknown_thread otherwise), a run by
@@ -427,6 +447,8 @@ export const NON_ADMIN_ROUTES = new Set([
   // list and the link writes stay admin through the default gate.
   "GET /v1/agent-identity/:kind/:subjectId",
   "GET /v1/risks",
+  // CXR-REV-003: the register's Excel export reads the list's own WHERE (own risks for a non-admin)
+  "GET /v1/risks/export.xlsx",
   "GET /v1/risks/library",
   // G2/X8: the scenario library — same class as the risk library
   "GET /v1/risks/scenarios",
@@ -462,6 +484,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/workflows/instances/:instanceId/deploy-override",
   "POST /v1/workflows/instances/:instanceId/abort",
   "GET /v1/workflows/instances/:instanceId",
+  // ADR-0349 slice 5: what the instance waits for; the same readers as the instance itself (initiator, admins, approvers)
+  "GET /v1/workflows/instances/:instanceId/pending",
   "GET /v1/approvals",
   // ADR-0226: the queue's Excel export, read through the same visibility as the list (never wider)
   "GET /v1/approvals/export.xlsx",
@@ -626,7 +650,15 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/projects/:projectId/context",
   "GET /v1/projects/:projectId/context/graph",
   "POST /v1/projects/:projectId/context/promote",
+  // ADR-0365 (lane E46): the live context graph's reads. Any signed-in principal; every result is filtered in-route by
+  // the caller's own project memberships (and by row-level security), and a node they cannot read is a 404. The
+  // source binding and sync routes stay admin-only (absent here).
+  "GET /v1/context-graph/nodes",
+  "GET /v1/context-graph/nodes/:nodeId",
+  "GET /v1/context-graph/nodes/:nodeId/neighbours",
   "GET /v1/projects/:projectId/compliance",
+  // ADR-0362: a project viewer may read whether its files are inspected (projectRoleGate in the handler); PUT stays admin
+  "GET /v1/projects/:projectId/content-inspection",
   "GET /v1/projects/:projectId/costs",
   "GET /v1/projects/:projectId/costs.csv",
   // ADR-0044: triggering an eval run is governed by the caller's own AGENT
@@ -652,6 +684,9 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/decisions",
   "GET /v1/decisions",
   "POST /v1/pm/webhooks/:connectionName",
+  "POST /v1/edr-webhooks/:connectionId",
+  // ADR-0338 slice 1c: see AUTH_EXEMPT_ROUTES (bound to the starting browser, acts as the admin who started it)
+  "GET /v1/discovery/control-credential/delegated/callback",
   "GET /admin",
   "GET /app",
   "GET /",
@@ -722,6 +757,8 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/openapi.json",
   "GET /v1/api/versioning",
   "GET /v1/me",
+  // ADR-0348: the declared lifecycle tables (definitions only, no record), for every signed-in caller and agent
+  "GET /v1/state-machines",
   "GET /v1/model-providers/status",
   "GET /v1/runs",
   // ADR-0226: the Excel export of the same list, under the same scope (a non-admin gets only their own runs)
@@ -782,6 +819,9 @@ export const NON_ADMIN_ROUTES = new Set([
   // every other builder route above.
   "GET /v1/builder/agents/:id/autonomy",
   "PUT /v1/builder/agents/:id/autonomy",
+  // DELIBERATELY ABSENT, so ADMIN-ONLY (ADR-0180 addendum, lane E51): PUT
+  // /v1/builder/agents/:id/autonomy/enforcement. Relaxing the oversight gate
+  // loosens a strict default; it takes a step-up and is audited.
   //
   // --- A10: risk tolerance and acceptance ------------------------------------
   // The acceptance HISTORY reads like the risk detail: owner-or-admin in the
@@ -948,6 +988,10 @@ export const NON_ADMIN_ROUTES = new Set([
   // ADR-0210 — the OIDC-profile identity assertion issuer's public metadata (auth-exempt above too)
   `GET ${MCP_IDENTITY_OIDC_DISCOVERY_PATH}`,
   `GET ${MCP_IDENTITY_OIDC_JWKS_PATH}`,
+  // ADR-0315 (G7) — the agent credential issuer's public metadata (auth-exempt above too)
+  `GET ${AGENT_CREDENTIAL_DISCOVERY_PATH}`,
+  `GET ${AGENT_CREDENTIAL_JWKS_PATH}`,
+  `GET ${AGENT_CREDENTIAL_STATUS_PATH}`,
   `POST ${OAUTH_TOKEN_PATH}`,
   `POST ${OAUTH_REVOCATION_PATH}`,
   `POST ${OAUTH_INTROSPECTION_PATH}`,

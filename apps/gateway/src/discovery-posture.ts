@@ -13,6 +13,7 @@ import {
   DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS,
   DISCOVERY_FAMILY_SWITCHES_DEFAULT,
   familySwitchProblem,
+  SALESFORCE_ORG_TOKENS_TRADE_OFF,
   type ActiveDiscoverySource,
   type DiscoveryFamilySwitches,
   type DiscoverySourceKind,
@@ -27,8 +28,16 @@ export interface DiscoverySettingsView {
   endpointMcpConfig: boolean;
   /** ADR-0337 §4: Google Workspace sources may use the Directory token listing (off by default) */
   googleDirectoryTokens: boolean;
+  /** ADR-0337 §4a (owner, 2026-11-22): Salesforce sources may read the org-wide OAuth tokens, which needs Customize
+   * Application on the integration user (off by default; turning it on is a step-up, audited with its trade-off) */
+  salesforceOrgTokens: boolean;
   /** ADR-0331: governed removal of flagged MCP servers from endpoints (off by default) */
   endpointAddonRemoval: boolean;
+  /** ADR-0338: governed vendor agent control (off by default) and its approval window in hours (24 by default) */
+  vendorAgentControl: boolean;
+  vendorAgentControlApprovalTtlHours: number;
+  /** ADR-0338 §3a: a delegated (named admin) control credential may be used (off by default) */
+  vendorAgentControlDelegated: boolean;
   version: number;
   updatedAt: string | null;
 }
@@ -43,7 +52,11 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
       families: DISCOVERY_FAMILY_SWITCHES_DEFAULT,
       endpointMcpConfig: false,
       googleDirectoryTokens: false,
+      salesforceOrgTokens: false,
       endpointAddonRemoval: false,
+      vendorAgentControl: false,
+      vendorAgentControlApprovalTtlHours: 24,
+      vendorAgentControlDelegated: false,
       version: 1,
       updatedAt: null,
     };
@@ -54,7 +67,11 @@ export async function loadDiscoverySettings(db: Db): Promise<DiscoverySettingsVi
     families: { saas: row.saasSourcesEnabled, identity: row.identitySourcesEnabled, ml_platform: row.mlPlatformSourcesEnabled, agent_registry: row.agentRegistrySourcesEnabled },
     endpointMcpConfig: row.endpointMcpConfigEnabled,
     googleDirectoryTokens: row.googleDirectoryTokensEnabled,
+    salesforceOrgTokens: row.salesforceOrgTokensEnabled,
     endpointAddonRemoval: row.endpointAddonRemovalEnabled,
+    vendorAgentControl: row.vendorAgentControlEnabled,
+    vendorAgentControlApprovalTtlHours: row.vendorAgentControlApprovalTtlHours,
+    vendorAgentControlDelegated: row.vendorAgentControlDelegatedEnabled,
     version: row.version,
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -102,6 +119,16 @@ export interface DiscoveryPosture {
   googleDirectoryTokens: boolean;
   /** ADR-0337 §4: the Google Workspace sources configured to read every user's OAuth token grants */
   directoryTokenSources: SourceRef[];
+  /**
+   * ADR-0338 §3a: sources whose live CONTROL credential is delegated (a named admin's authority): a finding, since a
+   * federated service principal is preferred wherever the vendor accepts one. `usable` is false once the opt-in is
+   * off or the credential expired (it is then listed for revocation).
+   */
+  delegatedControlCredentials: Array<SourceRef & { expiresAt: string | null; usable: boolean }>;
+  /** ADR-0337 §4a: whether Salesforce sources may read org-wide OAuth tokens, what that costs, and who asks for it */
+  salesforceOrgTokens: boolean;
+  salesforceOrgTokensTradeOff: string;
+  salesforceOrgTokenSources: SourceRef[];
   statement: string;
 }
 
@@ -111,32 +138,42 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     .select({ sourceId: discoverySources.id, name: discoverySources.name, kind: discoverySources.kind, enabled: discoverySources.enabled, target: discoverySources.target })
     .from(discoverySources)
     .orderBy(asc(discoverySources.name))
-    .then((rows) => rows.map(({ target, ...ref }) => ({ ...ref, directoryTokens: directoryTokensRequested(ref.kind, target) })));
+    .then((rows) => rows.map(({ target, ...ref }) => ({ ...ref, directoryTokens: directoryTokensRequested(ref.kind, target), orgTokens: salesforceOrgTokensRequested(ref.kind, target) })));
   const creds = await db
     .select({
       sourceId: discoveryCredentials.sourceId,
       mode: discoveryCredentials.credentialMode,
       writeScope: discoveryCredentials.writeScope,
+      purpose: discoveryCredentials.purpose,
+      expiresAt: discoveryCredentials.expiresAt,
+      expired: sql<boolean>`coalesce(${discoveryCredentials.expiresAt} <= now(), false)`,
       // the database clock (M-075)
       ageDays: sql<number>`floor(extract(epoch from (now() - ${discoveryCredentials.createdAt})) / 86400)::int`,
     })
     .from(discoveryCredentials)
     .where(and(isNull(discoveryCredentials.revokedAt)));
-  const byId = new Map(sources.map(({ directoryTokens: _d, ...s }) => [s.sourceId, s]));
+  const byId = new Map(sources.map(({ directoryTokens: _d, orgTokens: _o, ...s }) => [s.sourceId, s]));
   const staticCredentials: DiscoveryPosture["staticCredentials"] = [];
   const writeScopeUnverified: SourceRef[] = [];
   const credentialsRefused: SourceRef[] = [];
+  const delegatedControlCredentials: DiscoveryPosture["delegatedControlCredentials"] = [];
   for (const c of creds) {
     const s = byId.get(c.sourceId);
     if (!s) continue;
+    // ADR-0338 §2: a control credential is never a read credential; the read findings below count read rows only
+    if (c.purpose === "platform_write") {
+      if (c.mode === "delegated") delegatedControlCredentials.push({ ...s, expiresAt: c.expiresAt?.toISOString() ?? null, usable: settings.vendorAgentControlDelegated && !c.expired });
+      continue;
+    }
     if (c.mode === "static") staticCredentials.push({ ...s, ageDays: Number(c.ageDays) });
     if (c.writeScope === "unverified") writeScopeUnverified.push(s);
     if (c.writeScope === "refused") credentialsRefused.push(s);
   }
   const staleCredentials = staticCredentials.filter((c) => c.ageDays >= settings.credentialWarningAgeDays);
   // a source whose family is switched off is never run, so it is not counted as scanning (ADR-0235)
-  const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null).map(({ directoryTokens: _d, ...s }) => s);
-  const directoryTokenSources = sources.filter((s) => s.directoryTokens).map(({ directoryTokens: _d, ...s }) => s);
+  const enabled = sources.filter((s) => s.enabled && familySwitchProblem(s.kind, settings.families) === null).map(({ directoryTokens: _d, orgTokens: _o, ...s }) => s);
+  const directoryTokenSources = sources.filter((s) => s.directoryTokens).map(({ directoryTokens: _d, orgTokens: _o, ...s }) => s);
+  const salesforceOrgTokenSources = sources.filter((s) => s.orgTokens).map(({ directoryTokens: _d, orgTokens: _o, ...s }) => s);
   return {
     sourcesTotal: sources.length,
     sourcesEnabled: enabled,
@@ -149,6 +186,10 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     families: settings.families,
     googleDirectoryTokens: settings.googleDirectoryTokens,
     directoryTokenSources,
+    delegatedControlCredentials,
+    salesforceOrgTokens: settings.salesforceOrgTokens,
+    salesforceOrgTokensTradeOff: SALESFORCE_ORG_TOKENS_TRADE_OFF,
+    salesforceOrgTokenSources,
     statement: activeDiscoveryPosture(enabled),
   };
 }
@@ -166,4 +207,20 @@ export function directoryTokensRequested(kind: DiscoverySourceKind, target: Read
 export function directoryTokensProblem(kind: DiscoverySourceKind, target: Readonly<Record<string, unknown>>, settings: Pick<DiscoverySettingsView, "googleDirectoryTokens">): string | null {
   if (!directoryTokensRequested(kind, target) || settings.googleDirectoryTokens) return null;
   return "the Google Directory token listing is not allowed: an admin must first turn on 'googleDirectoryTokens' in the discovery settings (a step-up); its scope could also revoke tokens";
+}
+
+/** ADR-0337 §4a: a Salesforce source whose target asks for the org-wide OAuth token read (owner decision 2026-11-22) */
+export function salesforceOrgTokensRequested(kind: DiscoverySourceKind, target: Readonly<Record<string, unknown>>): boolean {
+  return kind === "entitlement_salesforce" && target.orgTokens === "on";
+}
+
+/**
+ * ADR-0337 §4a: why a source may not read Salesforce org-wide OAuth tokens, or null. The read needs Customize
+ * Application, which can change the org's setup, so the org switch (`salesforceOrgTokens`, off by default, its own
+ * `settings_relax` step-up, audited with SALESFORCE_ORG_TOKENS_TRADE_OFF) must be on before any source is created,
+ * widened, enabled or run with it.
+ */
+export function salesforceOrgTokensProblem(kind: DiscoverySourceKind, target: Readonly<Record<string, unknown>>, settings: Pick<DiscoverySettingsView, "salesforceOrgTokens">): string | null {
+  if (!salesforceOrgTokensRequested(kind, target) || settings.salesforceOrgTokens) return null;
+  return "the Salesforce org-wide OAuth token read is not allowed: an admin must first turn on 'salesforceOrgTokens' in the discovery settings (a step-up); it needs Customize Application, which can also change the org's setup";
 }

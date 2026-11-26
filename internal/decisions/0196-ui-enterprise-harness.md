@@ -704,3 +704,15 @@ one `CEILING_EXCEPTIONS` row.
   editor on the Agents page (#744, approved on #453 on 2026-11-07) adds 6,227 B, almost all of it in the lazy
   `admin-integrations` chunk. Lazy-loading the card would not lower the total, which counts every chunk.
 - The owner chose this over trimming main first or cutting the approved screen. Crossing 1,160 kB goes back to the owner.
+
+## Addendum / As built (2026-11-20) — all JS 1,160 → 1,170 kB (the ADR-0056 narrator red-team gate card)
+
+The owner decided this raise on 2026-11-20: <https://github.com/dhruvmahendrapatel/RegulAIt/issues/453#issuecomment-7029051527>. It is the ADR-recorded exception the `--guard` rule requires, with
+one `CEILING_EXCEPTIONS` row.
+
+- `all JS` from `1160 kB` to `1170 kB` (+10 kB). The entry JS, entry CSS and other chunk ceilings are unchanged; the new
+  `CopilotRedteamGateCard` chunk gets its own ceiling from `ui-chunk-budgets --write`.
+- Why: main measured 1,159,922 B gzip (78 B of headroom), and the narrator red-team gate card on the Copilot page
+  (ADR-0056 §5 amendment, lane UI-B) brings the total to 1,163,455 B. It is lazy-loaded so the `admin-overview` chunk
+  stays within its ceiling; lazy-loading cannot lower the total, which counts every chunk.
+- The owner chose the raise over trimming main first. Crossing 1,170 kB goes back to the owner.

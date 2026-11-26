@@ -10,7 +10,7 @@
  *   PUT    /v1/workflows/builder/templates/:templateId/draft            save {revision, definition}
  *   DELETE /v1/workflows/builder/templates/:templateId/draft            discard
  *   POST   /v1/workflows/builder/validate                               validate a definition, store nothing
- *   POST   /v1/workflows/builder/templates/:templateId/publish          {revision, acceptRelaxations?, reason?}, step-up
+ *   POST   /v1/workflows/builder/templates/:templateId/publish          {revision, acceptRelaxations?, reason?, canaryPercent?}, step-up
  *   GET    /v1/workflows/builder/templates/:templateId/versions         history, newest first
  *   GET    /v1/workflows/builder/templates/:templateId/versions/:version one version and its diff against live
  *
@@ -37,6 +37,8 @@ import {
 } from "@regulait/db";
 import { canonicalJson, isIntakeTemplateName, jsonPatch, sha256Hex, type JsonPatchOperation } from "@regulait/shared";
 import {
+  CANARY_MAX_PERCENT,
+  CANARY_MIN_PERCENT,
   builderRuleIssues,
   findRelaxations,
   stageDiff,
@@ -47,6 +49,7 @@ import {
 } from "@regulait/workflow-kernel";
 import { checkWorkflowTemplateReferences } from "./workflows.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CANARY_OPEN_REFUSAL, openCanary, startCanary } from "./workflow-template-versions.js";
 
 /** ADR-0341 §4.9 */
 export const BUILDER_MAX_DEFINITION_BYTES = 256 * 1024;
@@ -176,6 +179,9 @@ const publishBody = z
     revision: z.number().int().min(1),
     acceptRelaxations: z.boolean().optional(),
     reason: z.string().trim().min(10).max(2000).optional(),
+    /** ADR-0340 slice 3: publish as a canary — this share of NEW instances gets the new version, the rest the one it
+     * replaces, until the canary is promoted or rolled back */
+    canaryPercent: z.number().int().min(CANARY_MIN_PERCENT).max(CANARY_MAX_PERCENT).optional(),
   })
   .strict();
 const listQuery = z
@@ -212,7 +218,7 @@ function editRefusal(t: Pick<TemplateRow, "name" | "retiredAt"> | undefined): Re
   return null;
 }
 
-async function latestVersion(db: Db, templateId: string): Promise<WorkflowTemplateVersionRow | undefined> {
+export async function latestVersion(db: Db, templateId: string): Promise<WorkflowTemplateVersionRow | undefined> {
   const [v] = await db
     .select()
     .from(workflowTemplateVersions)
@@ -224,7 +230,7 @@ async function latestVersion(db: Db, templateId: string): Promise<WorkflowTempla
 
 /** the template's latest version; the first time, its live definition is recorded as version 1 (origin baseline).
  * Called under the template's row lock, so two first opens cannot both write version 1. */
-async function ensureBaseline(tx: Db, t: TemplateRow, actorUserId: string | null): Promise<WorkflowTemplateVersionRow> {
+export async function ensureBaseline(tx: Db, t: TemplateRow, actorUserId: string | null): Promise<WorkflowTemplateVersionRow> {
   const existing = await latestVersion(tx, t.id);
   if (existing) return existing;
   const [v] = await tx
@@ -510,6 +516,8 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
   if (refused) return reply.status(refused.status).send(refused.body);
   const d = await loadDraft(db, templateId);
   if (!d) return reply.status(404).send({ error: "no_draft" });
+  // ADR-0340 slice 3: the two versions of an open canary cannot move under it
+  if (await openCanary(db, templateId)) return reply.status(CANARY_OPEN_REFUSAL.status).send(CANARY_OPEN_REFUSAL.body);
   if (d.revision !== body.revision) {
     return reply.status(409).send({ error: "draft_revision_conflict", detail: "the draft changed since you reviewed it: review it again", revision: d.revision });
   }
@@ -535,7 +543,14 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
   // ADR-0341 §4.6: a fresh second proof bound to this template, the version it replaces and the exact bytes
   const su = await requireStepUp(db, req, reply, {
     kind: "settings_relax",
-    facts: { op: PUBLISH_STEP_UP_OP, templateId, fromVersion: latest.version, contentHash: v.contentHash },
+    facts: {
+      op: PUBLISH_STEP_UP_OP,
+      templateId,
+      fromVersion: latest.version,
+      contentHash: v.contentHash,
+      // a canary publish is bound to its share too (only when asked, so a plain publish's proof is unchanged)
+      ...(body.canaryPercent !== undefined ? { canaryPercent: body.canaryPercent } : {}),
+    },
   });
   if (!su.ok) return reply;
   const out = await db.transaction(async (txRaw) => {
@@ -545,12 +560,17 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
     const [nowDraft] = await tx.select().from(workflowTemplateDrafts).where(eq(workflowTemplateDrafts.templateId, templateId)).for("update");
     // fail closed: what the step-up was decided on must still be what is there (ADR-0186 A, Class A)
     if (!locked || locked.retiredAt || nowLatest?.id !== latest.id || !nowDraft || nowDraft.revision !== d.revision) return null;
+    if (await openCanary(tx, templateId)) return null;
     const [version] = await tx
       .insert(workflowTemplateVersions)
       .values({ templateId, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "builder", publishedBy: actor })
       .returning();
     await tx.update(workflowTemplates).set({ definition: v.definition }).where(eq(workflowTemplates.id, templateId));
     await tx.delete(workflowTemplateDrafts).where(eq(workflowTemplateDrafts.id, nowDraft.id));
+    const canary =
+      body.canaryPercent !== undefined
+        ? await startCanary(tx, { template: locked, canary: version!, stable: latest, percent: body.canaryPercent, actorUserId: actor })
+        : null;
     const retried = v.definition.stages.filter((st) => st.retry);
     await tx.insert(auditLog).values({
       userId: actor ?? NO_IDENTITY,
@@ -570,6 +590,7 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
         ...(retried.length > 0 ? { retryStages: retried.map((st) => ({ stageId: st.id, retry: st.retry })) } : {}),
         stepUp: su.method,
         stepUpKind: "settings_relax",
+        ...(canary ? { canaryId: canary.id, canaryPercent: canary.percent } : {}),
       },
       effect: "allow",
       ruleId: BUILDER_RULE_IDS.published,
@@ -578,11 +599,12 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
         `workflow template '${locked.name}' version ${version!.version} published from the builder` +
         (diff.relaxations.length > 0 ? ` with ${diff.relaxations.length} accepted relaxation(s): ${body.reason}` : ""),
     });
-    return version!;
+    return { version: version!, canary };
   });
   if (!out) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
   return reply.status(201).send({
     template: { id: templateId, name: t!.name },
-    version: { version: out.version, contentHash: out.contentHash, origin: out.origin, publishedAt: out.publishedAt },
+    version: { version: out.version.version, contentHash: out.version.contentHash, origin: out.version.origin, publishedAt: out.version.publishedAt },
+    ...(out.canary ? { canary: { id: out.canary.id, percent: out.canary.percent, stableVersion: latest.version } } : {}),
   });
 }

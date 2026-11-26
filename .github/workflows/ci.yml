@@ -131,9 +131,38 @@ name: CI
 #     ~16.5 at the slowest seen). Hence a fifth matrix entry, as this header prescribes; the cap
 #     stays at 20. Vitest 4.1 has no duration-based --shard; a custom sequencer would be our own code
 #     for a solved problem, so the count split stays (ADR-0176).
+#     RE-MEASURED 2026-11-22 (669 files): five shards reached the 20-min cap in turn, each cancelled
+#     with every finished test passing: main's shard 3 ran 19:42 (run 45003062253), and on #1082
+#     shards 3 and 4 (run 45000694944) and then shard 5 (run 45009845308) were cancelled. Each file
+#     also pays ~3-5 s of fresh-database setup (75 unnumbered migrations), so a count slice of 134
+#     files spends more of its 20 minutes on setup than on tests. Hence a sixth matrix entry, as this
+#     header prescribes; the cap stays at 20.
+#     2026-11-23: shard 6 of six ran ~17-20 min against its 20-min cap and was cancelled on several PRs
+#     that day, which also failed the coverage check. Hence a seventh matrix entry, as this header
+#     prescribes; the cap stays at 20 (a 30-min cap was proposed once and is not the lever). Expected:
+#     the same files over seven count slices of ~96 (from ~112 over six) cut each shard's test step by
+#     about a seventh, so the slowest shard should land near 15-17 min a job, ~3-5 min under the cap.
+#     MEASURED 2026-11-26 (seven shards, 715 files; the last 20 completed push runs on main, 45481528099
+#     through 45775726293). Job min / median / max, test step median / max:
+#       gateway shard 1   11:14 / 12:21 / 17:24   9:18 / 13:32
+#       gateway shard 2   11:08 / 11:51 / 16:28   8:57 / 12:46
+#       gateway shard 3   10:50 / 12:29 / 17:27   9:33 / 13:55
+#       gateway shard 4   12:39 / 13:51 / 19:19  10:45 / 15:29
+#       gateway shard 5    9:30 / 10:42 / 16:41   7:43 / 12:45
+#       gateway shard 6   14:02 / 14:35 / 19:16  11:39 / 15:53
+#       gateway shard 7   12:31 / 13:49 / 17:29  10:50 / 14:11
+#     18 of 138 shard jobs ran over 17 min and the slowest reached 19:19, so under runner load a shard
+#     crosses the cap: on PRs, shard 6 was cancelled at 20:02 on #1158 (run 45768732532) and shard 7 on
+#     #1166, each with every finished test passing. Hence an eighth matrix entry, as this header
+#     prescribes; the cap stays at 20. Expected, from run 45775726293's per-file times split the way
+#     Vitest does (SHA-1 order, equal counts; the same split reproduces that run's seven shards exactly):
+#     test time per shard goes from 125-318 s over seven slices of ~102 files to 130-268 s over eight
+#     of ~89, and each file's ~3-4 s of fresh-database setup falls with the count, so the slowest
+#     shard's test step should drop ~1.5-2 min (to ~10 min median, ~14 at the worst seen), leaving
+#     ~3-5 min under the cap at the slowest. Replace this estimate with measured figures after the first runs.
 # Re-measure if the suite grows materially; these are real numbers, not guesses,
 # and they should stay that way. The next lever, when a shard nears its 20-min
-# cap, is a fifth matrix entry (one more ~2m15s setup), not a higher cap.
+# cap, is one more matrix entry (one more ~2m15s setup), not a higher cap.
 # If that ceiling is ever actually hit, the next lever is narrowing
 # `pull_request` to `types: [ready_for_review]` so draft iterations stop
 # billing — NOT taken now, because this repo's agents open drafts and a draft
@@ -142,13 +171,17 @@ name: CI
 # The free public-repo runner pool (~20 concurrent jobs) against ~30 jobs per PR meant one PR's CI at a time.
 #   pull_request   the `scope` job reads the PR's diff. Code changed: build, typecheck, lint, the package suites,
 #                  the static pre-flights (migration guard, licence gate) and the gateway shards. ADR-0323: a web-only
-#                  PR runs ONE gateway runner with only the tests that read apps/web sources, instead of the five
+#                  PR runs ONE gateway runner with only the tests that read apps/web sources, instead of the eight
 #                  shards and their coverage check. The web app changed: also the mocked SPA shards. Docs only: every
 #                  job is skipped and `build-and-test` still reports (it allows a skip only where the scope said so).
 #                  A dependency, workflow, schema/migration or security-config change is a full run (ADR-0323).
 #                  Dry run: `node scripts/ci-plan.mjs <changed paths>` or `--base origin/main`.
+#                  #1227 (ADR-0262 addendum, 2026-11-23): the real-gateway SPA journeys also run on a PR that
+#                  changes their inputs (`journeys`: apps/web/**, packages/shared|ui/**, apps/gateway/src/** less
+#                  unit tests). This repository has no merge queue, so a journeys gate on `full` alone never ran
+#                  before a merge: #1227 passed every PR check and turned main red on spa-journeys.
 #   merge_group    everything, on the combined result of the queued PRs: the above plus the SPA journeys and
-#   push to main   the docker build. The merge queue is where the full suite gates a merge.
+#   push to main   the docker build. The merge queue is where the full suite gates a merge (when one is enabled).
 #   nightly        everything, for rot with no commit of ours to blame (a moved base image, a yanked dependency).
 # No workflow-level path filter: `build-and-test` must report on every PR and every merge group.
 on:
@@ -175,6 +208,8 @@ permissions:
 # ADR-0252: CI databases are disposable, so migrations merged but not yet numbered (packages/db/migrations/pending/)
 # are applied in their provisional order. A long-lived database refuses them (packages/db/src/pending-migrations.ts).
 env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
   REGULAIT_MIGRATIONS_UNASSIGNED: apply
 
 jobs:
@@ -194,6 +229,7 @@ jobs:
       base: ${{ steps.scope.outputs.base }}
       web: ${{ steps.scope.outputs.web }}
       gateway: ${{ steps.scope.outputs.gateway }}
+      journeys: ${{ steps.scope.outputs.journeys }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -258,7 +294,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -424,7 +460,7 @@ jobs:
     # ADR-0262 (PR trim): skipped only on a docs-only PR. ADR-0323: on a web-only PR (`gateway` is 'false') the matrix
     # is ONE runner, `web-readers`, which runs only the gateway tests that read apps/web sources or walk the repository
     # (`node scripts/ci-scope.mjs --gateway-web-readers`; step-up-posture-guard walks every product source). Any other
-    # value of `gateway`, an empty one included, gives the five shards.
+    # value of `gateway`, an empty one included, gives the eight shards.
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-24.04
     # A blast-radius cap, not a target: the slowest shard plus setup is well
@@ -458,9 +494,9 @@ jobs:
         # deadline upper bounds (a timeout fires within N ms) and each shard
         # runs alone on its runner, so they see LESS load than they did when the
         # gateway shared `pnpm -r test`'s parallelism with every other package.
-        # FIVE since 2026-11-08 (see "RE-MEASURED 2026-11-08" at the top): shard 4 of four reached the 20-min cap.
-        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full five.
-        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5]') }}
+        # EIGHT since 2026-11-26 (see the 2026-11-26 note at the top): shards 6 and 7 of seven were cancelled at the cap.
+        # ADR-0323: the web-only form is chosen only on an exact 'false'; anything else is the full eight.
+        shard: ${{ fromJSON(needs.scope.outputs.gateway == 'false' && '["web-readers"]' || '[1, 2, 3, 4, 5, 6, 7, 8]') }}
 
 
     services:
@@ -510,7 +546,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -653,7 +689,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -742,9 +778,10 @@ jobs:
   # (install + build dominate), on the same `pull_request` paths-ignore as the
   # rest of this workflow.
   spa-journeys:
-    # ADR-0262: the full suite only (merge group, push to main, nightly, manual)
+    # ADR-0262: the full suite (merge group, push to main, nightly, manual), and since #1227 (ADR-0262 addendum) also a
+    # PR that changes the journeys' inputs (`journeys`). Not a required check, so gating it directly is safe.
     needs: scope
-    if: needs.scope.outputs.full == 'true'
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.journeys == 'true'
     runs-on: ubuntu-24.04
     # 12, down from 20 (ADR-0183 2.4): the serial mocked suite (~11.5 min on
     # 2026-10-05) moved to the sharded `spa-mock` job below, leaving ~4 min of
@@ -785,7 +822,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

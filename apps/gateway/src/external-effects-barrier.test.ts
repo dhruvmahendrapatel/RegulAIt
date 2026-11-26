@@ -35,7 +35,12 @@
  * action-decision; pm.create_work_item, pm.update_fields
  * (run sync: create, then repair-in-place), pm.transition_state (node status
  * mirror on run events), pm.add_comment (decision mirror); device_policy.sign_payload (ADR-0331: an endpoint agent's directive
- * read of an approved removal, the counting fake being the device-policy signer).
+ * read of an approved removal, the counting fake being the device-policy signer); vendor_agent_control.reverse (ADR-0338: a
+ * restore's execute, the counting fake being the in-memory vendor's control member). vendor_agent_control.apply is the
+ * one declared exemption (NARROWING_WRITE_OPERATIONS, owner decision 2): its row proves the opposite, that a disable
+ * or quarantine flipped into every non-normal dial at the barrier still reaches the vendor exactly once;
+ * vendor.delete_conversation (ADR-0361 slice 3: an approved remediation's execute, the counting fake being the remediation
+ * member of the sanctioned AI SaaS connector, over a fake compliance API).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
@@ -56,6 +61,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { EXTERNAL_WRITE_OPERATIONS, type ExternalWriteOperation } from "./external-effects.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // the probe — hoisted so the mock factories below can see it
@@ -186,6 +192,30 @@ let piaId: string;
 let anaAuth: { authorization: string }; // the approver (gates, infra proposals, require_approval)
 let anaId: string;
 let workerAgentId: string;
+let vendorFake: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeVendorControl>;
+let vendorCreds: ReturnType<typeof import("./testing/vendor-agent-control-fixture.js").fakeCredentials>;
+
+// ADR-0361 slice 3: a fake compliance API for one sanctioned AI SaaS tenant; the remediation member is the counting fake
+const saasAllowed = trackEgressAllowHosts();
+const SAAS_HOST = "api.anthropic.com";
+const SAAS_CHATS = ["halted", "read_only", "require_approval", "normal"].map((m) => `bm_chat_${m}_${RUN}`);
+const saasJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const saasRecent = () => new Date(Date.now() - 2 * 86_400_000 + 3600_000).toISOString();
+const saasFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = new URL(String(input instanceof Request ? input.url : input));
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (url.hostname !== SAAS_HOST) return saasJson({ error: "unexpected" }, 599);
+  if (url.pathname === "/v1/compliance/apps/chats" && method === "GET") {
+    if (url.searchParams.get("limit") === "1") return saasJson({ data: [], has_more: false, last_id: null });
+    return saasJson({ data: SAAS_CHATS.map((id) => ({ id, updated_at: saasRecent(), user: { id: "user_bm" } })), has_more: false, last_id: "c" });
+  }
+  const m = /^\/v1\/compliance\/apps\/chats\/([^/]+)(\/messages)?$/.exec(url.pathname);
+  if (m && method === "GET" && m[2]) {
+    return saasJson({ id: m[1], user: { id: "user_bm" }, chat_messages: [{ id: `${m[1]}-m1`, role: "user", created_at: saasRecent(), content: [{ type: "text", text: "hello" }] }], has_more: false, last_id: null });
+  }
+  if (m && method === "DELETE" && !m[2]) return saasJson({ id: m[1], type: "claude_chat_deleted" });
+  return saasJson({ error: "unexpected" }, 599);
+}) as typeof fetch;
 
 /** which (operation, mode) cells the matrix actually exercised */
 const covered = new Map<string, Set<string>>();
@@ -264,6 +294,29 @@ async function refusedAtBarrier(operation: ExternalWriteOperation, mode: Flipped
   return res;
 }
 
+/**
+ * THE EXEMPTION'S CELL (ADR-0338 §7): the same drive and flip as `refusedAtBarrier`, but the operation narrows, so the
+ * counting fake MUST move exactly once under the flipped dial.
+ */
+async function admittedAtBarrier(operation: ExternalWriteOperation, mode: FlippedMode, drive: () => Promise<Injected>): Promise<Injected> {
+  const before = probe.count(operation);
+  const gate = probe.arm(operation);
+  const inflight = drive();
+  const outcome = await Promise.race([gate.reached.then(() => "reached" as const), inflight.then(() => "finished" as const, () => "finished" as const)]);
+  if (outcome !== "reached") {
+    probe.disarm();
+    const res = await inflight;
+    throw new Error(`${operation}: the drive finished (${res.statusCode} ${res.body.slice(0, 200)}) without reaching the barrier`);
+  }
+  await setMode(mode);
+  gate.release();
+  const res = await inflight;
+  await setMode("normal");
+  expect(probe.count(operation), `${operation} under '${mode}': a narrowing write must still reach the provider`).toBe(before + 1);
+  mark(operation, mode);
+  return res;
+}
+
 /** the row's POSITIVE CONTROL: the same drive under 'normal' reaches the fake */
 async function admitted(operation: ExternalWriteOperation, drive: () => Promise<Injected>, calls = 1): Promise<Injected> {
   const before = probe.count(operation);
@@ -328,7 +381,24 @@ beforeAll(async () => {
     { kind: "directive_signer" as const, keyId: "barrier-directive-key", signPayload: async (b: Buffer) => edSign(null, b, directiveKey) },
     { signPayload: "device_policy.sign_payload" },
   );
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, directiveSigner });
+  // ADR-0338: the in-memory vendor's control member is the counting fake for vendor_agent_control.apply / .reverse
+  const { fakeVendorControl, fakeCredentials } = await import("./testing/vendor-agent-control-fixture.js");
+  vendorFake = fakeVendorControl();
+  vendorCreds = fakeCredentials();
+  const control = probe.counting(vendorFake.control, { apply: "vendor_agent_control.apply", reverse: "vendor_agent_control.reverse" });
+  // ADR-0361 slice 3: the real connectors, with the remediation member of the one used here counted
+  const { AI_SAAS_CONNECTORS } = await import("./ai-saas-connectors.js");
+  const saasConnectors = new Map([...AI_SAAS_CONNECTORS].map(([vendor, c]) =>
+    [vendor, vendor === "claude_enterprise" && c.remediation ? { ...c, remediation: probe.counting(c.remediation, { deleteConversation: "vendor.delete_conversation" }) } : c] as const));
+  app = buildApp(db, {
+    aiSaasMonitorFetch: saasFetch,
+    aiSaasMonitorResolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    aiSaasMonitorConnectors: saasConnectors,
+    bootstrapToken: BOOT,
+    dataKey: DATA_KEY,
+    directiveSigner,
+    vendorAgentControl: { controls: { entra_agent_id: control }, credentialFor: vendorCreds.resolver },
+  });
   const pia = await makeUser(`bm-pia-${RUN}@example.com`);
   piaId = pia.id;
   piaAuth = pia.auth;
@@ -346,6 +416,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await setMode("normal");
+  (await saasAllowed.removeAll(app, AUTH)).assertRemoved();
   await app.close();
 });
 
@@ -731,6 +802,157 @@ describe("AER-018 — the barrier matrix: flip the dial while the route waits on
       for (const r of restores.reverse()) await r();
       if (prevUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
       else process.env.REGULAIT_PUBLIC_URL = prevUrl;
+    }
+  });
+
+  it("vendor_agent_control.reverse is refused and vendor_agent_control.apply is admitted (ADR-0338 §7: narrowing only)", async () => {
+    const { seedRegistryAgent } = await import("./testing/vendor-agent-control-fixture.js");
+    const { grantStepUpForTest, stepUpRequest } = await import("./testing/step-up-grant.js");
+    const { requestActionSchema, vendorControlDecideStepUp, vendorControlExecuteStepUp, vendorControlRequestStepUp } = await import("./vendor-agent-control.js");
+    const { agentRegistryRecords, users, vendorAgentActions } = await import("@regulait/db");
+    const restores: Array<() => Promise<unknown>> = [];
+    const sourceIds: string[] = [];
+    const URL_ = "/v1/vendor-agent-control/actions";
+    const withGrant = async (who: string, args: Parameters<typeof grantStepUpForTest>[2], url: string, payload: object) => {
+      const r = stepUpRequest(await grantStepUpForTest(db, who, args));
+      return app.inject({ method: "POST", url, headers: r.headers, cookies: r.cookies, payload });
+    };
+    const approvedAction = async (recordId: string, action: string, reverses?: string) => {
+      const b = { recordId, action, approverUserId: anaId, reason: `barrier ${RUN}`, ...(reverses ? { reverses } : {}) };
+      const asked = await withGrant(piaId, vendorControlRequestStepUp(requestActionSchema.parse(b)), URL_, b);
+      expect(asked.statusCode, asked.body).toBe(201);
+      const act = asked.json().action as { id: string; approvalId: string };
+      const [ap] = await db.select().from(approvals).where(eq(approvals.id, act.approvalId));
+      const decided = await withGrant(anaId, vendorControlDecideStepUp(ap!.id, "approved", ap!.argumentsDigest!), `/v1/approvals/${ap!.id}/decide`, { decision: "approved" });
+      expect(decided.statusCode, decided.body).toBe(200);
+      return act.id;
+    };
+    const execute = async (id: string) => {
+      const [row] = await db.select().from(vendorAgentActions).where(eq(vendorAgentActions.id, id));
+      return withGrant(piaId, vendorControlExecuteStepUp(row!), `${URL_}/${id}/execute`, {});
+    };
+    const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
+    try {
+      restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+      const [s0] = await db.select({ on: discoverySettings.vendorAgentControlEnabled }).from(discoverySettings).where(eq(discoverySettings.id, 1));
+      restores.push(() => db.update(discoverySettings).set({ vendorAgentControlEnabled: s0?.on ?? false }).where(eq(discoverySettings.id, 1)));
+      await db.update(discoverySettings).set({ vendorAgentControlEnabled: true }).where(eq(discoverySettings.id, 1));
+      const [p0] = await db.select().from(users).where(eq(users.id, piaId));
+      const [a0] = await db.select().from(users).where(eq(users.id, anaId));
+      restores.push(() => db.update(users).set({ isAdmin: p0!.isAdmin, totpEnabled: p0!.totpEnabled }).where(eq(users.id, piaId)));
+      restores.push(() => db.update(users).set({ isAdmin: a0!.isAdmin, totpEnabled: a0!.totpEnabled }).where(eq(users.id, anaId)));
+      // admins (the routes are admin-only), without a second factor: the bootstrap credential keeps flipping the dial
+      await db.update(users).set({ isAdmin: true }).where(inArray(users.id, [piaId, anaId]));
+      const agent = async () => {
+        const a = await seedRegistryAgent(db, { run: RUN, createdBy: piaId, sourceIds });
+        vendorCreds.issue(a.sourceId);
+        return a;
+      };
+
+      // apply: a quarantine flipped into each non-normal dial at the barrier still reaches the vendor once
+      for (const mode of MODES) {
+        const id = await approvedAction((await agent()).recordId, "quarantine");
+        const res = await admittedAtBarrier("vendor_agent_control.apply", mode, () => execute(id));
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().action.status).toBe("succeeded");
+      }
+      const control = await approvedAction((await agent()).recordId, "disable");
+      expect((await admitted("vendor_agent_control.apply", () => execute(control))).json().action.status).toBe("succeeded");
+
+      // reverse: a restore flipped into each non-normal dial at the barrier never reaches the vendor
+      const target = await agent();
+      const taken = await approvedAction(target.recordId, "quarantine");
+      expect((await execute(taken)).json().action.status).toBe("succeeded");
+      for (const mode of MODES) {
+        const id = await approvedAction(target.recordId, "restore", taken);
+        const res = await refusedAtBarrier("vendor_agent_control.reverse", mode, () => execute(id));
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json().action).toMatchObject({ status: "failed", outcomeCode: mode === "halted" ? "execution_halted" : mode === "read_only" ? "execution_read_only" : "execution_requires_approval" });
+        expect(vendorFake.states.get(target.externalId)).toBe("quarantined");
+      }
+      const back = await approvedAction(target.recordId, "restore", taken);
+      expect((await admitted("vendor_agent_control.reverse", () => execute(back))).json().action).toMatchObject({ status: "succeeded", observedState: "active" });
+    } finally {
+      if (sourceIds.length) {
+        const recs = await db.select({ id: agentRegistryRecords.id }).from(agentRegistryRecords).where(inArray(agentRegistryRecords.sourceId, sourceIds));
+        if (recs.length) {
+          const rows = await db.select({ id: vendorAgentActions.id, approvalId: vendorAgentActions.approvalId }).from(vendorAgentActions).where(inArray(vendorAgentActions.recordId, recs.map((r) => r.id)));
+          await db.delete(vendorAgentActions).where(sql`${vendorAgentActions.reversesActionId} IS NOT NULL AND ${inArray(vendorAgentActions.recordId, recs.map((r) => r.id))}`);
+          await db.delete(vendorAgentActions).where(inArray(vendorAgentActions.recordId, recs.map((r) => r.id)));
+          if (rows.length) await db.delete(approvals).where(inArray(approvals.id, rows.map((r) => r.approvalId)));
+        }
+        await db.delete(discoverySources).where(inArray(discoverySources.id, sourceIds));
+      }
+      for (const r of restores.reverse()) await r();
+    }
+  });
+
+  it("vendor.delete_conversation (ADR-0361 slice 3: an approved remediation's execute)", async () => {
+    const { aiSaasMonitorConnectors, aiSaasMonitorPolicy, users } = await import("@regulait/db");
+    const { grantStepUpForTest, stepUpRequest } = await import("./testing/step-up-grant.js");
+    const { relaxIdentityForTest } = await import("./testing/identity-posture.js");
+    const { relaxStepUpAround } = await import("./testing/step-up-posture.js");
+    type Facts = Parameters<typeof grantStepUpForTest>[2];
+    const relax = async (who: string, facts: Record<string, unknown>) => stepUpRequest(await grantStepUpForTest(db, who, { kind: "settings_relax", facts } as Facts));
+    const restores: Array<() => Promise<unknown>> = [];
+    let connectorId: string | undefined;
+    const BASE = "/v1/ai-saas-monitoring";
+    try {
+      restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+      const [p0] = await db.select().from(users).where(eq(users.id, piaId));
+      const [a0] = await db.select().from(users).where(eq(users.id, anaId));
+      restores.push(() => db.update(users).set({ isAdmin: p0!.isAdmin }).where(eq(users.id, piaId)));
+      restores.push(() => db.update(users).set({ isAdmin: a0!.isAdmin }).where(eq(users.id, anaId)));
+      // the routes are admin-only; the bootstrap credential keeps flipping the dial
+      await db.update(users).set({ isAdmin: true }).where(inArray(users.id, [piaId, anaId]));
+      // egress-allow-cleanup: afterAll
+      const host = await relaxStepUpAround(db, () =>
+        post("/v1/egress-allow-hosts", { host: saasAllowed.trackHost(SAAS_HOST), allowPrivateRanges: false, allowPlaintextHttp: false, note: `barrier ${RUN}` }));
+      expect([201, 409], host.body).toContain(host.statusCode);
+      await db.insert(aiSaasMonitorPolicy).values({ id: "singleton", enabled: true }).onConflictDoUpdate({ target: aiSaasMonitorPolicy.id, set: { enabled: true, remediationEnabled: false } });
+      const created = await post(`${BASE}/connectors`, { vendor: "claude_enterprise", name: `bm-saas-${RUN}`, config: { backfillDays: 2 }, reason: "barrier" }, piaAuth);
+      expect(created.statusCode, created.body).toBe(201);
+      const cid = created.json().connector.id as string;
+      connectorId = cid;
+      const put = async (url: string, facts: Record<string, unknown>, payload: object) =>
+        app.inject({ method: "PUT", url, ...(await relax(piaId, facts)), payload });
+      expect((await put(`${BASE}/connectors/${cid}/credential`, { aiSaasConnector: cid, values: { credential: "store" } }, { secret: `read-${RUN}`, replacesCredentialId: null, attestReadOnly: true, reason: "read key" })).statusCode).toBe(201);
+      expect((await put(`${BASE}/connectors/${cid}/enabled`, { aiSaasConnector: cid, values: { enabled: true } }, { enabled: true, reason: "barrier" })).statusCode).toBe(200);
+      const run = await post(`${BASE}/connectors/${cid}/runs`, {}, piaAuth);
+      expect(run.json().run, run.body).toMatchObject({ status: "succeeded", interactionsNew: SAAS_CHATS.length });
+      expect((await put(`${BASE}/remediation`, { aiSaasRemediation: true, values: { enabled: true } }, { enabled: true, reason: "barrier" })).statusCode).toBe(200);
+      expect((await put(`${BASE}/connectors/${cid}/credential`, { aiSaasConnector: cid, values: { credential: "store", purpose: "remediate" } }, { secret: `del-${RUN}`, replacesCredentialId: null, purpose: "remediate", reason: "delete key" })).statusCode).toBe(201);
+
+      /** request, four-eyes approve, and return a drive that executes it */
+      const approved = async (chat: string) => {
+        const found = await db.execute<{ id: string }>(sql`SELECT id FROM ai_saas_interactions WHERE conversation_ref = ${chat} LIMIT 1`);
+        const interactionId = (Array.isArray(found) ? found : (found as { rows: Array<{ id: string }> }).rows)[0]!.id;
+        const body = { interactionId, action: "delete_conversation", approverUserId: anaId, reason: `barrier ${RUN}` };
+        const asked = await app.inject({ method: "POST", url: `${BASE}/remediations`, ...(await relax(piaId, { op: "ai_saas_remediation", interactionId, action: "delete_conversation" })), payload: body });
+        expect(asked.statusCode, asked.body).toBe(202);
+        const { id, approvalId } = asked.json().remediation as { id: string; approvalId: string };
+        const [ap] = await db.select({ d: approvals.argumentsDigest }).from(approvals).where(eq(approvals.id, approvalId));
+        const decideReq = stepUpRequest(await grantStepUpForTest(db, anaId, { kind: "approval_decide", facts: { op: "ai_saas_remediation", approvalId, decision: "approved", argumentsDigest: ap!.d } } as Facts));
+        const decided = await app.inject({ method: "POST", url: `/v1/approvals/${approvalId}/decide`, ...decideReq, payload: { decision: "approved", reason: "barrier" } });
+        expect(decided.statusCode, decided.body).toBe(200);
+        return async () => app.inject({ method: "POST", url: `${BASE}/remediations/${id}/execute`, ...(await relax(piaId, { op: "ai_saas_remediation_execute", remediationId: id })) });
+      };
+
+      for (const [i, mode] of MODES.entries()) {
+        const execute = await approved(SAAS_CHATS[i]!);
+        const res = await refusedAtBarrier("vendor.delete_conversation", mode, execute);
+        // the barrier refused before the vendor call: the action failed, it is not an unknown outcome to settle
+        expect(res.json().remediation, res.body).toMatchObject({ status: "failed", outcomeCode: "execution_mode_blocked" });
+      }
+      const control = await approved(SAAS_CHATS[3]!);
+      const ok = await admitted("vendor.delete_conversation", control);
+      expect(ok.json().remediation, ok.body).toMatchObject({ status: "succeeded", outcomeCode: "deleted" });
+    } finally {
+      await db.update(aiSaasMonitorPolicy).set({ enabled: false, remediationEnabled: false });
+      if (connectorId) {
+        await db.update(aiSaasMonitorConnectors).set({ enabled: false }).where(eq(aiSaasMonitorConnectors.id, connectorId));
+      }
+      for (const r of restores.reverse()) await r();
     }
   });
 

@@ -27,10 +27,12 @@ const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 import { episodeKey, evaluateDetections, raisedKey, type DetectionEpisodes, type DetectionEvent, type DetectionMatch } from "./engine.js";
 import { DETECTION_INCIDENT_MACHINE, DETECTION_RESPONSE_MACHINE } from "@regulait/shared";
 import { runDetectionResponse, type DetectionResponseTarget } from "./responses.js";
+import { expireQuarantines } from "./quarantine.js";
+import { auditSuppressed, splitSuppressed, type SuppressedMatch } from "./suppressions.js";
 import { DEFAULT_DETECTION_PACK, packDigest, parseDetectionPack, verifyDetectionPack, type DetectionPack } from "./pack.js";
 
 export const DETECTION_SWEEP_JOB_NAME = "agent-detection-sweep";
-export const DETECTION_OWN_OBJECT_TYPES = ["detection_incident", "detection_rule_pack"] as const;
+export const DETECTION_OWN_OBJECT_TYPES = ["detection_incident", "detection_rule_pack", "detection_suppression"] as const;
 
 export const DETECTION_SWEEP_LIMITS = {
   batchSize: 500,
@@ -49,6 +51,8 @@ export const DETECTION_RULE_IDS = {
   /** the look-back was truncated, so a sequence whose first step fell outside it may go undetected (audited, never silent) */
   degraded: "detection-degraded",
   incidentStatus: "detection-incident-status",
+  /** ADR-0333 §5b: an admin dry-ran a pack over a past window (read-only) */
+  packDryRun: "detection-pack-dry-run",
 } as const;
 
 export interface ActivePack {
@@ -148,10 +152,15 @@ const toEvent = (r: EventRow): FreshEvent => {
   return { ...rest, seq: Number(r.seq), at: Number(atMs), addonSeverity: addonSeverity(r.addonSeverity, skillSeverityRank) };
 };
 
+/** ADR-0333 §6: an endpoint hook decision (ADR-0310 addendum) is grouped by its DEVICE, not by its user column, which
+ * is the nil sentinel for every device; before slice 3 every device's decisions fell into one `user:` group. */
+export const ENDPOINT_GROUP_PREFIX = "endpoint:";
+
 /** the event projection: the group key, the data-scope flag and the add-on's admission severity, from one row */
 const EVENT_SELECT = sql`
   a.id AS "auditId", a.seq AS seq, (extract(epoch FROM a.at) * 1000)::float8 AS "atMs",
   CASE WHEN a.delegation_grant_id IS NOT NULL THEN 'grant:' || coalesce(g.root_grant_id, a.delegation_grant_id)::text
+       WHEN a.object_type = 'endpoint_device' AND a.object_id IS NOT NULL THEN 'endpoint:' || a.object_id::text
        ELSE 'user:' || a.user_id::text END AS "group",
   a.user_id AS "userId", a.object_type AS "objectType", a.effect AS effect, a.rule_id AS "ruleId",
   a.tool_name AS "toolName", a.server_id AS "serverId", a.detail->>'phase' AS phase,
@@ -168,7 +177,7 @@ const EVENT_FROM = sql`FROM audit_log a
   LEFT JOIN mcp_servers s ON s.id = a.server_id
   LEFT JOIN users u ON u.id = a.user_id
   LEFT JOIN workload_identities wi ON wi.id = a.actor_identity_id`;
-const NOT_OWN = sql`a.object_type NOT IN ('detection_incident', 'detection_rule_pack')`;
+const NOT_OWN = sql`a.object_type NOT IN ('detection_incident', 'detection_rule_pack', 'detection_suppression')`;
 
 async function rows<T>(db: Pick<Db, "execute">, query: ReturnType<typeof sql>): Promise<T[]> {
   const result = await db.execute(query);
@@ -183,6 +192,10 @@ export interface DetectionSweepResult {
   responses: number;
   packVersion: number | null;
   lookbackTruncated: boolean;
+  /** ADR-0333 §5b: matches an active suppression held back (counted in audit rows, not raised) */
+  suppressed: number;
+  /** ADR-0333 §6: device quarantines that reached their end time and ended (only under the `normal` dial) */
+  quarantinesExpired: number;
   /** ADR-0333 D2: history rows replayed in this pass, and whether the replay has finished */
   replayed: number;
   replayComplete: boolean;
@@ -260,6 +273,8 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
     responses: 0,
     packVersion: active.version,
     lookbackTruncated: false,
+    suppressed: 0,
+    quarantinesExpired: 0,
     replayed: 0,
     replayComplete: false,
   };
@@ -275,6 +290,8 @@ export async function runDetectionSweep(db: Db, actorUserId: string | null): Pro
     result.rowsRead += live;
     // configured responses run for live incidents only (replayed ones are historical and alert-only)
     result.responses += await runPendingResponses(db, actorUserId);
+    // ADR-0333 §6: end quarantines past their time; widening, so a non-normal dial keeps them in force
+    result.quarantinesExpired = (await expireQuarantines(db, actorUserId ?? SYSTEM_ACTOR)).expired;
     result.replayComplete = claimed.replayCursor >= claimed.replayUntil;
     if (!result.replayComplete) {
       const replayed = await runRange(db, token, active, "replay", claimed.replayCursor, claimed.replayUntil, maxSpanSeconds, result);
@@ -313,9 +330,12 @@ async function runRange(
     read += batch.length;
     const fresh = batch.filter((r) => !(DETECTION_OWN_OBJECT_TYPES as readonly string[]).includes(r.objectType)).map(toEvent);
     const degraded: string[] = [];
-    const matches = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result, degraded);
+    const evaluated = await evaluateBatch(db, active, fresh, cursor, maxSpanSeconds, result, degraded);
+    // ADR-0333 §5b: a match an active suppression covers raises nothing, and is counted in the batch's audit
+    const { kept: matches, suppressed } = await splitSuppressed(db, active.pack, evaluated);
+    result.suppressed += suppressed.length;
     const window = { fromSeq: cursor, toSeq: lastSeq, maxSpanSeconds };
-    result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode, degraded.length ? { groups: degraded, ...window } : null);
+    result.incidents += await commitBatch(db, token, active, matches, lastSeq, mode, degraded.length ? { groups: degraded, ...window } : null, suppressed);
     cursor = lastSeq;
     if (batch.length < DETECTION_SWEEP_LIMITS.batchSize) break;
   }
@@ -343,13 +363,19 @@ async function evaluateBatch(
     // the scan never walks the whole chain backwards (review of #865).
     const users = [...new Set(fresh.map((e) => e.userId))];
     const userList = sql`ARRAY[${sql.join(users.map((u) => sql`${u}`), sql`, `)}]::uuid[]`;
+    // endpoint groups share the nil user, so their rows are narrowed to the fresh devices too (ADR-0333 §6)
+    const devices = groups.filter((g) => g.startsWith(ENDPOINT_GROUP_PREFIX)).map((g) => g.slice(ENDPOINT_GROUP_PREFIX.length));
+    const deviceFilter =
+      devices.length === 0
+        ? sql`AND a.object_type <> 'endpoint_device'`
+        : sql`AND (a.object_type <> 'endpoint_device' OR a.object_id = ANY(ARRAY[${sql.join(devices.map((d) => sql`${d}`), sql`, `)}]::uuid[]))`;
     const perGroup = DETECTION_SWEEP_LIMITS.lookbackRowsPerGroup;
     const loaded = await rows<EventRow & { rn: number | string }>(
       db,
       sql`SELECT * FROM (
             SELECT w.*, row_number() OVER (PARTITION BY w."group" ORDER BY w.seq DESC) AS rn FROM (
               SELECT ${EVENT_SELECT} ${EVENT_FROM}
-              WHERE a.user_id = ANY(${userList}) AND a.at >= to_timestamp(${since / 1000}::float8)
+              WHERE a.user_id = ANY(${userList}) AND a.at >= to_timestamp(${since / 1000}::float8) ${deviceFilter}
                 AND a.seq <= ${cursor} AND a.seq IS NOT NULL AND ${NOT_OWN}
             ) w WHERE w."group" = ANY(${groupList})
           ) r WHERE r.rn <= ${perGroup + 1}
@@ -402,7 +428,8 @@ async function runPendingResponses(db: Db, actorUserId: string | null): Promise<
   const pending = await rows<Omit<DetectionResponseTarget, "auditUserId">>(
     db,
     sql`SELECT i.id AS "incidentId", i.rule_id AS "ruleId", i.response AS response, i.group_key AS "groupKey",
-               i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor"
+               i.user_id AS "userId", i.actor_identity_id AS "actorIdentityId", p.created_by AS "packAuthor",
+               (SELECT r->'quarantineHours' FROM jsonb_array_elements(p.pack->'rules') r WHERE r->>'id' = i.rule_id LIMIT 1) AS "quarantineHours"
         FROM detection_incidents i LEFT JOIN detection_rule_packs p ON p.version = i.pack_version
         WHERE i.response <> 'alert' AND i.response_state IN (${sql.join(DETECTION_RESPONSE_MACHINE.def.states.filter((st) => !DETECTION_RESPONSE_MACHINE.isTerminal(st)).map((st) => sql`${st}`), sql`, `)})
         ORDER BY i.created_at, i.id LIMIT 100`,
@@ -420,10 +447,12 @@ async function commitBatch(
   lastSeq: number,
   mode: SweepMode,
   degraded: { groups: string[]; fromSeq: number; toSeq: number; maxSpanSeconds: number } | null,
+  suppressed: SuppressedMatch[] = [],
 ): Promise<number> {
   const historical = mode === "replay";
   return db.transaction(async (tx) => {
     let raised = 0;
+    await auditSuppressed(tx as unknown as Db, SYSTEM_ACTOR, suppressed, historical);
     // ADR-0333 §1: a truncated look-back is never silently treated as matching nothing. It is audited once per group
     // per detection window, not on every batch: a group that stays busy would otherwise flood the chain and the
     // SIEM (review of #865). The mark is claimed in this transaction, so a rolled-back batch leaves it unclaimed.
@@ -552,4 +581,67 @@ export function detectionJobDefinitions(): SchedulerJobDefinition[] {
       },
     },
   ];
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR-0333 §5b: dry run of a pack over a past window (read-only)
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const DRY_RUN_LIMITS = { maxWindowSeconds: 7 * 24 * 3600, maxRows: 20_000 } as const;
+
+export interface DryRunRuleResult {
+  ruleId: string;
+  severity: DetectionPack["rules"][number]["severity"];
+  /** matches the pack would have raised in the window (each an incident, before suppressions) */
+  hits: number;
+  /** distinct groups among those hits */
+  groups: number;
+  /** of `hits`, those a suppression active NOW would hold back */
+  suppressedNow: number;
+}
+
+export interface DryRunResult {
+  window: { from: string; to: string };
+  rowsRead: number;
+  /** the window held more than DRY_RUN_LIMITS.maxRows rows: only the earliest were evaluated */
+  truncated: boolean;
+  rules: DryRunRuleResult[];
+}
+
+/**
+ * Evaluate `pack` over the audit rows of [from, to] (plus the look-back the pack's longest timespan needs before
+ * `from`) and return what it would have raised. Read-only: one READ ONLY transaction, no incident, episode, cursor or
+ * response is written. Incidents already raised are ignored, so the counts answer "what would this pack raise on this
+ * history", not "what is new". Bounded by DRY_RUN_LIMITS.
+ */
+export async function dryRunDetectionPack(db: Db, pack: DetectionPack, window: { from: Date; to: Date }): Promise<DryRunResult> {
+  const maxSpanSeconds = Math.max(0, ...pack.rules.map((r) => (r.type === "single" ? 0 : r.timespanSeconds)));
+  const fromMs = window.from.getTime();
+  const since = (fromMs - maxSpanSeconds * 1000) / 1000;
+  const until = window.to.getTime() / 1000;
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    const loaded = await rows<EventRow>(
+      tx,
+      sql`SELECT ${EVENT_SELECT} ${EVENT_FROM}
+          WHERE a.at >= to_timestamp(${since}::float8) AND a.at <= to_timestamp(${until}::float8)
+            AND a.seq IS NOT NULL AND ${NOT_OWN}
+          ORDER BY a.seq LIMIT ${DRY_RUN_LIMITS.maxRows + 1}`,
+    );
+    const truncated = loaded.length > DRY_RUN_LIMITS.maxRows;
+    const events = (truncated ? loaded.slice(0, DRY_RUN_LIMITS.maxRows) : loaded).map(toEvent);
+    const fresh = new Set(events.filter((e) => e.at >= fromMs).map((e) => e.seq));
+    const matches = evaluateDetections(pack, events, fresh);
+    const { suppressed } = await splitSuppressed(tx, pack, matches);
+    const suppressedBy = new Map<string, number>();
+    for (const s of suppressed) suppressedBy.set(s.ruleId, (suppressedBy.get(s.ruleId) ?? 0) + 1);
+    const rules = pack.rules
+      .filter((r) => r.enabled)
+      .map((r) => {
+        const mine = matches.filter((m) => m.rule.id === r.id);
+        return { ruleId: r.id, severity: r.severity, hits: mine.length, groups: new Set(mine.map((m) => m.group)).size, suppressedNow: suppressedBy.get(r.id) ?? 0 };
+      });
+    return { window: { from: window.from.toISOString(), to: window.to.toISOString() }, rowsRead: events.length, truncated, rules };
+  });
 }

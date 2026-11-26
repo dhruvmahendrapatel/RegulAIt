@@ -25,11 +25,18 @@
  * Open source first (ADR-0176): OpenAI's costs endpoint is called through the official `openai` SDK
  * (`client.admin.organization.usage.costs`, Apache-2.0) with the guarded fetch injected. `@anthropic-ai/sdk` has no
  * method for `/v1/organizations/cost_report` (checked against its api.md at 0.113.0 and main, 2026-11-15), so that
- * endpoint is called with the guarded fetch directly.
+ * endpoint is called with the guarded fetch directly. GitHub's billing usage report is one unpaginated GET per day:
+ * `@octokit/request` (MIT) was compared and not added, because it would be a new dependency whose fetch must be
+ * replaced by the guarded one anyway, for a single GET. Cursor publishes no SDK for its Admin API (slice 3,
+ * 2026-11-19). The ChatGPT Enterprise Daily Usage endpoint (slice 4b, 2026-11-20) is on a different host and is not in
+ * the `openai` SDK (checked at 6.49.0); a client generated from the vendor's OpenAPI document (for example with
+ * `openapi-fetch`, MIT) was compared and not added, because it would vendor a 700 KB document and a new dependency for
+ * one paginated GET whose fetch must still be the guarded one. The vendor's own sample code calls it with plain fetch.
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import OpenAiSdk from "openai";
+import { AWS_CUR_MAX_OBJECT_BYTES, AwsCurReadError, awsCredentialProvider, readAwsCurPeriod } from "@regulait/cloud-discovery";
 import { z } from "zod";
 import {
   and,
@@ -52,9 +59,24 @@ import {
 } from "@regulait/db";
 import {
   anthropicCostReportSchema,
+  AWS_CUR_MAX_ROWS,
+  awsCurBillingPeriods,
+  awsCurFacts,
+  awsCurManifestSchema,
+  awsCurPeriodBounds,
+  chatGptDailyUsagePageSchema,
+  cursorUsageEventsSchema,
+  FEDERATION_AUDIENCES,
+  normalizeAwsCurCsv,
+  vendorUsageConnectorSubject,
+  vendorUsageSecretSchemas,
   factOverlapsMetered,
+  githubBillingUsageSchema,
   normalizeAccountKey,
   normalizeAnthropicCostReport,
+  normalizeChatGptDailyUsage,
+  normalizeCursorUsageEvents,
+  normalizeGithubCopilotUsage,
   normalizeOpenAiCosts,
   openAiCostsSchema,
   resolveVendorAccount,
@@ -68,13 +90,18 @@ import {
   VENDOR_USAGE_PULL_RUN_MACHINE,
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
-  type AnthropicPublicConfig,
-  type OpenAiPublicConfig,
+  type AwsCurPublicConfig,
+  type ChatGptDailyUsageRow,
+  type CursorUsageEvent,
+  type GithubCopilotPublicConfig,
+  type OpenAiCodexPublicConfig,
   type VendorUsageFact,
+  type VendorUsagePublicConfig,
   type VendorUsagePullVendor,
 } from "@regulait/shared";
 import { loadResolutionContext, scanFreeTexts } from "./cost-import.js";
 import { loadEgressAllowList } from "./custom-providers.js";
+import { FederationError, federationTokenMinter } from "./federation-signing-keys.js";
 import { resolveDeployMode } from "./deploy-posture.js";
 import {
   createGuardedFetch,
@@ -122,7 +149,7 @@ export interface VendorUsageDeps {
   resolve?: EgressResolver | undefined;
 }
 
-type PublicConfig = AnthropicPublicConfig | OpenAiPublicConfig;
+type PublicConfig = VendorUsagePublicConfig;
 
 function isPullVendor(v: string): v is VendorUsagePullVendor {
   return (VENDOR_USAGE_PULL_VENDORS as readonly string[]).includes(v);
@@ -197,6 +224,13 @@ function classifyError(err: unknown, page: number): PullError {
     }
   }
   if (err instanceof OpenAiSdk.APIError && typeof err.status === "number") return statusError(err.status, page);
+  if (err instanceof AwsCurReadError) {
+    const code: PullErrorCode = err.reason === "too_large" ? "response_too_large" : err.reason === "too_many_files" ? "page_limit" : "bad_response";
+    return new PullError(code, err.message);
+  }
+  // an AWS SDK service error carries the HTTP status in $metadata; its message is AWS text and is not kept
+  const awsStatus = (err as { $metadata?: { httpStatusCode?: unknown } } | null)?.$metadata?.httpStatusCode;
+  if (typeof awsStatus === "number" && awsStatus >= 400) return statusError(awsStatus, page);
   if (err instanceof VendorUsageResponseError || err instanceof z.ZodError || err instanceof SyntaxError) {
     return new PullError("bad_response", `a vendor response did not match the documented shape on page ${page}`);
   }
@@ -306,6 +340,255 @@ async function fetchOpenAi(
     page = parsed.next_page;
   }
   throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
+}
+
+/** GitHub's REST API version the billing usage report is documented under (re-checked 2026-11-19) */
+const GITHUB_API_VERSION = "2026-03-10";
+
+/** a GET or POST through the guarded fetch that returns parsed JSON or throws a classified error */
+async function fetchJson(fetcher: typeof fetch, url: string, init: RequestInit, page: number): Promise<unknown> {
+  try {
+    const res = await fetcher(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined);
+      throw statusError(res.status, page);
+    }
+    return await res.json();
+  } catch (err) {
+    throw classifyError(err, page);
+  }
+}
+
+/** GitHub's daily billing usage report, one request per day of the window, Copilot lines only */
+async function fetchGithubCopilot(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+  config: GithubCopilotPublicConfig,
+): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  const facts: VendorUsageFact[] = [];
+  const base = config.account === "organization" ? "organizations" : "enterprises";
+  let n = 0;
+  for (let day = window.start.getTime(); day < window.end.getTime(); day += DAY_MS) {
+    n += 1;
+    if (n > VENDOR_USAGE_MAX_PAGES) {
+      throw new PullError("page_limit", `the window needed more than ${VENDOR_USAGE_MAX_PAGES} requests; nothing was written`);
+    }
+    const d = new Date(day);
+    const url = new URL(`https://${VENDOR_USAGE_CATALOGUE.github_copilot.host}/${base}/${encodeURIComponent(config.slug)}/settings/billing/usage`);
+    url.searchParams.set("year", String(d.getUTCFullYear()));
+    url.searchParams.set("month", String(d.getUTCMonth() + 1));
+    url.searchParams.set("day", String(d.getUTCDate()));
+    const body = await fetchJson(
+      fetcher,
+      url.toString(),
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${key}`, accept: "application/vnd.github+json", "x-github-api-version": GITHUB_API_VERSION },
+      },
+      n,
+    );
+    try {
+      facts.push(...normalizeGithubCopilotUsage(githubBillingUsageSchema.parse(body), { kind: config.account, slug: config.slug }));
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+  }
+  return { facts, pages: n };
+}
+
+/** Cursor's filtered usage events for the window (both bounds inclusive, epoch ms), 1000 a page */
+async function fetchCursor(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+): Promise<{ facts: VendorUsageFact[]; pages: number }> {
+  const events: CursorUsageEvent[] = [];
+  const authorization = `Basic ${Buffer.from(`${key}:`, "utf8").toString("base64")}`;
+  for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
+    const body = await fetchJson(
+      fetcher,
+      `https://${VENDOR_USAGE_CATALOGUE.cursor.host}/teams/filtered-usage-events`,
+      {
+        method: "POST",
+        headers: { authorization, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ startDate: window.start.getTime(), endDate: window.end.getTime() - 1, page: n, pageSize: 1000 }),
+      },
+      n,
+    );
+    let parsed;
+    try {
+      parsed = cursorUsageEventsSchema.parse(body);
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+    // a vendor that answers a different page than the one asked for would loop or skip pages; refuse it
+    if (parsed.pagination.currentPage !== n) {
+      throw new PullError("bad_response", `the vendor answered page ${parsed.pagination.currentPage} when page ${n} was asked for; nothing was written`);
+    }
+    events.push(...parsed.usageEvents);
+    if (!parsed.pagination.hasNextPage) {
+      try {
+        return { facts: normalizeCursorUsageEvents(events), pages: n };
+      } catch (err) {
+        throw classifyError(err, n);
+      }
+    }
+  }
+  throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
+}
+
+/** what a fetch returns; `replacePeriods` are AWS billing months read in full, whose stale lines are withdrawn */
+interface Fetched {
+  facts: VendorUsageFact[];
+  pages: number;
+  replacePeriods?: string[];
+  /** daily rows with credit-priced usage and no vendor estimate, so no credit line (slice 4b, owner decision 1) */
+  creditRowsWithoutEstimate?: number;
+}
+
+/** rows asked for a page: well inside the vendor's 30,000 cap and the 4 MB response bound */
+const CHATGPT_USAGE_PAGE_ROWS = 2000;
+
+/**
+ * ChatGPT Enterprise Daily Usage for the window, per user and UTC day, following `next_page` (slice 4b). Both bounds
+ * are UTC midnights in Unix seconds, `start_time` inclusive and `end_time` exclusive, as the vendor documents.
+ */
+async function fetchChatGptUsage(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+  config: OpenAiCodexPublicConfig,
+): Promise<Fetched> {
+  const rows: ChatGptDailyUsageRow[] = [];
+  const cursors = new Set<string>();
+  let page: string | null = null;
+  for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
+    const url = new URL(`https://${VENDOR_USAGE_CATALOGUE.openai_codex.host}/v1/analytics/workspaces/${encodeURIComponent(config.workspaceId)}/usage`);
+    url.searchParams.set("start_time", String(window.start.getTime() / 1000));
+    url.searchParams.set("end_time", String(window.end.getTime() / 1000));
+    url.searchParams.set("limit", String(CHATGPT_USAGE_PAGE_ROWS));
+    if (page) url.searchParams.set("page", page);
+    const body = await fetchJson(fetcher, url.toString(), { method: "GET", headers: { authorization: `Bearer ${key}`, accept: "application/json" } }, n);
+    let parsed;
+    try {
+      parsed = chatGptDailyUsagePageSchema.parse(body);
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+    rows.push(...parsed.data);
+    if (!parsed.has_more) {
+      try {
+        const { facts, creditRowsWithoutEstimate } = normalizeChatGptDailyUsage(rows, { workspaceId: config.workspaceId, window });
+        return { facts, pages: n, creditRowsWithoutEstimate };
+      } catch (err) {
+        throw classifyError(err, n);
+      }
+    }
+    if (!parsed.next_page) throw new PullError("bad_response", `the vendor said more pages follow page ${n} but gave no cursor; nothing was written`);
+    if (cursors.has(parsed.next_page)) throw repeatedCursor(n);
+    cursors.add(parsed.next_page);
+    page = parsed.next_page;
+  }
+  throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
+}
+
+/** what the AWS fetch needs beyond the key: the federation minter's inputs and a guarded fetch sized for CUR files */
+interface AwsFetchContext {
+  db: Db;
+  dataKey: string | undefined;
+  connectorId: string;
+  periods: string[];
+  allowList: Awaited<ReturnType<typeof loadEgressAllowList>>;
+  deps: VendorUsageDeps;
+}
+
+/** a federated connector stores no secret: this marker is its credential row, and revoking it stops the pull */
+export const AWS_CUR_FEDERATED_SECRET = JSON.stringify({ mode: "federated" });
+
+/** a stored secret parsed for its connector's credential mode, or null when they disagree */
+function awsCurSecret(raw: string, config: AwsCurPublicConfig) {
+  let parsed;
+  try {
+    parsed = vendorUsageSecretSchemas.aws_cur.parse(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+  return parsed.mode === config.credentialMode ? parsed : null;
+}
+
+/**
+ * AWS Data Exports (CUR 2.0): each billing period through @regulait/cloud-discovery's reader, STS and S3 both on the
+ * guarded fetch. Federated mode presents a token minted for this connector's subject; static mode signs with the
+ * stored key pair. Only Bedrock lines are kept (`productCodes`), summed per day in integer micro-units.
+ */
+async function fetchAwsCur(key: string, config: AwsCurPublicConfig, ctx: AwsFetchContext): Promise<Fetched> {
+  const secret = awsCurSecret(key, config);
+  if (!secret) throw new PullError("unauthorized", "the stored credential does not match the connector's credential mode");
+  // CUR objects are larger than an API page: the S3 and STS calls get their own guarded fetch with the reader's cap
+  const fetcher = createGuardedFetch({
+    allowList: ctx.allowList,
+    maxResponseBytes: AWS_CUR_MAX_OBJECT_BYTES,
+    ...(ctx.deps.fetchImpl ? { fetchImpl: ctx.deps.fetchImpl } : {}),
+    ...(ctx.deps.resolve ? { resolve: ctx.deps.resolve } : {}),
+  });
+  const credentials =
+    secret.mode === "static"
+      ? awsCredentialProvider({ fetch: fetcher, credential: { mode: "aws_static", accessKeyId: secret.accessKeyId, secretAccessKey: secret.secretAccessKey } }, config.region)
+      : awsCredentialProvider(
+          {
+            fetch: fetcher,
+            credential: { mode: "aws_web_identity", roleArn: config.roleArn!, roleSessionName: "regulait-vendor-usage" },
+            oidcToken: federationTokenMinter(ctx.db, {
+              dataKey: ctx.dataKey,
+              subject: vendorUsageConnectorSubject(ctx.connectorId),
+              allowedAudiences: [FEDERATION_AUDIENCES.aws],
+            }),
+          },
+          config.region,
+        );
+  const target = { bucket: config.bucket, region: config.region, prefix: config.prefix, exportName: config.exportName };
+  const facts: VendorUsageFact[] = [];
+  const replacePeriods: string[] = [];
+  let rows = 0;
+  let files = 0;
+  for (const period of ctx.periods) {
+    const groups = new Map<string, { fact: VendorUsageFact; micro: number; qty: number }>();
+    const read = await readAwsCurPeriod({ fetch: fetcher, credentials, parseManifest: (raw) => awsCurManifestSchema.parse(raw) }, target, period, (text) => {
+      const out = normalizeAwsCurCsv(text, period, config, groups);
+      rows += out.rows;
+      if (rows > AWS_CUR_MAX_ROWS) throw new PullError("page_limit", `the export has more than ${AWS_CUR_MAX_ROWS} rows in this window; use an export limited to the configured product codes`);
+    });
+    files += read.files;
+    if (!read.delivered) continue;
+    facts.push(...awsCurFacts(groups));
+    replacePeriods.push(period);
+  }
+  return { facts, pages: files, replacePeriods };
+}
+
+function fetchVendor(
+  vendor: VendorUsagePullVendor,
+  config: PublicConfig,
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+  aws: AwsFetchContext,
+): Promise<Fetched> {
+  switch (vendor) {
+    case "anthropic":
+      return fetchAnthropic(key, window, fetcher);
+    case "openai":
+      return fetchOpenAi(key, window, fetcher);
+    case "github_copilot":
+      return fetchGithubCopilot(key, window, fetcher, config as GithubCopilotPublicConfig);
+    case "cursor":
+      return fetchCursor(key, window, fetcher);
+    case "aws_cur":
+      return fetchAwsCur(key, config as AwsCurPublicConfig, aws);
+    case "openai_codex":
+      return fetchChatGptUsage(key, window, fetcher, config as OpenAiCodexPublicConfig);
+  }
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -456,7 +739,12 @@ export async function runVendorUsagePull(
 
   const vendor = connector.vendor;
   const config = parseConfig(vendor, connector.publicConfig);
-  const window = pullWindow(connector.pulledThrough, config.backfillDays, now);
+  // AWS delivers whole billing months; every other vendor answers a daily range
+  const periods = vendor === "aws_cur" ? awsCurBillingPeriods(connector.pulledThrough, (config as AwsCurPublicConfig).backfillMonths, now) : [];
+  const window =
+    vendor === "aws_cur"
+      ? { start: awsCurPeriodBounds(periods[0]!).start, end: awsCurPeriodBounds(periods[periods.length - 1]!).end }
+      : pullWindow(connector.pulledThrough, (config as { backfillDays: number }).backfillDays, now);
   await db
     .update(vendorUsagePullRuns)
     .set({ windowStart: window.start, windowEnd: window.end })
@@ -469,11 +757,25 @@ export async function runVendorUsagePull(
     return refuse("data_key_unavailable", "the stored credential could not be decrypted with the configured data key");
   }
 
-  let fetched: { facts: VendorUsageFact[]; pages: number };
+  let fetched: Fetched;
   try {
-    const fetcher = guardedFetch(await loadEgressAllowList(db), opts.deps ?? {});
-    fetched = vendor === "anthropic" ? await fetchAnthropic(key, window, fetcher) : await fetchOpenAi(key, window, fetcher);
+    const allowList = await loadEgressAllowList(db);
+    const fetcher = guardedFetch(allowList, opts.deps ?? {});
+    fetched = await fetchVendor(vendor, config, key, window, fetcher, {
+      db,
+      dataKey: opts.dataKey,
+      connectorId,
+      periods,
+      allowList,
+      deps: opts.deps ?? {},
+    });
   } catch (err) {
+    // federation off (or its issuer unset) means the federated credential cannot be used: a refusal, not a failure
+    for (let e: unknown = err, depth = 0; e && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+      if (e instanceof FederationError) {
+        return refuse("no_credential", "this connector's federated credential cannot be used: cloud workload identity federation is off or has no issuer (ADR-0195)");
+      }
+    }
     const e = classifyError(err, 0);
     return finish("fail", {errorCode: e.code, errorDetail: e.detail }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", e.detail);
   }
@@ -489,7 +791,10 @@ export async function runVendorUsagePull(
     return finish("fail", {errorCode: "scan_blocked", errorDetail: detail, pages: fetched.pages }, VENDOR_USAGE_RULE_IDS.pullFailed, "deny", detail);
   }
 
-  const ctx = await loadResolutionContext(db);
+  const loaded = await loadResolutionContext(db);
+  // an AWS principal's role session name is chosen by the caller, so it is never read as an email (owner decision,
+  // 2026-11-20): AWS lines resolve through admin aliases only
+  const ctx = vendor === "aws_cur" ? { ...loaded, userIdByEmail: new Map<string, string>(), domainRules: [] } : loaded;
   // a fact key the vendor returned twice is one fact: the later bucket wins, so one statement never touches a row twice
   const byKey = new Map<string, { fact: VendorUsageFact; i: number; factKey: string }>();
   fetched.facts.forEach((fact, i) => {
@@ -607,9 +912,39 @@ export async function runVendorUsagePull(
         .returning({ inserted: sql<boolean>`(xmax = 0)` });
       newLines += written.filter((w) => w.inserted).length;
     }
+    // AWS months read in full replace what was stored for them (owner decision, 2026-11-20): a line AWS no longer
+    // reports for a re-read month is withdrawn, so the ledger matches AWS's restated file
+    let withdrawnLines = 0;
+    if (fetched.replacePeriods && fetched.replacePeriods.length > 0) {
+      const keep = lines.map((l) => l.factKey);
+      const withdrawn = await tx
+        .delete(importedCostLines)
+        .where(
+          and(
+            eq(importedCostLines.pullConnectorId, connectorId),
+            inArray(sql<string>`${importedCostLines.detail}->>'billingPeriod'`, fetched.replacePeriods),
+            keep.length ? sql`${importedCostLines.factKey} <> ALL(${sql.param(keep)}::text[])` : undefined,
+          ),
+        )
+        .returning({ id: importedCostLines.id });
+      withdrawnLines = withdrawn.length;
+    }
     await tx
       .update(costImportBatches)
-      .set({ summary: { origin: "pull", connectorId, runId, vendors: [vendor], overlapLines, pages: fetched.pages, newLines, restatedLines: lines.length - newLines } })
+      .set({
+        summary: {
+          origin: "pull",
+          connectorId,
+          runId,
+          vendors: [vendor],
+          overlapLines,
+          pages: fetched.pages,
+          newLines,
+          restatedLines: lines.length - newLines,
+          ...(fetched.replacePeriods ? { replacedPeriods: fetched.replacePeriods, withdrawnLines } : {}),
+          ...(fetched.creditRowsWithoutEstimate !== undefined ? { creditRowsWithoutEstimate: fetched.creditRowsWithoutEstimate } : {}),
+        },
+      })
       .where(eq(costImportBatches.id, batch!.id));
     const through = new Date(Math.min(window.end.getTime(), now.getTime()));
     await tx
@@ -736,13 +1071,40 @@ const credentialBody = z
     secret: z.string().min(8).max(4096),
     replacesCredentialId: z.string().uuid().nullable(),
     acknowledgeWriteCapable: z.boolean().default(false),
+    /** the admin attests the token carries read permissions only, where RegulAIt cannot check its scope (#1069 S4) */
+    acknowledgeUnverifiedScope: z.boolean().default(false),
+    /** an AWS access-key pair is long-lived; storing one is a relaxation the admin acknowledges separately */
+    acknowledgeStaticAwsKey: z.boolean().default(false),
     reason: reasonField,
   })
   .strict();
 const revokeBody = z.object({ reason: reasonField }).strict();
 const idParam = z.object({ connectorId: z.string().uuid() });
 
-function connectorView(c: VendorUsageConnectorRow, cred: { id: string; scopePosture: string; createdAt: Date } | null) {
+/** how many gateway-owned vendor ids a connector declares for the metered-overlap exclusion */
+function declaredGatewayIds(cfg: PublicConfig): number {
+  if ("gatewayWorkspaceIds" in cfg) return cfg.gatewayWorkspaceIds.length;
+  if ("gatewayApiKeyIds" in cfg) return cfg.gatewayApiKeyIds.length + cfg.gatewayProjectIds.length;
+  return 0;
+}
+
+/** what the admin attests when storing a token whose scope RegulAIt cannot check (#1069 S4) */
+const UNVERIFIED_SCOPE_ATTESTATION =
+  "the administrator attested that this token carries read permissions only; RegulAIt cannot verify its scope";
+
+type CredentialViewRow = { id: string; scopePosture: string; createdAt: Date; writeCapableAcknowledgedAt: Date | null };
+
+function credentialView(cred: CredentialViewRow) {
+  return {
+    id: cred.id,
+    scopePosture: cred.scopePosture,
+    storedAt: cred.createdAt.toISOString(),
+    scopeAcknowledgedAt: cred.writeCapableAcknowledgedAt?.toISOString() ?? null,
+    ...(cred.scopePosture === "unverified" ? { scopeAttestation: UNVERIFIED_SCOPE_ATTESTATION } : {}),
+  };
+}
+
+function connectorView(c: VendorUsageConnectorRow, cred: CredentialViewRow | null) {
   return {
     id: c.id,
     vendor: c.vendor,
@@ -750,7 +1112,7 @@ function connectorView(c: VendorUsageConnectorRow, cred: { id: string; scopePost
     enabled: c.enabled,
     config: c.publicConfig,
     pulledThrough: c.pulledThrough?.toISOString() ?? null,
-    credential: cred ? { id: cred.id, scopePosture: cred.scopePosture, storedAt: cred.createdAt.toISOString() } : null,
+    credential: cred ? credentialView(cred) : null,
     createdAt: c.createdAt.toISOString(),
   };
 }
@@ -797,15 +1159,13 @@ export function registerVendorUsagePullRoutes(
       catalogue: Object.values(VENDOR_USAGE_CATALOGUE),
       connectors: connectors.map((c) => {
         const cfg = isPullVendor(c.vendor) ? parseConfig(c.vendor, c.publicConfig) : null;
-        const declared = cfg
-          ? "gatewayWorkspaceIds" in cfg
-            ? cfg.gatewayWorkspaceIds.length
-            : cfg.gatewayApiKeyIds.length + cfg.gatewayProjectIds.length
-          : 0;
+        const declared = cfg ? declaredGatewayIds(cfg) : 0;
+        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor" || c.vendor === "aws_cur" || c.vendor === "openai_codex";
         return {
           ...connectorView(c, credBy.get(c.id) ?? null),
-          meteredOverlap:
-            declared > 0
+          meteredOverlap: unmetered
+            ? "the gateway does not meter this vendor, so no line is excluded as already metered"
+            : declared > 0
               ? "lines billed to the declared gateway keys, projects or workspaces are excluded as already metered"
               : "no gateway key, project or workspace is declared, so spend the gateway metered cannot be excluded for this connector",
         };
@@ -895,7 +1255,7 @@ export function registerVendorUsagePullRoutes(
     if (!connector || !isPullVendor(connector.vendor)) return reply.status(404).send({ error: "not_found" });
     const parsed = credentialBody.safeParse(req.body);
     if (!parsed.success) {
-      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, reason }"));
+      return reply.status(400).send(bad("expected { secret, replacesCredentialId: uuid | null, acknowledgeWriteCapable?, acknowledgeUnverifiedScope?, acknowledgeStaticAwsKey?, reason }"));
     }
     if (resolveDeployMode() === "air_gapped") {
       return reply.status(409).send({ error: "vendor_usage_air_gapped", detail: "this deployment is air-gapped; no vendor credential can be stored" });
@@ -911,9 +1271,42 @@ export function registerVendorUsagePullRoutes(
         detail: VENDOR_USAGE_CATALOGUE[connector.vendor].scopeNote + " Send acknowledgeWriteCapable: true to store it.",
       });
     }
+    // secure by default (ADR-0180): a scope RegulAIt cannot check is held at least as strictly as one it knows can
+    // write, so storing it needs the admin's own attestation, recorded with the credential and in the audit row
+    // a structured secret must be the shape its connector's mode expects (ADR-0322 slice 4a)
+    let staticAwsKey = false;
+    if (connector.vendor === "aws_cur") {
+      const cfg = parseConfig("aws_cur", connector.publicConfig) as AwsCurPublicConfig;
+      if (!awsCurSecret(parsed.data.secret, cfg)) {
+        return reply.status(400).send({
+          error: "invalid_credential_shape",
+          detail:
+            cfg.credentialMode === "federated"
+              ? `a federated AWS connector stores ${AWS_CUR_FEDERATED_SECRET} as its credential`
+              : 'a static AWS connector stores {"mode":"static","accessKeyId":"…","secretAccessKey":"…"}',
+        });
+      }
+      staticAwsKey = cfg.credentialMode === "static";
+      if (staticAwsKey && !parsed.data.acknowledgeStaticAwsKey) {
+        return reply.status(409).send({
+          error: "static_aws_key_acknowledgement_required",
+          detail:
+            "a static AWS access key is long-lived and is stored encrypted until it is revoked; the federated role is " +
+            "the secure default. Send acknowledgeStaticAwsKey: true to store it.",
+        });
+      }
+    }
+    if (posture === "unverified" && !parsed.data.acknowledgeUnverifiedScope) {
+      return reply.status(409).send({
+        error: "unverified_scope_acknowledgement_required",
+        detail:
+          VENDOR_USAGE_CATALOGUE[connector.vendor].scopeNote +
+          " Send acknowledgeUnverifiedScope: true to attest that the token carries read permissions only.",
+      });
+    }
     if (!(await requireStepUp(db, req, reply, {
       kind: "settings_relax",
-      facts: { vendorUsageConnector: connector.id, values: { credential: "store", scopePosture: posture } },
+      facts: { vendorUsageConnector: connector.id, values: { credential: "store", scopePosture: posture, ...(staticAwsKey ? { staticAwsKey: true } : {}) } },
     })).ok) {
       return reply;
     }
@@ -939,17 +1332,26 @@ export function registerVendorUsagePullRoutes(
           connectorId: connector.id,
           secretCiphertext: ciphertext,
           scopePosture: posture,
-          writeCapableAcknowledgedAt: posture === "write_capable" ? new Date() : null,
+          // the acknowledgement of any scope RegulAIt cannot hold to read-only: write_capable or unverified
+          writeCapableAcknowledgedAt: posture === "read_only" ? null : new Date(),
           createdBy: actor(req),
         })
         .returning();
       const ruleId = existing ? VENDOR_USAGE_RULE_IDS.credentialReplaced : VENDOR_USAGE_RULE_IDS.credentialStored;
       await audit(tx, actor(req), "vendor_usage_credential", row!.id, ruleId, "allow",
         `vendor usage credential ${existing ? "replaced" : "stored"} for '${connector.name}' (${posture}): ${parsed.data.reason}`,
-        { connectorId: connector.id, replacedCredentialId: existing?.id ?? null, scopePosture: posture, writeCapableAcknowledged: posture === "write_capable", reason: parsed.data.reason });
+        {
+          connectorId: connector.id,
+          replacedCredentialId: existing?.id ?? null,
+          scopePosture: posture,
+          writeCapableAcknowledged: posture === "write_capable",
+          ...(posture === "unverified" ? { scopeAttestation: UNVERIFIED_SCOPE_ATTESTATION } : {}),
+          ...(staticAwsKey ? { staticAwsKeyAcknowledged: true } : {}),
+          reason: parsed.data.reason,
+        });
       return row!;
     });
-    return reply.status(existing ? 200 : 201).send({ credential: { id: stored.id, scopePosture: posture, storedAt: stored.createdAt.toISOString() } });
+    return reply.status(existing ? 200 : 201).send({ credential: credentialView(stored) });
   });
 
   // revoking is never harder than granting: no step-up (ADR-0322 §2)

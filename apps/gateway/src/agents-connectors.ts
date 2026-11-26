@@ -39,7 +39,7 @@ import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
 import { errMessage } from "./err-serializer.js";
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { refusePieceConnector } from "./connector-catalogue.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -56,7 +56,6 @@ import {
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
-  classifyComplexity,
   estimateTokens,
   routeModel,
   planPromptCache,
@@ -66,9 +65,11 @@ import {
   normalizeCacheInput,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
+import { auditRoutingClassification, classifyForRouting, routingClassifierDetail } from "./routing-classifier.js";
 import {
   defaultBaseUrlFor,
   isModelProviderKind,
+  validateVendorCredential,
   ModelProviderError,
   resolveModelProvider,
   type ModelChatMessage,
@@ -87,6 +88,8 @@ import {
   createConnectorGrantSchema,
   createConnectorSchema,
   createModelCredentialSchema,
+  ENV_FALLBACK_MODEL_PROVIDERS,
+  VENDOR_MODEL_PROVIDERS,
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
@@ -122,7 +125,7 @@ import {
   useCaseDispatchGate,
   type DispatchUseCaseGate,
 } from "./use-case-gate.js";
-import { privacyDispatchGate } from "./privacy-ops.js";
+import { inspectableFilesOf, inspectDispatchFiles, notInspectedAuditNote, type ContentInspectionVerdict, type InspectableFile } from "./content-inspection.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { engineKeyWorkflowInstance, guardInstanceAttributedCall, guardProjectPlanOnly, isPlanSafeMode } from "./plan-only.js";
@@ -166,7 +169,7 @@ import {
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 import { withLifecycle } from "./integration-lifecycle.js";
 import { CHANGED_CONCURRENTLY, checkStepUp, grantMintStepUp, requireStepUp } from "./step-up.js";
-import { governedModelGate } from "./governed-core.js";
+import { governedModelGate, governedProcessingLimit } from "./governed-core.js";
 import { resolveDispatchUsage } from "./usage-extractors.js";
 import {
   prepareConversationContext,
@@ -181,17 +184,24 @@ import {
 import {
   effectiveTechniqueMode,
   envFallbackAllowed,
+  incrementalStreamInspection,
   loadOrgSettings,
 } from "./org-settings.js";
 import {
   loadNativeCacheConfig,
   lookupSemanticCache,
   semanticCacheNativeKey,
+  semanticCacheTierDetail,
   storeSemanticCache,
+} from "./semantic-cache-shared.js";
+import { storeSimilarEmbedding, type SimilarityProbe } from "./semantic-cache-similarity.js";
+import { IncrementalStreamReleaser } from "./stream-inspection.js";
+import {
   type NativeCacheRequest,
   type SemanticCacheKey,
   type SemanticCacheHit,
 } from "./semantic-cache-shared.js";
+import { recordRuleStepSaving, switchedRuleAnswer, type RuleStepRef } from "./rule-step-serve.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { customProviderDisabledRefusal, resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
@@ -497,6 +507,10 @@ export interface GovernedDispatchArgs {
    * re-runs every provider-independent input gate and current output controls
    * before returning it, without contacting a provider or writing usage. */
   cachedResponse?: SemanticCacheHit | undefined;
+  /** ADR-0327 slice 4b: set with `cachedResponse` when the candidate answer is an approved rule-like step's rule
+   * output, not a cached model answer. It only relabels the span and audit rows; every gate runs exactly as for a
+   * cache hit. */
+  ruleStepServed?: RuleStepRef | undefined;
   /** pillar 5 attribution: the project this call bills to */
   projectId?: string | null | undefined;
   /** streaming delta callback, forwarded to the provider */
@@ -559,7 +573,23 @@ export interface GovernedDispatchArgs {
   delegationGrantId?: string | undefined;
   /** §5.1 lead ceiling (agent ids) for the delegated decision; null/absent = none */
   delegationCeilingAgentIds?: readonly string[] | null | undefined;
+  /**
+   * ADR-0362 — the caller files to inspect when `messages` does not carry them (the native invoke path's semantic-cache
+   * hit, which sends no messages). Absent: the image and document blocks of `messages` are inspected.
+   */
+  inspectFiles?: readonly InspectableFile[] | undefined;
+  /**
+   * ADR-0251 slice 4b — the request's session facts (`abacPrincipalFromRequest`) for the governed core's ABAC v5
+   * request. Absent (an internal dispatch with no request behind it) = each reads as its strict value.
+   */
+  principal?: AbacPrincipalContext | null | undefined;
 }
+
+/**
+ * ADR-0362: one inspection per dispatch, shared by its fallback hops (a hop re-runs `dispatchAttempt` with the same
+ * `messages` / `inspectFiles` array), so the files are extracted and audited once.
+ */
+const contentInspectionMemo = new WeakMap<object, Promise<ContentInspectionVerdict>>();
 
 /**
  * ADR-0066 §4 — THE ONE GOVERNED-DISPATCH ENTRY POINT, now with fallback.
@@ -1000,7 +1030,11 @@ async function dispatchOnce(
     requestedAgentId: args.requestedAgentId,
     ...(args.projectId ? { projectId: args.projectId } : {}),
     ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
-    ...(args.cachedResponse ? { semanticCache: "hit" } : {}),
+    ...(args.ruleStepServed
+      ? { ruleStep: { ...args.ruleStepServed } }
+      : args.cachedResponse
+        ? { semanticCache: "hit" }
+        : {}),
     ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
     ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
       ? { fallbackPosition: detail["fallbackPosition"] ?? null }
@@ -1421,6 +1455,9 @@ async function dispatchAttempt(
     projectId: args.projectId ?? null,
     provider: served.provider ?? null,
     model: served.model ?? null,
+    // ADR-0251 slice 4b: the request's session facts and the delegation chain feed the ABAC v5 request
+    principal: args.principal ?? null,
+    delegationGrantId: args.delegationGrantId ?? null,
     // P-01: a model approval rule holds the call; its consent is bound to exactly this request (ADR-0104)
     invocation: {
       input: args.input,
@@ -1644,6 +1681,31 @@ async function dispatchAttempt(
     ? effectiveCompliancePolicy(await complianceProfilesForTags(db, labelTags)).piiMode
     : null;
 
+  // ADR-0362 — CONTENT INSPECTION, after the ADR-0363 label gate (so a label-blocked file is never extracted and a
+  // label-redacted file is inspected as its marker) and before the three input checks: the files the provider will be
+  // sent (image and document blocks of `dispatchMessages`) are
+  // read in the sandbox when the project's inspection is on (or forced by the compliance floor), and their text joins
+  // the prompt for exactly those checks. A file that cannot be read refuses 422 here, audited, before provider work.
+  // No files, or inspection off: nothing changes (`checkedInput` is the prompt, byte-identical).
+  let checkedInput = args.input;
+  {
+    const source: object | undefined = args.inspectFiles ?? dispatchMessages;
+    const files = args.inspectFiles ?? inspectableFilesOf(dispatchMessages);
+    if (source && files.length > 0 && served) {
+      let pending = contentInspectionMemo.get(source);
+      if (!pending) {
+        pending = inspectDispatchFiles(db, { userId, agentId: served.id, projectId: args.projectId ?? null, files });
+        contentInspectionMemo.set(source, pending);
+      }
+      const verdict = await pending;
+      if (verdict.kind === "refused") {
+        sink.auditLogId = verdict.auditLogId;
+        return { ok: false, status: verdict.status, error: verdict.error, detail: verdict.detail };
+      }
+      if (verdict.kind === "proceed") checkedInput = args.input + verdict.inspectedText;
+    }
+  }
+
   const piiMode = stricterPiiMode(await projectPiiMode(db, args.projectId ?? null), labelPiiFloor);
   // ADR-0117: resolved ONCE for this dispatch and reused by the output check
   // below, so the input and output gates can never disagree about which
@@ -1653,7 +1715,7 @@ async function dispatchAttempt(
   if (piiMode) {
     // INPUT check runs BEFORE any provider work, so a block incurs no cost —
     // no usage row, no dispatch, no tokens.
-    const chk = enforcePII(piiMode, { input: args.input }, piiIntl);
+    const chk = enforcePII(piiMode, { input: checkedInput }, piiIntl);
     inputHits = chk.hits;
     if (chk.action === "block") {
       const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -1691,12 +1753,11 @@ async function dispatchAttempt(
   // audited with categories only. Behind `org_settings.privacy_ops_enabled`
   // (shipped off); off, it is one settings read. A cascade `block` already
   // refused above, so this decides only what warn/log let through.
-  const privacyRefusal = await privacyDispatchGate(db, {
+  const privacyRefusal = await governedProcessingLimit(db, {
     userId,
-    agentId: served.id,
-    agentName: served.name,
+    target: { type: "model", agentId: served.id, agentName: served.name },
     projectId: args.projectId ?? null,
-    input: args.input,
+    input: checkedInput,
   });
   if (privacyRefusal) {
     sink.auditLogId = privacyRefusal.auditLogId;
@@ -1730,7 +1791,7 @@ async function dispatchAttempt(
     // INPUT phase, BEFORE any provider work — a block costs nothing: no
     // dispatch, no usage row, no tokens. Identical placement to the PII input
     // check immediately above.
-    guardrailInput = await runGuardrailsAsync(guardrails, "input", args.input);
+    guardrailInput = await runGuardrailsAsync(guardrails, "input", checkedInput);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
       sink.auditLogId = await recordGuardrailDecision(db, {
@@ -1762,12 +1823,16 @@ async function dispatchAttempt(
 
   if (args.cachedResponse && !labelRedacted) {
     const cached = args.cachedResponse;
+    // where the candidate came from, as the audit rows below record it: never a cache claim for a rule's answer
+    const candidateSource: Record<string, unknown> = args.ruleStepServed
+      ? { ruleStep: { ...args.ruleStepServed } }
+      : { semanticCache: { hit: true } };
     let outputHits: PiiHit[] = [];
     if (piiMode) {
       const check = enforcePII(piiMode, { output: cached.outputText }, piiIntl);
       outputHits = check.hits;
       if (check.action === "block") {
-        const detail = `cached output withheld: contains PII (${piiCategoryList(outputHits)})`;
+        const detail = `${args.ruleStepServed ? "rule" : "cached"} output withheld: contains PII (${piiCategoryList(outputHits)})`;
         const [row] = await db.insert(auditLog).values({
           userId,
           objectType: "agent",
@@ -1775,7 +1840,7 @@ async function dispatchAttempt(
           detail: {
             phase: "pii",
             pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
-            semanticCache: { hit: true },
+            ...candidateSource,
             ...(args.projectId ? { projectId: args.projectId } : {}),
             receiptClass: "decision",
           },
@@ -1808,7 +1873,7 @@ async function dispatchAttempt(
           projectId: args.projectId ?? null,
           evaluation: guardrailOutput,
           outcome,
-          detail: { agentId: served.id, model: served.model, semanticCache: { hit: true } },
+          detail: { agentId: served.id, model: served.model, ...candidateSource },
         });
       }
       if (guardrailOutput.action === "block") {
@@ -1816,7 +1881,7 @@ async function dispatchAttempt(
           ok: false,
           status: 403,
           error: "guardrail_blocked",
-          detail: `cached output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
+          detail: `${args.ruleStepServed ? "rule" : "cached"} output blocked by guardrail: ${guardrailCategoryList(guardrailOutput.blocking)}`,
           guardrails: {
             action: "block",
             phase: "output",
@@ -1839,14 +1904,14 @@ async function dispatchAttempt(
         detail: {
           phase: "pii",
           pii: { mode: piiMode, action: "warn", inputHits, outputHits },
-          semanticCache: { hit: true },
+          ...candidateSource,
           ...(args.projectId ? { projectId: args.projectId } : {}),
           receiptClass: "decision",
         },
         effect: "allow",
         ruleId: "pii-warned",
         ruleChain: [],
-        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, cached answer served`,
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, ${args.ruleStepServed ? "rule" : "cached"} answer served`,
       });
     }
     const findings = [...(guardrailInput?.findings ?? []), ...(guardrailOutput?.findings ?? [])];
@@ -2240,11 +2305,30 @@ async function dispatchAttempt(
   // response so this is disclosed rather than silent. With every output
   // detector at `off`/`log`/`warn` (the shipped posture) nothing is buffered and
   // streaming is byte-identical to before.
-  const bufferStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  const holdStream = !!(args.onText || args.onThinking) && (guardrails.blocksOutput || piiMode === "block");
+  // ADR-0352 slice 3: the org may opt in to INCREMENTAL release instead of the whole-result
+  // buffer. Text deltas are then released after windowed scans by the same detectors (no
+  // character before a scan that covered it), the full scan below stays authoritative, and a
+  // block ends the stream with an explicit error event. Thinking deltas have no windowed path,
+  // so a request that streams thinking keeps the buffer.
+  const incremental =
+    holdStream && !args.onThinking && !!args.onText && (await loadOrgSettings(db)).streamOutputInspection === "incremental";
+  const bufferStream = holdStream && !incremental;
+  const releaser = incremental
+    ? new IncrementalStreamReleaser(args.onText!, async (window) => {
+        if (piiMode === "block" && enforcePII(piiMode, { output: window }, piiIntl).action === "block") {
+          return { block: true, reason: "pii" };
+        }
+        if (guardrails.active && (await runGuardrailsAsync(guardrails, "output", window)).action === "block") {
+          return { block: true, reason: "guardrail" };
+        }
+        return { block: false };
+      })
+    : null;
   // Release only the complete result that was scanned, never a separate delta
   // transcript that a faulty provider could make disagree with its result.
   // Omitting both callbacks also avoids an unbounded duplicate delta buffer.
-  const providerOnText = bufferStream ? undefined : args.onText;
+  const providerOnText = releaser ? releaser.push : bufferStream ? undefined : args.onText;
   const providerOnThinking = bufferStream ? undefined : args.onThinking;
 
   let result;
@@ -2397,6 +2481,21 @@ async function dispatchAttempt(
       // withheld markers, and this one names the layer that refused.
       outputText = guardrailWithheldMarker(guardrailOutput.blocking);
     }
+  }
+  // ADR-0352 slice 3: wait for the windowed scans, then hold the result to the same bar.
+  // A window block, a scanner failure, or a delta transcript that disagrees with the result
+  // that was scanned all withhold (fail closed); only then is the held-back tail released.
+  let streamViolation: "guardrail" | "pii" | null = null;
+  if (releaser) {
+    try {
+      await releaser.settle();
+      streamViolation = releaser.violation;
+    } catch {
+      streamViolation = "guardrail";
+    }
+    if (!streamViolation && releaser.text !== result.outputText) streamViolation = "guardrail";
+    if (!streamViolation && (withheld || guardrailWithheld)) streamViolation = guardrailWithheld ? "guardrail" : "pii";
+    if (!streamViolation) releaser.flushTail();
   }
   // Flush (or drop) the buffered stream. This is the line that makes the
   // streaming guarantee real: on a block the deltas are simply never written.
@@ -2618,12 +2717,37 @@ async function dispatchAttempt(
   // cap, the softer configurable threshold raises a distinct non-blocking signal.
   const budgetSignal = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
 
+  // ADR-0352 slice 3: an incremental stream that was blocked ends with an explicit error event.
+  // The spend and the guardrail / PII decisions above are already recorded (bill-and-withhold);
+  // this only changes how the client learns of the block, since pieces may already be on its screen.
+  if (releaser && streamViolation) {
+    const pieceSent = releaser.emittedAny;
+    const detail =
+      `the streamed answer was stopped by the output ${streamViolation === "pii" ? "PII policy" : "guardrail policy"}` +
+      (pieceSent ? "; discard the partial text already received" : "");
+    return streamViolation === "pii"
+      ? {
+          ok: false,
+          status: 403,
+          error: "pii_blocked",
+          detail,
+          ...(pii ? { pii } : {}),
+        }
+      : {
+          ok: false,
+          status: 403,
+          error: "guardrail_blocked",
+          detail,
+          ...(dispatchGuardrails ? { guardrails: { ...dispatchGuardrails, withheld: true } } : {}),
+        };
+  }
   return {
     ok: true,
     result: {
       servedAgentId: served.id,
       model: served.model,
       servedModel: result.servedModel ?? null,
+      ...(releaser ? { streamInspection: { mode: "incremental" as const, scans: releaser.stats.scans } } : {}),
       outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
@@ -2685,10 +2809,13 @@ async function performDispatch(
     virtualKey?: VirtualKeyContext | null | undefined;
     /** ADR-0173 batch 2c: the pillar-6 compaction state, for the span only */
     compaction?: { active: boolean; compacted?: boolean | undefined } | null | undefined;
+    /** ADR-0251 slice 4b: the request's session facts for the governed core's ABAC v5 request */
+    principal: AbacPrincipalContext;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
   return executeGovernedDispatch(db, dataKey, {
+    principal: args.principal,
     userId,
     served: registry.find((a) => a.id === routing.selectedAgentId),
     requestedAgentId,
@@ -2739,6 +2866,10 @@ export function platformEnvKey(
     openai: { key: ["OPENAI_API_KEY"], base: ["OPENAI_BASE_URL"] },
     google: { key: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], base: ["GOOGLE_BASE_URL", "GEMINI_BASE_URL"] },
     xai: { key: ["XAI_API_KEY"], base: ["XAI_BASE_URL"] },
+    // ADR-0352: the API-key vendors. Base URLs come only from the stored credential.
+    mistral: { key: ["MISTRAL_API_KEY"], base: [] },
+    cohere: { key: ["COHERE_API_KEY", "CO_API_KEY"], base: [] },
+    qwen: { key: ["DASHSCOPE_API_KEY", "ALIBABA_API_KEY"], base: [] },
   };
   const entry = map[provider];
   if (!entry) return null;
@@ -2763,13 +2894,16 @@ export function platformEnvKeyName(provider: string): string | null {
     openai: "OPENAI_API_KEY",
     google: "GOOGLE_API_KEY",
     xai: "XAI_API_KEY",
+    mistral: "MISTRAL_API_KEY",
+    cohere: "COHERE_API_KEY",
+    qwen: "DASHSCOPE_API_KEY",
   };
   return names[provider] ?? null;
 }
 
 /** The non-mock providers that support the platform-key env fallback, i.e. the
  * provider kinds `platformEnvKey` can resolve. */
-export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
+export const ENV_FALLBACK_PROVIDERS = ENV_FALLBACK_MODEL_PROVIDERS;
 
 /**
  * ADR-0181: the request header a client sends to say "if this call may not
@@ -3204,6 +3338,10 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/model-credentials", async (req, reply) => {
     const body = createModelCredentialSchema.parse(req.body);
+    // ADR-0352: a structured (Bedrock / Vertex) secret is checked when it is typed,
+    // not on a user's first call. The message never contains the secret.
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     }
@@ -3287,7 +3425,8 @@ export function registerAgentConnectorRoutes(
     const providers: Record<string, { configured: boolean }> = {
       mock: { configured: true },
     };
-    for (const provider of ENV_FALLBACK_PROVIDERS) {
+    // ADR-0352: every shipped vendor kind; the env half only for kinds that have one
+    for (const provider of VENDOR_MODEL_PROVIDERS) {
       providers[provider] = {
         configured:
           stored.has(provider) ||
@@ -3400,6 +3539,8 @@ export function registerAgentConnectorRoutes(
       return reply.status(403).send({ error: "forbidden" });
     }
     const body = createModelCredentialSchema.parse(req.body);
+    const shapeError = validateVendorCredential(body.provider, body.apiKey, body.baseUrl);
+    if (shapeError) return reply.status(400).send({ error: "invalid_credential", detail: shapeError });
     // ADR-0024 (O15): under enforced key custody, per-user BYO credentials
     // stop working — creation AND update (this endpoint upserts) are refused
     // with an explanation, and every refusal is audited. Existing rows are not
@@ -4136,8 +4277,11 @@ export function registerAgentConnectorRoutes(
     // agent's own override is still caught by the core's buffer-and-flush in
     // executeGovernedDispatch, which is the actual guarantee — this one is the
     // early, disclosed refusal.
+    // ADR-0352 slice 3: under incremental output inspection the stream stays live, because
+    // the core releases it only after windowed scans and ends it with an error event on a block
     const streamSuppressed =
       body.stream === true &&
+      !(await incrementalStreamInspection(db)) &&
       ((await projectPiiMode(db, projectId)) === "block" ||
         (await resolveGuardrailPolicy(db, { projectId, agentId: agent.id })).blocksOutput);
     // ADR-0021: 'suppress' (default) keeps ADR-0019's buffer-and-disclose;
@@ -4212,6 +4356,9 @@ export function registerAgentConnectorRoutes(
     let routing: (RoutingDecision & { skippedCandidates?: SkippedCandidate[] }) | null = null;
     let dispatchOutcome: DispatchOutcome | null = null;
     let convoContext: PreparedConversationContext | null = null;
+    // ADR-0362 decision 7: with content inspection OFF, the dispatch audit row records every attached file as
+    // `not_scanned` (an additive key; null when there are no files or inspection is on, which writes its own row)
+    let contentInspectionNote: Awaited<ReturnType<typeof notInspectedAuditNote>> = null;
     if (decision.effect === "allow") {
       // §8.4 PII INPUT GATE — hoisted ahead of BOTH the semantic-cache serve and
       // the per-technique cost_events writes below, so a PII-bearing prompt can
@@ -4221,6 +4368,7 @@ export function registerAgentConnectorRoutes(
       // Runs only when dispatching (a decision-only invoke sends nothing to a
       // model and produces no output to leak).
       if (body.dispatch === true) {
+        contentInspectionNote = await notInspectedAuditNote(db, projectId, body.attachments ?? []);
         const inputBlock = await enforceProjectInputPii(db, userId, agent.id, projectId, body.input);
         if (inputBlock) {
           return reply
@@ -4230,10 +4378,9 @@ export function registerAgentConnectorRoutes(
         // ADR-0224 (P13 c): the processing limit, hoisted for the same reason as the PII rung above: a repeat of an
         // input carrying a category no record permits must be refused and audited, not answered from the semantic
         // cache. dispatchAttempt keeps its own call for the orchestration and worker paths that never reach here.
-        const privacyRefusal = await privacyDispatchGate(db, {
+        const privacyRefusal = await governedProcessingLimit(db, {
           userId,
-          agentId: agent.id,
-          agentName: agent.name,
+          target: { type: "model", agentId: agent.id, agentName: agent.name },
           projectId: projectId ?? null,
           input: body.input ?? "",
         });
@@ -4277,6 +4424,93 @@ export function registerAgentConnectorRoutes(
         !!body.input &&
         !convo &&
         routingModeForCache !== "passthrough";
+      // ADR-0327 slice 4c: a switched rule-like step is answered by its approved rule, on this path as on the compat
+      // path (4b). Only a plain single-turn dispatch qualifies: the rule was measured on spans whose input is
+      // `body.input` alone, so anything else that shapes the model's answer (a conversation, a system prompt,
+      // attachments, a baseline, reference content) goes to the AI. A passthrough user keeps every AI call. The rule's
+      // answer is only a candidate: the one dispatch core runs every input gate and the output PII and guardrail checks
+      // on it, and nothing here makes a permission decision or calls a model.
+      const ruleAnswer =
+        body.dispatch === true &&
+        !!body.input &&
+        !convo &&
+        !body.system &&
+        !body.baseline &&
+        !body.referenceContent &&
+        (body.attachments ?? []).length === 0 &&
+        modeFor(true) !== "passthrough"
+          ? await switchedRuleAnswer(db, { agentId: agent.id, stepName: agent.name, inputText: body.input })
+          : null;
+      if (ruleAnswer && body.input) {
+        const ruleStep = ruleAnswer.ref;
+        const governed = await executeGovernedDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
+          userId,
+          served: agent,
+          requestedAgentId: agent.id,
+          input: body.input,
+          projectId,
+          virtualKey: invokeVirtualKey,
+          mode: body.mode,
+          cachedResponse: { outputText: ruleAnswer.output, model: null, inputTokens: 0, outputTokens: 0, createdAt: new Date() },
+          ruleStepServed: ruleStep,
+          modelFeature: CHAT_FEATURE,
+          detail: { surface: "invoke_rule_step", mode: body.mode },
+        });
+        if (!governed.ok) {
+          return reply
+            .status(governed.status)
+            .send({
+              decision,
+              error: governed.error,
+              ...(governed.detail ? { detail: governed.detail } : {}),
+              ...(governed.approvalId ? { approvalId: governed.approvalId } : {}),
+              ...(governed.pii ? { pii: governed.pii } : {}),
+              ...(governed.guardrails ? { guardrails: governed.guardrails } : {}),
+              ...suppressionFlag,
+            });
+        }
+        // No usage_events: nothing was spent. The ledger records the saving.
+        await recordRuleStepSaving(db, {
+          userId,
+          requestedAgentId: agent.id,
+          servedAgentId: agent.id,
+          projectId: projectId ?? null,
+          ruleAnswer,
+          surface: "invoke",
+        });
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          detail: { mode: body.mode, servedAgentId: agent.id, ruleStep, receiptClass: "decision" },
+          effect: decision.effect,
+          ruleId: decision.ruleId,
+          ruleChain: decision.ruleChain,
+          reason: decision.reason,
+        });
+        const ruleDispatch = {
+          ...governed.result,
+          usage: { inputTokens: 0, outputTokens: 0 },
+          costUsd: 0,
+          ruleStep,
+        };
+        if (useStream) {
+          reply.hijack();
+          reply.raw.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+          });
+          const send = (event: string, data: unknown) =>
+            reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          send("delta", { text: governed.result.outputText });
+          send("result", { decision, dispatch: ruleDispatch });
+          reply.raw.end();
+          return reply;
+        }
+        return reply.send({ decision, dispatch: ruleDispatch, ...suppressionFlag });
+      }
       // ADR-0119: the key derivation, the scoped read and the collision guard
       // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
       // SAME governance boundary rather than a second copy of it. The behaviour
@@ -4289,6 +4523,8 @@ export function registerAgentConnectorRoutes(
       // dispatch and refuse to store if the two disagree.
       let cacheKey: SemanticCacheKey | null = null;
       let cacheRequest: NativeCacheRequest | null = null;
+      // ADR-0352: the lookup-time embedding, reused by the store side (no second embed call)
+      let similarityProbe: SimilarityProbe | null = null;
       const cacheConfig =
         wantCache && body.input ? await loadNativeCacheConfig(db, { agentId: agent.id, userId }) : null;
       if (wantCache && body.input && cacheConfig) {
@@ -4320,14 +4556,34 @@ export function registerAgentConnectorRoutes(
           },
         };
         cacheKey = semanticCacheNativeKey(cacheRequest, cacheConfig);
+        // ADR-0352: the meaning-based tier rides inside the lookup (only on an exact miss, only
+        // when the org turned it on), so the hit below is governed exactly like an exact one
+        const similarityState: { probe: SimilarityProbe | null; missReason?: string } = { probe: null };
         const hit = await lookupSemanticCache(db, {
           userId,
           agentId: agent.id,
           key: cacheKey,
           ttlSeconds: org.semanticCacheTtlSeconds,
+          ...(org.semanticCacheSimilarityEnabled && org.semanticCacheEmbedderId
+            ? {
+                similarity: {
+                  dataKey: opts.dataKey,
+                  embedderId: org.semanticCacheEmbedderId,
+                  min: org.semanticCacheSimilarityMin,
+                  request: cacheRequest,
+                  config: cacheConfig,
+                  state: similarityState,
+                },
+              }
+            : {}),
         });
+        similarityProbe = similarityState.probe;
+        if (similarityState.missReason) {
+          req.log.warn({ semanticCacheTier: "similarity", reason: similarityState.missReason }, "similarity tier miss");
+        }
         if (hit) {
           const governed = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,
@@ -4338,6 +4594,8 @@ export function registerAgentConnectorRoutes(
             cachedResponse: hit,
             modelFeature: CHAT_FEATURE,
             detail: { surface: "invoke_cache", mode: body.mode },
+            // ADR-0362: a hit sends no messages, so the files the key commits to are inspected from here
+            ...(body.attachments?.length ? { inspectFiles: body.attachments } : {}),
           });
           if (!governed.ok) {
             return reply
@@ -4379,11 +4637,17 @@ export function registerAgentConnectorRoutes(
             estimatedTokensOut: hit.outputTokens,
             estimatedTokensSaved: savedTokens,
             estimatedCostSavedUsd,
-            estimationBasis:
-              "semantic-caching: whole call served from the per-(user,agent) exact-match cache — full cached input+output tokens saved at the invoked agent's list price",
-            ruleId: "semantic-cache-hit",
+            estimationBasis: hit.tier === "similarity"
+              ? "semantic-caching: whole call served by the meaning-based tier (ADR-0352) from the per-(user,agent,partition) cache — full cached input+output tokens saved at the invoked agent's list price"
+              : "semantic-caching: whole call served from the per-(user,agent) exact-match cache — full cached input+output tokens saved at the invoked agent's list price",
+            ruleId: hit.tier === "similarity" ? "semantic-cache-similar-hit" : "semantic-cache-hit",
             projectId,
-            detail: { model: hit.model, cachedAt: hit.createdAt, mode: body.mode },
+            detail: {
+              model: hit.model,
+              cachedAt: hit.createdAt,
+              mode: body.mode,
+              ...semanticCacheTierDetail(hit),
+            },
           });
           const cachedDispatch = { ...governed.result, cached: true as const };
           await db.insert(auditLog).values({
@@ -4393,7 +4657,13 @@ export function registerAgentConnectorRoutes(
             detail: {
               mode: body.mode,
               servedAgentId: agent.id,
-              semanticCache: { hit: true, model: hit.model, cachedAt: hit.createdAt },
+              semanticCache: {
+                hit: true,
+                model: hit.model,
+                cachedAt: hit.createdAt,
+                ...semanticCacheTierDetail(hit),
+              },
+              ...(contentInspectionNote ?? {}),
               receiptClass: "decision",
             },
             effect: decision.effect,
@@ -4595,7 +4865,14 @@ export function registerAgentConnectorRoutes(
       // counted into the input estimate so budget gates and cost forecasts
       // stay truthful as the thread grows — the MODEL-BOUND history, i.e.
       // the compacted view when a summary is in play.
-      const complexity = classifyComplexity(body.input);
+      // ADR-0353 part 2: the configured routing classifier is asked only when routing will actually run
+      const classification = await classifyForRouting(
+        db,
+        opts.dataKey,
+        { routingClassifierScorerId: modeFor(org.routingEnabled) === "automatic" ? org.routingClassifierScorerId : null },
+        body.input,
+      );
+      const complexity = classification.complexity;
       const estimate = estimateTokens(body.input, complexity);
       const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
       if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
@@ -4648,6 +4925,14 @@ export function registerAgentConnectorRoutes(
       // exactly what they meant, and the agents it never got to weigh are
       // listed beside them with the reason each was withheld.
       if (skippedCandidates.length > 0) routing = { ...routing, skippedCandidates };
+      await auditRoutingClassification(db, {
+        userId,
+        requestedAgentId: agent.id,
+        projectId,
+        classification,
+        routing,
+        surface: "invoke",
+      });
       // ADR-0021: with the ORG routing toggle off the technique does not run
       // at all — no model_routing ledger row is written (a per-user
       // passthrough, org toggle on, still records its passthrough decision,
@@ -4671,6 +4956,7 @@ export function registerAgentConnectorRoutes(
           detail: {
             effect: routing.effect,
             complexity,
+            ...routingClassifierDetail(classification),
             mode: body.mode,
             ...(body.conversationId ? { conversationId: body.conversationId } : {}),
           },
@@ -4991,7 +5277,7 @@ export function registerAgentConnectorRoutes(
           return;
         }
         // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
-        await storeSemanticCache(db, {
+        const storedId = await storeSemanticCache(db, {
           userId,
           agentId: agent.id,
           key: cacheKey,
@@ -5000,6 +5286,9 @@ export function registerAgentConnectorRoutes(
           inputTokens: r.usage.inputTokens,
           outputTokens: r.usage.outputTokens,
         });
+        // ADR-0352: index the row for the meaning-based tier with the vector computed at
+        // lookup. The key check above makes the probe's partition the current one.
+        if (storedId && similarityProbe) await storeSimilarEmbedding(db, { cacheId: storedId, ...similarityProbe });
       };
 
       // MODEL DISPATCH: real execution, strictly after governance + routing —
@@ -5026,6 +5315,7 @@ export function registerAgentConnectorRoutes(
         const send = (event: string, data: unknown) =>
           reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         const outcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5055,6 +5345,7 @@ export function registerAgentConnectorRoutes(
             ...(routing.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
             ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
             stream: true,
+            ...(contentInspectionNote ?? {}),
             dispatch: outcome.ok
               ? {
                   model: outcome.result.model,
@@ -5092,6 +5383,7 @@ export function registerAgentConnectorRoutes(
       }
       if (body.dispatch) {
         dispatchOutcome = await performDispatch(db, opts.dataKey, {
+          principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b
           userId,
           requestedAgentId: agent.id,
           registry,
@@ -5126,6 +5418,7 @@ export function registerAgentConnectorRoutes(
         // §8.4: the caller asked for SSE and got a buffered JSON reply instead
         // because the project's PII mode is 'block' — recorded, never silent.
         ...suppressionFlag,
+        ...(contentInspectionNote ?? {}),
         ...(dispatchOutcome
           ? {
               dispatch: dispatchOutcome.ok
@@ -5562,6 +5855,8 @@ export function registerAgentConnectorRoutes(
       object: body.object,
       payload: body.payload,
       projectId: body.projectId ?? null,
+      // ADR-0251 slice 4b: the request's session facts for the ABAC v5 request
+      principal: abacPrincipalFromRequest(req),
     });
     return reply.status(out.status).send(out.body);
   });

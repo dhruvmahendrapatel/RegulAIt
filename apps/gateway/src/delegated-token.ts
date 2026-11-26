@@ -493,6 +493,55 @@ export async function verifyDelegatedToken(db: Db, input: VerifyDelegatedTokenIn
 }
 
 // ---------------------------------------------------------------------------
+// A delegated token presented as a form parameter (a token exchange's `subject_token`)
+// ---------------------------------------------------------------------------
+
+export type HeldDelegatedTokenResult =
+  | { ok: true; claims: JWTPayload; binding: { kind: "dpop"; thumbprint: string }; live: LiveChain }
+  | { ok: false; code: string };
+
+/**
+ * Verify a delegated access token that its holder PRESENTS as a token-exchange parameter rather than as the
+ * Authorization header: the signature with our published issuer key, the claims, the stored row and binding, and the
+ * live chain (`storedAndLive`). Only a DPoP-bound token qualifies; a certificate-bound one is refused
+ * `mtls_handoff_unsupported` (its key cannot sign the exchange's proof). The caller checks that the request's DPoP
+ * proof is signed by `binding.thumbprint`. Shared by the child exchange (decision 23) and the ADR-0315 agent
+ * credential exchange. Codes carry no prefix; the caller adds its own.
+ */
+export async function verifyHeldDelegatedToken(
+  db: Db,
+  input: { token: string; issuer: string; env: string; now: Date },
+): Promise<HeldDelegatedTokenResult> {
+  let binding: { kind: "dpop" | "mtls"; thumbprint: string } | null;
+  try {
+    binding = exactlyOneCnf(decodeJwt(input.token));
+  } catch {
+    return { ok: false, code: "token_malformed" };
+  }
+  if (!binding) return { ok: false, code: "cnf_invalid" };
+  if (binding.kind === "mtls") return { ok: false, code: "mtls_handoff_unsupported" };
+  const key = await issuerKeyFor(db, input.token, input.now);
+  if (!key) return { ok: false, code: "key_unknown" };
+  let claims: JWTPayload;
+  try {
+    claims = (
+      await jwtVerify(input.token, await importJWK(jwkOf(key.row) as JWK, ISSUER_JWS_ALG), {
+        algorithms: [ISSUER_JWS_ALG],
+        typ: ACCESS_TOKEN_TYP,
+        issuer: input.issuer,
+        currentDate: input.now,
+        requiredClaims: ["iss", "sub", "aud", "exp", "iat", "jti", "client_id"],
+      })
+    ).payload;
+  } catch {
+    return { ok: false, code: "token_invalid" };
+  }
+  const stored = await storedAndLive(db, claims, binding, key.row, { env: input.env }, input.now);
+  if (!stored.ok) return { ok: false, code: stored.code };
+  return { ok: true, claims, binding: { kind: "dpop", thumbprint: binding.thumbprint }, live: stored.live };
+}
+
+// ---------------------------------------------------------------------------
 // Decision 23: a parent authorises one specific child and body
 // ---------------------------------------------------------------------------
 
@@ -554,33 +603,10 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
   const no = (code: string, error: "invalid_grant" | "invalid_request" | "use_dpop_nonce" = "invalid_grant", extra: { dpopNonce?: string } = {}) =>
     ({ ok: false, error, code, ...extra }) as const;
 
-  // A's token: signature with our published keys
-  let parentClaims: JWTPayload;
-  let binding: { kind: "dpop" | "mtls"; thumbprint: string } | null;
-  try {
-    binding = exactlyOneCnf(decodeJwt(input.parentToken));
-  } catch {
-    return no("parent_token_malformed");
-  }
-  if (!binding) return no("parent_cnf_invalid");
-  if (binding.kind === "mtls") return no("mtls_parent_handoff_unsupported");
-  const key = await issuerKeyFor(db, input.parentToken, now);
-  if (!key) return no("parent_key_unknown");
-  try {
-    parentClaims = (
-      await jwtVerify(input.parentToken, await importJWK(jwkOf(key.row) as JWK, ISSUER_JWS_ALG), {
-        algorithms: [ISSUER_JWS_ALG],
-        typ: ACCESS_TOKEN_TYP,
-        issuer: input.issuer,
-        currentDate: now,
-        requiredClaims: ["iss", "sub", "aud", "exp", "iat", "jti", "client_id"],
-      })
-    ).payload;
-  } catch {
-    return no("parent_token_invalid");
-  }
-  const stored = await storedAndLive(db, parentClaims, binding, key.row, { env: input.env }, now);
-  if (!stored.ok) return no(`parent_${stored.code}`);
+  // A's token: signature with our published keys, stored row, DPoP binding and live chain (the shared check)
+  const held = await verifyHeldDelegatedToken(db, { token: input.parentToken, issuer: input.issuer, env: input.env, now });
+  if (!held.ok) return no(held.code === "mtls_handoff_unsupported" ? "mtls_parent_handoff_unsupported" : `parent_${held.code}`);
+  const { claims: parentClaims, binding, live: parentLive } = held;
 
   // the authorization: signed by A's BOUND key (the one the parent token's cnf.jkt names)
   let header;
@@ -628,7 +654,7 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
   }
   if (typeof a.jti !== "string" || a.jti.length === 0 || a.jti.length > 256) return no("authz_jti_invalid");
   if (a.htm !== "POST" || a.htu !== input.tokenEndpointUrl || a.ath !== b64urlSha256(input.parentToken)) return no("authz_request_mismatch");
-  if (a.parent_grant_id !== parentClaims.grant_id || a.parent_grant_id !== stored.live.leaf.id) return no("authz_parent_mismatch");
+  if (a.parent_grant_id !== parentClaims.grant_id || a.parent_grant_id !== parentLive.leaf.id) return no("authz_parent_mismatch");
   if (a.child !== input.authenticatedChildIdentityId) return no("authz_child_mismatch");
   if (a.child_cnf !== input.requestDpopJkt) return no("authz_child_key_mismatch");
   let canonicalBody: string;
@@ -639,7 +665,7 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
   }
   if (a.delegation !== canonicalBody) return no("authz_body_mismatch");
   // the signed env and project must BE the parent's (a child inherits both): refuse, never narrow or replace
-  if (input.body.env !== stored.live.leaf.environment || input.body.project_id !== stored.live.leaf.projectId) {
+  if (input.body.env !== parentLive.leaf.environment || input.body.project_id !== parentLive.leaf.projectId) {
     return no("delegation_body_mismatch");
   }
   if (a.idempotency_key !== input.idempotencyKey) return no("authz_idempotency_mismatch");
@@ -650,8 +676,8 @@ export async function checkDelegationAuthorization(db: Db, input: DelegationAuth
     key: `${binding.thumbprint}:${a.jti}`,
     expiresAt: new Date((a.iat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000),
   };
-  if (input.deferClaim) return { ok: true, parentGrantId: stored.live.leaf.id, parentLive: stored.live, jti: a.jti, claim };
+  if (input.deferClaim) return { ok: true, parentGrantId: parentLive.leaf.id, parentLive: parentLive, jti: a.jti, claim };
   const claimed = await claimReplay(db, claim.namespace, claim.key, claim.expiresAt);
   if (!claimed) return no("authz_replayed");
-  return { ok: true, parentGrantId: stored.live.leaf.id, parentLive: stored.live, jti: a.jti };
+  return { ok: true, parentGrantId: parentLive.leaf.id, parentLive: parentLive, jti: a.jti };
 }

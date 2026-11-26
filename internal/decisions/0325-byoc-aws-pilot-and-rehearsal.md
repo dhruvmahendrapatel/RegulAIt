@@ -180,6 +180,42 @@ named, tagged or designated production.
   PR extends it with a Pod Identity writer mode that matches ADR-0305 exactly and composes it in `byoc-aws`. Until
   then a BYOC install backs up to the operator's PVC path, and RDS point-in-time backups cover the database.
 
+### PR 4: operator backups to S3 (ADR-0305 §2)
+
+The follow-up named in PR 3. No AWS step: plan-only tests, like the rest of the lane.
+
+- **`backup-target-s3` gains `writer_profile`.** `host` (the default) is the existing grant, unchanged, so
+  `regulait-dev-app` and `demo-host` see no difference. `kubernetes_job` is exactly the ADR-0305 contract:
+  - `s3:PutObject` on the prefix;
+  - `kms:GenerateDataKey` and `kms:Decrypt` on the key, conditioned on `kms:ViaService = s3.<region>.amazonaws.com`
+    and on `kms:EncryptionContext:aws:s3:arn` being this bucket;
+  - no `ListBucket`, `GetObject`, `Delete` or CloudWatch.
+
+  The profile needs `kms_key_arn` (a precondition). The grant is built from the bucket name, so the plan shows it in
+  full. The module also gains `writer_role_arns`, for roles that attach `writer_policy_arn` themselves: they are still
+  named in the bucket policy's explicit Deny. Its provider floor moves to `>= 6.0`, which every caller already locks.
+  The module has its first plan-only tests, and `infra-terraform` now runs them.
+- **`byoc-aws/backup.tf`** composes it:
+  - a bucket `<prefix>-backups-<account>`, versioned, SSE-KMS with the stack key, never force-deleted, current
+    versions kept 30 days;
+  - a Pod Identity role `<prefix>-operator-backup` (terraform-aws-modules/eks-pod-identity 2.10.0, already pinned)
+    bound to `<installation>-backup` in the installation namespace, under the workload boundary.
+
+  `operator_backups` defaults to on. The deployer boundary needs no change, because names and actions are inside
+  the prefix it already allows. The freshness alarm is off for this writer, because the Job publishes no heartbeat
+  and an alarm with nothing to watch is always red. The operator's `BackupConfigured` condition and the CronJob
+  status report each run instead.
+- **Output `backup_spec`** is `spec.backup.s3` ready to paste: bucket, region, `pg/`, key, owner account,
+  `podIdentity: true`, and `egressCIDRs` (the endpoint subnets and S3's published ranges). The runbook's §6.9 adds
+  the ADR-0305 acceptance check: a real-size Job upload, then a download of it with the admin's own credentials
+  and `pg_restore --list` plus a full read. §6.9.1 is the restore ADR-0305 names (#1162 review R3, finding 1). It
+  covers the admin read grant, choosing an object version, an in-cluster `pg_restore` pod (RDS is reachable only from
+  the nodes), the master password from Secrets Manager and the matching data key (ADR-0035). The uninstall section
+  asks whether to keep the dumps. An automated restore rehearsal stays open (ADR-0305) until the rehearsal is
+  un-parked.
+- **The rehearsal** sets `backup_retention_days = 1`. `byoc-rehearsal-sweep.sh pre-destroy` empties the rehearsal
+  backup bucket and refuses one with Object Lock, so `terraform destroy` is not stopped by a non-empty bucket.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`

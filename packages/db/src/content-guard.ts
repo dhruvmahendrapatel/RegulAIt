@@ -49,6 +49,8 @@ export const CONTENT_COLUMN_PATTERN = /^(?:[a-z0-9_]+_)?(?:name|title|descriptio
 const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- templates and packs ---
   [s.workflowTemplates, ["name"]],
+  // ADR-0349 slice 4: an admin-typed workflow schedule name, like a template name
+  [s.workflowSchedules, ["name"]],
   [s.compliancePacks, ["title", "description"]],
   [s.compliancePackControls, ["title", "description"]],
   [s.reportDefinitions, ["name", "description"]],
@@ -60,6 +62,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.agents, ["name"]],
   [s.a2aAgents, ["name"]],
   [s.a2aAgentCredentials, ["headerName"]],
+  // ADR-0315 (G7): an agent credential audience's admin-typed name
+  [s.agentCredentialAudiences, ["name"]],
   // ADR-0236 (P11): governed MCP bundles
   [s.mcpBundles, ["name", "description"]],
   [s.builderAgents, ["name", "description"]],
@@ -74,6 +78,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- projects, initiatives and the AI inventory ---
   [s.projects, ["name"]],
   [s.initiatives, ["name"]],
+  // ADR-0357 §4 (lane E38): the business-unit level of the policy hierarchy
+  [s.businessUnits, ["name", "description"]],
   [s.teams, ["name"]],
   [s.aiUseCases, ["name", "description"]],
   // ADR-0345 §9: admin-editable reference data (the jurisdiction list is data, not code)
@@ -113,6 +119,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.webhookSubscriptions, ["name"]],
   [s.deployTargets, ["name"]],
   [s.discoverySources, ["name"]],
+  // ADR-0360 slice 2 (lane E41): an EDR connection an admin names
+  [s.edrConnections, ["name"]],
   // ADR-0261 (P37): a third-party ingest source an admin names
   [s.thirdPartyIngestSources, ["name"]],
   // ADR-0303: a SIEM destination an admin names
@@ -123,6 +131,10 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.customClassifiers, ["name"]],
   // ADR-0322: an operator-typed vendor usage connector name (a pasted vendor key here would be refused)
   [s.vendorUsageConnectors, ["name"]],
+  // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
+  [s.aiSaasMonitorConnectors, ["name"]],
+  // ADR-0358 (lane E39): a CMDB connector an admin names, and the IRE data-source name the admin registered on it
+  [s.cmdbConnectors, ["name", "sourceName"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
@@ -180,6 +192,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   // ADR-0314: a vendor agent registry's own name and description for an agent, read-only and bounded at staging
   "agent_registry_records.description": "ingested",
   "agent_registry_records.display_name": "ingested",
+  // ADR-0336: a staged agent's component name (a knowledge source, a skill, a connector) as the vendor reports it
+  "agent_registry_record_components.display_name": "ingested",
   // ADR-0261: an event identifier the sending product chose (a linear lower-case identifier check bounds it)
   "third_party_ingest_records.event_name": "ingested",
   // ADR-0337: an app's display name and a scope name as the SaaS vendor reports them (read-only entitlement reads)
@@ -192,6 +206,8 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "ai_incidents.title": "prose_owned_by_adr0102",
   "ai_policy_documents.title": "prose_owned_by_adr0102",
   "audit_log.tool_name": "audit_owned_by_adr0099",
+  // ADR-0315 (G7): a scope map row names the governed tool it maps
+  "agent_credential_audience_scopes.tool_name": "tool_reference",
   "approval_rules.tool_name": "tool_reference",
   "approvals.tool_name": "tool_reference",
   "config_canary_observations.tool_name": "tool_reference",
@@ -199,6 +215,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "grant_certification_items.tool_name": "tool_reference",
   "identity_tool_grants.tool_name": "tool_reference",
   "mcp_bundle_version_items.tool_name": "tool_reference",
+  "paid_call_holds.tool_name": "tool_reference",
   "policy_simulation_flips.tool_name": "tool_reference",
   "rate_limits.tool_name": "tool_reference",
   "revocations.tool_name": "tool_reference",
@@ -211,6 +228,7 @@ export const CONTENT_GUARD_EXCLUSIONS: Readonly<Record<string, ContentGuardExclu
   "billing_statements.rate_card_name": "platform_copy",
   "builder_agent_skills.snapshot_name": "platform_copy",
   "engine_runs.workflow_check_name": "platform_copy",
+  "endpoint_update_rollout_stages.group_name": "platform_copy",
   "eval_runs.agent_name": "platform_copy",
   "eval_runs.workflow_check_name": "platform_copy",
   "mcp_servers.registry_entry_name": "platform_copy",

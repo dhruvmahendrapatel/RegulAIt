@@ -41,6 +41,7 @@ import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
+
 /** One row of `GET /v1/users/:userId/servers/:serverId/entitlements`. */
 interface McpEntitlementRow {
   /** a named tool, or the server-wide read-all grant which names none */
@@ -68,7 +69,13 @@ export default function McpServersPage() {
       <PageHeader
         title="MCP servers"
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
-        actions={<Link to="/admin/mcp-servers/bundles">MCP bundles</Link>}
+        actions={
+          <>
+            {/* ADR-0246 (P27): definition pinning and high-risk tooling, on their own lazy page */}
+            <Link to="/admin/mcp-servers/pinning">Pinning and high-risk tooling</Link>
+            <Link to="/admin/mcp-servers/bundles">MCP bundles</Link>
+          </>
+        }
       />
       <Tabs
         tabs={MCP_TABS}
@@ -134,6 +141,8 @@ function McpServersTab() {
     </Button>
   );
 
+  // the selected server, read once for every card that shows it
+  const selected = (servers.data?.servers ?? []).find((s) => s.id === selectedId);
   return (
     <>
       <div className={v.stack}>
@@ -146,12 +155,14 @@ function McpServersTab() {
                 key: "name",
                 header: "Name",
                 sort: (s) => s.name,
-                render: (s) => (
-                  <span className={v.row} style={{ gap: "var(--s1)" }}>
-                    {s.name}
-                    <DisabledBadge row={s} noun="MCP server" />
-                  </span>
-                ),
+                render: (s) => s.name,
+                // beside the row's button, not inside it: the badge's (i) is a button of its own (UIS-04)
+                after: (s) =>
+                  s.enabled === false ? (
+                    <span className={v.row} style={{ display: "inline-flex", gap: "var(--s1)", marginLeft: "var(--s1)", verticalAlign: "middle" }}>
+                      <DisabledBadge row={s} noun="MCP server" />
+                    </span>
+                  ) : null,
               },
               // G4: the table is wide, so the row's actions sit next to the name rather than off-screen at the end
               { key: "actions", header: "Actions", render: (s) => life.actions(s, editButton(s)) },
@@ -219,17 +230,18 @@ function McpServersTab() {
           />
         </Card>
 
+
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
 
-        {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
-        {selectedId && <McpUpstreamCredentialCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
+        {selectedId && <McpExecutionCard server={selected} />}
+        {selectedId && <McpIdentityAssertionCard server={selected} />}
+        {selectedId && <McpUpstreamCredentialCard server={selected} />}
 
         {selectedId && (
           <ToolsCard
             key={selectedId}
-            server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)!}
+            server={selected!}
           />
         )}
         {selectedId && (
@@ -272,15 +284,22 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
   const act = useAction();
   const [userId, setUserId] = useState("");
   const [serverId, setServerId] = useState("");
-  const [rows, setRows] = useState<McpEntitlementRow[] | null>(null);
+  // INT-005: the rows carry the user and server they were read for, and are shown (and removable) only while that
+  // pair is still the one selected, so a Remove can never act on the previous subject's grant
+  const [loaded, setLoaded] = useState<{ subject: string; rows: McpEntitlementRow[] } | null>(null);
+  const subject = `${userId}\u0000${serverId}`;
+  const rows = loaded && loaded.subject === subject ? loaded.rows : null;
 
-  const load = () =>
-    act.run(async () => {
+  const load = () => {
+    const forUser = userId;
+    const forServer = serverId;
+    return act.run(async () => {
       const r = await api.get<{ entitlements: McpEntitlementRow[] }>(
-        `/v1/users/${userId}/servers/${serverId}/entitlements`,
+        `/v1/users/${encodeURIComponent(forUser)}/servers/${encodeURIComponent(forServer)}/entitlements`,
       );
-      setRows(r.entitlements);
+      setLoaded({ subject: `${forUser}\u0000${forServer}`, rows: r.entitlements });
     }, null);
+  };
 
   return (
     <Card
@@ -297,16 +316,17 @@ function McpEntitlementCard(props: { users: ReturnType<typeof useUsers>; servers
         className={a.formRow}
         onSubmit={(e) => {
           e.preventDefault();
+          setLoaded(null);
           void load();
         }}
       >
         <Field label="User">
-          <Select required value={userId} onChange={(e) => setUserId(e.target.value)}>
+          <Select required value={userId} onChange={(e) => (setUserId(e.target.value), setLoaded(null))}>
             {optionEls(userOpts(props.users.data?.users), "— select —")}
           </Select>
         </Field>
         <Field label="Server">
-          <Select required value={serverId} onChange={(e) => setServerId(e.target.value)}>
+          <Select required value={serverId} onChange={(e) => (setServerId(e.target.value), setLoaded(null))}>
             {optionEls(serverOpts(props.servers), "— select —")}
           </Select>
         </Field>

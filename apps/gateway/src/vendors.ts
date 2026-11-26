@@ -49,6 +49,7 @@
  * a person. And there is no SLA/renewal scheduler: re-assessment cadence is
  * the customer's own process.
  */
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   agents,
@@ -907,6 +908,7 @@ export function registerVendorRoutes(
         } else {
           // a direct call the person asked for: decided as the person, no agent principal acts
           const outcome = await executeGovernedDispatch(db, opts.dataKey, {
+            principal: abacPrincipalFromRequest(req), // ADR-0251 slice 4b: session facts for ABAC v5
             userId,
             served: agent,
             requestedAgentId: agent.id,

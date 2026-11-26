@@ -96,6 +96,19 @@ export function classifyComplexity(text: string | null | undefined): Complexity 
   return "medium";
 }
 
+/**
+ * ADR-0353 part 2: the complexity a pluggable routing classifier's score in [0, 1] stands for (the ADR-0088 scorer
+ * contract). Thirds: below 1/3 is low, below 2/3 medium, otherwise high. A score that is not a finite number in
+ * [0, 1] is null: the caller falls back to `classifyComplexity`, never guesses. The classifier only ever picks a
+ * complexity; `routeModel` still caps the choice by entitlement, the tier ceiling and the requested model's tier.
+ */
+export function complexityFromScore(score: unknown): Complexity | null {
+  if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) return null;
+  if (score < 1 / 3) return "low";
+  if (score < 2 / 3) return "medium";
+  return "high";
+}
+
 /** crude chars/4 input estimate + complexity-scaled output allowance */
 export function estimateTokens(text: string | null | undefined, complexity: Complexity): TokenEstimate {
   const inTokens = Math.ceil((text?.length ?? 0) / 4) + 200;
@@ -980,3 +993,4 @@ export function planFilePreprocessing(input: PlanFilePreprocessingInput): FilePr
 
 export * from "./rule-induction.js";
 export * from "./decision-table.js";
+export * from "./repetitive-asks.js";

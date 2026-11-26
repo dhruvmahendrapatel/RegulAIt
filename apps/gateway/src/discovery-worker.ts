@@ -76,6 +76,7 @@ import {
   isEnvName,
   keyMatchesSignature,
   presenceSignatureById,
+  REPO_SCAN_CATALOG_VERSIONS,
   redactKeyFragment,
   scrubAuditText,
   scrubSecrets,
@@ -89,13 +90,17 @@ import {
   federationSourceSubject,
   type DiscoverySourceKind,
   normaliseGuid,
+  nextDiscoveryWriteScope,
+  discoveryWriteScopeFinal,
+  agentConfigSecretRuleAllowed,
 } from "@regulait/shared";
+import { AGENT_PLATFORM_ADAPTERS } from "./agent-platform-adapters.js";
 import { upsertLabelDefinitions } from "./sensitivity-labels.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
-import { directoryTokensProblem, loadDiscoverySettings } from "./discovery-posture.js";
+import { directoryTokensProblem, loadDiscoverySettings, salesforceOrgTokensProblem } from "./discovery-posture.js";
 import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
@@ -446,6 +451,7 @@ export function checkObservations(
     throw new ObservationRefused(`the scanner reported ${observations.length} observations; at most ${EVIDENCE_MAX_ROWS} are accepted per run`);
   }
   return observations.map((o, i) => {
+    if (o.evidenceKind === "agent_config" || o.secretRule !== undefined) return checkConfigSecret(kind, o, i, nowIso);
     if (!spec.evidenceKinds.includes(o.evidenceKind)) {
       throw new ObservationRefused(`observation ${i}: evidenceKind is not one a ${kind} source reports`);
     }
@@ -518,6 +524,14 @@ export function checkObservations(
     if (o.actorPseudonym !== undefined && (typeof o.actorPseudonym !== "string" || !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym))) {
       throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
     }
+    // ADR-0083 §2: a repo scan names the compiled catalogue it matched against, so its evidence tells v2 from v3
+    if (o.evidenceKind === "repo_scan") {
+      if (typeof o.catalogVersion !== "number" || !REPO_SCAN_CATALOG_VERSIONS.includes(o.catalogVersion)) {
+        throw new ObservationRefused(`observation ${i}: a repo_scan observation must name its catalogue version (one of ${REPO_SCAN_CATALOG_VERSIONS.join(", ")})`);
+      }
+    } else if (o.catalogVersion !== undefined) {
+      throw new ObservationRefused(`observation ${i}: catalogVersion is only reported on a repo_scan observation`);
+    }
     const count = Number.isInteger(o.count) && (o.count as number) > 0 ? Math.min(o.count as number, 1_000_000_000) : 1;
     return {
       subjectKind: o.subjectKind,
@@ -537,8 +551,44 @@ export function checkObservations(
       actorPseudonym: o.actorPseudonym ?? null,
       os: o.os ?? null,
       ecosystem: o.ecosystem ? o.ecosystem.trim().toLowerCase() : null,
+      catalogVersion: o.evidenceKind === "repo_scan" ? (o.catalogVersion as number) : null,
     };
   });
+}
+
+/** ADR-0336 slice 4: the agent platform vendor of each E17 source kind, from the one adapter list */
+const VENDOR_OF_KIND: ReadonlyMap<string, string> = new Map(AGENT_PLATFORM_ADAPTERS.map((a) => [a.kind, a.vendor]));
+/** what an `agent_config` observation may carry: these fields and nothing else */
+const CONFIG_SECRET_FIELDS: ReadonlySet<string> = new Set(["evidenceKind", "subjectKind", "subject", "location", "secretRule", "observedAt"]);
+
+/**
+ * ADR-0336 slice 4: a plaintext credential in a staged agent's configuration, held to location only. The rule must be
+ * a vendored credential rule, the location a field path (no line, no commit: no offset into the text), and no other
+ * field may ride along (no key fragment, no host, no names). Refusals never echo what was sent.
+ */
+function checkConfigSecret(kind: DiscoverySourceRow["kind"], o: ScanObservation, i: number, nowIso: string): Observation {
+  const vendor = VENDOR_OF_KIND.get(kind);
+  if (o.evidenceKind !== "agent_config" || !vendor || !DISCOVERY_KIND_SPECS[kind].evidenceKinds.includes("agent_config")) {
+    throw new ObservationRefused(`observation ${i}: a plaintext-credential finding is reported only as agent_config evidence by an agent platform source`);
+  }
+  if (o.subjectKind !== "system") throw new ObservationRefused(`observation ${i}: an agent_config subject is the staged agent (system)`);
+  for (const k of Object.keys(o)) {
+    if (!CONFIG_SECRET_FIELDS.has(k) && (o as unknown as Record<string, unknown>)[k] !== undefined) {
+      throw new ObservationRefused(`observation ${i}: an agent_config observation carries only its subject, field path and rule id`);
+    }
+  }
+  const rule = o.secretRule;
+  if (!agentConfigSecretRuleAllowed(rule)) throw new ObservationRefused(`observation ${i}: secretRule is not a vendored credential rule id`);
+  const subject = typeof o.subject === "string" ? o.subject.trim() : "";
+  if (!subject || subject.length > SUBJECT_MAX) throw new ObservationRefused(`observation ${i}: the subject must be 1 to ${SUBJECT_MAX} characters`);
+  if (scrubAuditText(subject) !== subject) throw new ObservationRefused(`observation ${i}: the subject looks like it carries a credential; it was refused, not stored`);
+  if (!o.location || o.location.line !== undefined || o.location.commit !== undefined) {
+    throw new ObservationRefused(`observation ${i}: an agent_config location is a field path only (no line or commit)`);
+  }
+  const location = checkLocation(o.location, i);
+  if (scrubAuditText(location.path) !== location.path) throw new ObservationRefused(`observation ${i}: location.path looks like it carries a credential; it was refused, not stored`);
+  const observedAt = o.observedAt && Number.isFinite(Date.parse(o.observedAt)) ? new Date(o.observedAt).toISOString() : nowIso;
+  return { subjectKind: "system", subject, signalSource: "agent_config", observedAt, count: 1, location, configSecret: { rule, vendor } };
 }
 
 /** a sighting location: a normalised relative path (no `..`), a line, a commit; never contents (decision 6) */
@@ -629,16 +679,21 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   // ADR-0337 §4: the Directory token listing switched off after the run was queued stops here, before any credential
   const directoryOff = directoryTokensProblem(source.kind, source.target, runSettings);
   if (directoryOff) return fail("directory_tokens_not_allowed", directoryOff);
+  const orgTokensOff = salesforceOrgTokensProblem(source.kind, source.target, runSettings);
+  if (orgTokensOff) return fail("salesforce_org_tokens_not_allowed", orgTokensOff);
   const scanner = opts.registry.get(source.kind);
   if (!scanner) return fail("scanner_not_built", `no scanner is built for ${source.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[source.kind].slice})`);
 
   const [cred] = await db
     .select()
     .from(discoveryCredentials)
-    .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
+    // ADR-0338 §2: the scanner loads only the READ credential; a control (platform_write) credential never reaches a scan
+    .where(and(eq(discoveryCredentials.sourceId, source.id), eq(discoveryCredentials.purpose, "discovery_read"), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
+  // a read row is federated or static (the delegated CHECK holds `delegated` to control rows); refused all the same
+  if (cred && cred.credentialMode === "delegated") return fail("credential_refused", "a delegated credential is never used to scan");
   // decision 7 (review of #403): a credential found to grant write access is never used again
-  if (cred?.writeScope === "refused") {
+  if (cred && discoveryWriteScopeFinal(cred.writeScope)) {
     return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
   }
   let secret: string | null = null;
@@ -707,7 +762,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         target: Object.fromEntries(Object.entries(source.target).map(([k, v]) => [k, String(v)])),
         scope: { orgLevel: source.scope.orgLevel === true, include: [...(source.scope.include ?? [])] },
       },
-      credential: cred ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
+      credential: cred && cred.credentialMode !== "delegated" ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
       // ADR-0195 SD2b: federation tokens, for a federated credential only, bound to this source and its audiences
       ...(cred?.credentialMode === "federated" ? { federation: scanFederation(db, opts.dataKey, source.id, source.kind, cred.publicConfig) } : {}),
       fetch: ((input: string | URL | Request, init?: RequestInit) =>
@@ -747,7 +802,9 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   }
   if (leaseGone.signal.aborted) return "lease_lost";
 
-  if (result.credentialWriteScope === "write" && cred) {
+  // ADR-0336 decision 9: the credential's state moves only along DISCOVERY_WRITE_SCOPE_TRANSITIONS
+  const nextScope = cred ? nextDiscoveryWriteScope(cred.writeScope, result.credentialWriteScope) : null;
+  if (cred && nextScope === "refused") {
     // record the refusal on the credential (audited), so the source is blocked until it is replaced
     await db.update(discoveryCredentials).set({ writeScope: "refused" }).where(eq(discoveryCredentials.id, cred.id));
     await audit(db, "discovery_source", source.id, "discovery-credential-refused", "deny",
@@ -757,7 +814,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   if (result.credentialWriteScope === "write") {
     return fail("credential_has_write_scope", "the credential grants write access; a discovery credential must be read-only (ADR-0195 decision 7). Replace it.");
   }
-  if (result.credentialWriteScope === "read_only" && cred && cred.writeScope !== "read_only") {
+  if (cred && nextScope === "read_only") {
     await db.update(discoveryCredentials).set({ writeScope: "read_only" }).where(eq(discoveryCredentials.id, cred.id));
   }
 
@@ -774,6 +831,10 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
     // ADR-0314: a registry source's agents are shape-checked like observations; a refused record refuses the run
     registry = checkRegistryAgents(source.kind, result.registryAgents, result.registriesComplete);
+    // ADR-0336 slice 4: a plaintext-credential finding names a record this same run staged, nothing else
+    const staged = new Set(registry.records.map((r) => r.externalId));
+    const unbound = observations.findIndex((o) => o.signalSource === "agent_config" && !staged.has(o.subject));
+    if (unbound >= 0) throw new ObservationRefused(`observation ${unbound}: an agent_config subject must be a record staged by the same run`);
   } catch (err) {
     if (err instanceof ObservationRefused || err instanceof RegistryRecordRefused) return fail("observation_refused", err.message);
     throw err;

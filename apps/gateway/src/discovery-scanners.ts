@@ -38,13 +38,13 @@
  * prefix and length); or call a provider to test a key it found (decision 6).
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
-import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition, SaasEntitlementBatch } from "@regulait/shared";
+import type { AgentRegistry, AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome, LabelDefinition, RegistryComponentKind, RegistryComponentProvider, SaasEntitlementBatch } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_AGENT_SCANNER, ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 import { WIDER_DISCOVERY_SCANNERS } from "./discovery-wider-scanners.js";
 import { SAAS_ENTITLEMENT_SCANNERS } from "./saas-entitlement-readers.js";
-import { AGENT_REGISTRY_SCANNERS } from "./agent-registry-scanners.js";
+import { AGENT_PLATFORM_SCANNERS } from "./agent-platform-adapters.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -145,6 +145,17 @@ export interface ScanObservation {
   os?: "macos" | "windows" | "linux";
   /** Optional: the package ecosystem (npm, pypi…); a catalogue row scoped to an ecosystem matches only it */
   ecosystem?: string;
+  /**
+   * ADR-0083 §2: the compiled shadow-AI catalogue version the scanner matched against. REQUIRED on a `repo_scan`
+   * observation (one of `REPO_SCAN_CATALOG_VERSIONS`) and refused on any other evidence kind.
+   */
+  catalogVersion?: number;
+  /**
+   * ADR-0336 slice 4, evidence `agent_config` only: the id of the vendored secret rule (`VENDORED_SECRET_RULES`) that
+   * matched a field of a staged agent's configuration; `location.path` names the field and `subject` is the staged
+   * record's external id. It carries no value, excerpt, offset or hash, and nothing else may ride with it.
+   */
+  secretRule?: string;
 }
 
 /**
@@ -213,6 +224,25 @@ export interface RegistryAgentRecord {
    * (`ctx.pseudonymise`), never names or emails.
    */
   attributes?: Record<string, string | string[] | boolean | null>;
+  /**
+   * ADR-0336 decision 3: what the agent uses, staged in `agent_registry_record_components`. Set ONLY when the adapter
+   * read this agent's components completely; the worker then replaces the stored set (an empty list clears it).
+   * Undefined after a partial read: the stored set is kept as it is. Never secrets, instructions or prompt text.
+   */
+  components?: RegistryAgentComponent[];
+}
+
+/** one thing a staged agent uses (ADR-0336 decision 3); every field bounded by `checkRegistryAgents` */
+export interface RegistryAgentComponent {
+  kind: RegistryComponentKind;
+  /** the vendor's own reference: a connector id, a component id, a model name (1 to 512 characters) */
+  vendorRef: string;
+  /** 1 to 256 characters */
+  displayName: string;
+  /** whether the vendor reports it switched on; null when it does not say */
+  enabled?: boolean | null;
+  /** who supplies a connected app's connection; null when the vendor does not say */
+  providedBy?: RegistryComponentProvider | null;
 }
 
 export interface Scanner {
@@ -256,8 +286,9 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   ...WIDER_DISCOVERY_SCANNERS,
   // ADR-0337 (E18): entitlement_m365, entitlement_google_workspace (Salesforce and Slack follow in slice 2)
   ...SAAS_ENTITLEMENT_SCANNERS,
-  // ADR-0314 (G6): agent_registry_entra, agent_registry_gemini, agent_registry_agentcore
-  ...AGENT_REGISTRY_SCANNERS,
+  // ADR-0314 (G6) and ADR-0336 (E17): the agent_registry family, built from the one agent platform adapter list
+  // (agent_registry_entra, agent_registry_gemini, agent_registry_agentcore, agent_registry_copilot_studio, agent_registry_agentforce, agent_registry_openai, agent_registry_n8n)
+  ...AGENT_PLATFORM_SCANNERS,
 ]);
 
 /**

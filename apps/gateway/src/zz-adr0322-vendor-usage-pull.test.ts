@@ -16,6 +16,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import {
   and,
@@ -51,6 +52,9 @@ const DATA_KEY = "e".repeat(64);
 const RUN = Date.now();
 const ANTHROPIC_KEY = `sk-ant-admin01-FAKE-${RUN}-secret`;
 const OPENAI_KEY = `sk-admin-FAKE-${RUN}-secret`;
+const GITHUB_TOKEN = `github_pat_FAKE_${RUN}_secret`;
+const CURSOR_KEY = `key_FAKE_${RUN}_secret`;
+const CHATGPT_KEY = `sk-admin-FAKE-chatgpt-${RUN}-secret`;
 const resolve = async () => [{ address: "93.184.216.34", family: 4 }];
 
 interface Seen {
@@ -113,7 +117,7 @@ function anthropicPages(amountCents: string) {
 const put = (url: string, payload: unknown) => app.inject({ method: "PUT", url, headers: AUTH, payload: payload as object });
 const steppedPut = (url: string, payload: unknown) => relaxStepUpAround(db, () => put(url, payload));
 
-async function createConnector(vendor: "anthropic" | "openai", config: Record<string, unknown>) {
+async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor" | "aws_cur" | "openai_codex", config: Record<string, unknown>) {
   const res = await app.inject({
     method: "POST",
     url: "/v1/vendor-usage/connectors",
@@ -126,12 +130,13 @@ async function createConnector(vendor: "anthropic" | "openai", config: Record<st
   return c as { id: string; enabled: boolean; credential: unknown };
 }
 
-async function storeKey(connectorId: string, secret: string) {
+async function storeKey(connectorId: string, secret: string, extra: Record<string, unknown> = {}) {
   return steppedPut(`/v1/vendor-usage/connectors/${connectorId}/credential`, {
     secret,
     replacesCredentialId: null,
     acknowledgeWriteCapable: true,
     reason: "adr0322 suite key",
+    ...extra,
   });
 }
 
@@ -176,7 +181,7 @@ afterAll(async () => {
 });
 
 describe("ADR-0322: off by default, three switches before anything leaves", () => {
-  it("starts off, and lists both vendors as write-capable with their honest limits", async () => {
+  it("starts off, and lists every vendor with its scope posture and honest limits", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -184,6 +189,10 @@ describe("ADR-0322: off by default, three switches before anything leaves", () =
     expect(body.catalogue.map((c: { vendor: string; scopePosture: string }) => [c.vendor, c.scopePosture])).toEqual([
       ["anthropic", "write_capable"],
       ["openai", "write_capable"],
+      ["github_copilot", "unverified"],
+      ["cursor", "write_capable"],
+      ["aws_cur", "unverified"],
+      ["openai_codex", "unverified"],
     ]);
     expect(body.statement).toMatch(/IMPORTED/);
   });
@@ -513,6 +522,387 @@ describe("ADR-0322: the OpenAI pull (official SDK, guarded fetch injected)", () 
     expect(conn?.enabled).toBe(false);
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
     expect([run.status, run.errorCode]).toEqual(["refused", "disabled"]);
+  });
+});
+
+async function allowHost(host: string) {
+  // egress-allow-cleanup: afterAll (tracked host, removed by allowed.removeAll)
+  const allow = await relaxStepUpAround(db, () =>
+    app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload: { host: allowed.trackHost(host), allowPrivateRanges: false, allowPlaintextHttp: false, note: `adr0322 ${RUN}` } }),
+  );
+  expect([200, 201]).toContain(allow.statusCode);
+}
+
+async function enabledConnector(vendor: "github_copilot" | "cursor" | "openai_codex", config: Record<string, unknown>, secret: string) {
+  const c = await createConnector(vendor, config);
+  expect((await storeKey(c.id, secret, vendor === "cursor" ? {} : { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
+  expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+  return c;
+}
+
+describe("ADR-0322 slice 3: the GitHub Copilot pull (billing usage report, Copilot lines only)", () => {
+  it("refuses a slug that is not a GitHub login, so the path segment cannot be steered", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/vendor-usage/connectors",
+      headers: AUTH,
+      payload: { vendor: "github_copilot", name: `adr0322-bad-gh-${RUN}`, config: { account: "organization", slug: "../../user" }, reason: "adr0322 suite" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("stores a token whose scope cannot be checked only with the admin's attestation, recorded and audited (#1069 S4)", async () => {
+    const c = await createConnector("github_copilot", { account: "organization", slug: "acme-eng" });
+    const refused = await storeKey(c.id, GITHUB_TOKEN);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toBe("unverified_scope_acknowledgement_required");
+    expect(await db.select().from(vendorUsageCredentials).where(eq(vendorUsageCredentials.connectorId, c.id))).toHaveLength(0);
+
+    const stored = await storeKey(c.id, GITHUB_TOKEN, { acknowledgeUnverifiedScope: true });
+    expect(stored.statusCode, stored.body).toBe(201);
+    expect(stored.json().credential).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+    expect(stored.json().credential.scopeAcknowledgedAt).not.toBeNull();
+    const [cred] = await db.select().from(vendorUsageCredentials).where(eq(vendorUsageCredentials.connectorId, c.id));
+    expect(cred?.scopePosture).toBe("unverified");
+    expect(cred?.writeCapableAcknowledgedAt).not.toBeNull();
+    const [row] = await db
+      .select({ detail: auditLog.detail })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, VENDOR_USAGE_RULE_IDS.credentialStored), eq(auditLog.objectId, cred!.id)));
+    expect(row?.detail).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+    expect(JSON.stringify(row?.detail)).not.toContain(GITHUB_TOKEN);
+    const view = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
+    const mine = view.json().connectors.find((x: { id: string }) => x.id === c.id);
+    expect(mine.credential).toMatchObject({ scopePosture: "unverified", scopeAttestation: expect.stringMatching(/read permissions only/) });
+  });
+
+  it("reads one report per day of the window, keeps the Copilot lines, and upserts on re-pull", async () => {
+    const c = await enabledConnector("github_copilot", { account: "organization", slug: "acme-eng", backfillDays: 3 }, GITHUB_TOKEN);
+    await allowHost("api.github.com");
+
+    const yesterday = new Date(dayIso(-1));
+    const items = (url: URL) => {
+      const asked = Date.UTC(Number(url.searchParams.get("year")), Number(url.searchParams.get("month")) - 1, Number(url.searchParams.get("day")));
+      if (asked !== yesterday.getTime()) return [];
+      const date = yesterday.toISOString();
+      return [
+        { date, product: "Copilot", sku: "Copilot Business", quantity: 4, unitType: "user-months", netAmount: 76, organizationName: "acme-eng" },
+        { date, product: "Copilot", sku: "Premium request", quantity: 25, unitType: "requests", netAmount: 1, organizationName: "acme-eng", repositoryName: "acme-eng/api" },
+        { date, product: "Actions", sku: "Linux", quantity: 100, unitType: "minutes", netAmount: 0.8, organizationName: "acme-eng" },
+      ];
+    };
+    answer = (url) =>
+      url.pathname === "/organizations/acme-eng/settings/billing/usage" ? json({ usageItems: items(url) }) : json({ message: "Not Found" }, 404);
+
+    seen = [];
+    const first = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(first.run).toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    // backfillDays 3 = three past days and today
+    expect(seen).toHaveLength(4);
+    expect(seen.every((s) => s.url.host === "api.github.com")).toBe(true);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Bearer ${GITHUB_TOKEN}`);
+    expect(seen[0]!.headers.get("x-github-api-version")).toBe("2026-03-10");
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    expect(lines.map((l) => [l.accountRef, l.amount, l.overlapsMetered, l.basis]).sort()).toEqual([
+      ["github organization acme-eng", 1, false, "imported"],
+      ["github organization acme-eng", 76, false, "imported"],
+    ]);
+
+    await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id))).toHaveLength(2);
+    const view = await app.inject({ method: "GET", url: "/v1/vendor-usage", headers: AUTH });
+    expect(view.body).not.toContain(GITHUB_TOKEN);
+    const mine = view.json().connectors.find((x: { id: string }) => x.id === c.id);
+    expect(mine.meteredOverlap).toMatch(/does not meter this vendor/);
+  });
+
+  it("stores a fixed code when GitHub refuses the token, never GitHub's body", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    answer = () => json({ message: `Bad credentials ${GITHUB_TOKEN}` }, 401);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect([run.status, run.errorCode]).toEqual(["failed", "unauthorized"]);
+    expect(run.errorDetail).not.toContain(GITHUB_TOKEN);
+  });
+});
+
+describe("ADR-0322 slice 3: the Cursor pull (filtered usage events, Basic auth)", () => {
+  it("pages through the events, sums them per day and person, and resolves a person by email", async () => {
+    const c = await enabledConnector("cursor", { backfillDays: 2 }, CURSOR_KEY);
+    await allowHost("api.cursor.com");
+    const at = Date.parse(dayIso(-1)) + 3_600_000;
+    const bodies: Array<Record<string, unknown>> = [];
+    const requestBodies: Promise<void>[] = [];
+    const cursorFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const req = new Request(input, init);
+      requestBodies.push(req.clone().text().then((t) => void bodies.push(JSON.parse(t))));
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    let pageNo = 0;
+    answer = (url) => {
+      if (url.pathname !== "/teams/filtered-usage-events") return json({ error: "unexpected path" }, 404);
+      pageNo += 1;
+      return pageNo === 1
+        ? json({
+            usageEvents: [
+              { timestamp: String(at), userEmail: `adr0322-admin-${RUN}@example.com`, model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 1, chargedCents: 12.5 },
+              { timestamp: String(at + 60_000), serviceAccountId: "sa_ci", model: "model-a", kind: "Usage-based", product: "agent", chargedCents: 40 },
+            ],
+            pagination: { currentPage: 1, hasNextPage: true },
+          })
+        : json({
+            usageEvents: [{ timestamp: String(at + 120_000), userEmail: `ADR0322-admin-${RUN}@example.com`, model: "model-a", kind: "Usage-based", product: "agent", requestsCosts: 2, chargedCents: 7.25 }],
+            pagination: { currentPage: 2, hasNextPage: false },
+          });
+    };
+    seen = [];
+    const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: cursorFetch, resolve } });
+    await Promise.all(requestBodies);
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    expect(seen.map((s) => s.url.host)).toEqual(["api.cursor.com", "api.cursor.com"]);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Basic ${Buffer.from(`${CURSOR_KEY}:`).toString("base64")}`);
+    expect(bodies.map((b) => [b.page, b.pageSize])).toEqual([
+      [1, 1000],
+      [2, 1000],
+    ]);
+    expect(Number(bodies[0]!.endDate)).toBeGreaterThan(Number(bodies[0]!.startDate));
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    const byRef = new Map(lines.map((l) => [l.accountRef, l]));
+    expect(byRef.get(`adr0322-admin-${RUN}@example.com`)).toMatchObject({ amount: 0.1975, resolutionMethod: "exact_email" });
+    expect(byRef.get("cursor service account sa_ci")).toMatchObject({ amount: 0.4 });
+  });
+
+  it("refuses a vendor that answers a different page than the one asked for, and writes nothing", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    answer = () => json({ usageEvents: [], pagination: { currentPage: 1, hasNextPage: true } });
+    let calls = 0;
+    const counting = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls > 1) return json({ usageEvents: [], pagination: { currentPage: 1, hasNextPage: true } });
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: counting, resolve } });
+    expect([run.status, run.errorCode, calls]).toEqual(["failed", "bad_response", 2]);
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
+  });
+});
+
+describe("ADR-0322 slice 4b: ChatGPT Enterprise Daily Usage (ChatGPT, Codex and Work)", () => {
+  const WS = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  const PATH = `/v1/analytics/workspaces/${WS}/usage`;
+  const dayS = (offset: number) => Date.parse(dayIso(offset)) / 1000;
+  const usageRow = (user: string, email: string | null, offset: number, totals: Record<string, unknown>, clients: Array<Record<string, unknown>>) => ({
+    object: "workspace.usage.result",
+    start_time: dayS(offset),
+    end_time: dayS(offset + 1),
+    user_id: user,
+    actor: { type: "ACCOUNT_USER", user_id: user, email },
+    totals,
+    clients,
+  });
+
+  it("refuses a workspace id that is not a UUID, so the path segment cannot be steered", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/vendor-usage/connectors",
+      headers: AUTH,
+      payload: { vendor: "openai_codex", name: `adr0322-bad-ws-${RUN}`, config: { workspaceId: "../../manage" }, reason: "adr0322 suite" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("follows next_page, records credit usage at the vendor's estimate (marked), and resolves a person by email", async () => {
+    const c = await enabledConnector("openai_codex", { workspaceId: WS, backfillDays: 2 }, CHATGPT_KEY);
+    await allowHost("api.chatgpt.com");
+    answer = (url) => {
+      if (url.pathname !== PATH) return json({ error: "unexpected path" }, 404);
+      if (!url.searchParams.get("page")) {
+        return json({
+          object: "page",
+          data: [
+            usageRow(
+              "user-admin",
+              `ADR0322-admin-${RUN}@example.com`,
+              -1,
+              { chats: 4, messages: 9, credits: 3.5, cost_usd: null, estimated_cost_usd: 0.14 },
+              [
+                { client_id: "CHAT_WEB", chats: 3, messages: 7, credits: 1, cost_usd: null, estimated_cost_usd: 0.04 },
+                { client_id: "CODEX_CLI", chats: 1, messages: 2, credits: 2, cost_usd: null, estimated_cost_usd: 0.08 },
+              ],
+            ),
+          ],
+          has_more: true,
+          next_page: "cursor-2",
+        });
+      }
+      return json({
+        object: "page",
+        data: [
+          usageRow("user-usd", null, 0, { chats: 1, messages: 2, credits: null, cost_usd: 0.25 }, [{ client_id: "CODEX_CLI", chats: 1, messages: 2, credits: null, cost_usd: 0.25 }]),
+          usageRow("user-noest", "noest@example.test", 0, { chats: 1, messages: 1, credits: 2, cost_usd: null }, [{ client_id: "CHAT_WEB", chats: 1, messages: 1, credits: 2, cost_usd: null }]),
+        ],
+        has_more: false,
+        next_page: null,
+      });
+    };
+    seen = [];
+    const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 4, overlapLines: 0 });
+    expect(seen.map((s) => [s.url.host, s.url.pathname, s.url.searchParams.get("page")])).toEqual([
+      ["api.chatgpt.com", PATH, null],
+      ["api.chatgpt.com", PATH, "cursor-2"],
+    ]);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Bearer ${CHATGPT_KEY}`);
+    // UTC-midnight Unix seconds, start inclusive and end exclusive, the same on every page
+    expect(seen.map((s) => [s.url.searchParams.get("start_time"), s.url.searchParams.get("end_time"), s.url.searchParams.get("limit")])).toEqual([
+      [String(dayS(-2)), String(dayS(1)), "2000"],
+      [String(dayS(-2)), String(dayS(1)), "2000"],
+    ]);
+    expect(seen.some((s) => s.url.searchParams.has("group"))).toBe(false);
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    const rows = lines.map((l) => [l.accountRef, l.service ?? null, l.amount, l.currency, (l.detail as { estimate?: boolean } | null)?.estimate, l.resolutionMethod]);
+    expect(rows.sort()).toEqual(
+      [
+        ["chatgpt user user-usd", "CODEX_CLI", 0.25, "USD", false, "unresolved"],
+        [`adr0322-admin-${RUN}@example.com`, "CHAT_WEB", 0.04, "USD", true, "exact_email"],
+        [`adr0322-admin-${RUN}@example.com`, "CODEX_CLI", 0.08, "USD", true, "exact_email"],
+        [`adr0322-admin-${RUN}@example.com`, "unattributed", 0.02, "USD", true, "exact_email"],
+      ].sort(),
+    );
+    const [batch] = await db.select().from(costImportBatches).where(eq(costImportBatches.id, run.batchId!));
+    expect(batch?.summary).toMatchObject({ creditRowsWithoutEstimate: 1, pages: 2 });
+
+    // a re-pull of the same window updates in place
+    await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id))).toHaveLength(4);
+  });
+
+  it("refuses a page that says more follow without a cursor, or repeats one, and writes nothing", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    for (const next of [null, "same"]) {
+      answer = () => json({ object: "page", data: [], has_more: true, next_page: next });
+      const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+      expect([run.status, run.errorCode]).toEqual(["failed", "bad_response"]);
+    }
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
+  });
+
+  it("stores a fixed code when the vendor refuses the key's scope, never the vendor's body", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    answer = () => json({ error: { message: `missing scope for ${CHATGPT_KEY}` } }, 403);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect([run.status, run.errorCode]).toEqual(["failed", "forbidden"]);
+    expect(run.errorDetail).not.toContain(CHATGPT_KEY);
+  });
+});
+
+describe("ADR-0322 slice 4a: AWS CUR 2.0, Bedrock lines (static key path; federated exchange in cloud-discovery)", () => {
+  const NOW = new Date("2026-11-20T12:00:00Z");
+  const BUCKET_HOST = "acme-cur.s3.us-east-1.amazonaws.com";
+  const META = "exports/ai/bedrock/metadata/BILLING_PERIOD=2026-11/";
+  const DATA = "exports/ai/bedrock/data/BILLING_PERIOD=2026-11/";
+  const base = { region: "us-east-1", bucket: "acme-cur", prefix: "exports/ai", exportName: "bedrock" };
+  const AKID = `AKIA${String(RUN).padStart(16, "0").slice(-16)}`;
+  const SECRET = JSON.stringify({ mode: "static", accessKeyId: AKID, secretAccessKey: `fake-${RUN}-aws-secret-key` });
+  const header = "line_item_usage_start_date,line_item_usage_account_id,line_item_product_code,line_item_usage_type,line_item_line_item_type,line_item_unblended_cost,line_item_currency_code,line_item_usage_amount,line_item_iam_principal";
+  const principal = `arn:aws:sts::123456789012:assumed-role/dev/adr0322-admin-${RUN}@example.com`;
+  let files: Record<string, string | Uint8Array> = {};
+  const s3 = (url: URL) => {
+    if (url.hostname !== BUCKET_HOST) return json({ error: "unexpected host" }, 404);
+    if (url.searchParams.get("list-type") === "2") {
+      const p = url.searchParams.get("prefix") ?? "";
+      const keys = Object.keys(files).filter((k) => k.startsWith(p)).map((k) => `<Contents><Key>${k}</Key><LastModified>2026-11-19T00:00:00.000Z</LastModified></Contents>`);
+      return new Response(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>acme-cur</Name><IsTruncated>false</IsTruncated>${keys.join("")}</ListBucketResult>`, { headers: { "content-type": "application/xml" } });
+    }
+    const body = files[decodeURIComponent(url.pathname.slice(1))];
+    return body === undefined ? new Response("<Error><Code>NoSuchKey</Code></Error>", { status: 404 }) : new Response(body);
+  };
+  const deliver = (rows: string[], dataFile = "bedrock-00001.csv.gz") => {
+    files = {
+      [`${META}bedrock-Manifest.json`]: JSON.stringify({ executionId: `exec-${rows.length}`, dataFiles: [`s3://acme-cur/${DATA}${dataFile}`] }),
+      [`${DATA}${dataFile}`]: gzipSync(Buffer.from([header, ...rows].join("\n"))),
+    };
+  };
+
+  it("refuses a credential whose shape does not match the mode, and a static key without its own acknowledgement", async () => {
+    const fed = await createConnector("aws_cur", { ...base, credentialMode: "federated", roleArn: "arn:aws:iam::123456789012:role/regulait-cur" });
+    expect((await storeKey(fed.id, SECRET, { acknowledgeUnverifiedScope: true })).json().error).toBe("invalid_credential_shape");
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "static" });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "federated" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(400);
+    const noStatic = await storeKey(c.id, SECRET, { acknowledgeUnverifiedScope: true });
+    expect([noStatic.statusCode, noStatic.json().error]).toEqual([409, "static_aws_key_acknowledgement_required"]);
+    const noScope = await storeKey(c.id, SECRET, { acknowledgeStaticAwsKey: true });
+    expect([noScope.statusCode, noScope.json().error]).toEqual([409, "unverified_scope_acknowledgement_required"]);
+    const ok = await storeKey(c.id, SECRET, { acknowledgeStaticAwsKey: true, acknowledgeUnverifiedScope: true });
+    expect(ok.statusCode, ok.body).toBe(201);
+    expect(ok.body).not.toContain(AKID);
+    const [audit] = await db.select({ detail: auditLog.detail }).from(auditLog).where(and(eq(auditLog.ruleId, VENDOR_USAGE_RULE_IDS.credentialStored), eq(auditLog.objectId, ok.json().credential.id)));
+    expect(audit?.detail).toMatchObject({ staticAwsKeyAcknowledged: true, scopePosture: "unverified" });
+    expect(JSON.stringify(audit?.detail)).not.toContain(AKID);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+  });
+
+  it("reads the month's export, keeps Bedrock lines only, and resolves a principal through admin aliases only", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    await allowHost(BUCKET_HOST);
+    deliver([
+      `2026-11-17T01:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.10,USD,1000,${principal}`,
+      `2026-11-17T02:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.25,USD,2500,${principal}`,
+      `2026-11-17T03:00:00Z,123456789012,AmazonBedrock,USE1-output-tokens,Usage,1.00,USD,100,`,
+      `2026-11-17T04:00:00Z,123456789012,AmazonEC2,BoxUsage,Usage,9.99,USD,1,`,
+    ]);
+    seen = [];
+    answer = s3;
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect(run, run.errorDetail ?? "").toMatchObject({ status: "succeeded", linesUpserted: 2, overlapLines: 0 });
+    expect(seen.every((x) => x.url.hostname === BUCKET_HOST)).toBe(true);
+    expect(seen[0]!.headers.get("authorization")).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${AKID}/`));
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    const byRef = new Map(lines.map((l) => [l.accountRef, l]));
+    // the session name is the admin's email, but a caller chooses it: no automatic resolution
+    expect(byRef.get(principal)).toMatchObject({ amount: 0.35, resolutionMethod: "unresolved", basis: "imported" });
+    expect(byRef.get("aws account 123456789012")).toMatchObject({ amount: 1 });
+    expect(JSON.stringify(await db.select().from(vendorUsagePullRuns).where(eq(vendorUsagePullRuns.connectorId, c)))).not.toContain(AKID);
+  });
+
+  it("replaces a re-read month: a restated amount updates in place and a line AWS removed is withdrawn", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    deliver([`2026-11-17T01:00:00Z,123456789012,AmazonBedrock,USE1-input-tokens,Usage,0.40,USD,1000,${principal}`]);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 1 });
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    expect(lines.map((l) => [l.accountRef, l.amount])).toEqual([[principal, 0.4]]);
+    const [batch] = await db.select({ summary: costImportBatches.summary }).from(costImportBatches).where(eq(costImportBatches.id, run.batchId!));
+    expect(batch?.summary).toMatchObject({ replacedPeriods: ["2026-11"], withdrawnLines: 1 });
+  });
+
+  it("refuses a Parquet export with a fixed code and RegulAIt's own sentence", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    files = { [`${META}Manifest.json`]: JSON.stringify({ dataFiles: [`${DATA}bedrock-00001.snappy.parquet`] }) };
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+    expect([run.status, run.errorCode, run.errorDetail]).toEqual(["failed", "bad_response", "this export is Parquet; recreate it as gzip-compressed CSV"]);
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(1);
+  });
+
+  it("refuses a federated connector while the federation issuer is not configured, without calling AWS", async () => {
+    const c = await createConnector("aws_cur", { ...base, credentialMode: "federated", roleArn: "arn:aws:iam::123456789012:role/regulait-cur" });
+    expect((await storeKey(c.id, JSON.stringify({ mode: "federated" }), { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
+    expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
+    const saved = process.env.REGULAIT_PUBLIC_URL;
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      seen = [];
+      const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve }, now: NOW });
+      expect([run.status, run.errorCode]).toEqual(["refused", "no_credential"]);
+      // no request at all leaves: the federation token is refused before STS or S3 is called
+      expect(seen).toHaveLength(0);
+    } finally {
+      if (saved !== undefined) process.env.REGULAIT_PUBLIC_URL = saved;
+    }
   });
 });
 

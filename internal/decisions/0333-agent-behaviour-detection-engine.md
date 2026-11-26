@@ -168,6 +168,81 @@ match tool names only, so they are heuristics, and the admin can edit them.
   standing is not re-checked when a restricting response runs; for `require_approval`, a pool the author can no longer
   satisfy is refused by the approval-rule create, so the response fails closed (`approval_rule_refused`).
 
+### 5a. Device quarantine (slice 3, GAP_ANALYSIS_DARKCONTROL gap 4)
+
+- **Endpoint decisions group by device.** An endpoint hook decision (ADR-0310 addendum) is audited with the nil user
+  and the device as its object. Its group key is now `endpoint:<deviceId>`, not `user:<nil>`; before this slice every
+  device's decisions fell into one group, so a burst on one device and a single deny on another counted together. The
+  look-back is narrowed to the fresh devices as well as the fresh users.
+- **`quarantine_device` is a fifth response.** It applies only to an `endpoint:` group (`not_endpoint` otherwise) and
+  to a live device (`device_not_found` for a revoked or unknown one). It opens one active row in
+  `endpoint_device_quarantines` for the rule's `quarantineHours` (1 to 720, default 72; the database caps the row at
+  30 days). A device with an active quarantine keeps it: at most one is active per device (partial unique index), and
+  the response reports `existing: true`. It runs in the response transaction of section 5, so it is never applied
+  unrecorded. Like every response stronger than `alert`, it exists only in a pack stored behind a `settings_relax`
+  step-up.
+- **The lifecycle is an ADR-0348 machine**, `ENDPOINT_DEVICE_QUARANTINE_MACHINE` (`active -> released | expired`),
+  held equal to the column's CHECK by the shared machine test. Every move is one conditional UPDATE from `whereFrom`.
+- **Release needs a human admin with a step-up.** `POST /v1/detection/quarantines/:id/release` takes a `settings_relax`
+  step-up bound to the quarantine. The method is stored on the row, and the release is audited
+  (`detection-quarantine-released`). A system or bootstrap principal without a user cannot release.
+- **Expiry** is run by the sweep, at most 100 rows per pass, one `detection-quarantine-expired` audit row each.
+- **The kill switch: narrowing only (ADR-0338 §7, reused, not rebuilt).** The generic guard ADR-0338 §5 specifies,
+  `killSwitchNarrowingOnly({ dial, direction })`, is in `@regulait/shared` (it had not been built when this slice
+  started; lane E19 imports it instead of writing it). Opening a quarantine is narrowing and runs under any execution
+  dial. Release and expiry are widening: while the dial is not `normal`, a release is refused
+  (`execution_dial_not_normal`) and nothing expires, so a halt keeps every quarantine in force.
+- **Enforcement on the device is not delivered yet (owner question open).** The hook decides on the device (ADR-0298),
+  and no gateway call is attributed to a device, so the gateway cannot refuse the device's AI tools alone. Delivering
+  "deny-all for AI tools while quarantined" needs the agent to learn of its quarantine through its signed channel: a
+  change to `agents/endpoint/` (lane E13). `activeQuarantineForDevice` is the read that delivery uses. Until it lands,
+  every quarantine view says `deviceEnforcement: "not_delivered"` (ADR-0180: an unknown is never shown as fine).
+- **Admin routes** (admin-only by the default gate, API only; the screens are known UI gaps on #453):
+  `GET /v1/detection/quarantines` (keyset-paginated, by status or device), `GET /v1/detection/quarantines/:id` (with
+  its `describe()` lifecycle), and the release route above. RLS is enabled and forced on the table, with the incident
+  tables' admin and `system_task` policy.
+
+### 5b. Suppressions and the dry run (slice 4)
+
+- **A suppression covers one rule in one group, for a bounded time.** It names a rule of the active pack and exactly
+  one group key (`user:`, `grant:` or `endpoint:`; never a wildcard: silencing a rule for everyone is a pack edit,
+  which has its own step-up). It lasts 1 to 720 hours, and the database caps the row at 30 days. At most 200 are
+  active at once, and one per (rule, group).
+- **No self-exemption and no critical rule (security review of #1157).** A `critical` rule is never suppressed
+  (`suppression_not_allowed_for_severity`); changing it is a pack edit, which is global, visible and needs its own
+  step-up. A requester cannot suppress their own group (`cannot_suppress_own_detection`): their `user:` key, or a
+  delegation tree whose root grant they sponsor. Another admin must decide it, which is the second person the
+  four-eyes rule asks for. An `endpoint:` group carries no user, because device users are pseudonymous (ADR-0195), so
+  it cannot be attributed to the requester. As defence in depth, the sweep never applies a suppression to a match whose
+  sponsor is the suppression's creator.
+- **Bound to the rule's content.** A suppression stores the digest of the rule as suppressed: its canonical JSON plus
+  the globs of the tool classes it names. It holds back a match only while the active rule still has that digest, so a
+  pack edit that keeps the id but changes what the rule matches, its severity or its response ends the suppression's
+  effect. The row stays active, so the admin who created it sees why it no longer applies.
+- **Creating one is a relaxation.** `POST /v1/detection/suppressions` takes a `settings_relax` step-up bound to the
+  exact terms (rule, group, hours and a digest of the reason). The method is stored on the row, and the creation is
+  audited (`detection-suppression-created`). The reason is free text, so it is registered with the prose scrub.
+- **A suppression never hides that the rule fired.** While it is active and unexpired, the sweep raises no incident for
+  that rule in that group. It writes one `detection-suppressed` audit row per suppression per batch, with the match
+  count and the trigger sequence numbers, in the batch's transaction, so it reaches the SIEM. Suppressions apply to
+  replayed history too, and those rows say `historical`.
+- **Lifecycle (ADR-0348).** `DETECTION_SUPPRESSION_MACHINE`, `active -> revoked`. Revoking early is a narrowing: any
+  admin, no step-up, audited (`detection-suppression-revoked`). Expiry is derived from `expires_at` and never stored,
+  as for the ADR-0350 exceptions. An expired row reads as `expired`, suppresses nothing, and `describe` shows revoke
+  refused for it.
+- **Tenant scope.** One deployment is one tenant (ADR-0041). RLS on the table, enabled and forced, keeps it to admin
+  principals and the sweep (`system_task`), like the incident tables.
+- **The dry run.** `POST /v1/detection/rule-pack/dry-run` evaluates the active pack, or a proposed one, over a past
+  window of at most 7 days. It reads at most 20,000 audit rows plus the look-back the pack's longest timespan needs, and
+  says `truncated` when it stopped early. It runs the same engine as the sweep inside one `READ ONLY` transaction, so it
+  writes no incident, episode, cursor or response. It returns per-rule `hits`, distinct `groups`, and `suppressedNow`
+  (the hits a suppression active today would hold back). Incidents already raised are ignored, so the counts answer
+  "what would this pack raise on this history". The run itself is audited (`detection-pack-dry-run`: who, which pack
+  digest, which window), because it reads the audit trail.
+- **Overlap with rogue-agent containment (#1134, ADR-0366).** Containment acts on governance-monitor alerts, not on
+  these incidents. A future link from detection incidents to containment would see only raised incidents, so a
+  suppressed match would contain nothing; that is the intended meaning of a suppression.
+
 ### 6. Reuse and open-source search (ADR-0176)
 
 **In the repo first:**
@@ -243,6 +318,6 @@ As built:
 - Tool classes match names, not behaviour. A tool named to evade a class is not caught by that class. The pack is
   editable so that each deployment can tune it, and the incident evidence makes false positives cheap to review.
 - The routes are API only. The screens are known UI gaps tracked on #453.
-- **Follow-ups:** endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); a per-rule suppression
-  list for known-good automations; a rule test harness in the admin API (dry-run a pack over a past window).
+- **Follow-ups:** endpoint hook decisions in the audit chain (lane E13, ADR-0298 follow-up); the incident,
+  rule-pack, suppression and dry-run screens (#453). The suppression list and the dry run are built (section 5b).
 

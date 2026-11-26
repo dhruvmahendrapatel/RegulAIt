@@ -26,7 +26,7 @@ import { useToast } from "../../ui/toast";
 import { RunGraph } from "../../ui/runGraph/RunGraph";
 import rg from "../../ui/runGraph/runGraph.module.css";
 import { bk, builderApi, chatRefusal, useMyModelTiles, useMyProjects, type ChatResponse } from "./builderApi";
-import { agentInitials, importMessage, parseBundleText, safeAgentColor } from "./builderLogic";
+import { agentInitials, importMessage, isImeComposing, parseBundleText, safeAgentColor } from "./builderLogic";
 import s from "./builder.module.css";
 
 // ---- glyphs (inline, decorative) -------------------------------------------
@@ -633,11 +633,18 @@ export function MessageList(props: {
   );
 }
 
-/** the message box: Enter sends, Shift+Enter breaks a line */
+/**
+ * the message box: Enter sends, Shift+Enter breaks a line.
+ *
+ * `onSend` returns the send's promise. The text stays in the box until that
+ * promise resolves, so a refused or failed send keeps what was written and the
+ * caller shows the error (UIW-01). Text edited while the send is in flight is
+ * kept too.
+ */
 export function Composer(props: {
   label: string;
   placeholder: string;
-  onSend: (text: string) => void;
+  onSend: (text: string) => Promise<unknown>;
   busy?: boolean;
   disabled?: boolean;
   leading?: ReactNode;
@@ -647,8 +654,11 @@ export function Composer(props: {
   const send = () => {
     const t = text.trim();
     if (!t || props.busy || props.disabled) return;
-    props.onSend(t);
-    setText("");
+    props.onSend(t).then(
+      () => setText((cur) => (cur.trim() === t ? "" : cur)),
+      // the caller's own error handler shows why; the draft stays for a retry
+      () => undefined,
+    );
   };
   return (
     <div className={s.composer}>
@@ -663,7 +673,7 @@ export function Composer(props: {
         autoFocus={props.autoFocus}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (e.key === "Enter" && !e.shiftKey && !isImeComposing(e)) {
             e.preventDefault();
             send();
           }
