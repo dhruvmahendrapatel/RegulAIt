@@ -20705,7 +20705,7 @@ export const customClassifierHashKey = pgTable(
 // ===== end ADR-0363 slice 2 =====
 
 // ===== ADR-0365 (lane E46, slice 1): the live synced context graph (pillar 4, PENDING P2) =====
-// Migration `pending/shared_context_graph.sql` (numbered at merge). Forced row-level security on all four tables; a
+// Migration `0394_shared_context_graph.sql`. Forced row-level security on all four tables; a
 // node is readable by an admin or by a principal who is a member of the project of EVERY one of its scope rows
 // (`regulait_context_graph_node_readable`). A node stores no copy of its source's facts: label, URL, type and missing
 // state are joined from pm_connections / pm_imported_work_items at read (3NF; nothing PM-authoritative is stored).
@@ -20728,6 +20728,8 @@ export const contextGraphSources = pgTable(
     // the cursor's tie-breaker id, FK-free on purpose: it is a position, and the item it names may be gone
     cursorItemId: uuid("cursor_item_id"),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    /** slice 2: when the work-item-to-run links were last projected (the incremental window, re-read with the overlap) */
+    linksSyncedAt: timestamp("links_synced_at", { withTimezone: true }),
   },
   (t) => [
     uniqueIndex("context_graph_sources_connection_uq").on(t.pmConnectionId),
@@ -20736,8 +20738,8 @@ export const contextGraphSources = pgTable(
   ],
 );
 
-export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item"] as const;
-export const CONTEXT_GRAPH_EDGE_KINDS = ["contains"] as const;
+export const CONTEXT_GRAPH_NODE_KINDS = ["pm_project", "pm_work_item", "orchestration_run"] as const;
+export const CONTEXT_GRAPH_EDGE_KINDS = ["contains", "tracks"] as const;
 
 /** A graph node: a bound connection's PM project (one per source) or one imported work item. */
 export const contextGraphNodes = pgTable(
@@ -20749,15 +20751,19 @@ export const contextGraphNodes = pgTable(
       .references(() => contextGraphSources.id, { onDelete: "cascade" }),
     kind: text("kind", { enum: CONTEXT_GRAPH_NODE_KINDS }).notNull(),
     pmImportedWorkItemId: uuid("pm_imported_work_item_id").references(() => pmImportedWorkItems.id, { onDelete: "cascade" }),
+    /** slice 2 (migration `shared_context_graph_runs`): the run an `orchestration_run` node stands for */
+    orchestrationRunId: uuid("orchestration_run_id").references(() => orchestrationRuns.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("context_graph_nodes_work_item_uq").on(t.pmImportedWorkItemId).where(sql`${t.pmImportedWorkItemId} IS NOT NULL`),
     uniqueIndex("context_graph_nodes_project_uq").on(t.sourceId).where(sql`${t.kind} = 'pm_project'`),
     index("context_graph_nodes_source_kind_idx").on(t.sourceId, t.kind, t.id),
+    uniqueIndex("context_graph_nodes_source_run_uq").on(t.sourceId, t.orchestrationRunId).where(sql`${t.orchestrationRunId} IS NOT NULL`),
+    index("context_graph_nodes_run_idx").on(t.orchestrationRunId).where(sql`${t.orchestrationRunId} IS NOT NULL`),
     check(
       "context_graph_nodes_kind_check",
-      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.pmImportedWorkItemId} IS NULL WHEN 'pm_work_item' THEN ${t.pmImportedWorkItemId} IS NOT NULL ELSE false END`,
+      sql`CASE ${t.kind} WHEN 'pm_project' THEN ${t.pmImportedWorkItemId} IS NULL AND ${t.orchestrationRunId} IS NULL WHEN 'pm_work_item' THEN ${t.pmImportedWorkItemId} IS NOT NULL AND ${t.orchestrationRunId} IS NULL WHEN 'orchestration_run' THEN ${t.orchestrationRunId} IS NOT NULL AND ${t.pmImportedWorkItemId} IS NULL ELSE false END`,
     ),
   ],
 );
@@ -20780,7 +20786,7 @@ export const contextGraphEdges = pgTable(
   (t) => [
     uniqueIndex("context_graph_edges_triple_uq").on(t.fromNodeId, t.toNodeId, t.kind),
     index("context_graph_edges_to_idx").on(t.toNodeId),
-    check("context_graph_edges_kind_check", sql`${t.kind} IN ('contains')`),
+    check("context_graph_edges_kind_check", sql`${t.kind} IN ('contains', 'tracks')`),
     check("context_graph_edges_no_loop_check", sql`${t.fromNodeId} <> ${t.toNodeId}`),
   ],
 );
@@ -20799,6 +20805,27 @@ export const contextGraphNodeScopes = pgTable(
   (t) => [
     primaryKey({ name: "context_graph_node_scopes_pk", columns: [t.nodeId, t.projectId] }),
     index("context_graph_node_scopes_project_idx").on(t.projectId, t.nodeId),
+  ],
+);
+/**
+ * ADR-0365 slice 2: a second access scope, by user. When a node has rows here the reader must be one of them (an admin
+ * aside), on top of every project scope. A run node gets its run's initiator: a run is visible to its initiator and
+ * admins only, so a project scope alone would widen it. The sync writes it from `orchestration_runs` (an access
+ * assignment, like the project scope from the source; the full pass rewrites it).
+ */
+export const contextGraphNodeUserScopes = pgTable(
+  "context_graph_node_user_scopes",
+  {
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => contextGraphNodes.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ name: "context_graph_node_user_scopes_pk", columns: [t.nodeId, t.userId] }),
+    index("context_graph_node_user_scopes_user_idx").on(t.userId, t.nodeId),
   ],
 );
 // ===== end ADR-0365 =====

@@ -58,7 +58,9 @@ describe("every pack version published before S5 is unchanged (content hash)", (
     // ADR-0294 (P18 B5) adds nist-ai-600-1@1, pinned in nist-ai-600-1-pack.test.ts; ADR-0319 adds aiuc-1@1
     const added = new Set(["iso-42001@2", "iso-23894@1", "iso-42005@1", "gdpr@1", "ccpa@1", "dpdp@1", "lgpd@1", "sr-11-7@1", "nyc-ll144@1", "nist-ai-600-1@1", "aiuc-1@1",
       // ADR-0351 slice 2, pinned in eu-ai-act-deployer.test.ts
-      "eu-ai-act-deployer@1"]);
+      "eu-ai-act-deployer@1",
+      // ADR-0351 slice 3, pinned in endpoint-benchmark-pack.test.ts
+      "ai-coding-endpoint-benchmark@1"]);
     expect(all.filter((k) => !(k in PINNED) && !k.startsWith("owasp-") && !added.has(k)).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
     for (const k of ["eu-ai-act@3", "isaca-ai-agents@1", "nist-ai-rmf@4"]) {
       const [fw, v] = k.split("@");
