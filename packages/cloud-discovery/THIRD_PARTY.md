@@ -45,7 +45,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `google-gax` | `6.12.1` | Apache-2.0 | The GAPIC runtime. Used only in REST fallback mode; its gRPC transport is never selected. |
 | `@grpc/grpc-js` | `1.14.5` | Apache-2.0 | Installed as a dependency of `google-gax`; never used as a transport by this package. |
 | `gaxios` | `8.3.3` | Apache-2.0 | Google's HTTP client; constructed through `google-auth-library`'s own re-export with `fetchImplementation` set to the guarded fetch. |
-| `@azure/msal-node`, `@azure/msal-common` | `6.0.1`, `16.14.1` | MIT | Entra token acquisition inside `@azure/identity`; its network client is the guarded `HttpClient`. |
+| `@azure/msal-node`, `@azure/msal-common` | `7.1.1`, `16.14.1` | MIT | Entra token acquisition inside `@azure/identity`; its network client is the guarded `HttpClient`. |
 | `protobufjs` | `7.6.6` | BSD-3-Clause | Message encoding for the Google clients' REST fallback. |
 
 ## Dev dependencies
@@ -53,7 +53,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | Component | Version | Licence | Used for |
 |---|---|---|---|
 | `@types/node` | `26.6.6` | MIT | Node.js type definitions; build-only. |
-| `vitest` | `4.1.11` | MIT | Test runner; test-only. |
+| `vitest` | `4.1.12` | MIT | Test runner; test-only. |
 
 ## What we wrote instead of reusing (ADR-0176 rule 4)
 

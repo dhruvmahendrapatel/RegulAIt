@@ -7,4 +7,4 @@ ISC; maintained; pinned; works air-gapped). npm dependencies are pinned exactly 
 |---|---|---|---|
 | `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `4.6.7` (exact; ADR-0192) | MIT | Strict runtime schemas for the garak probe/detector exchange and self-test payloads (`src/exchange.ts`, `src/selftest.ts`). |
 | `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.6.6` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
-| `vitest` (npm, github.com/vitest-dev/vitest, © Anthony Fu and contributors) | `4.1.11` (exact devDependency) | MIT | Test runner for the `*.test.ts` files in `src/`; test-only, never in a shipped bundle. |
+| `vitest` (npm, github.com/vitest-dev/vitest, © Anthony Fu and contributors) | `4.1.12` (exact devDependency) | MIT | Test runner for the `*.test.ts` files in `src/`; test-only, never in a shipped bundle. |
