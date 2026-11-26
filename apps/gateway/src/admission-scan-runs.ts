@@ -49,6 +49,7 @@ import {
   type EngineTerminalRunStatus,
 } from "@regulait/shared";
 import { recordAdmissionEngineScanTx, type AdmissionScanSubject } from "./admission-engine-scans.js";
+import { CONTENTEXTRACT_ENGINE_ID, contentExtractInputTx } from "./content-inspection-runs.js";
 import { databaseWallNow } from "./db-clock.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 
@@ -211,6 +212,8 @@ export type SubjectInput = { ok: true; file: string; bytes: Buffer; sha256: stri
  * whose digest is no longer current (nor, for a skill, a pinned copy's) is superseded: scanning it decides nothing.
  */
 export async function subjectInputTx(tx: Exec, run: EngineRunRow): Promise<SubjectInput> {
+  // ADR-0362: a content-extraction run's subject is the request's file bundle, carried encrypted on the run
+  if (run.engineId === CONTENTEXTRACT_ENGINE_ID) return contentExtractInputTx(tx, run);
   const subject = subjectOfRun(run);
   if (!subject) return { ok: false, code: "subject_gone" };
   if (subject.kind === "mcp_server") {
@@ -268,6 +271,8 @@ export async function recordSubjectRunEndTx(
   args: { status: EngineTerminalRunStatus; placed: boolean; report: unknown },
 ): Promise<{ scanId: string; verdict: string; state: string | null; current: boolean } | null> {
   if (run.targetKind !== "subject" || run.status !== "leased" || !args.placed) return null;
+  // ADR-0362: a content-extraction run records no admission verdict (its end is content-inspection-runs.ts')
+  if (run.engineId === CONTENTEXTRACT_ENGINE_ID) return null;
   if (!["completed", "failed", "timeout"].includes(args.status)) return null;
   const subject = subjectOfRun(run);
   if (!subject) return null;

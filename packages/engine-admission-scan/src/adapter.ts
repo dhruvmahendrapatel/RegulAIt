@@ -1,6 +1,7 @@
 /**
  * ADR-0242 §6.1 — THE ADMISSION-SCAN ADAPTER: one subject lease → the subject scanned in the executor's sandbox →
- * the driver's `regulait.admission-scan.v1` report posted as the envelope's raw report, byte for byte.
+ * the driver's report (`regulait.admission-scan.v1`, or ADR-0362 the extractor's result) posted as the envelope's raw
+ * report, byte for byte.
  *
  * The runner decides nothing about the subject. It never sees the subject's bytes (the gateway places them), never
  * parses the report (the gateway does, strictly, in `recordSubjectRunEndTx`), and carries no key (the lease has none).
@@ -20,8 +21,8 @@
  */
 import { createHash } from "node:crypto";
 import type { EngineAdapter } from "@regulait/engine-runner";
-import type { AdmissionScanEngineId, EngineLease, EngineResultEnvelope } from "@regulait/shared";
-import { ADMISSION_SUBJECT_FILE } from "./config.js";
+import type { EngineLease, EngineResultEnvelope } from "@regulait/shared";
+import { ADMISSION_SUBJECT_FILE, type SubjectEngineId } from "./config.js";
 import type { SubjectScanExecutor, SubjectScanOutcome } from "./exchange.js";
 
 export type AdmissionEnvelopeBody = Omit<EngineResultEnvelope, "version" | "runId" | "engineId" | "engineVersion">;
@@ -39,7 +40,7 @@ function body(status: AdmissionEnvelopeBody["status"], errorCode: string | null,
 }
 
 /** the lease's subject file when it is the one this engine reads, else null */
-export function leaseSubjectFile(engine: AdmissionScanEngineId, lease: EngineLease): string | null {
+export function leaseSubjectFile(engine: SubjectEngineId, lease: EngineLease): string | null {
   const s = lease.subject;
   if (!s || lease.engineId !== engine || s.file !== ADMISSION_SUBJECT_FILE[engine]) return null;
   return s.file;
@@ -57,7 +58,7 @@ export function admissionEnvelopeBody(outcome: SubjectScanOutcome): AdmissionEnv
 }
 
 export interface AdmissionScanAdapterOptions {
-  engine: AdmissionScanEngineId;
+  engine: SubjectEngineId;
   executor: SubjectScanExecutor;
   /** the wait is the run's remaining time less this margin (to report before the deadline) */
   reportMarginMs?: number;

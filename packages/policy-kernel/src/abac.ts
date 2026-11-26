@@ -33,6 +33,14 @@
  */
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import type { AbacDecision, AbacEffect } from "./index.js";
+import {
+  AGENT_RESPONSE_TABLE,
+  POLICY_RESPONSES,
+  compareResponseStrictness,
+  responseOfPolicyMode,
+  type AgentGuidance,
+  type PolicyResponseMode,
+} from "./agent-response.js";
 
 export type { AbacDecision, AbacEffect };
 
@@ -405,9 +413,14 @@ export function abacSchemaText(version: string): string | null {
 // The neutral interface everything above this file speaks
 // ---------------------------------------------------------------------------
 
-/** the effect a policy applies WHEN IT MATCHES — never "allow" (ABAC cannot grant) */
-export type AbacPolicyMode = "forbid" | "require_approval";
-export const ABAC_POLICY_MODES: readonly AbacPolicyMode[] = ["forbid", "require_approval"];
+/**
+ * What a policy does WHEN IT MATCHES — never "allow" (ABAC cannot grant). ADR-0354 widens the vocabulary to the
+ * graduated responses (`agent-response.ts` is the declared table): `advise` lets an already-allowed call run with
+ * guidance, `correct` refuses with a safe alternative, `block_session` refuses and ends the session, `disable`
+ * refuses and quarantines the agent. None of them can turn a refusal into an allow.
+ */
+export type AbacPolicyMode = PolicyResponseMode;
+export const ABAC_POLICY_MODES: readonly AbacPolicyMode[] = POLICY_RESPONSES;
 
 export interface AbacPolicy {
   /** stable policy id (survives version bumps) — this is what lands in `ruleId` */
@@ -423,6 +436,8 @@ export interface AbacPolicy {
   approverUserId?: string | null;
   approverName?: string | null;
   description?: string | null;
+  /** ADR-0354 — the stored, already-validated agent guidance (advise and correct only) */
+  guidance?: AgentGuidance | null;
 }
 
 export interface AbacPrincipalAttrs {
@@ -820,16 +835,17 @@ function withV5Help(issue: AbacValidationIssue, schemaVersion: string): AbacVali
 
 /**
  * ADR-0251 slice 4, review #836 (ADR-0180) — the request facts the governed core does not yet supply for a model,
- * connector or A2A call. It decides below the routes, so it has no session (`sessionOrigin`, `mfaCompleted`,
- * `clientIp`), no delegation chain (`actorChain`, `delegationDepth`), no rate-consumption figure
- * (`rateLimitUsagePct`), and it evaluates the sponsor as `User`, never an `Agent`. A forbid conditioned on any of
- * these would validate and then never refuse such a call, so a v5 policy that can reach a governed action and reads
- * one is refused at write time (`governedReachIssue`). Remove an entry only in the change that threads the fact
- * through `assembleGovernedAbacRequest`.
+ * connector or A2A call. Since slice 4b the core receives the request's session facts (`sessionOrigin`,
+ * `mfaCompleted`, `clientIp`) from the route and the delegation chain (`actorChain`, `delegationDepth`, and each actor
+ * evaluated as `Agent`) from the stored grant, each reading as its strict value when absent. It still has no
+ * rate-consumption figure (`rateLimitUsagePct`), so a forbid conditioned on it would validate and then never refuse
+ * such a call; a v5 policy that can reach a governed action and reads it is refused at write time
+ * (`governedReachIssue`). Remove an entry only in the change that threads the fact through
+ * `assembleGovernedAbacRequest`.
  */
 export const ABAC_GOVERNED_UNSUPPLIED_FACTS: Readonly<{ principal: readonly string[]; context: readonly string[] }> = {
-  principal: ["sessionOrigin", "mfaCompleted"],
-  context: ["clientIp", "actorChain", "delegationDepth", "rateLimitUsagePct"],
+  principal: [],
+  context: ["rateLimitUsagePct"],
 };
 
 type EstEntity = { type?: string; id?: string; __entity?: { type: string; id: string } };
@@ -857,10 +873,9 @@ function reachesGovernedAction(p: EstPolicy): boolean {
   return true;
 }
 
-/** every `principal.x` / `context.x` the policy reads (attribute access or `has`), and whether it names an Agent */
-function factsRead(p: EstPolicy): { principal: Set<string>; context: Set<string>; namesAgent: boolean } {
-  const out = { principal: new Set<string>(), context: new Set<string>(), namesAgent: false };
-  const agentType = `${ABAC_NAMESPACE}::Agent`;
+/** every `principal.x` / `context.x` the policy reads (attribute access or `has`) */
+function factsRead(p: EstPolicy): { principal: Set<string>; context: Set<string> } {
+  const out = { principal: new Set<string>(), context: new Set<string>() };
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) return n.forEach(walk);
     if (!n || typeof n !== "object") return;
@@ -870,7 +885,6 @@ function factsRead(p: EstPolicy): { principal: Set<string>; context: Set<string>
         if (left?.Var === "principal" && attr) out.principal.add(attr);
         if (left?.Var === "context" && attr) out.context.add(attr);
       }
-      if (v === agentType) out.namesAgent = true;
       walk(v);
     }
   };
@@ -881,7 +895,7 @@ function factsRead(p: EstPolicy): { principal: Set<string>; context: Set<string>
 
 /**
  * ADR-0251 slice 4, review #836: the issue for a v5 policy that can reach a governed action but reads a fact the
- * governed core does not supply (or is about an Agent principal), so it would silently never refuse such a call.
+ * governed core does not supply, so it would silently never refuse such a call.
  * Null when the policy cannot reach a governed action or reads only supplied facts.
  */
 function governedReachIssue(p: EstPolicy): AbacValidationIssue | null {
@@ -890,17 +904,17 @@ function governedReachIssue(p: EstPolicy): AbacValidationIssue | null {
   const missing = [
     ...ABAC_GOVERNED_UNSUPPLIED_FACTS.principal.filter((a) => read.principal.has(a)).map((a) => `principal.${a}`),
     ...ABAC_GOVERNED_UNSUPPLIED_FACTS.context.filter((a) => read.context.has(a)).map((a) => `context.${a}`),
-    ...(read.namesAgent ? ["an Agent principal"] : []),
   ];
   if (missing.length === 0) return null;
   return {
     message:
-      `this policy can apply to model, connector or A2A calls and reads ${missing.map((m) => (m.includes(".") ? `\`${m}\`` : m)).join(", ")}, ` +
+      `this policy can apply to model, connector or A2A calls and reads ${missing.map((m) => `\`${m}\``).join(", ")}, ` +
       "which the governed core does not supply for those calls yet, so it would never refuse one",
     help:
       'Scope it to MCP tool calls (`action == RegulAIt::Action::"McpToolCall"`), where these facts are known, or ' +
       "drop the condition. For model, connector and A2A calls the core supplies the sponsor's roles, teams, admin " +
-      "flag and AI-training status, the deploy context, and the resource's own attributes.",
+      "flag, AI-training status and session facts (sessionOrigin, mfaCompleted, clientIp), the delegation chain " +
+      "(actorChain, delegationDepth, each actor as an Agent), the deploy context, and the resource's own attributes.",
   };
 }
 
@@ -1111,17 +1125,23 @@ class CedarAbacEngine implements AbacEngine {
 
     if (matched.length === 0) return { effect: "permit" };
 
-    // PRECEDENCE among matched policies: a hard `forbid` beats a
-    // `require_approval` (strictest wins — an approver must not be able to sign
-    // away a policy that refuses outright), and within a mode the policies are
-    // ordered by name so the governing policy is stable and explainable.
+    // PRECEDENCE among matched policies: the strictest response wins (ADR-0354's
+    // declared order: disable, block_session, forbid, correct, require_approval,
+    // advise), so a hard `forbid` still beats a `require_approval` (an approver
+    // must not be able to sign away a policy that refuses outright) and an
+    // `advise` never outranks anything that restricts. Within a mode the
+    // policies are ordered by name so the governing policy is stable and
+    // explainable.
     matched.sort((a, b) => {
-      if (a.mode !== b.mode) return a.mode === "forbid" ? -1 : 1;
+      const byStrictness = compareResponseStrictness(responseOfPolicyMode(a.mode), responseOfPolicyMode(b.mode));
+      if (byStrictness !== 0) return byStrictness;
       return a.name.localeCompare(b.name);
     });
     const governing = matched[0]!;
+    const responseEffect = AGENT_RESPONSE_TABLE[responseOfPolicyMode(governing.mode)].effect;
     return {
-      effect: governing.mode,
+      effect: responseEffect === "allow" ? "permit" : responseEffect === "deny" ? "forbid" : "require_approval",
+      response: { policyId: governing.id, mode: governing.mode, guidance: governing.guidance ?? null },
       policyId: governing.id,
       policyName: governing.name,
       policyVersion: governing.version ?? null,

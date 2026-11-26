@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { filterParams, parseListExport, parseListPage, runListPage, sendListError, sendListExport, type ListReader, type ListSpec } from "./list-contract.js";
 import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, isNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
-import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
+import { auditRowSelfConsistent, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { isReceiptKeyId, ReceiptKeyError, receiptPublicKeyFingerprint, receiptSigningKeyPosture, resolveReceiptSigningKey, type ReceiptKeySource } from "./receipt-signing-key.js";
@@ -51,7 +51,7 @@ export async function registerReceiptSigningKey(
   tx: Pick<Db, "insert" | "select">,
   key: Pick<SigningKey, "keyId" | "jwk" | "source">,
   firstUsedAt: Date,
-  via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom",
+  via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom" | "detection-rule-pack",
 ): Promise<boolean> {
   const inserted = await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt }).onConflictDoNothing().returning({ keyId: receiptSigningKeys.keyId });
   if (inserted.length === 0) {
@@ -166,9 +166,7 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     );
     for (const row of rows) {
       // Never notarise corrupted audit content merely because the stored hash exists.
-      if (row.seq === null || !row.contentHash || !row.rowHash || !row.prevHash ||
-          auditRowVersionProblem({ ...row, seq: row.seq }, v2FromSeq) !== null ||
-          row.contentHash !== auditContentHashFor(row, auditChainVersionAt(row.seq, v2FromSeq)) || row.rowHash !== auditRowHash(row.prevHash, row.contentHash))
+      if (!auditRowSelfConsistent(row, v2FromSeq))
         throw new Error("Audit row failed integrity verification; no receipts from this pass committed.");
       const tool=boundedDecisionField(row.toolName),rule=boundedDecisionField(row.ruleId);
       const v1: DecisionReceiptPayload = {

@@ -205,6 +205,10 @@ export const EVIDENCE_COLLECTORS = [
    * unrevoked device and 0 otherwise, so the ordinary threshold of 1 IS the check. Org-wide (endpoint rows carry no
    * project): counted under an org-scoped report only. */
   "endpoint_benchmark_check",
+  /** ADR-0345 (lane E26): agent-risk proof results in the period that PASSED and whose evidence still holds (hash,
+   * chained audit row, signature when signed). Scoped to the proofs whose risk cites the control being evaluated
+   * (`controlRef`, an ADR-0243 OWASP pack control). Org-wide: counted under an org-scoped report only. */
+  "agent_risk_proofs",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;

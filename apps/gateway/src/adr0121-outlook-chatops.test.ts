@@ -28,6 +28,9 @@ import {
   outlookCredentialSchema,
   resendCredentialSchema,
   teamsCredentialSchema,
+  jiraCredentialSchema,
+  googleCredentialSchema,
+  CURATED_PIECES,
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
@@ -517,12 +520,24 @@ describe("AER-015 — what the page offers is what strict egress can name", () =
     const page = readPage(CONNECTORS_PAGE);
     const fields = pageConst(page, "JSON_CREDENTIAL_FIELDS");
     if (!ts.isObjectLiteralExpression(fields)) throw new Error("ConnectorsPage JSON_CREDENTIAL_FIELDS: not an object literal");
-    const schemas: Record<string, typeof teamsCredentialSchema | typeof outlookCredentialSchema | typeof resendCredentialSchema> = {
+    const schemas: Record<
+      string,
+      typeof teamsCredentialSchema | typeof outlookCredentialSchema | typeof resendCredentialSchema | typeof jiraCredentialSchema | typeof googleCredentialSchema
+    > = {
       teams: teamsCredentialSchema,
       outlook: outlookCredentialSchema,
       // ADR-0202 lane E
       resend: resendCredentialSchema,
+      // ADR-0255 catalogue pieces whose credential is a document (#1229 review R2 [2])
+      piece_jira_cloud: jiraCredentialSchema,
+      piece_google_sheets: googleCredentialSchema,
+      piece_gmail: googleCredentialSchema,
     };
+    // every curated piece that takes a JSON document (not a bearer token) has a schema above, so a new one cannot
+    // land with a one-line token field again
+    for (const p of CURATED_PIECES) {
+      if (p.auth !== "bearer") expect(schemas[p.kind], `${p.kind} (${p.auth}) needs a JSON credential entry`).toBeDefined();
+    }
     const seen: string[] = [];
     for (const prop of fields.properties) {
       if (!ts.isPropertyAssignment(prop) || !(ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) || !ts.isObjectLiteralExpression(prop.initializer)) {

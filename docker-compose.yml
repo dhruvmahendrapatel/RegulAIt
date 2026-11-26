@@ -51,7 +51,7 @@ x-postgres: &postgres
 
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
-# Each engine (promptfoo, modelscan, garak, spikee) runs as ONE long-running runner
+# Each engine (promptfoo, modelscan, garak, spikee, mcpscanner, skillscanner, contentextract) runs as ONE long-running runner
 # container that pulls work from the gateway over a lease; the gateway never
 # starts containers and has no Docker socket. Every engine is OFF in the product
 # until an admin enables it after the runner's self-test passes. The per-engine
@@ -680,18 +680,95 @@ services:
       REGULAIT_SPIKEE_JOBS_DIR: /jobs
       REGULAIT_SPIKEE_RESULTS_DIR: /results
 
+  # --- mcpscanner and skillscanner engines: runners (profile: engines) — ADR-0242 --
+  #
+  # The two admission-scan engines (ADR-0242 §6.3, L4.5). One shim package
+  # (packages/engine-admission-scan) serves both images; REGULAIT_ADMISSION_ENGINE
+  # names which engine the runner serves (the image sets the same value, and the
+  # runner refuses anything else before it enrols). As modelscan (ADR-0190 I5):
+  # the runner never runs the scanner. Each subject run (one MCP server's tool
+  # list, or one SKILL.md, placed inline by the gateway) executes as an engine
+  # TASK in the executor's gVisor sandbox with no network at all, under the run's
+  # `engine_worker` placement; there is no gateway channel and no task secret.
+  # Both exchange volumes are the runner's own, tmpfs-backed: a subject is at
+  # most 8 MiB and a raw report at most 3 MiB (ENGINE_RESULT_LIMITS). Digest
+  # pinning as for the other engines: one variable per engine,
+  # REGULAIT_ENGINE_<ENGINE>_DIGEST=sha256:<digest>; its default is all-zero (no
+  # image) until the first signed publish is recorded in
+  # engines/images.lock.json, so neither runner can start and neither engine can
+  # be enabled (secure by default).
+  engine-mcpscanner:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_MCPSCANNER_REPOSITORY:-regulait/engine-mcpscanner}@${REGULAIT_ENGINE_MCPSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-mcpscanner-state:/state
+      - engine-mcpscanner-jobs:/jobs
+      - engine-mcpscanner-results:/results
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_MCPSCANNER_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_MCPSCANNER_REPOSITORY:-regulait/engine-mcpscanner}@${REGULAIT_ENGINE_MCPSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_MCPSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ADMISSION_ENGINE: mcpscanner
+      REGULAIT_ADMISSION_JOBS_DIR: /jobs
+      REGULAIT_ADMISSION_RESULTS_DIR: /results
+
+  engine-skillscanner:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_SKILLSCANNER_REPOSITORY:-regulait/engine-skillscanner}@${REGULAIT_ENGINE_SKILLSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-skillscanner-state:/state
+      - engine-skillscanner-jobs:/jobs
+      - engine-skillscanner-results:/results
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_SKILLSCANNER_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_SKILLSCANNER_REPOSITORY:-regulait/engine-skillscanner}@${REGULAIT_ENGINE_SKILLSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_SKILLSCANNER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ADMISSION_ENGINE: skillscanner
+      REGULAIT_ADMISSION_JOBS_DIR: /jobs
+      REGULAIT_ADMISSION_RESULTS_DIR: /results
+
+  # --- contentextract engine: runner (profile: engines) — ADR-0362 ----------
+  #
+  # As the admission-scan engines (ADR-0242 §6.1, the same runner and task shim,
+  # packages/engine-admission-scan): the runner never runs the extractor. Each
+  # run is a `subject` run the gateway itself queues for one request's file
+  # bundle, executed as an engine TASK in the executor's sandbox under the run's
+  # `engine_worker` placement: no network, no gateway channel, no secret, the
+  # gateway's bundle.json alone at the read-only input root. Its digest default
+  # is all-zero (no image): the image is held unpublished until the owner
+  # decides ADR-0362 owner question 1, so it cannot start and the engine stays off.
+  engine-contentextract:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_CONTENTEXTRACT_REPOSITORY:-regulait/engine-contentextract}@${REGULAIT_ENGINE_CONTENTEXTRACT_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-contentextract-state:/state
+      - engine-contentextract-jobs:/jobs
+      - engine-contentextract-results:/results
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_CONTENTEXTRACT_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_CONTENTEXTRACT_REPOSITORY:-regulait/engine-contentextract}@${REGULAIT_ENGINE_CONTENTEXTRACT_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_CONTENTEXTRACT_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ADMISSION_JOBS_DIR: /jobs
+      REGULAIT_ADMISSION_RESULTS_DIR: /results
+
   # --- engine task images (profile: engine-images) — ADR-0190 I5 follow-up --
   #
   # Each engine has ONE image with two uses (engines/*/Dockerfile): the runner
   # above (`node /app/dist/main.js`), and the TASK the sandbox executor
   # (profile `isolation`) starts in a gVisor sandbox under the run's
   # `engine_worker` placement (`node /app/dist/task-main.js`, the manifest's
-  # `taskEntry`). These three services only BUILD those images on this host's
+  # `taskEntry`). These services only BUILD those images on this host's
   # daemon, from the repository root; every base in the Dockerfiles is pinned
   # by digest and every image runs as uid 10001:
   #
   #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image \
-  #     engine-spikee-image
+  #     engine-spikee-image engine-mcpscanner-image engine-skillscanner-image engine-contentextract-image
   #
   # (pending execution: no session that wrote this had a Docker daemon.)
   # They are never services: `up` with this profile runs each as an inert
@@ -735,6 +812,27 @@ services:
       context: .
       dockerfile: engines/spikee/Dockerfile
     image: regulait/engine-spikee:local
+
+  engine-mcpscanner-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/mcpscanner/Dockerfile
+    image: regulait/engine-mcpscanner:local
+
+  engine-skillscanner-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/skillscanner/Dockerfile
+    image: regulait/engine-skillscanner:local
+
+  engine-contentextract-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/contentextract/Dockerfile
+    image: regulait/engine-contentextract:local
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
@@ -1357,6 +1455,52 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=256m,uid=10001,gid=10001,mode=0750"
+  # ADR-0242 L4.5: each admission-scan runner's own state (its runner key only) and its two tmpfs-backed exchange
+  # volumes. The job directory holds only subject.json (the gateway places the subject inline in the task); the
+  # result volume holds the task's frames and one report (at most 3 MiB raw) and the worker's self-test.
+  engine-mcpscanner-state:
+  engine-mcpscanner-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-mcpscanner-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=10001,gid=10001,mode=0750"
+  engine-skillscanner-state:
+  engine-skillscanner-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-skillscanner-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=10001,gid=10001,mode=0750"
+  # ADR-0362: the contentextract runner's own state (its runner key only) and its two
+  # tmpfs-backed exchange volumes. The jobs volume holds only a one-line job marker
+  # (the gateway places the bundle itself); the results volume holds the extracted
+  # text until the runner posts it (the raw-report cap is 3 MiB), so 32m is ample.
+  engine-contentextract-state:
+  engine-contentextract-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-contentextract-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=32m,uid=10001,gid=10001,mode=0750"
   # ADR-0190 I4: the sandbox executor's own state (its key only)
   sandbox-executor-state:
   # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon

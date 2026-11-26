@@ -13,7 +13,8 @@ Zlib, Unicode-3.0) and oletools' public-domain `oledump` with the BSD `tablestre
 exceptions to the ADR-0176 list, recorded in the rows below.
 
 **Admission status: NOT ADMISSIBLE YET.** The image builds and passes its licence gate and offline smoke scan (measured
-locally, 2026-11-07), but it is not published: no digest is recorded in `engines/images.lock.json`, the image-level scan
+locally, 2026-11-07) and is publishable by the engine-images workflow (ADR-0242 L4.5, 2026-11-17), but no publish is
+recorded yet: its `engines/images.lock.json` entry is all null, the image-level scan
 (OS layer, vulnerabilities, licences) has not run in CI, and the closure's advisories have not been checked (phase 2,
 ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be enabled (ADR-0187 decision 3).
 
@@ -130,7 +131,7 @@ ADR-0242 §6). The shipped manifest carries no digest, so the engine cannot be e
 | **pruned:** `oletools/thirdparty/xxxswf`, `oletools/pyxswf.py` | 0.60.2 | no licence stated: removed in the build |
 | oletools' own `thirdparty/` kept: `oledump` (public-domain dedication, Didier Stevens), `tablestream` and `xglob` (BSD-2-Clause), `prettytable` (BSD-3-Clause) | 0.60.2 | as listed: an owner-accepted exception (ADR-0242 owner decision Q4, 2026-11-15) |
 | `yara-x`'s statically linked Rust crates (from the wheel's CycloneDX SBOM) | 1.23.0 | mostly MIT / Apache-2.0; also Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms: an owner-accepted exception (ADR-0242 owner decision Q3, 2026-11-15) |
-| the Go CEL helper (`skill_scanner/core/cel/_bin`), REBUILT in the image from the hashed sdist with Go 1.27.3 (the wheel's was Go 1.27.1, with stdlib advisories) | 2.3.2 | its Go modules, per the sdist's `go.mod`: cel-go v0.32.0 and cel.dev/expr (Apache-2.0), protobuf-go and golang.org/x/exp (BSD-3-Clause), antlr4-go (BSD-3-Clause), genproto (Apache-2.0), go.yaml.in/yaml/v3 (MIT and Apache-2.0), and the Go standard library (BSD-3-Clause) |
+| the Go CEL helper (`skill_scanner/core/cel/_bin`), REBUILT in the image from the hashed sdist with Go 1.27.4 (1.27.3 carries CVE-2026-97054) (the wheel's was Go 1.27.1, with stdlib advisories) | 2.3.2 | its Go modules, per the sdist's `go.mod`: cel-go v0.32.0 and cel.dev/expr (Apache-2.0), protobuf-go and golang.org/x/exp (BSD-3-Clause), antlr4-go (BSD-3-Clause), genproto (Apache-2.0), go.yaml.in/yaml/v3 (MIT and Apache-2.0), and the Go standard library (BSD-3-Clause) |
 
 Cloud clients in this closure (`litellm`, `openai`, `anthropic`) are hard dependencies upstream. The driver never builds an
 analyzer that uses them, refuses to start with any cloud credential set, sets `LITELLM_LOCAL_MODEL_COST_MAP=True` (litellm

@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0362",
+  "lane": "E43",
+  "tracking": "ADR-0362 slice 1b-ii (lane E43): the brief is API and backend only; the project content-inspection settings card is for the design builder on #453",
+  "gaps": {
+    "GET /v1/projects/:projectId/content-inspection": "reads whether a project's attached files are inspected (stored setting, effective policy, compliance floor, cost note)",
+    "PUT /v1/projects/:projectId/content-inspection": "turns a project's content inspection on or off or chooses what an unreadable file does (relaxing is a settings_relax step-up, audited)"
+  }
+}

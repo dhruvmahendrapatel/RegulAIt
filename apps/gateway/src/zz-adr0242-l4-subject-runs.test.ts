@@ -29,7 +29,11 @@ import { ENGINE_MANIFEST, ENGINE_RESULT_VERSION, manifestCanonicalJson, manifest
 import { buildSelfTest, generateRunnerSecret, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
 import { buildApp } from "./app.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
-import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
+import { PLACEMENT_REPORT_DEADLINE_MS, startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
+
+// #1222: a test that places a task outlives the rig's placement-report deadline, so a slow report fails the rig's
+// wait (with its message), not vitest's 20 s default
+const PLACES_TIMEOUT_MS = PLACEMENT_REPORT_DEADLINE_MS + 30_000;
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { enqueueAdmissionScanRun, setAdmissionScanRuntime, skillMarkdown } from "./admission-scan-runs.js";
@@ -39,7 +43,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations");
 const here = path.dirname(fileURLToPath(import.meta.url));
-// a recorded report, with the `inputs` the driver echoes (#843 security review; the recordings predate the echo)
+// a recorded report, with the `inputs` the driver echoes (#843 security review), set to the file this case placed
 const fixture = (name: string, inputs?: ReadonlyArray<{ path: string; sha256: string }>) => {
   const r = JSON.parse(readFileSync(path.resolve(here, "../../../packages/shared/src/engines/fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;
   return Buffer.from(JSON.stringify(inputs ? { ...r, inputs } : r));
@@ -192,7 +196,7 @@ describe("ADR-0242 L4.3 the subject target", () => {
     expect((await db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!.admissionState).toBe("held");
     // a decisive scan exists: the same digest is not queued again
     expect(await enqueueAdmissionScanRun(db, { kind: "builder_skill", id: s.id, digest: s.contentDigest })).toEqual({ kind: "already_scanned" });
-  });
+  }, PLACES_TIMEOUT_MS);
 
   it("#843 security review: the runner adds no input files and places the subject only at the input root", async () => {
     await setEngine("skillscanner", true);
@@ -219,7 +223,7 @@ describe("ADR-0242 L4.3 the subject target", () => {
     const [ended] = await db.select().from(engineRuns).where(eq(engineRuns.id, run!.id));
     expect((ended!.summary as { admission?: { verdict: string; state: string } }).admission).toMatchObject({ verdict: "unknown", state: "held" });
     expect((await db.select().from(builderSkills).where(eq(builderSkills.id, s.id)))[0]!.admissionState).toBe("held");
-  });
+  }, PLACES_TIMEOUT_MS);
 
   it("a superseded digest ends the run not_run at lease", async () => {
     await setEngine("skillscanner", true);

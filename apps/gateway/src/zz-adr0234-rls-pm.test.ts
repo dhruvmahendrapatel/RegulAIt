@@ -6,7 +6,8 @@
  *   - every PM table has row-level security ENABLED and FORCED;
  *   - a non-admin principal reads, inserts, updates and deletes nothing in any PM table;
  *   - an admin principal reaches every PM table;
- *   - `pm_sync` (a principal step) reaches connections, links and the inbound log, never the webhook delivery
+ *   - `pm_sync` (a principal step) reaches connections, the links of objects the principal may see (narrowed by
+ *     `rls_pm_tables_followon`) and the inbound log, never the webhook delivery
  *     records or the import linkage;
  *   - the PM webhook's reason (`approval_maintenance`) records and releases deliveries and appends the inbound log;
  *   - `system_task` prunes deliveries; `public_ingest` and `credential_request` reach no PM table;
@@ -19,13 +20,19 @@ import { randomUUID } from "node:crypto";
 import {
   createDb,
   eq,
+  governanceAlerts,
   initiatives,
+  agents,
   pmConnections,
+  pmIdentityLinks,
   pmImportedWorkItems,
   pmLinks,
   pmProjectInitiatives,
   pmSyncEvents,
+  pmTriggerSettings,
   pmWebhookDeliveries,
+  pmWorkTriggers,
+  pmWriteBacks,
   runMigrations,
   runWithRlsPrincipal,
   runWithRlsPrincipalStep,
@@ -50,11 +57,15 @@ const urlFor = (name: string) => {
 
 const PM_TABLES = [
   "pm_connections",
+  "pm_identity_links",
   "pm_imported_work_items",
   "pm_links",
   "pm_project_initiatives",
   "pm_sync_events",
+  "pm_trigger_settings",
   "pm_webhook_deliveries",
+  "pm_work_triggers",
+  "pm_write_backs",
 ] as const;
 
 let admin: Db;
@@ -99,6 +110,9 @@ beforeAll(async () => {
     { id: ids.alice, email: `alice-${ids.alice}@rls.test`, displayName: "Alice" },
     { id: ids.root, email: `root-${ids.root}@rls.test`, displayName: "Root", isAdmin: true },
   ]);
+  // the alert the link points at is alice's: under pm_sync a non-admin reaches only the links of objects it may see
+  // (rls_pm_tables_followon), and a governance alert's owner may read its ticket
+  await db.insert(governanceAlerts).values({ id: ids.alert, ruleId: "rls0234pm", subjectKey: ids.alert, severity: "high", title: "t", ownerUserId: ids.alice });
   await db.insert(pmConnections).values({ id: ids.conn, name: `rlspm-${ids.conn}`, provider: "mock", project: "P", tokenCiphertext: "x" });
   await db.insert(pmLinks).values({
     id: ids.link,
@@ -116,6 +130,15 @@ beforeAll(async () => {
   await db.insert(initiatives).values({ id: ids.initiative, name: `rlspm-${ids.initiative}` });
   await db.insert(pmProjectInitiatives).values({ connectionId: ids.conn, initiativeId: ids.initiative });
   await db.insert(pmImportedWorkItems).values({ connectionId: ids.conn, externalId: "1", externalUrl: "https://pm.example/1", itemType: "Task" });
+  // ADR-0356: the trigger settings, an identity link and a trigger record
+  const [agent] = await db.insert(agents).values({ name: `rlspm-agent-${ids.conn}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+  await db.insert(pmTriggerSettings).values({ connectionId: ids.conn, agentId: agent!.id, config: {} });
+  await db.insert(pmIdentityLinks).values({ connectionId: ids.conn, pmUserId: "pm-alice", userId: ids.alice, verifiedSource: "admin_asserted" });
+  const [trigger] = await db
+    .insert(pmWorkTriggers)
+    .values({ connectionId: ids.conn, externalId: "1", mechanism: "assignment", deliveryContentSha256: "a".repeat(64) })
+    .returning({ id: pmWorkTriggers.id });
+  await db.insert(pmWriteBacks).values({ triggerId: trigger!.id, kind: "started", sourceKey: "instance" });
 }, 180_000);
 
 afterAll(async () => {
@@ -167,16 +190,22 @@ describe("what each scope reaches, with no application filter", () => {
     await runWithRlsPrincipalStep({ userId: ids.alice }, "pm_sync", "test.pm-sync", async () => {
       expect(await visible()).toEqual({
         pm_connections: 1,
+        pm_identity_links: 0,
         pm_imported_work_items: 0,
         pm_links: 1,
         pm_project_initiatives: 0,
         pm_sync_events: 1,
+        pm_trigger_settings: 1,
         pm_webhook_deliveries: 0,
+        pm_work_triggers: 1,
+        pm_write_backs: 0,
       });
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "commented", payload: {} }).returning({ id: pmSyncEvents.id });
       expect(ev?.id).toBeTruthy();
+      // an alert's ticket link is read-only to its owner (rls_pm_tables_followon: only an admin, a job or the decide
+      // path writes it); the per-row write rules are proved in zz-adr0234-rls-pm-followon.test.ts
       const upd = await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, ids.link)).returning({ id: pmLinks.id });
-      expect(upd).toEqual([{ id: ids.link }]);
+      expect(upd).toEqual([]);
       // the connection itself is admin-managed
       expect(await db.update(pmConnections).set({ project: "Q" }).where(eq(pmConnections.id, ids.conn)).returning({ id: pmConnections.id })).toEqual([]);
       expect(await pgError(db.insert(pmWebhookDeliveries).values({ connectionId: ids.conn, contentSha256: "d".repeat(64) }))).toMatch(/row-level security/);
@@ -187,6 +216,9 @@ describe("what each scope reaches, with no application filter", () => {
     await runWithRlsSystem("approval_maintenance", "test.pm-webhook", async () => {
       const v = await visible();
       expect(v).toMatchObject({ pm_connections: 1, pm_links: 1, pm_webhook_deliveries: 2, pm_imported_work_items: 0, pm_project_initiatives: 0 });
+      // ADR-0356: the webhook reads the trigger settings and the identity links, and records the triggers
+      expect(v).toMatchObject({ pm_trigger_settings: 1, pm_identity_links: 1, pm_work_triggers: 1 });
+      expect(await db.update(pmTriggerSettings).set({ enabled: true }).where(eq(pmTriggerSettings.connectionId, ids.conn)).returning({ id: pmTriggerSettings.connectionId })).toEqual([]);
       const [d] = await db.insert(pmWebhookDeliveries).values({ connectionId: ids.conn, contentSha256: "e".repeat(64) }).returning({ id: pmWebhookDeliveries.id });
       expect(await db.delete(pmWebhookDeliveries).where(eq(pmWebhookDeliveries.id, d!.id)).returning({ id: pmWebhookDeliveries.id })).toEqual([{ id: d!.id }]);
       const [ev] = await db.insert(pmSyncEvents).values({ connectionId: ids.conn, externalId: "1", kind: "updated", payload: {} }).returning({ id: pmSyncEvents.id });

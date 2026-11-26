@@ -1,9 +1,12 @@
 name: Engine images
 
-# ENG-IMG (ADR-0190 "As built: engine task images") — builds the three engine
-# images (engines/<engine>/Dockerfile: the runner and the task, one image per
-# engine) and pushes them to GitHub Container Registry under this repository's
-# owner, as `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`.
+# ENG-IMG (ADR-0190 "As built: engine task images") — builds the engine images
+# the lock names (scripts/engine-images-lock.mjs ENGINE_IDS: promptfoo,
+# modelscan, garak, spikee, and since ADR-0242 L4.5 the admission-scan engines
+# mcpscanner and skillscanner; engines/<engine>/Dockerfile: the runner and the
+# task, one image per engine) and pushes them to GitHub Container Registry
+# under this repository's owner, as
+# `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`.
 #
 # ── Triggers ─────────────────────────────────────────────────────────────────
 # Push to main (only when an engine's own files or this workflow change, so

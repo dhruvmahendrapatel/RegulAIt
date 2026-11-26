@@ -6,8 +6,9 @@
  *     checks that before this runs);
  *   - first the worker's self-test (selftest.ts), in this sandbox; a sandbox that reaches the network, or a worker
  *     that sees a runner credential or a remote-analyzer credential, scans nothing (fail closed);
- *   - then our driver, `python -I /opt/<id>/scan.py <input root> <results>/report.json`, as a child process group
- *     bounded by ADMISSION_DRIVER_TIMEOUT_MS, with an environment built here (the sandbox init gives this process
+ *   - then our driver, `python -I /opt/<id>/scan.py <input root> <results>/report.json` (ADR-0362: for the
+ *     extractor, `python -I /opt/contentextract/extract.py <input root>/bundle.json <results>/report.json`), as a child
+ *     process group bounded by `driverTimeoutMs`, with an environment built here (the sandbox init gives this process
  *     only PATH and HOME): the offline switch, a scratch HOME and TMPDIR, nothing else;
  *   - last `done.json`: the driver's exit, whether it was killed at its limit, and the report's sha256 (or that it was
  *     over the gateway's raw-report cap, in which case it is not sent). The report's content is never read here
@@ -18,8 +19,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runProcessGroup, sandboxRuntimeObservation, type SandboxTaskContext } from "@regulait/engine-runner/worker";
-import { ENGINE_TASK_EGRESS_PROBE_ADDRESS, type AdmissionScanEngineId, type SandboxRuntimeObservation } from "@regulait/shared";
-import { ADMISSION_DRIVER_TIMEOUT_MS, admissionImagePaths, offlineSwitch } from "./config.js";
+import { ENGINE_TASK_EGRESS_PROBE_ADDRESS, type SandboxRuntimeObservation } from "@regulait/shared";
+import { admissionImagePaths, driverInputArg, driverTimeoutMs, offlineSwitch, type SubjectEngineId } from "./config.js";
 import { ADMISSION_REPORT_MAX_BYTES, DONE_FILE, REPORT_FILE, type SubjectScanDone } from "./exchange.js";
 import { workerSelfTestBlocks, writeWorkerSelfTest } from "./selftest.js";
 import { installedAdmissionEngineVersion } from "./version.js";
@@ -44,11 +45,11 @@ async function writeDone(dir: string, done: SubjectScanDone): Promise<void> {
 }
 
 /** the environment the driver is started with: nothing inherited, nothing secret */
-export function driverEnv(engine: AdmissionScanEngineId, scratch: string): Record<string, string> {
+export function driverEnv(engine: SubjectEngineId, scratch: string): Record<string, string> {
   return { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: scratch, TMPDIR: scratch, LANG: "C.UTF-8", [offlineSwitch(engine)]: "1" };
 }
 
-export function admissionScanTask(engine: AdmissionScanEngineId, opts: AdmissionTaskOptions = {}): (ctx: SandboxTaskContext) => Promise<void> {
+export function admissionScanTask(engine: SubjectEngineId, opts: AdmissionTaskOptions = {}): (ctx: SandboxTaskContext) => Promise<void> {
   return async (ctx) => {
     const out = path.join(ctx.resultsRoot, ctx.runId);
     const failClosed = (error: NonNullable<SubjectScanDone["error"]>) => writeDone(out, { exitCode: null, timedOut: false, reportSha256: null, reportTooLarge: false, error });
@@ -75,8 +76,10 @@ export function admissionScanTask(engine: AdmissionScanEngineId, opts: Admission
     const reportPath = path.join(out, REPORT_FILE);
     const paths = admissionImagePaths(engine);
     const driver = opts.driver ?? { command: paths.python, args: ["-I", paths.driver] };
-    // the driver reads the input ROOT (the one file there) and echoes what it read (`inputs`)
-    const run = await runProcessGroup(driver.command, [...driver.args, ctx.jobsRoot, reportPath], { cwd: scratch, env, timeoutMs: opts.timeoutMs ?? ADMISSION_DRIVER_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
+    // an admission driver reads the input ROOT (the one file there) and echoes what it read (`inputs`); the extractor
+    // reads the bundle file itself (ADR-0362). Only the argument differs, never the driver or its environment
+    const input = driverInputArg(engine, { inputRoot: ctx.jobsRoot, subjectFile: ctx.subjectFile });
+    const run = await runProcessGroup(driver.command, [...driver.args, input, reportPath], { cwd: scratch, env, timeoutMs: opts.timeoutMs ?? driverTimeoutMs(engine), maxOutputBytes: 64 * 1024 });
     // the driver's own output is never kept or logged (it may name parts of the subject)
     await rm(scratch, { recursive: true, force: true });
     if (run.exitCode === null && !run.killed) {

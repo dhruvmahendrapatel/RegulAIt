@@ -275,12 +275,22 @@ export function vendoredInjectionHits(
   opts: { packs?: VendoredPackSelection; rules?: readonly VendoredInjectionRule[] } = {},
 ): VendoredInjectionHit[] {
   if (!text || !vendoredPackEnabled(opts.packs, "nemo-yara-injection")) return [];
+  return injectionRuleHits(text, opts.rules ?? VENDORED_INJECTION_RULES);
+}
+
+/** Shared RE2/count semantics; imported content has no static pack switch and never grows the static cache. */
+export function injectionRuleHits(
+  text: string,
+  rules: readonly (Pick<VendoredInjectionRule, "id" | "category" | "patterns" | "minMatches"> & { caseInsensitive?: boolean | undefined; compiled?: readonly RE2JS[] | undefined })[],
+  cache = true,
+): VendoredInjectionHit[] {
   const byCategory = new Map<string, VendoredInjectionHit>();
-  for (const rule of opts.rules ?? VENDORED_INJECTION_RULES) {
+  for (const rule of rules) {
     const need = Math.max(1, Math.floor(rule.minMatches));
     let matched = 0;
-    for (const p of rule.patterns) {
-      const re = compileVendored(rule.id, p, rule.caseInsensitive);
+    for (const [i, p] of rule.patterns.entries()) {
+      // a rule carrying its own programs (a verified feed snapshot) is never recompiled here
+      const re = rule.compiled ? (rule.compiled[i] ?? null) : cache ? compileVendored(rule.id, p, rule.caseInsensitive) : RE2JS.compile(p, rule.caseInsensitive ? RE2JS.CASE_INSENSITIVE : 0);
       if (re && re.test(text)) matched += 1;
       if (matched >= need) break;
     }
