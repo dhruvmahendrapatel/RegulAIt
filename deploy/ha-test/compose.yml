@@ -2,7 +2,7 @@
 # Driven by failover-suite.mjs --backend compose, which sets the REGULAIT_HA_* variables and runs `docker compose`
 # with the project name regulait-ha. Every port is published on 127.0.0.1 only.
 #
-#   pg-primary  Postgres primary; synchronous_standby_names = 'FIRST 1 (standby1)'
+#   pg-primary  Postgres primary; synchronous_standby_names = 'FIRST 1 (standby1)', set once the standby streams
 #   pg-standby  a base backup of the primary, streaming as standby1 (synchronous)
 #   writer      the writer endpoint (writer-proxy.mjs), repointed at the standby on failover
 #   gw-a, gw-b  two gateway replicas from this repository's Dockerfile, sharing one install-secrets volume
@@ -51,8 +51,9 @@ services:
       - wal_level=replica
       - -c
       - max_wal_senders=5
-      - -c
-      - synchronous_standby_names=FIRST 1 (standby1)
+      # synchronous_standby_names is NOT set here: the image's first-start init server inherits these flags, and
+      # its CREATE DATABASE would wait forever for a standby that cannot reach it yet. backends/compose.mjs sets it
+      # with ALTER SYSTEM once standby1 is streaming, as the native backend does.
       - -c
       - synchronous_commit=on
       - -c
@@ -60,7 +61,8 @@ services:
     volumes:
       - ./pg/primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U regulait"]
+      # over TCP: the init server listens on the Unix socket only, so this passes once the real server is up
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U regulait -d regulait"]
       interval: 1s
       timeout: 2s
       retries: 60

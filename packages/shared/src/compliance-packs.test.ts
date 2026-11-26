@@ -206,8 +206,8 @@ describe("the launch packs are honest data", () => {
     // ADR-0243 (P24): the OWASP MCP Top 10 and LLM Top 10 packs join it
     // ADR-0294 (P18 B5): the NIST AI 600-1 GAI-risk pack joins it; ADR-0295 (P18 B4): ISO/IEC 23894 and 42005 (ID-only);
     // ADR-0296 part 2 (P18 B2): GDPR, CCPA, DPDP and LGPD; ADR-0297 (P18 B6): SR 11-7 and NYC Local Law 144;
-    // ADR-0319 (gap G11): AIUC-1
-    expect(frameworks).toEqual(["aiuc-1", "ccpa", "dpdp", "eu-ai-act", "finra", "gdpr", "hipaa", "isaca-ai-agents", "iso-23894", "iso-27001", "iso-42001", "iso-42005", "lgpd", "nist-ai-600-1", "nist-ai-rmf", "nyc-ll144", "owasp-llm-top-10", "owasp-mcp-top-10", "pci-dss", "soc-2", "sr-11-7"]);
+    // ADR-0319 (gap G11): AIUC-1; ADR-0351 slice 2: the EU AI Act deployer-obligation register
+    expect(frameworks).toEqual(["aiuc-1", "ccpa", "dpdp", "eu-ai-act", "eu-ai-act-deployer", "finra", "gdpr", "hipaa", "isaca-ai-agents", "iso-23894", "iso-27001", "iso-42001", "iso-42005", "lgpd", "nist-ai-600-1", "nist-ai-rmf", "nyc-ll144", "owasp-llm-top-10", "owasp-mcp-top-10", "pci-dss", "soc-2", "sr-11-7"]);
     // ADR-0150: two frameworks ship a second version (bias/safety controls); ADR-0190 I4: the ISACA pack a
     // second (item 5 evidenced by sandbox placements)
     const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();

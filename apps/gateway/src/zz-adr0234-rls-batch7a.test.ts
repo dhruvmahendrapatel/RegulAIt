@@ -286,6 +286,10 @@ describe("the census: what may still run with no scope, or outside a request's",
       "scheduler.ts": { count: 1, why: "the tick runs each job through runSchedulerJob, which enters system_task" },
       "boot.ts": { count: 1, why: "the rate-limit counter prune touches no RLS table (the PM delivery prune runs as system_task)" },
       "org-settings.ts": { count: 1, why: "the audit prune runs on the owner connection (runAuditPruneOnce)" },
+      "workflow-claim-heartbeat.ts": {
+        count: 1,
+        why: "ADR-0349 lease renewal: one guarded UPDATE of workflow_instances (no RLS policy); the timer is created inside the stage executor, so AsyncLocalStorage carries its scope into each tick",
+      },
     };
     const found: Record<string, number> = {};
     for (const { f, text } of sources) {

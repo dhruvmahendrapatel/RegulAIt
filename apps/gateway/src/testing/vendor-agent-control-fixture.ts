@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { agentRegistryRecords, discoverySources, type Db } from "@regulait/db";
 import type { ControlOp, ControlResult, VendorAgentServiceState } from "@regulait/shared";
-import type { ControlCredential } from "../vendor-agent-control.js";
+import type { ControlCredential, ControlCredentialLookup } from "../vendor-agent-control-credentials.js";
 import type { VendorAgentControl, VendorAgentRef } from "../vendor-agent-control-contract.js";
 
 /** one disabled `agent_registry_entra` source and one staged agent record on it */
@@ -35,6 +35,8 @@ export function fakeVendorControl() {
   const control: VendorAgentControl = {
     kind: "vendor_agent_control",
     actions: ["disable", "quarantine"],
+    acceptedModes: ["federated", "static"],
+    token: { provider: "entra", scope: "https://vendor.example/.default" },
     async readState(_ctx, ref) {
       if (unreadable) throw new Error("unreadable");
       return { state: states.get(ref.externalId) ?? "active" };
@@ -67,14 +69,40 @@ export function fakeVendorControl() {
 
 /** a credential resolver over a map the test controls (source id → credential); absent means none */
 export function fakeCredentials() {
-  const creds = new Map<string, ControlCredential>();
+  const creds = new Map<string, ControlCredential & { token: string }>();
+  const failing = new Set<string>();
+  let acquired = 0;
   return {
     creds,
-    resolver: async (_db: Db, sourceId: string) => creds.get(sourceId) ?? null,
+    resolver: async (_db: Db, sourceId: string): Promise<ControlCredentialLookup> => {
+      const c = creds.get(sourceId);
+      return c ? { ok: true, credential: c } : { ok: false, code: "no_control_credential", detail: "no fixture credential" };
+    },
     issue(sourceId: string) {
-      const c = { id: randomUUID(), token: `fixture-token-${randomUUID()}` };
+      const token = `fixture-token-${randomUUID()}`;
+      const c = {
+        id: randomUUID(),
+        mode: "federated" as const,
+        token,
+        acquire: async () => {
+          acquired += 1;
+          if (failing.has(sourceId)) {
+            const { ControlTokenError } = await import("../vendor-agent-control-credentials.js");
+            throw new ControlTokenError("control_token_failed", "the fixture token request failed");
+          }
+          return token;
+        },
+      };
       creds.set(sourceId, c);
       return c;
+    },
+    /** the next token requests for this source fail */
+    failTokens(sourceId: string, on = true) {
+      if (on) failing.add(sourceId);
+      else failing.delete(sourceId);
+    },
+    get acquired() {
+      return acquired;
     },
   };
 }

@@ -69,3 +69,12 @@ output "ingress_manifest" {
 output "vpc_id" {
   value = module.byoc.vpc_id
 }
+
+output "backup_bucket" {
+  value = module.byoc.backup_bucket
+}
+
+output "backup_spec" {
+  description = "spec.backup.s3 for the RegulAItInstallation, less uploaderImage (runbook step 6.6)."
+  value       = module.byoc.backup_spec
+}

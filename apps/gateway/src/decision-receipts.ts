@@ -51,7 +51,7 @@ export async function registerReceiptSigningKey(
   tx: Pick<Db, "insert" | "select">,
   key: Pick<SigningKey, "keyId" | "jwk" | "source">,
   firstUsedAt: Date,
-  via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom" | "detection-rule-pack",
+  via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom" | "detection-rule-pack" | "fairness-run",
 ): Promise<boolean> {
   const inserted = await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt }).onConflictDoNothing().returning({ keyId: receiptSigningKeys.keyId });
   if (inserted.length === 0) {

@@ -340,7 +340,7 @@ test.describe("ADR-0175 A15: the energy estimate", () => {
   test("the cost dashboard labels it an estimate, says N of M, shows unknown (never 0) and each factor's source; axe-clean", async ({ page }) => {
     const state = await mockApi(page);
     await page.goto("/ui/admin/cost");
-    await page.getByRole("link", { name: "Open cost rollup for Claims triage" }).click();
+    await page.getByRole("button", { name: "Open cost rollup for Claims triage" }).click();
     const panel = page.getByRole("region", { name: "Estimated energy and emissions" });
     await expect(panel).toBeVisible();
     await expect(panel.getByText("estimate", { exact: true })).toBeVisible();

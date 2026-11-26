@@ -6,7 +6,7 @@
  *    is shown, never sent. To run where a class is unavailable, an admin lowers
  *    a floor instead (each relaxation audited, with a step-up).
  *  - Unknown input stays unmeasured: a missing or malformed envelope, or any of
- *    the eight values missing or out of range, makes the whole card read-only.
+ *    the nine values missing or out of range, makes the whole card read-only.
  *    Nothing is filled in from the strict defaults.
  *  - Only edited fields are sent, re-derived against the values stored at
  *    save time. A relaxation is confirmed first and goes through `withStepUp`
@@ -159,7 +159,7 @@ function IsolationSettingsForm({ settings }: { settings: Record<string, unknown>
       </p>
       {unavailable && (
         <p role="status" id={unmeasuredId}>
-          Isolation settings are unmeasured: the gateway has not reported all eight values. Editing is unavailable, and no value is
+          Isolation settings are unmeasured: the gateway has not reported all nine values. Editing is unavailable, and no value is
           filled in from the defaults.
         </p>
       )}

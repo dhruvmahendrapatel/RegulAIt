@@ -36,6 +36,7 @@ import {
   ne,
   or,
   count,
+  externalScorers,
   orgSettings,
   ORG_SETTINGS_ID,
   pmConnections,
@@ -56,6 +57,7 @@ import {
   accountabilitySettingRelaxed,
   aiBomSnapshotTriggerPosture,
   alertTicketSettingsProblem,
+  routingClassifierProblem,
   composeAuditRetentionDays,
   type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
@@ -65,6 +67,7 @@ import {
   setRevocationScopeSchema,
   setRuleDeployModeSchema,
   updateOrgSettingsSchema,
+  TEXT_EMBEDDING_SCORER_KIND,
 } from "@regulait/shared";
 import { z } from "zod";
 // ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
@@ -101,6 +104,12 @@ export type { OrgSettingsRow };
 /** The singleton row, created on first read if migration seeding was skipped
  * (belt-and-braces; 0038 inserts it) — byte-for-byte the
  * loadInterceptionSettings pattern. */
+/** ADR-0352 slice 3: whether a stream under an output-phase block policy is released
+ * incrementally (windowed scans) instead of suppressed or buffered. Strict default: no. */
+export async function incrementalStreamInspection(db: Db): Promise<boolean> {
+  return (await loadOrgSettings(db)).streamOutputInspection === "incremental";
+}
+
 export async function loadOrgSettings(db: Db): Promise<OrgSettingsRow> {
   const [row] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   if (row) return row;
@@ -783,11 +792,47 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         });
       }
     }
+    // ADR-0366: rogue-agent containment proposals are decided by an administrator, so the named approver must be an
+    // ACTIVE ADMIN — anyone else could never decide them, and every proposal would wait unrouted
+    if (body.containmentApproverUserId) {
+      const [approver] = await db
+        .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.containmentApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (!approver.isAdmin || approver.disabledAt) {
+        return reply.status(422).send({
+          error: "containment_approver_not_admin",
+          detail: "the containment approver must be an active administrator",
+        });
+      }
+    }
     // The sign-in lockout guards (ADR-0025/0036 sso_only, ADR-0174
     // break-glass) run further down, INSIDE the sign-in invariant lock, over
     // the row as re-read under that lock (AER-056). `before` here serves only
     // the checks that do not count sign-in doors.
     const before = await loadOrgSettings(db);
+    // ADR-0352: the meaning-based tier may only be ON with a usable local embedder named:
+    // an external scorer claiming `text_embedding` alone, enabled (it passed its connection test)
+    {
+      const nextEnabled = body.semanticCacheSimilarityEnabled ?? before.semanticCacheSimilarityEnabled;
+      const nextEmbedder = body.semanticCacheEmbedderId !== undefined ? body.semanticCacheEmbedderId : before.semanticCacheEmbedderId;
+      if (nextEmbedder && body.semanticCacheEmbedderId !== undefined) {
+        const [scorer] = await db
+          .select({ enabled: externalScorers.enabled, kinds: externalScorers.scorerKinds })
+          .from(externalScorers)
+          .where(eq(externalScorers.id, nextEmbedder));
+        if (!scorer || !(scorer.kinds as string[]).includes(TEXT_EMBEDDING_SCORER_KIND)) {
+          return reply.status(422).send({ error: "unknown_embedder", detail: "semanticCacheEmbedderId must name an external scorer that claims text_embedding" });
+        }
+        if (!scorer.enabled) {
+          return reply.status(422).send({ error: "embedder_disabled", detail: "the embedder must pass its connection test and be enabled first" });
+        }
+      }
+      if (nextEnabled && !nextEmbedder) {
+        return reply.status(422).send({ error: "embedder_required", detail: "turning on semanticCacheSimilarityEnabled needs semanticCacheEmbedderId" });
+      }
+    }
     // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
     // would silently match nothing at evaluation time (fail closed per
     // entry), so the honest failure is a 400 here, before anything is saved.
@@ -856,6 +901,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         ? await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, connectionId))
         : [];
       const problem = alertTicketSettingsProblem({ mode, connectionId, connectionExists: Boolean(conn) });
+      if (problem) return reply.status(422).send(problem);
+    }
+    // ADR-0353 part 2: a routing classifier must be an enabled RegulAIt-contract scorer claiming routing_complexity.
+    // Clearing it (null) always passes: the heuristic is the default.
+    if (body.routingClassifierScorerId) {
+      const [scorer] = await db
+        .select({
+          name: externalScorers.name,
+          enabled: externalScorers.enabled,
+          scorerKinds: externalScorers.scorerKinds,
+          adapter: externalScorers.adapter,
+        })
+        .from(externalScorers)
+        .where(eq(externalScorers.id, body.routingClassifierScorerId));
+      const problem = routingClassifierProblem(scorer ? { ...scorer, scorerKinds: scorer.scorerKinds ?? [] } : null);
       if (problem) return reply.status(422).send(problem);
     }
     // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes

@@ -136,6 +136,8 @@ describe("ADR-0195 SD1 repo scanners", () => {
       expect(o.location?.path, JSON.stringify(o)).toBeTruthy();
       expect(o.location?.commit).toBe(SHA);
       expect(o.actorPseudonym).toBe(`psn:${"a".repeat(24)}`);
+      // ADR-0083 §2: which compiled catalogue the analyser matched against
+      expect(o.catalogVersion).toBe(3);
     }
     expect(res.observations.find((o) => o.packageName === "@anthropic-ai/sdk")!.location).toEqual({ path: "package.json", line: 3, commit: SHA });
     expect(res.observations.find((o) => o.keyFragment)!.location).toEqual({ path: "src/a.py", line: 3, commit: SHA });
@@ -213,7 +215,7 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const obs = toScanObservations("github:acme/app", analysis, null);
     expect(obs.flatMap((o) => o.names ?? [])).toEqual([]);
     // and if a scanner did, SD0 refuses the run's observations rather than store the name
-    const forged = [{ evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "github:acme/app", names: ["OPENAI_API_KEY"] }];
+    const forged = [{ evidenceKind: "repo_scan" as const, catalogVersion: 3, subjectKind: "repo" as const, subject: "github:acme/app", names: ["OPENAI_API_KEY"] }];
     expect(() => checkObservations("repo_github", forged, "2026-10-17T00:00:00.000Z")).toThrow(ObservationRefused);
   });
 

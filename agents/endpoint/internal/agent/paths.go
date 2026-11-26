@@ -13,6 +13,10 @@ type Paths struct {
 	TicketFile string // device ticket, root:regulait-agent 0640
 	StatusFile string // install-step outcome, world-readable, no secrets
 	StateDir   string // the user's own state, 0700
+	// SpoolDir is the self-update spool (ADR-0360 §4): the per-user agent writes the directive, the release manifest and
+	// the binary here; the root updater verifies all three and trusts none of them. Its result file is world-readable
+	// and holds no secret.
+	SpoolDir string
 }
 
 // DefaultPaths are the documented locations per OS (R15 §3.2, §4.4).
@@ -22,18 +26,21 @@ func DefaultPaths() Paths {
 	case "darwin":
 		sys := "/Library/Application Support/RegulAIt/Agent"
 		return Paths{ConfigFile: filepath.Join(sys, "config.json"), EnrolFile: filepath.Join(sys, "enrol.json"), TicketFile: filepath.Join(sys, "ticket.json"),
-			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(home, "Library", "Application Support", "RegulAIt", "Agent")}
+			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(home, "Library", "Application Support", "RegulAIt", "Agent"),
+			SpoolDir: filepath.Join(sys, "update")}
 	case "windows":
 		sys := filepath.Join(os.Getenv("ProgramData"), "RegulAIt", "Agent")
 		return Paths{ConfigFile: filepath.Join(sys, "config.json"), EnrolFile: filepath.Join(sys, "enrol.json"), TicketFile: filepath.Join(sys, "ticket.json"),
-			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(os.Getenv("LOCALAPPDATA"), "RegulAIt", "Agent")}
+			StatusFile: filepath.Join(sys, "redeem-status.json"), StateDir: filepath.Join(os.Getenv("LOCALAPPDATA"), "RegulAIt", "Agent"),
+			SpoolDir: filepath.Join(sys, "update")}
 	default:
 		state := os.Getenv("XDG_STATE_HOME")
 		if state == "" || !filepath.IsAbs(state) {
 			state = filepath.Join(home, ".local", "state")
 		}
 		return Paths{ConfigFile: "/etc/regulait-agent/config.json", EnrolFile: "/etc/regulait-agent/enrol.json", TicketFile: "/var/lib/regulait-agent/ticket.json",
-			StatusFile: "/var/lib/regulait-agent/redeem-status.json", StateDir: filepath.Join(state, "regulait-agent")}
+			StatusFile: "/var/lib/regulait-agent/redeem-status.json", StateDir: filepath.Join(state, "regulait-agent"),
+			SpoolDir: "/var/lib/regulait-agent/update"}
 	}
 }
 

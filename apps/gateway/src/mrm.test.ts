@@ -264,7 +264,12 @@ afterAll(async () => {
   }
   await db.delete(modelCardEvidence);
   await db.delete(modelCardApprovals);
-  await db.delete(modelCards);
+  // ADR-0346: a card holding signed fairness evidence, or an evaluation that ran, is kept (append-only evidence;
+  // the delete route refuses it too), so another suite's such card survives this sweep
+  await db.delete(modelCards).where(sql`${modelCards.id} NOT IN (
+    SELECT fr.card_id FROM fairness_runs fr JOIN fairness_run_evidence fe ON fe.run_id = fr.id
+    UNION SELECT fe2.card_id FROM fairness_evaluations fe2 JOIN fairness_engine_inputs fi ON fi.evaluation_id = fe2.id
+  )`);
   await restoreSb2Gates();
 });
 
