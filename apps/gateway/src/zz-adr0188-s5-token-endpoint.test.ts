@@ -38,7 +38,7 @@
  * issuer key are put back in afterAll. Identity rows cannot be deleted by
  * design; every fixture is scoped by this run's ids.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
 import { createHash, generateKeyPairSync, randomUUID, type KeyObject } from "node:crypto";
@@ -49,7 +49,7 @@ import * as oauth from "oauth4webapi";
 import { auditLog, createDb, delegationGrants, eq, identitySigningKeys, issuedTokens, orgSettings, replayClaims, runMigrations, spiffeTrustBundles, sql, and, desc, traceSpans, usageEvents, type Db } from "@regulait/db";
 import { canonicalDelegationBody, IDENTITY_SIGNING_KEY_ENV, type DelegationBody } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { deriveIdentitySecrets, issueDpopNonce, mintDelegatedToken } from "./delegated-token.js";
+import { deriveIdentitySecrets, DPOP_NONCE_SLOT_SECONDS, issueDpopNonce, mintDelegatedToken } from "./delegated-token.js";
 import { configuredIdentitySigningKeys, rotateIdentitySigningKey } from "./identity-signing-keys.js";
 import { COMPAT_ANTHROPIC_ROUTE, COMPAT_MODELS_ROUTE, COMPAT_OPENAI_ROUTE, MCP_PROXY_ROUTE } from "./compat-core.js";
 import { WORKLOAD_ROUTES } from "./oauth/resource.js";
@@ -288,6 +288,20 @@ const providerKey = (iss: string, jti: string) => b64sha(`${iss}${jti}`);
 
 // --- setup -----------------------------------------------------------------
 
+/**
+ * Issue #1287: a gateway DPoP nonce is valid only inside its own 5-minute slot. A test whose nonce is issued just
+ * before a slot boundary and checked just after it gets `use_dpop_nonce` (400), whatever it was testing. In CI the
+ * assertion race straddled 06:25:00 and its loser was refused by the nonce check, before the assertion-replay
+ * check it was meant to reach. So no test starts within NONCE_SLOT_HEADROOM_MS of a boundary: it waits for the
+ * next slot (at most that long, once per slot). The server's rule is unchanged.
+ */
+const NONCE_SLOT_HEADROOM_MS = 5_000;
+beforeEach(async () => {
+  const slotMs = DPOP_NONCE_SLOT_SECONDS * 1000;
+  const left = slotMs - (Date.now() % slotMs);
+  if (left < NONCE_SLOT_HEADROOM_MS) await new Promise((resolve) => setTimeout(resolve, left + 100));
+});
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   db2 = createDb(DATABASE_URL);
@@ -475,6 +489,8 @@ describe("S5 — private_key_jwt refused before any claim", () => {
       token({ ...(await rootForm(a, p2)), client_assertion: shared }, await dpop(bind), {}, app2),
     ]);
     expect([r1.statusCode, r2.statusCode].sort()).toEqual([200, 401]);
+    // the loser reached the assertion-replay check (issue #1287): not a refusal from an earlier check
+    expect([r1, r2].find((r) => r.statusCode === 401)!.json().error).toBe("invalid_client");
   });
 });
 
