@@ -126,6 +126,13 @@ hand-written is RegulAIt's: which assets are exported, the policy, the audit and
   route runs the same function.
 - **Row-level security** on every new table: an active admin principal, `system_task` and `migration` only.
 
+### What this part does not do
+
+- **No CI retirement.** An asset deleted in RegulAIt keeps its `cmdb_ci_links` row and its CI is not retired or
+  marked absent in the CMDB; the CMDB's own staleness rules apply. Retirement is a later slice if asked for.
+- **Moving the instance re-pushes everything.** Changing a connector's instance URL clears its `cmdb_ci_links` ledger
+  in the same transaction as the credential revoke, so the first pass on the new instance pushes the whole inventory.
+
 ### ServiceNow setup the admin does (stated on the posture read)
 
 1. Add a `discovery_source` choice for RegulAIt on `cmdb_ci` (the IRE requires a registered source name).
@@ -159,3 +166,13 @@ hand-written is RegulAIt's: which assets are exported, the policy, the audit and
   whole up to 100 vendors with a `truncated` flag rather than paged (one row per vendor); when `licensed`,
   `activeLicensed` or `idleLicensed` is suppressed, `activeLicensed`, `idleLicensed` and `utilisation` are withheld
   together, since any one of them with `licensed` gives the others back. Migration `pending/adoption_analytics_policy.sql`. The six routes are known UI gaps on #453.
+- **Slice 2 (CMDB sync).** As decided, with these details: the credential is the integration user's name and password
+  (HTTP Basic, the ServiceNow default); OAuth client credentials is a follow-up. Changing the instance URL revokes the
+  credential and disables the connector, so a stored password never reaches a host it was not stored for. Applying a
+  CMDB-reported owner to a RegulAIt agent is not built: the read-back is recorded on `cmdb_ci_links` and shown by
+  `GET /v1/cmdb/connectors/:id/links` only (a follow-up in PENDING). There is no per-tenant rate limit beyond one pass
+  per connector at a time (a partial unique index on `running`) and bounded batches (100 items per request, 2,000 per
+  pass); a 429 fails the run (`rate_limited`) and the next pass retries. The run lifecycle is `CMDB_SYNC_RUN_MACHINE`, declared with ADR-0348's
+  `defineMachine` and listed in `STATE_MACHINES`; the finish step's guard is its `sourcesOf`. Migration
+  `pending/cmdb_sync.sql`. The nine
+  routes are known UI gaps on #453, and the credential DELETE is listed as API-only in the affordance census until then.

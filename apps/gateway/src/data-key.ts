@@ -298,6 +298,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "vendor_control_delegated_requests", column: "code_verifier_ciphertext", what: "delegated vendor control sign-in PKCE verifiers (ADR-0338)" },
   { table: "vendor_control_delegated_requests", column: "refresh_token_ciphertext", what: "delegated vendor control refresh tokens held until a second admin approves (ADR-0338)" },
   { table: "vendor_usage_credentials", column: "secret_ciphertext", what: "vendor usage/cost pull credentials (ADR-0322)" },
+  // ADR-0358 (lane E39): the CMDB integration credential (ServiceNow first)
+  { table: "cmdb_credentials", column: "secret_ciphertext", what: "CMDB sync credentials" },
   // ADR-0360 slice 2 (lane E41): an EDR connection's vendor credential and its inbound webhook secret (never returned)
   { table: "edr_connections", column: "secret_ciphertext", what: "EDR connection credentials (ADR-0360)" },
   { table: "edr_connections", column: "webhook_secret_ciphertext", what: "EDR inbound webhook secrets (ADR-0360)" },
