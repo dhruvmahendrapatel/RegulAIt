@@ -204,7 +204,7 @@ test("publishes only after the relaxation is accepted with a reason, then says w
   await dialog.getByLabel("I accept this relaxation").check();
   await expect(publish).toHaveAttribute("aria-disabled", "true"); // a reason is still owed
   await dialog.getByRole("textbox", { name: /Why the workflow is relaxed/ }).fill("one approver is enough for this flow");
-  await expect(publish).toHaveAttribute("aria-disabled", "false");
+  await expect(publish).not.toHaveAttribute("aria-disabled", "true"); // the kit Button drops the attribute once enabled
   expect(state.publishes).toHaveLength(0);
   await publish.click();
   await expect(page.getByText("Version 2 published")).toBeVisible();
