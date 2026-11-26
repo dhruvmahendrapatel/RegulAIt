@@ -27,6 +27,7 @@ import {
   type Db,
   type SQL,
 } from "@regulait/db";
+import { errMessage } from "./err-serializer.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
 /** the re-read window behind the cursor (ADR-0365 §2) */
@@ -441,7 +442,7 @@ export async function runContextGraphSyncSweep(
       out.scanned += r.scanned;
       if (r.more) out.more += 1;
     } catch (e) {
-      out.failed.push({ sourceId: id, error: e instanceof Error ? e.message.slice(0, 300) : "sync failed" });
+      out.failed.push({ sourceId: id, error: errMessage(e).slice(0, 300) });
     }
   }
   return out;
