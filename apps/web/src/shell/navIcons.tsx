@@ -141,6 +141,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/recommendations": "bulb",
   "/admin/certification": "ribbon",
   "/admin/sod": "divide",
+  "/admin/agent-risk": "gauge", // ADR-0339
   "/admin/rules": "sliders",
   "/admin/abac-policies": "tag",
   "/admin/guardrails": "rails",

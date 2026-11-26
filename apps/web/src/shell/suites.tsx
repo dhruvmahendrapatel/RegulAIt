@@ -193,6 +193,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // surfaced (never auto-revoked), and refused mints escalatable to the
       // one approvals queue for an arm's-length override.
       { label: "SoD rules", to: "/admin/sod" },
+      // ADR-0339 — each agent's risk score (factors, dangerous combinations, ranked fixes) and who wrote, owns and runs it
+      { label: "Agent risk", to: "/admin/agent-risk" },
     ],
   },
   {

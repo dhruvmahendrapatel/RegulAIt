@@ -203,7 +203,7 @@ jobs:
 
       - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
@@ -212,7 +212,7 @@ jobs:
       # even on a browser hit. apt still checks every cached file against the signed package index.
       - name: Restore Playwright apt packages
         id: playwright-apt
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/playwright-apt
           key: playwright-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-${{ steps.playwright.outputs.version }}-chromium
@@ -232,7 +232,7 @@ jobs:
       # Saved straight after the install, not in a post step, so a later test failure or a timeout still keeps it.
       - name: Save Playwright browsers (cache miss)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
@@ -256,7 +256,7 @@ jobs:
 
       - name: Save Playwright apt packages (cache miss)
         if: steps.playwright-apt.outputs.cache-hit != 'true' && steps.playwright-apt-collect.outputs.count != '0'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/playwright-apt
           key: ${{ steps.playwright-apt.outputs.cache-primary-key }}
@@ -656,7 +656,7 @@ jobs:
 
       - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.imageos }}-${{ steps.playwright.outputs.version }}-chromium
@@ -665,7 +665,7 @@ jobs:
       # even on a browser hit. apt still checks every cached file against the signed package index.
       - name: Restore Playwright apt packages
         id: playwright-apt
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/playwright-apt
           key: playwright-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.image }}-${{ steps.playwright.outputs.version }}-chromium
@@ -685,7 +685,7 @@ jobs:
       # Saved straight after the install, not in a post step, so a later test failure or a timeout still keeps it.
       - name: Save Playwright browsers (cache miss)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
@@ -709,7 +709,7 @@ jobs:
 
       - name: Save Playwright apt packages (cache miss)
         if: steps.playwright-apt.outputs.cache-hit != 'true' && steps.playwright-apt-collect.outputs.count != '0'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/playwright-apt
           key: ${{ steps.playwright-apt.outputs.cache-primary-key }}

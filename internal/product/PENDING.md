@@ -118,11 +118,11 @@ Agentforce, OpenAI and n8n members. The admin screen is requested on #453 (KNOWN
   the route census and a KNOWN_UI_GAPS entry on #453.
 
 - **Capability-combination follow-ups (ADR-0339 addendum, lane E20).**
-  - Show the legs and the ranked fix options on the agent risk screen (UI builder, #453; the data is in
-    `toxicCombinations[].legs` and `fixOptions`).
   - Owner questions:
     - Should the ADR-0193 write floor count as a mitigation once it also gates calls made without a run context?
     - Should per-call approval rules count as Ask-first for registry agents? Today neither counts (strict default).
+    - May a ranked way to break a combination be applied from the agent risk screen, and by whom? It is shown
+      read-only until this is decided.
 
 - **MCP 2026-07-28 stateless protocol (ADR-0311 decision 4, proposed).** The work is a staged move to the
   `@modelcontextprotocol/server` and `/client` v2 SDK (Apache-2.0). It serves both protocol generations on
@@ -338,14 +338,10 @@ today); owner questions on a second approver for publish, non-admin draft editin
 **E21 — compensation follow-ups (ADR-0340, 2026-11-16).** (1) A compensation undoes only the current round's records: an earlier round's branch or pull request (moved to `effects:history` by a re-open) is not closed or deleted; decide whether a cancel should also close earlier rounds' unmerged pull requests. (2) The template editor (`WorkflowTemplatesPage`) does not offer `compensates`, `delete_branch` or `close_pr` yet (screens are tracked on #453); templates are authored through the API. (3) The PM-tool mirror (pillar 8) shows a compensating instance by its status only (`awaiting_execution`), not as "compensating".
 
 - **Agent risk score follow-ups (ADR-0339, lane E20).**
-  - The screen for the four `/v1/agent-risk` routes (UI builder, #453).
   - Once the vendor registry import (PR #855) merges, its import route marks the new agent `imported` (today the agents
     trigger marks it `created`).
-  - Slice 2: author vs runner, non-human identity links (staged, confirmed by an admin with a step-up) and the
-    `inactive` owner flag.
 
 - **Agent identity follow-ups (ADR-0339 slice 2, lane E20).**
-  - The screen for the four `/v1/agent-identity` routes (UI builder, #453).
   - Once the vendor registry import (PR #855) merges: write `vendor_record` authorship with the vendor creator's
     pseudonym, and stage the vendor identity it read (Entra Agent ID object id, AgentCore runtime ARN, Gemini agent
     resource name) as an `importer` link.

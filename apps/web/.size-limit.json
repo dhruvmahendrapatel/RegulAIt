@@ -445,6 +445,12 @@
     "limit": "14.0 kB"
   },
   {
+    "name": "chunk: admin-agent-risk",
+    "path": "dist/assets/admin-agent-risk-????????.js",
+    "gzip": true,
+    "limit": "8.7 kB"
+  },
+  {
     "name": "chunk: admin-ai-governance",
     "path": "dist/assets/admin-ai-governance-????????.js",
     "gzip": true,
