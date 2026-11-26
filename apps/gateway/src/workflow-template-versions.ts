@@ -29,6 +29,7 @@ import {
   workflowInstanceTemplateVersions,
   workflowTemplateCanaries,
   workflowTemplates,
+  workflowTemplateVersionFragments,
   workflowTemplateVersions,
   type Db,
   type WorkflowTemplateCanaryRow,
@@ -38,6 +39,7 @@ import { canaryBucket, canonicalJson, sha256Hex, WORKFLOW_TEMPLATE_CANARY_MACHIN
 import { findRelaxations, workflowDefinitionSchema, type Relaxation, type WorkflowDefinition } from "@regulait/workflow-kernel";
 import type { DbOrTx } from "./orchestration.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { insertTemplateVersion, pinsOfTemplateVersion } from "./workflow-fragments.js";
 
 /** the step-up op a canary rollback is bound to (kind `settings_relax`, as a publish is: ADR-0341 §4.6) */
 export const CANARY_ROLLBACK_STEP_UP_OP = "workflow_template_canary_rollback";
@@ -122,6 +124,13 @@ async function liveVersion(db: DbOrTx, t: TemplateRow, actorUserId: string | nul
       .onConflictDoNothing({ target: [workflowTemplateVersions.templateId, workflowTemplateVersions.version] })
       .returning();
     if (!inserted) continue; // a concurrent start or publish took that number: read again
+    // a re-record of an older version's definition keeps the sub-process pins that version recorded (ADR-0341 §9)
+    const pins = match ? await pinsOfTemplateVersion(db, match.id) : [];
+    if (pins.length > 0) {
+      await db
+        .insert(workflowTemplateVersionFragments)
+        .values(pins.map((p) => ({ templateVersionId: inserted.id, callStageId: p.callStageId, fragmentVersionId: p.fragmentVersionId })));
+    }
     await db.insert(auditLog).values({
       userId: actorUserId ?? NO_IDENTITY,
       objectType: "workflow_template",
@@ -335,10 +344,12 @@ export function registerWorkflowTemplateVersionRoutes(app: FastifyInstance, db: 
       if (body.outcome === "rollback") {
         // a restore is a publish (ADR-0341 §5): the stable definition becomes the next version and the live one
         const latest = (await latestVersionOf(tx, templateId))!;
-        [restored] = await tx
-          .insert(workflowTemplateVersions)
-          .values({ templateId, version: latest.version + 1, definition: stable.definition, contentHash: stable.contentHash, origin: "canary_rollback", publishedBy: actor })
-          .returning();
+        // it carries the stable version's sub-process pins, so the restore can be reopened as it was written (ADR-0341 §9)
+        restored = await insertTemplateVersion(
+          tx,
+          { templateId, version: latest.version + 1, definition: stable.definition, contentHash: stable.contentHash, origin: "canary_rollback", publishedBy: actor },
+          await pinsOfTemplateVersion(tx, stable.id),
+        );
         await tx.update(workflowTemplates).set({ definition: stable.definition }).where(eq(workflowTemplates.id, templateId));
       }
       await tx.insert(auditLog).values({

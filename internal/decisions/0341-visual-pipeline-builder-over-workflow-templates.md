@@ -139,8 +139,8 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
   - The graph libraries the two canvases now share are split out by the bundler as `runGraphLayout-*` (70.5 kB), under
     a new `lazy: graph libraries (shared)` ceiling of 74 kB. The unchanged `lazy: RunGraphCanvas` entry now measures 1.4 kB.
   - The entry grows by 0.08 kB (the route).
-  - `all JS` goes from 1,149.6 kB to 1,160.3 kB, over its 1,150 kB ceiling. Raising it is an owner decision
-    (ADR-0196), asked for in slice 2's PR.
+  - `all JS` went from 1,149.6 kB to 1,160.3 kB, over its then 1,150 kB ceiling. That ceiling was removed instead
+    (ADR-0344, addendum of 2026-11-21): the JS gate counts first-load JS only, with one ceiling per chunk.
 - Slice 3 adds the diff view, version history and the publish flow (relaxation acceptance, step-up).
 
 ### 8. Open source first (ADR-0176)
@@ -153,6 +153,38 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
   JSON Schema form generators (`@rjsf/core`, Apache-2.0) were considered for the property sheet and not used: the
   stage schema has cross-field rules zod enforces server side, and a generated form would pull a large dependency into
   the lazy chunk for about a dozen fields.
+
+### 9. The sub-process catalogue (follow-up, 2026-11-17; Camunda gap row 10)
+
+Owner-approved addition to this lane, recorded here rather than in a new ADR (master brief, 2026-11-17).
+
+1. **Fragments.** A sub-process is a named list of stages (`workflow_fragments`), versioned append-only
+   (`workflow_fragment_versions`). A fragment has no trigger, calls no other fragment (one level only) and uses no `.`
+   in its stage ids. It is validated by the template schema behind a trigger, so cross-stage rules (a rollback target)
+   apply inside it.
+2. **Approval before listing.** Every version is filed in the one Approvals Queue as kind `workflow_fragment`, decided
+   by a named, active administrator who is not its proposer (`reviewer_is_author`, and
+   `cannot_approve_own_fragment_version` in the decide path, even by admin override). One pending version at a time.
+3. **State is the approval row (rule 12).** The version stores no state. ADR-0348's declared
+   `WORKFLOW_FRAGMENT_VERSION_MACHINE` (in `@regulait/shared`, listed in `STATE_MACHINES`) maps the approval's status:
+   `pending → pending_approval`, `approved → approved`, `denied → rejected`, and anything else to rejected (fail
+   closed). Only `approved` is listed and callable.
+4. **Calls pin a version.** A draft writes `{ id, type: "call", fragment, version }`. Validate and publish expand it into
+   the version's stages with ids `<callId>.<stageId>`, so the plan gate, the deploy tail, the relaxation check and every
+   existing reader see the real pipeline. The live definition and every instance snapshot stay plain kernel
+   definitions. The pin is a row of `workflow_template_version_fragments` (template version, call stage, fragment
+   version), and reopening a draft collapses the expansion back into the call.
+5. **A new version never moves a caller.** A template keeps its pinned version until it is republished, and only an
+   approved version can be pinned.
+6. **Gallery reuse.** `GET /v1/workflows/template-gallery` gains an additive `fragments` list (approved only).
+7. **Screen.** `/admin/workflow-templates/sub-processes` (its own lazy chunk, `lazy: SubProcessesPage` 3.5 kB) lists the
+   catalogue, proposes a sub-process or its next version, and shows each version's state. Calling a sub-process from
+   the canvas palette follows once the canvas (slice 2) is on `main`.
+8. **Open source compared (rule 9).** GitHub Actions reusable workflows (`uses: …@ref`), Argo Workflows `templateRef`
+   and Camunda call activities with a `versionTag` binding all resolve a reference pinned by version at run time. Here
+   it is resolved at publish instead, so the kernel and the instance snapshot need no change. Storing versions as
+   ADR-0048 `config_versions` rows was considered and not used: that model keeps one active version per artifact,
+   while callers must be able to pin any approved version, and it has no rejected state.
 
 ## Consequences
 
@@ -168,3 +200,7 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
 2. Should non-admins (for example a business role) be able to edit drafts while only admins publish? Built meanwhile:
    admin only.
 3. A dedicated step-up kind for template publishes instead of `settings_relax` with an op?
+4. ~~Template versions are kept in two places: `workflow_template_versions` here, and E21's `config_versions` rows.
+   Which one is canonical?~~ Settled 2026-11-25: `workflow_template_versions` is canonical. E21's slice 3 was rebuilt on
+   it and the `config_versions` artifact type was dropped (ADR-0340, addendum of 2026-11-25). Sub-process pins key to
+   `workflow_template_versions`.

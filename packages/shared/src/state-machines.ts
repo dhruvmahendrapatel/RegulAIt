@@ -8,6 +8,7 @@ import { defineMachine, type StateMachine } from "./state-machine.js";
 // ADR-0358 (lane E39): declared beside its contract, listed here so every machine is in one registry
 import { CMDB_SYNC_RUN_MACHINE } from "./cmdb-sync.js";
 import { MCP_ADMISSION_STATES } from "./mcp-admission.js";
+import { WORKFLOW_FRAGMENT_VERSION_MACHINE } from "./workflow-fragment-machine.js";
 import { INCIDENT_STATUSES } from "./accountability.js";
 import { SHADOW_AI_DISPOSITIONS } from "./shadow-ai.js";
 import { ENDPOINT_COMMAND_EXCEPTION_MACHINE } from "./endpoint-command-exceptions.js";
@@ -1226,6 +1227,8 @@ export const REDTEAM_LIBRARY_MACHINE = defineMachine({
 export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string>>> = Object.freeze({
   [TRAINING_JOB_MACHINE.def.id]: TRAINING_JOB_MACHINE,
   [MCP_ADMISSION_MACHINE.def.id]: MCP_ADMISSION_MACHINE,
+  // ADR-0341 §9: a sub-process version, read from its approval row
+  [WORKFLOW_FRAGMENT_VERSION_MACHINE.def.id]: WORKFLOW_FRAGMENT_VERSION_MACHINE,
   [INCIDENT_MACHINE.def.id]: INCIDENT_MACHINE,
   [EVAL_RUN_MACHINE.def.id]: EVAL_RUN_MACHINE,
   [CLASSIFIER_VERSION_MACHINE.def.id]: CLASSIFIER_VERSION_MACHINE,

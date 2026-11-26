@@ -99,6 +99,8 @@ export const APPROVAL_OBJECT_TYPES = [
   "compliance_profile",
   // ADR-0251: a model call held by a model approval rule, released once by the identical re-submitted call
   "model_call",
+  // ADR-0341 follow-up: a proposed sub-process (workflow fragment) version, listed and callable only once approved
+  "workflow_fragment",
   // ADR-0363 slice 2: a drafted customer-classifier version, published only when its named reviewer approves
   "custom_classifier",
   // ADR-0327 addendum: a proposed decision-table version, published only when its named reviewer approves it
@@ -146,6 +148,7 @@ export const APPROVAL_OBJECT_TYPE_LABELS: Record<ApprovalObjectType, string> = {
   eval_run: "eval run (offensive built-in dataset)",
   compliance_profile: "compliance profile change",
   model_call: "model call",
+  workflow_fragment: "sub-process version",
   custom_classifier: "customer classifier version",
   decision_table: "decision table version",
   agent_risk_proof: "agent risk proof acknowledgement",

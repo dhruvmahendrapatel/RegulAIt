@@ -1703,6 +1703,7 @@ export function transition(
 
 // ADR-0341: the visual pipeline builder's governance rules
 export * from "./builder.js";
+export * from "./fragments.js";
 // ADR-0342: the pure workflow-history replayer (process analytics; lane E30's CI replay check)
 export * from "./replay.js";
 // ADR-0340 slice 3: migrating a running instance to another template version, and the canary lifecycle

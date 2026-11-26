@@ -5192,6 +5192,7 @@ export * from "./fairness.js";
 // ADR-0348: declared lifecycle state machines (one transition table each; agents read `describe`)
 export * from "./state-machine.js";
 export * from "./state-machines.js";
+export * from "./workflow-fragment-machine.js";
 // ADR-0340 slice 3: the workflow migration and template canary lifecycles
 export * from "./workflow-template-versions.js";
 export * from "./pipeline-steps.js";

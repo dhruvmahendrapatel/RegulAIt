@@ -119,7 +119,12 @@ export default function WorkflowTemplatesPage() {
       <PageHeader
         title="Workflow templates"
         info={<p>Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition.</p>}
-        actions={<Link to="/admin/process-analytics">Process analytics</Link>}
+        actions={
+          <>
+            <Link to="/admin/workflow-templates/sub-processes">Sub-process catalogue</Link>
+            <Link to="/admin/process-analytics">Process analytics</Link>
+          </>
+        }
       />
       <div className={v.stack}>
         <Card title="Templates">

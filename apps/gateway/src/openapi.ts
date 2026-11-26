@@ -349,6 +349,16 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   },
   "GET /v1/workflows/builder/templates/:templateId/versions": { summary: "The template's published versions, newest first (`before` pages)." },
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": { summary: "One version's definition and its diff against the live template." },
+  "GET /v1/workflows/fragments": { summary: "The sub-process catalogue: fragments with an approved version (`include=all` lists every fragment with its latest state)." },
+  "POST /v1/workflows/fragments": {
+    summary:
+      "Propose a new sub-process {name, description?, stages, reviewerUserId}. Version 1 is filed in the Approvals Queue and is listed and callable only once another administrator approves it.",
+  },
+  "GET /v1/workflows/fragments/:fragmentId": { summary: "A sub-process and every version with its state (pending_approval, approved, rejected)." },
+  "POST /v1/workflows/fragments/:fragmentId/versions": {
+    summary: "Propose the next version of a sub-process. It needs its own approval; templates keep the version they pinned until they are republished.",
+  },
+  "GET /v1/workflows/fragments/:fragmentId/versions/:version": { summary: "One sub-process version's stages and state." },
   "GET /v1/workflows/builder/templates/:templateId/canary": {
     summary: "The template's open canary (or null), the last one, and how many new instances each side has served (ADR-0340).",
   },

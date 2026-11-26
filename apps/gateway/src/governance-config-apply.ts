@@ -42,7 +42,6 @@ import {
   roles,
   sql,
   teams,
-  workflowTemplateVersions,
   workflowTemplates,
   type Db,
 } from "@regulait/db";
@@ -77,7 +76,8 @@ import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { checkSodMint, type SodMint } from "./sod.js";
 import { requireStepUp } from "./step-up.js";
 import { lockRoleOrRefuse, RoleNotFoundError } from "./workload-identity-admin.js";
-import { BUILDER_RULE_IDS, builderDiff, ensureBaseline, validateBuilderDefinition } from "./workflow-builder.js";
+import { BUILDER_RULE_IDS, builderDiff, definitionContentHash, ensureBaseline, validateBuilderDefinition } from "./workflow-builder.js";
+import { insertTemplateVersion } from "./workflow-fragments.js";
 import { CANARY_OPEN_REFUSAL, openCanary } from "./workflow-template-versions.js";
 import { createWorkflowTemplateValidated, retireWorkflowTemplateLocked } from "./workflows.js";
 
@@ -520,11 +520,11 @@ async function writeTemplate(ctx: Ctx, c: GovernanceChange) {
   if (!locked) throw new ApplyRefusal(409, "changed_concurrently", `template ${c.key} no longer exists; plan again`);
   if (after === null || (after.retired && !locked.retiredAt)) {
     // a definition change on a template the file also retires is still recorded first, then the retire
-    if (after !== null && canonicalJson(after.definition) !== canonicalJson(locked.definition)) await publishVersion(ctx, locked, after.definition, c.key);
+    if (after !== null) await publishVersion(ctx, locked, after.definition, c.key);
     await retireOrRefuse(tx, templateId, reason, ctx.actor, c.key);
     return;
   }
-  if (canonicalJson(after.definition) !== canonicalJson(locked.definition)) await publishVersion(ctx, locked, after.definition, c.key);
+  await publishVersion(ctx, locked, after.definition, c.key);
 }
 
 async function retireOrRefuse(tx: Db, templateId: string, reason: string, actor: string | null, key: string) {
@@ -532,19 +532,27 @@ async function retireOrRefuse(tx: Db, templateId: string, reason: string, actor:
   if (!r.ok) throw new ApplyRefusal(409, String(r.body.error), `template ${key}: ${String(r.body.error)}`);
 }
 
-/** a new version (origin governance_apply) over the baseline, as the builder's publish writes one */
+/**
+ * A new version (origin governance_apply) over the baseline, as the builder's publish writes one, with the
+ * sub-process pins of its call stages. Nothing is written when the file's definition, expanded, is what is live: a
+ * file that calls a sub-process holds the call stage while the live definition holds its expansion, so the two are
+ * compared by the expanded content hash, never as written (an unchanged file applied again publishes nothing).
+ */
 async function publishVersion(ctx: Ctx, locked: typeof workflowTemplates.$inferSelect, raw: Record<string, unknown>, key: string) {
   const { tx } = ctx;
-  // ADR-0340 slice 3: the two versions of an open canary cannot move under it, from the builder or from here
-  if (await openCanary(tx, locked.id)) throw new ApplyRefusal(CANARY_OPEN_REFUSAL.status, CANARY_OPEN_REFUSAL.body.error, `template ${key}: ${CANARY_OPEN_REFUSAL.body.detail}`);
+  if (canonicalJson(raw) === canonicalJson(locked.definition)) return;
   const v = await validateBuilderDefinition(tx, raw);
   if (!v.valid) throw new ApplyRefusal(422, "invalid_workflow_definition", `template ${key}: ${v.issues.map((i) => i.message).join("; ").slice(0, 500)}`);
+  if (v.contentHash === definitionContentHash(locked.definition)) return;
+  // ADR-0340 slice 3: the two versions of an open canary cannot move under it, from the builder or from here
+  if (await openCanary(tx, locked.id)) throw new ApplyRefusal(CANARY_OPEN_REFUSAL.status, CANARY_OPEN_REFUSAL.body.error, `template ${key}: ${CANARY_OPEN_REFUSAL.body.detail}`);
   const latest = await ensureBaseline(tx, locked, ctx.actor);
   const diff = builderDiff(locked.definition, v.definition);
-  const [version] = await tx
-    .insert(workflowTemplateVersions)
-    .values({ templateId: locked.id, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "governance_apply", publishedBy: ctx.actor })
-    .returning({ version: workflowTemplateVersions.version });
+  const version = await insertTemplateVersion(
+    tx,
+    { templateId: locked.id, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "governance_apply", publishedBy: ctx.actor },
+    v.calls,
+  );
   await tx.update(workflowTemplates).set({ definition: v.definition }).where(eq(workflowTemplates.id, locked.id));
   await tx.insert(auditLog).values({
     userId: ctx.actor ?? NIL_USER,

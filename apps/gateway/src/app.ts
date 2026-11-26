@@ -552,6 +552,7 @@ import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder.js";
+import { applyFragmentDecision, precheckFragmentDecision, registerWorkflowFragmentRoutes } from "./workflow-fragments.js";
 import { registerWorkflowTemplateVersionRoutes } from "./workflow-template-versions.js";
 import { applyWorkflowMigrationDecision, precheckWorkflowMigrationDecision, registerWorkflowMigrationRoutes } from "./workflow-migrations.js";
 import { registerWorkflowScheduleRoutes } from "./workflow-schedules.js";
@@ -5392,6 +5393,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const refusal = await precheckComplianceProfileDecision(db, row, deciderUserId);
       if (refusal) return fail(refusal.status, refusal.body);
     }
+    // ADR-0341 follow-up — `cannot_approve_own_fragment_version`, keyed on the DECIDER so a sub-process version's
+    // proposer cannot reach its review through delegation or the admin override above.
+    if (row.objectType === "workflow_fragment") {
+      const refusal = await precheckFragmentDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
     // ADR-0361 slice 3 — `cannot_approve_own_ai_saas_remediation` (keyed on the DECIDER, so the requester cannot reach
     // their own deletion through delegation or the admin override above) and a fresh `approval_decide` step-up on
     // every decision, so an API key, a chat tap or a bulk decide cannot decide a conversation deletion.
@@ -5706,6 +5713,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ADR-0208 (G7): a reviewed compliance-profile version — approved = it becomes the active version here, inside
       // the decision's transaction, only if its base version is still the active one (else recorded stale); running
       // workflow instances of the carrying projects get the additive changes only. Denied = nothing changes.
+      // ADR-0341 follow-up: a sub-process version's state IS this approval row, so the decision only adds its audit
+      if (updated.objectType === "workflow_fragment") {
+        await applyFragmentDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
+      }
       // ADR-0363 slice 2: a reviewed customer-classifier version is published (or rejected) inside the decision
       if (updated.objectType === "custom_classifier") {
         await applyCustomClassifierDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
@@ -6354,6 +6365,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerTemplateGalleryRoutes(app, db);
   // ADR-0341 — the visual pipeline builder: drafts, versions, diff and publish of workflow templates (admin)
   registerWorkflowBuilderRoutes(app, db);
+  registerWorkflowFragmentRoutes(app, db);
   registerWorkflowTemplateVersionRoutes(app, db);
   registerWorkflowMigrationRoutes(app, db);
   // ADR-0349 slice 4: workflow schedules (admin-only)

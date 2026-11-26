@@ -49,6 +49,8 @@ export const CONTENT_COLUMN_PATTERN = /^(?:[a-z0-9_]+_)?(?:name|title|descriptio
 const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- templates and packs ---
   [s.workflowTemplates, ["name"]],
+  // ADR-0341 §9: a sub-process, typed by an admin like a template
+  [s.workflowFragments, ["name", "description"]],
   // ADR-0349 slice 4: an admin-typed workflow schedule name, like a template name
   [s.workflowSchedules, ["name"]],
   [s.compliancePacks, ["title", "description"]],
