@@ -859,6 +859,9 @@ describe("every sweep is registered", () => {
         // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
         // in zz-adr0345-proof-runner.test.ts
         AGENT_RISK_PROOF_JOB_NAME,
+        // ADR-0358 (lane E39): pushes the AI asset inventory to enabled CMDB connectors; driven end to end in
+        // zz-adr0358-cmdb-sync.test.ts (with no connector enabled it sends nothing)
+        SCHEDULER_JOB_NAMES.cmdbSyncSweep,
         // ADR-0364 S3 (lane E45): ends robot runs no gateway still holds; driven in zz-adr0364-robots-s3.test.ts
         ROBOT_RUN_STALE_SWEEP_JOB_NAME,
         // ADR-0361: AI SaaS compliance-export reads (nothing while the org policy is off, the default) and their

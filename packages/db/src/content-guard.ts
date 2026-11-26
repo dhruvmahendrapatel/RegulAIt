@@ -133,6 +133,8 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.vendorUsageConnectors, ["name"]],
   // ADR-0361: an operator-typed AI SaaS monitor connector name (a pasted vendor key here would be refused)
   [s.aiSaasMonitorConnectors, ["name"]],
+  // ADR-0358 (lane E39): a CMDB connector an admin names, and the IRE data-source name the admin registered on it
+  [s.cmdbConnectors, ["name", "sourceName"]],
   [s.engineRunners, ["name"]],
   [s.executors, ["name"]],
   [s.externalScorers, ["name"]],
