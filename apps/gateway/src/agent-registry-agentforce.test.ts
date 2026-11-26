@@ -8,7 +8,8 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { createLocalJWKSet, exportJWK, importSPKI, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import type { ScanContext, ScanSource } from "./discovery-scanners.js";
-import { WRITE_SYSTEM_PERMISSIONS, AGENTFORCE_ENDPOINTS, AGENTFORCE_QUERIES, AGENTFORCE_SCANNER, agentforceTargetProblem, objectWriteQuery } from "./agent-registry-agentforce.js";
+import { WRITE_SYSTEM_PERMISSIONS, AGENTFORCE_ENDPOINTS, AGENTFORCE_QUERIES, AGENTFORCE_SCAN_QUERIES, AGENTFORCE_SCANNER, agentforceTargetProblem, objectWriteQuery } from "./agent-registry-agentforce.js";
+import { checkObservations } from "./discovery-worker.js";
 import { SALESFORCE_JWT_LIFETIME_S, rsaKeyStrongEnough } from "./salesforce-jwt.js";
 import { checkRegistryAgents } from "./agent-registry-records.js";
 
@@ -27,6 +28,9 @@ const USER_1 = "005AA00000000AAAAA";
 const INTEGRATION_USER = "005AA00000000ZZZZZ";
 /** free text a careless adapter might keep: it must never be requested or staged */
 const SECRET_TEXT = "INSTRUCTIONS-never-stored-sk_live_example";
+/** a real-shaped credential (built at run time, so no scanner sees a token in this file) */
+const TOKEN = ["gh", "p_", "A1b2C3d4".repeat(4), "E5f6"].join("");
+const ACTION_1 = "179AA00000000F0010";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const urlOf = (input: string | URL | Request) => new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 
@@ -102,6 +106,16 @@ function fakeOrg(opts: FakeOpts = {}) {
         records: [{ Id: "179AA00000000F001", DeveloperName: "Lookup_Leave_Balance", MasterLabel: "Look up leave balance", PlannerId: PLANNER_1, InvocationTargetType: "flow", Description: SECRET_TEXT }],
         nextRecordsUrl: `/services/data/v${V}/query/01gAA00000000BBBBB-2000`,
       });
+    }
+    // slice 5: the free text, read by its own queries and scanned in memory
+    if (p === `/services/data/v${V}/tooling/query` && q === AGENTFORCE_SCAN_QUERIES.planners) {
+      return json({ done: true, records: [{ Id: PLANNER_1, Description: `planner notes, key ${TOKEN}` }] });
+    }
+    if (p === `/services/data/v${V}/query` && q === AGENTFORCE_SCAN_QUERIES.topics) {
+      return json({ done: true, records: [{ Id: TOPIC_1, PlannerId: PLANNER_1, Description: "Handles leave", Scope: `call the API with ${TOKEN}` }] });
+    }
+    if (p === `/services/data/v${V}/query` && q === AGENTFORCE_SCAN_QUERIES.actions) {
+      return json({ done: true, records: [{ Id: ACTION_1, PluginId: TOPIC_1, Description: `uses ${TOKEN}` }, { Id: "179AA00000000F0020", PlannerId: "16jAA00000000ZZZZZ", Description: `unlinked ${TOKEN}` }] });
     }
     if (p === `/services/data/v${V}/query/01gAA00000000BBBBB-2000`) {
       if (opts.actionsPage2Status) return json([{ errorCode: "REQUEST_LIMIT_EXCEEDED" }], opts.actionsPage2Status);
@@ -184,7 +198,10 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
     expect(JSON.stringify(res)).not.toContain(USER_1);
     expect(JSON.stringify(res)).not.toContain(SECRET_TEXT);
     // the exact SOQL issued, in order; the permission check first
-    expect(org.soql).toEqual([AGENTFORCE_QUERIES.permissions, objectWriteQuery(INTEGRATION_USER), AGENTFORCE_QUERIES.bots, AGENTFORCE_QUERIES.versions, AGENTFORCE_QUERIES.planners, AGENTFORCE_QUERIES.topics, AGENTFORCE_QUERIES.actions]);
+    expect(org.soql).toEqual([
+      AGENTFORCE_QUERIES.permissions, objectWriteQuery(INTEGRATION_USER), AGENTFORCE_QUERIES.bots, AGENTFORCE_QUERIES.versions, AGENTFORCE_QUERIES.planners, AGENTFORCE_QUERIES.topics, AGENTFORCE_QUERIES.actions,
+      AGENTFORCE_SCAN_QUERIES.planners, AGENTFORCE_SCAN_QUERIES.topics, AGENTFORCE_SCAN_QUERIES.actions,
+    ]);
     // one POST (the token), every other call a GET on an allow-listed path of the My Domain origin
     const sent = calls.urls.map((u, i) => ({ url: new URL(u), method: calls.methods[i] }));
     expect(sent.filter((c) => c.method === "POST").map((c) => c.url.pathname)).toEqual(["/services/oauth2/token"]);
@@ -318,5 +335,29 @@ describe("ADR-0336 agent_registry_agentforce: the read", () => {
   it("is registered as an adapter whose endpoints are the token POST and GET on the query paths only", () => {
     expect(AGENTFORCE_ENDPOINTS.filter((r) => r.method === "POST").map((r) => r.path.source)).toEqual(["^\\/services\\/oauth2\\/token$"]);
     expect(AGENTFORCE_ENDPOINTS.filter((r) => r.method === "GET").every((r) => /query/.test(r.path.source))).toBe(true);
+  });
+});
+
+describe("ADR-0336 slice 5: plaintext credentials in an Agentforce agent's text, by location only", () => {
+  it("reports each field with a credential, for a linked agent only: subject, path and rule id, nothing else", async () => {
+    const res = await run().promise;
+    const subject = `acme.my.salesforce.com/${BOT_1}`;
+    expect(res.observations).toEqual([
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `planners/${PLANNER_1}/Description` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `topics/${TOPIC_1}/Scope` }, secretRule: "pipelock.secrets.github_token" },
+      { evidenceKind: "agent_config", subjectKind: "system", subject, location: { path: `actions/${ACTION_1}/Description` }, secretRule: "pipelock.secrets.github_token" },
+    ]);
+    const out = JSON.stringify(res);
+    for (let i = 0; i + 8 <= TOKEN.length; i++) expect(out).not.toContain(TOKEN.slice(i, i + 8));
+    expect(checkObservations("agent_registry_agentforce", res.observations!, "2026-11-21T00:00:00.000Z")[0]).toMatchObject({ configSecret: { rule: "pipelock.secrets.github_token", vendor: "salesforce" } });
+  });
+
+  it("pins the scan queries; the kept queries stay free of text", () => {
+    expect(AGENTFORCE_SCAN_QUERIES).toEqual({
+      planners: "SELECT Id, Description FROM GenAiPlannerDefinition",
+      topics: "SELECT Id, PlannerId, Description, Scope FROM GenAiPluginDefinition",
+      actions: "SELECT Id, PlannerId, PluginId, Description FROM GenAiFunctionDefinition",
+    });
+    for (const q of Object.values(AGENTFORCE_QUERIES)) expect(q).not.toMatch(/\b(Description|Scope)\b/);
   });
 });

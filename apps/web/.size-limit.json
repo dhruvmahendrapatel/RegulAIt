@@ -27,10 +27,50 @@
     "limit": "78 kB"
   },
   {
-    "name": "all JS",
-    "path": "dist/assets/*.js",
+    "name": "first-load JS",
+    "path": [
+      "dist/assets/client-????????.js",
+      "dist/assets/defineProperty-????????.js",
+      "dist/assets/format-????????.js",
+      "dist/assets/index-????????.js",
+      "dist/assets/jsx-runtime-????????.js",
+      "dist/assets/preload-helper-????????.js",
+      "dist/assets/react-????????.js",
+      "dist/assets/views.module-????????.js"
+    ],
     "gzip": true,
-    "limit": "1170 kB"
+    "limit": "139.5 kB"
+  },
+  {
+    "name": "first-paint JS",
+    "path": [
+      "dist/assets/CardBoundary-????????.js",
+      "dist/assets/DataList-????????.js",
+      "dist/assets/DetailDrawer-????????.js",
+      "dist/assets/HomePage-????????.js",
+      "dist/assets/Logo-????????.js",
+      "dist/assets/RefusalNotice-????????.js",
+      "dist/assets/TotpQrCode-????????.js",
+      "dist/assets/TrustDashboardPage-????????.js",
+      "dist/assets/account-????????.js",
+      "dist/assets/adminKit-????????.js",
+      "dist/assets/auth-????????.js",
+      "dist/assets/auth.module-????????.js",
+      "dist/assets/client-????????.js",
+      "dist/assets/defineProperty-????????.js",
+      "dist/assets/demoGovernance.module-????????.js",
+      "dist/assets/focus-????????.js",
+      "dist/assets/format-????????.js",
+      "dist/assets/index-????????.js",
+      "dist/assets/jsx-runtime-????????.js",
+      "dist/assets/listState-????????.js",
+      "dist/assets/palette-????????.js",
+      "dist/assets/preload-helper-????????.js",
+      "dist/assets/react-????????.js",
+      "dist/assets/views.module-????????.js"
+    ],
+    "gzip": true,
+    "limit": "182 kB"
   },
   {
     "name": "chunk: AccountSubpages",
@@ -43,6 +83,12 @@
     "path": "dist/assets/AgentStewardship-????????.js",
     "gzip": true,
     "limit": "11.3 kB"
+  },
+  {
+    "name": "chunk: AssetScore",
+    "path": "dist/assets/AssetScore-????????.js",
+    "gzip": true,
+    "limit": "4.2 kB"
   },
   {
     "name": "chunk: BomEvidencePanel",
@@ -67,6 +113,18 @@
     "path": "dist/assets/ClassicalDriftPanel-????????.js",
     "gzip": true,
     "limit": "8.7 kB"
+  },
+  {
+    "name": "chunk: ConnectorCataloguePage",
+    "path": "dist/assets/ConnectorCataloguePage-????????.js",
+    "gzip": true,
+    "limit": "6.8 kB"
+  },
+  {
+    "name": "chunk: ConnectorsPage",
+    "path": "dist/assets/ConnectorsPage-????????.js",
+    "gzip": true,
+    "limit": "7.0 kB"
   },
   {
     "name": "chunk: CopilotRedteamGateCard",
@@ -123,6 +181,18 @@
     "limit": "4.6 kB"
   },
   {
+    "name": "chunk: EntitlementFindingsPage",
+    "path": "dist/assets/EntitlementFindingsPage-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
+    "name": "chunk: EntitlementLinksPage",
+    "path": "dist/assets/EntitlementLinksPage-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
+  },
+  {
     "name": "chunk: ExecutorDetail",
     "path": "dist/assets/ExecutorDetail-????????.js",
     "gzip": true,
@@ -165,6 +235,12 @@
     "limit": "4.4 kB"
   },
   {
+    "name": "chunk: LifecycleActions",
+    "path": "dist/assets/LifecycleActions-????????.js",
+    "gzip": true,
+    "limit": "4.8 kB"
+  },
+  {
     "name": "chunk: ListPreview",
     "path": "dist/assets/ListPreview-????????.js",
     "gzip": true,
@@ -175,6 +251,12 @@
     "path": "dist/assets/Logo-????????.js",
     "gzip": true,
     "limit": "4.3 kB"
+  },
+  {
+    "name": "chunk: McpPinning",
+    "path": "dist/assets/McpPinning-????????.js",
+    "gzip": true,
+    "limit": "6.9 kB"
   },
   {
     "name": "chunk: ModelRateLimits",
@@ -219,6 +301,12 @@
     "limit": "3.4 kB"
   },
   {
+    "name": "chunk: ProcessAnalyticsPage",
+    "path": "dist/assets/ProcessAnalyticsPage-????????.js",
+    "gzip": true,
+    "limit": "7.1 kB"
+  },
+  {
     "name": "chunk: ProfileEditModal",
     "path": "dist/assets/ProfileEditModal-????????.js",
     "gzip": true,
@@ -229,6 +317,12 @@
     "path": "dist/assets/ProjectArchiveDialogs-????????.js",
     "gzip": true,
     "limit": "3.8 kB"
+  },
+  {
+    "name": "chunk: ReadSetupPage",
+    "path": "dist/assets/ReadSetupPage-????????.js",
+    "gzip": true,
+    "limit": "6.6 kB"
   },
   {
     "name": "chunk: ReasonedAction",

@@ -11,13 +11,14 @@
  * upsert key, so a re-pull of the same window replaces its own rows instead of adding a second copy.
  *
  * Endpoints verified against the vendors' own documentation on 2026-11-15 (ADR-0322 §6); GitHub's enhanced billing
- * usage report and Cursor's Admin API re-checked on 2026-11-19 for slice 3.
+ * usage report and Cursor's Admin API re-checked on 2026-11-19 for slice 3. ChatGPT Enterprise's Daily Usage endpoint
+ * checked against the vendor's public OpenAPI document (version 2.5.43) on 2026-11-20 for slice 4b.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { parseCsvRecords } from "./onboarding.js";
 
-export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "aws_cur"] as const;
+export const VENDOR_USAGE_PULL_VENDORS = ["anthropic", "openai", "github_copilot", "cursor", "aws_cur", "openai_codex"] as const;
 export type VendorUsagePullVendor = (typeof VENDOR_USAGE_PULL_VENDORS)[number];
 
 export interface VendorUsageCatalogueEntry {
@@ -136,6 +137,29 @@ export const VENDOR_USAGE_CATALOGUE: Readonly<Record<VendorUsagePullVendor, Vend
       "so a line AWS removes is withdrawn. The gateway does not meter Bedrock, so no line is excluded as already " +
       "metered.",
   },
+  openai_codex: {
+    vendor: "openai_codex",
+    label: "ChatGPT Enterprise Daily Usage (ChatGPT, Codex and Work)",
+    host: "api.chatgpt.com",
+    endpoints: ["GET /v1/analytics/workspaces/{workspace_id}/usage?start_time&end_time&limit&page"],
+    scopePosture: "unverified",
+    scopeNote:
+      "The endpoint needs a workspace-scoped Admin key with the enterprise.analytics.usage.read permission. An Admin " +
+      "key can be created with other permissions too, including write ones, and the API does not report a key's " +
+      "permissions back, so RegulAIt cannot verify the scope. Storing it needs the administrator's attestation that " +
+      "it carries that read permission only (recorded and audited); RegulAIt calls only the Daily Usage endpoint.",
+    overlapMatchesOn: [],
+    limits:
+      "One line per user, UTC day, client (such as CHAT_WEB or CODEX_CLI) and pricing basis, plus an 'unattributed' " +
+      "line for the part of a user's daily total the vendor does not assign to a client. Credit-priced usage is " +
+      "recorded at the vendor's estimated_cost_usd, an estimate at the workspace's current credit overage rate and not " +
+      "an invoice amount, and every such line is marked as an estimate with its credit count; credit-priced usage " +
+      "with no estimate is not imported and is counted in the run summary. Native USD-priced usage (cost_usd) is " +
+      "recorded as reported. A line resolves to a person by the user's email, which the vendor reports as the " +
+      "user's current address and may omit. Users deleted from the workspace drop out of the per-user report, so " +
+      "their earlier lines are kept, not withdrawn. Recent days are corrected as usage arrives; each pull re-reads " +
+      "the last two days. The gateway does not meter ChatGPT or Codex, so no line is excluded as already metered.",
+  },
 };
 
 const idList = z.array(z.string().trim().min(1).max(200)).max(200);
@@ -210,6 +234,13 @@ export const vendorUsagePublicConfigSchemas = {
         ctx.addIssue({ code: "custom", path: ["roleArn"], message: "static mode takes no role ARN" });
       }
     }),
+  openai_codex: z
+    .object({
+      /** the ChatGPT Enterprise workspace id, which becomes one path segment */
+      workspaceId: z.string().trim().uuid("the ChatGPT Enterprise workspace id (a UUID)"),
+      backfillDays: z.number().int().min(1).max(30).default(7),
+    })
+    .strict(),
 } as const;
 
 /**
@@ -236,12 +267,14 @@ export type OpenAiPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)
 export type GithubCopilotPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["github_copilot"]>;
 export type CursorPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["cursor"]>;
 export type AwsCurPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["aws_cur"]>;
+export type OpenAiCodexPublicConfig = z.infer<(typeof vendorUsagePublicConfigSchemas)["openai_codex"]>;
 export type VendorUsagePublicConfig =
   | AnthropicPublicConfig
   | OpenAiPublicConfig
   | GithubCopilotPublicConfig
   | CursorPublicConfig
-  | AwsCurPublicConfig;
+  | AwsCurPublicConfig
+  | OpenAiCodexPublicConfig;
 
 /** the largest window one run asks for: both vendors cap a request at 31 daily buckets */
 export const VENDOR_USAGE_MAX_WINDOW_DAYS = 31;
@@ -364,6 +397,54 @@ export const cursorUsageEventsSchema = z.object({
 });
 export type CursorUsageEvents = z.infer<typeof cursorUsageEventsSchema>;
 export type CursorUsageEvent = CursorUsageEvents["usageEvents"][number];
+
+/** an amount as the vendor sends it: a JSON number, bounded so micro-units stay exact integers */
+const usageAmount = z.number().finite().gt(-1e9).lt(1e9);
+
+/** ChatGPT Enterprise Daily Usage, one page (`GET /v1/analytics/workspaces/{id}/usage`, OpenAPI 2.5.43) */
+export const chatGptDailyUsagePageSchema = z.object({
+  object: z.literal("page"),
+  data: z
+    .array(
+      z.object({
+        object: z.literal("workspace.usage.result"),
+        start_time: z.number().int(),
+        end_time: z.number().int(),
+        user_id: z.string().min(1).max(200).nullable(),
+        actor: z
+          .object({
+            type: z.literal("ACCOUNT_USER"),
+            user_id: z.string().min(1).max(200),
+            email: z.string().max(320).nullable().optional(),
+          })
+          .nullable(),
+        totals: z.object({
+          chats: z.number().int().nonnegative(),
+          messages: z.number().int().nonnegative(),
+          credits: usageAmount.nullable(),
+          cost_usd: usageAmount.nullable().optional(),
+          estimated_cost_usd: usageAmount.optional(),
+        }),
+        clients: z
+          .array(
+            z.object({
+              client_id: z.string().min(1).max(100),
+              chats: z.number().int().nonnegative(),
+              messages: z.number().int().nonnegative(),
+              credits: usageAmount.nullable(),
+              cost_usd: usageAmount.nullable().optional(),
+              estimated_cost_usd: usageAmount.optional(),
+            }),
+          )
+          .max(200),
+      }),
+    )
+    .max(30_000),
+  has_more: z.boolean(),
+  next_page: z.string().min(1).max(4096).nullable(),
+});
+export type ChatGptDailyUsagePage = z.infer<typeof chatGptDailyUsagePageSchema>;
+export type ChatGptDailyUsageRow = ChatGptDailyUsagePage["data"][number];
 
 // --------------------------------------------------------------------------------------------------------------------
 // Normalisation
@@ -629,6 +710,106 @@ export function normalizeCursorUsageEvents(events: readonly CursorUsageEvent[]):
   }));
 }
 
+const toMicro = (x: number): number => Math.round(x * 1e6);
+
+/**
+ * ChatGPT Enterprise Daily Usage rows (every page of a run) to facts (ADR-0322 slice 4b, owner decisions 1 and 2).
+ *
+ * Each per-user, per-day row yields, for each of its clients, a `credit_estimate` fact when the vendor gives
+ * `estimated_cost_usd` (the amount, marked as an estimate, with the credit count beside it) and a `usd` fact when it
+ * gives native `cost_usd`. The part of a row's total the vendor does not assign to a client becomes an `unattributed`
+ * fact of the same basis, when it is positive. A row with credit-priced usage and no estimate imports no credit line
+ * and is counted in `creditRowsWithoutEstimate`. A row that is not a per-user UTC day inside the window, or a second
+ * row for the same user and day, fails the run rather than being moved or summed.
+ */
+export function normalizeChatGptDailyUsage(
+  rows: readonly ChatGptDailyUsageRow[],
+  ctx: { workspaceId: string; window: { start: Date; end: Date } },
+): { facts: VendorUsageFact[]; creditRowsWithoutEstimate: number } {
+  const facts: VendorUsageFact[] = [];
+  const seen = new Set<string>();
+  let creditRowsWithoutEstimate = 0;
+  for (const row of rows) {
+    if (row.user_id === null || row.actor === null || row.actor.user_id !== row.user_id) {
+      throw new VendorUsageResponseError("a daily usage row was not a per-user row");
+    }
+    const startMs = row.start_time * 1000;
+    if (startMs % DAY_MS !== 0 || row.end_time - row.start_time !== DAY_MS / 1000) {
+      throw new VendorUsageResponseError("a daily usage row did not cover one UTC day");
+    }
+    if (startMs < ctx.window.start.getTime() || startMs >= ctx.window.end.getTime()) {
+      throw new VendorUsageResponseError("a daily usage row fell outside the requested window");
+    }
+    const dayKey = `${row.user_id}|${startMs}`;
+    if (seen.has(dayKey)) throw new VendorUsageResponseError("the vendor returned two rows for the same user and day");
+    seen.add(dayKey);
+
+    const { start, end } = utcDay(startMs);
+    const email = row.actor.email?.trim().toLowerCase() || null;
+    const accountRef = email ?? `chatgpt user ${row.user_id}`;
+    const accountId = email ?? row.user_id;
+    const push = (
+      service: string,
+      basis: "credit_estimate" | "usd",
+      micro: number,
+      extra: { credits: number | null; chats: number | null; messages: number | null },
+    ) => {
+      facts.push({
+        factCanonical: canonical(["openai_codex.daily_usage.v1", ctx.workspaceId, start, row.user_id, service, basis]),
+        accountRef,
+        accountKind: "user",
+        accountId,
+        periodStart: start,
+        periodEnd: end,
+        amount: micro / 1e6,
+        currency: "USD",
+        service,
+        description: basis === "credit_estimate" ? "credit-priced usage, estimated in USD" : "USD-priced usage",
+        quantity: basis === "credit_estimate" ? extra.credits : extra.messages,
+        unit: basis === "credit_estimate" ? "credits" : "messages",
+        detail: {
+          source: "chatgpt daily usage",
+          basis,
+          estimate: basis === "credit_estimate",
+          userId: row.user_id,
+          ...extra,
+        },
+      });
+    };
+
+    let estSum = 0;
+    let usdSum = 0;
+    let creditSum = 0;
+    for (const c of row.clients) {
+      const counts = { chats: c.chats, messages: c.messages };
+      if (c.estimated_cost_usd !== undefined) {
+        const micro = toMicro(c.estimated_cost_usd);
+        estSum += micro;
+        creditSum += toMicro(c.credits ?? 0);
+        push(c.client_id, "credit_estimate", micro, { credits: c.credits, ...counts });
+      }
+      if (c.cost_usd !== null && c.cost_usd !== undefined) {
+        const micro = toMicro(c.cost_usd);
+        usdSum += micro;
+        push(c.client_id, "usd", micro, { credits: null, ...counts });
+      }
+    }
+    const t = row.totals;
+    if (t.estimated_cost_usd !== undefined) {
+      const rest = toMicro(t.estimated_cost_usd) - estSum;
+      const credits = Math.max(0, toMicro(t.credits ?? 0) - creditSum) / 1e6;
+      if (rest > 0) push("unattributed", "credit_estimate", rest, { credits, chats: null, messages: null });
+    } else if (t.credits !== null && t.credits !== 0) {
+      creditRowsWithoutEstimate += 1;
+    }
+    if (t.cost_usd !== null && t.cost_usd !== undefined) {
+      const rest = toMicro(t.cost_usd) - usdSum;
+      if (rest > 0) push("unattributed", "usd", rest, { credits: null, chats: null, messages: null });
+    }
+  }
+  return { facts, creditRowsWithoutEstimate };
+}
+
 /**
  * Whether a fact is spend the gateway already metered: the vendor billed it to a key, project or workspace the admin
  * declared as the gateway's own. Such a line is kept, excluded from the imported side and disclosed (ADR-0322 §5).
@@ -640,7 +821,7 @@ export function factOverlapsMetered(
   detailProjectId?: string | null,
 ): boolean {
   // the gateway does not meter Copilot seats or Cursor usage, so none of their lines is already metered
-  if (vendor === "github_copilot" || vendor === "cursor" || vendor === "aws_cur") return false;
+  if (vendor === "github_copilot" || vendor === "cursor" || vendor === "aws_cur" || vendor === "openai_codex") return false;
   if (vendor === "anthropic") {
     const c = config as AnthropicPublicConfig;
     return fact.accountKind === "workspace" && fact.accountId !== null && c.gatewayWorkspaceIds.includes(fact.accountId);

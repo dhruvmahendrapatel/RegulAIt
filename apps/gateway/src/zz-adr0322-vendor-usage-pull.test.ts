@@ -54,6 +54,7 @@ const ANTHROPIC_KEY = `sk-ant-admin01-FAKE-${RUN}-secret`;
 const OPENAI_KEY = `sk-admin-FAKE-${RUN}-secret`;
 const GITHUB_TOKEN = `github_pat_FAKE_${RUN}_secret`;
 const CURSOR_KEY = `key_FAKE_${RUN}_secret`;
+const CHATGPT_KEY = `sk-admin-FAKE-chatgpt-${RUN}-secret`;
 const resolve = async () => [{ address: "93.184.216.34", family: 4 }];
 
 interface Seen {
@@ -116,7 +117,7 @@ function anthropicPages(amountCents: string) {
 const put = (url: string, payload: unknown) => app.inject({ method: "PUT", url, headers: AUTH, payload: payload as object });
 const steppedPut = (url: string, payload: unknown) => relaxStepUpAround(db, () => put(url, payload));
 
-async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor" | "aws_cur", config: Record<string, unknown>) {
+async function createConnector(vendor: "anthropic" | "openai" | "github_copilot" | "cursor" | "aws_cur" | "openai_codex", config: Record<string, unknown>) {
   const res = await app.inject({
     method: "POST",
     url: "/v1/vendor-usage/connectors",
@@ -191,6 +192,7 @@ describe("ADR-0322: off by default, three switches before anything leaves", () =
       ["github_copilot", "unverified"],
       ["cursor", "write_capable"],
       ["aws_cur", "unverified"],
+      ["openai_codex", "unverified"],
     ]);
     expect(body.statement).toMatch(/IMPORTED/);
   });
@@ -531,9 +533,9 @@ async function allowHost(host: string) {
   expect([200, 201]).toContain(allow.statusCode);
 }
 
-async function enabledConnector(vendor: "github_copilot" | "cursor", config: Record<string, unknown>, secret: string) {
+async function enabledConnector(vendor: "github_copilot" | "cursor" | "openai_codex", config: Record<string, unknown>, secret: string) {
   const c = await createConnector(vendor, config);
-  expect((await storeKey(c.id, secret, vendor === "github_copilot" ? { acknowledgeUnverifiedScope: true } : {})).statusCode).toBe(201);
+  expect((await storeKey(c.id, secret, vendor === "cursor" ? {} : { acknowledgeUnverifiedScope: true })).statusCode).toBe(201);
   expect((await steppedPut(`/v1/vendor-usage/connectors/${c.id}/enabled`, { enabled: true, reason: "adr0322 suite" })).statusCode).toBe(200);
   return c;
 }
@@ -684,6 +686,117 @@ describe("ADR-0322 slice 3: the Cursor pull (filtered usage events, Basic auth)"
     const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl: counting, resolve } });
     expect([run.status, run.errorCode, calls]).toEqual(["failed", "bad_response", 2]);
     expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
+  });
+});
+
+describe("ADR-0322 slice 4b: ChatGPT Enterprise Daily Usage (ChatGPT, Codex and Work)", () => {
+  const WS = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  const PATH = `/v1/analytics/workspaces/${WS}/usage`;
+  const dayS = (offset: number) => Date.parse(dayIso(offset)) / 1000;
+  const usageRow = (user: string, email: string | null, offset: number, totals: Record<string, unknown>, clients: Array<Record<string, unknown>>) => ({
+    object: "workspace.usage.result",
+    start_time: dayS(offset),
+    end_time: dayS(offset + 1),
+    user_id: user,
+    actor: { type: "ACCOUNT_USER", user_id: user, email },
+    totals,
+    clients,
+  });
+
+  it("refuses a workspace id that is not a UUID, so the path segment cannot be steered", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/vendor-usage/connectors",
+      headers: AUTH,
+      payload: { vendor: "openai_codex", name: `adr0322-bad-ws-${RUN}`, config: { workspaceId: "../../manage" }, reason: "adr0322 suite" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("follows next_page, records credit usage at the vendor's estimate (marked), and resolves a person by email", async () => {
+    const c = await enabledConnector("openai_codex", { workspaceId: WS, backfillDays: 2 }, CHATGPT_KEY);
+    await allowHost("api.chatgpt.com");
+    answer = (url) => {
+      if (url.pathname !== PATH) return json({ error: "unexpected path" }, 404);
+      if (!url.searchParams.get("page")) {
+        return json({
+          object: "page",
+          data: [
+            usageRow(
+              "user-admin",
+              `ADR0322-admin-${RUN}@example.com`,
+              -1,
+              { chats: 4, messages: 9, credits: 3.5, cost_usd: null, estimated_cost_usd: 0.14 },
+              [
+                { client_id: "CHAT_WEB", chats: 3, messages: 7, credits: 1, cost_usd: null, estimated_cost_usd: 0.04 },
+                { client_id: "CODEX_CLI", chats: 1, messages: 2, credits: 2, cost_usd: null, estimated_cost_usd: 0.08 },
+              ],
+            ),
+          ],
+          has_more: true,
+          next_page: "cursor-2",
+        });
+      }
+      return json({
+        object: "page",
+        data: [
+          usageRow("user-usd", null, 0, { chats: 1, messages: 2, credits: null, cost_usd: 0.25 }, [{ client_id: "CODEX_CLI", chats: 1, messages: 2, credits: null, cost_usd: 0.25 }]),
+          usageRow("user-noest", "noest@example.test", 0, { chats: 1, messages: 1, credits: 2, cost_usd: null }, [{ client_id: "CHAT_WEB", chats: 1, messages: 1, credits: 2, cost_usd: null }]),
+        ],
+        has_more: false,
+        next_page: null,
+      });
+    };
+    seen = [];
+    const { run } = await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(run).toMatchObject({ status: "succeeded", linesUpserted: 4, overlapLines: 0 });
+    expect(seen.map((s) => [s.url.host, s.url.pathname, s.url.searchParams.get("page")])).toEqual([
+      ["api.chatgpt.com", PATH, null],
+      ["api.chatgpt.com", PATH, "cursor-2"],
+    ]);
+    expect(seen[0]!.headers.get("authorization")).toBe(`Bearer ${CHATGPT_KEY}`);
+    // UTC-midnight Unix seconds, start inclusive and end exclusive, the same on every page
+    expect(seen.map((s) => [s.url.searchParams.get("start_time"), s.url.searchParams.get("end_time"), s.url.searchParams.get("limit")])).toEqual([
+      [String(dayS(-2)), String(dayS(1)), "2000"],
+      [String(dayS(-2)), String(dayS(1)), "2000"],
+    ]);
+    expect(seen.some((s) => s.url.searchParams.has("group"))).toBe(false);
+
+    const lines = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id));
+    const rows = lines.map((l) => [l.accountRef, l.service ?? null, l.amount, l.currency, (l.detail as { estimate?: boolean } | null)?.estimate, l.resolutionMethod]);
+    expect(rows.sort()).toEqual(
+      [
+        ["chatgpt user user-usd", "CODEX_CLI", 0.25, "USD", false, "unresolved"],
+        [`adr0322-admin-${RUN}@example.com`, "CHAT_WEB", 0.04, "USD", true, "exact_email"],
+        [`adr0322-admin-${RUN}@example.com`, "CODEX_CLI", 0.08, "USD", true, "exact_email"],
+        [`adr0322-admin-${RUN}@example.com`, "unattributed", 0.02, "USD", true, "exact_email"],
+      ].sort(),
+    );
+    const [batch] = await db.select().from(costImportBatches).where(eq(costImportBatches.id, run.batchId!));
+    expect(batch?.summary).toMatchObject({ creditRowsWithoutEstimate: 1, pages: 2 });
+
+    // a re-pull of the same window updates in place
+    await runVendorUsagePull(db, c.id, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c.id))).toHaveLength(4);
+  });
+
+  it("refuses a page that says more follow without a cursor, or repeats one, and writes nothing", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    const before = await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c));
+    for (const next of [null, "same"]) {
+      answer = () => json({ object: "page", data: [], has_more: true, next_page: next });
+      const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+      expect([run.status, run.errorCode]).toEqual(["failed", "bad_response"]);
+    }
+    expect(await db.select().from(importedCostLines).where(eq(importedCostLines.pullConnectorId, c))).toHaveLength(before.length);
+  });
+
+  it("stores a fixed code when the vendor refuses the key's scope, never the vendor's body", async () => {
+    const c = connectorIds[connectorIds.length - 1]!;
+    answer = () => json({ error: { message: `missing scope for ${CHATGPT_KEY}` } }, 403);
+    const { run } = await runVendorUsagePull(db, c, { trigger: "manual", dataKey: DATA_KEY, deps: { fetchImpl, resolve } });
+    expect([run.status, run.errorCode]).toEqual(["failed", "forbidden"]);
+    expect(run.errorDetail).not.toContain(CHATGPT_KEY);
   });
 });
 

@@ -1,10 +1,10 @@
 # ADR-0342: Process analytics and human-task SLAs (cycle time, wait vs work, bottlenecks, heatmaps, task priority and due dates)
 
-- **Status**: Accepted (owner direction 2026-11-16, lane E23 brief from the Camunda gap analysis; slice 1 built)
+- **Status**: Accepted (owner direction 2026-11-16, lane E23 brief from the Camunda gap analysis; slices 1 and 2 built)
 - **Date**: 2026-11-16
 - **Index**: Process analytics: a measured read model replayed from `workflow_events` through the workflow kernel, served by versioned, bounded, scope-checked APIs (per-template and per-stage cycle time, wait vs work, throughput, rework, bottleneck ranking, heatmap)
 - **Built in**: lane E23, branch `builder/e23-process-analytics`
-- **Migration**: `pending/process_analytics.sql`, numbered at merge (ADR-0252)
+- **Migration**: `pending/process_analytics.sql` (slice 1) and `pending/approval_task_priority.sql` (slice 2), numbered at merge (ADR-0252)
 - **Related**: ADR-0041 (single tenant per deployment), ADR-0047 (reporting entitlement decision, reused), ADR-0049 (forecasting and anomalies), ADR-0046 (review
   workbench: approval assignments, SLA policies and the SLA sweep), ADR-0064 (scheduler), ADR-0200 (measured read
   model), ADR-0234 (row-level security), ADR-0180 (secure by default), ADR-0176 (open source first)
@@ -118,14 +118,51 @@ else. No new dependency.
    - The deployment is single-tenant (ADR-0041; ADR-0234 found no tenant key), so the row-level security scope is the principal and its project
      memberships. No figure aggregates beyond the caller's visible projects.
 
-### Slice 2: human-task priority, due date and the escalation contract (next PR)
+### Slice 2: human-task priority, due date and the escalation contract (built)
 
-8. **One escalation mechanism.** Human tasks are rows in the one approvals queue, and their timed escalation is the
-   ADR-0046 SLA sweep (`runApprovalSlaSweep` over `approval_assignments`). Slice 2 adds a task priority and an explicit
-   due date to the assignment, set by the requester, an admin or a stage timer, and has the sweep honour them. Lane E21
-   (stage timers and escalation) drives a timer on a human stage by setting that task's due date (and optionally its
-   priority) through one function in `workbench.ts`. It does not build a second escalation path. A timer on a
-   non-human stage is E21's own and is not a task escalation. The contract is agreed in E21's ADR before slice 2 merges.
+8. **One escalation mechanism.** Human tasks are rows in the one approvals queue, and their timed escalation stays the
+   ADR-0046 SLA sweep (`runApprovalSlaSweep` over `approval_assignments`). Slice 2 adds to the assignment (pending
+   migration `approval_task_priority`):
+   - `priority` (`low`, `normal` default, `high`, `urgent`): it orders the queue (`sort=priority`, and `sort=due` for
+     the due time) and decides nothing;
+   - `due_source` (`policy`, the ADR-0046 derivation; `explicit`, set by an admin; `stage_timer`, set by a workflow
+     stage timer), plus a CHECK that a warn time never follows the due time.
+
+   **The one setter.** `scheduleApprovalTask(db, approvalId, { priority?, dueAt?, warnAt?, slaPolicyId? }, ctx)` sets
+   a pending task's priority, due and warn times and escalation policy, then runs the ordinary ADR-0046 evaluation, so
+   a due time already passed warns, breaches and escalates exactly once, the usual way, and never approves or denies.
+   `PUT /v1/approvals/:approvalId/schedule` (admin) calls it. `scheduleStageApprovals(db, { instanceId, stageId },
+   input, { actorUserId, systemActor })` is the stage-timer entry point: it schedules every pending task of one
+   workflow stage.
+
+   **Secure by default (ADR-0180).** A tightening (earlier due, higher priority, a notify-only policy where there was
+   none) is audited (`approval-task-scheduled`). A loosening needs a `settings_relax` step-up and is audited as a
+   relaxation (`approval-task-schedule-relaxed`). The loosenings are a later or removed due or warn time, a lower
+   priority, a different escalation policy, and attaching a policy whose breach reassigns or adds an assignee
+   (`escalation_policy_attached`): both of the last two change who decides the task, which B4S-02 makes a
+   `settings_relax`. A stage timer may never loosen (`stage_timer_cannot_relax`).
+
+   **One transaction per change.** The read of the task (`FOR UPDATE`), the relaxation decision, the write, its audit
+   row and the ADR-0046 evaluation commit together, so two changes to one task (an admin and a stage timer, or two
+   admins) serialise. Each one decides against what the other committed, never a stale read, so no loosening lands
+   without its step-up. A test races a tightening against a priority-only change. A stage timer's change is audited as
+   the system (`SYSTEM_ATTRIBUTION_ID`, with `detail.actor` naming the timer), never as the task's requester. A new due time must be in the future, and a named policy must exist and be enabled.
+   The escalation target is always an admin-defined ADR-0046 SLA policy (`slaPolicyId`), never a free-form target,
+   because creating a policy that hands a task to someone else already requires a step-up.
+
+   **Declared SLA transitions (owner rule: explicit state machines).** `APPROVAL_SLA_MACHINE` in
+   `packages/shared/src/workbench.ts` declares `approval_assignments.sla_state` with the shared ADR-0348
+   `defineMachine` and is registered in `STATE_MACHINES`, so its states are held equal to the column's CHECK. Its
+   events belong to two causes: the clock (`warn`, `breach`: the ADR-0046 evaluation only ever moves `ok` to
+   `warning` to `breached`) and a reschedule (`rearm_ok`, `rearm_warning`: a due time moved later re-arms `breached`
+   or `warning` back). `slaTransitionAllowed(cause, from, to)` reads the machine. `scheduleApprovalTask` applies
+   only reschedule events; a test pins that `evaluateSla` makes only clock ones. A re-armed breach keeps its `breached_at` on the record.
+
+   **The contract with lane E21 (stage timers).** On a human-approval stage, E21 does not escalate the task itself:
+   when the stage is entered, it sets each pending task's due and warn times (and optionally priority and policy)
+   through `scheduleStageApprovals`, and the SLA sweep does the rest. A breach rule that cancels the instance is
+   E21's, not a task escalation, and its pending tasks are superseded, never denied. Timers on non-human stages stay
+   E21's and never touch the queue. E21 recorded its side of this contract in its own ADR on #885.
 
 ### Slice 3: the value view (after #848)
 

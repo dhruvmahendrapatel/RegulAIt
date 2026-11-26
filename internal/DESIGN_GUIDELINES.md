@@ -117,6 +117,10 @@ enforces the rule yet; reviewers check it by hand.
   interactive only).*
 - Make sortable headers `<button>`s, navigation `<Link>`s (never `<div onClick>`), and let Enter and Space both
   activate. *Scan (#552 FS-4, FS-44, D5-11).*
+- Make a clickable table row carry one real control in its primary cell, never `<tr role="link">`: `rowHref` renders a
+  `<Link>` for a row that opens another page, `onRowClick` a `<button>` for a row that selects in place. A click
+  elsewhere on the row activates that control; a control beside the value goes in the column's `after`. *Owner,
+  2026-11-22 (UIS-04). Enforced by `codex-row-semantics.mock.spec.ts`.*
 - Use `aria-disabled` plus a guard, not `disabled`, on a busy button so focus stays. *Scan (#553 FS-19).*
 - Pair `Tabs` (`idPrefix`) with a `role="tabpanel"` wrapper. *Scan (FS-46).*
 - Put a count in a link's accessible name and mark the visual badge `aria-hidden`. *Scan (#552).*

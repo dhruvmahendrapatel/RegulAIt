@@ -1,0 +1,12 @@
+{
+  "adr": "ADR-0356",
+  "lane": "E37",
+  "tracking": "ADR-0356 (lane E37): the brief is API and backend only; the Atlassian audit feed screen is requested on #453 (lane brief rule 3, recorded in ADR-0356)",
+  "gaps": {
+    "POST /v1/pm/audit-sources": "adds a read-only Atlassian organisation audit feed (Rovo-agent and MCP events) to a Jira connection, disabled",
+    "GET /v1/pm/audit-sources": "lists the Atlassian audit feeds (never the key)",
+    "PATCH /v1/pm/audit-sources/:sourceId": "enables or disables an Atlassian audit feed, changes its filters or replaces its key (enable and key are settings_relax step-ups)",
+    "POST /v1/pm/audit-sources/:sourceId/poll": "polls an enabled Atlassian audit feed now and stores matching events as evidence",
+    "GET /v1/pm/audit-sources/:sourceId/events": "pages the stored Rovo/MCP audit events of a feed"
+  }
+}

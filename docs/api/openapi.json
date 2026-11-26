@@ -88,6 +88,9 @@
       "name": "spend"
     },
     {
+      "name": "state-machines"
+    },
+    {
       "name": "usage-events"
     },
     {
@@ -1139,7 +1142,12 @@
                 "rule_step_switch",
                 "robot_version",
                 "endpoint_addon_removal",
-                "vendor_agent_control"
+                "vendor_agent_control",
+                "vendor_control_delegated",
+                "saas_finding_review",
+                "agent_containment",
+                "ai_saas_remediation",
+                "workflow_migration"
               ]
             }
           },
@@ -2724,7 +2732,7 @@
     "/v1/workflows/instances": {
       "post": {
         "operationId": "postV1WorkflowsInstances",
-        "summary": "Start a workflow instance from a template.",
+        "summary": "Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.",
         "tags": [
           "workflows"
         ],
@@ -2736,7 +2744,71 @@
         "x-regulait-stability": "public-stable",
         "x-regulait-auth": "user",
         "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
-        "x-regulait-schema": "unspecified",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "projectId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "change": {
+                    "type": "object",
+                    "properties": {
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "changeType": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "environment": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "targetSystem": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "required": [
+                      "description",
+                      "paths",
+                      "changeType",
+                      "environment"
+                    ]
+                  },
+                  "templateId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "workItem": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "change"
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "400": {
             "description": "Request body failed schema validation."
@@ -2757,7 +2829,7 @@
       },
       "get": {
         "operationId": "getV1WorkflowsInstances",
-        "summary": "Workflow instances.",
+        "summary": "Workflow instances. ADR-0349: typed search fields `status`, `template`, `target`, `workItem`, `owner` (initiator), `stage` (current stage id) and `complianceTag` (the attributed project's classification), each index-served. A non-admin sees only their own instances. Add any ADR-0226 list parameter (`sort`, `cursor`, `offset`, `count`) for the paginated contract.",
         "tags": [
           "workflows"
         ],
@@ -2829,6 +2901,50 @@
           },
           "2XX": {
             "description": "ADR-0189 R25 item 13: an executor stage (git, deploy, nested build, checks) that would complete the instance and approve its AI use case is not run while no receipt signing key is usable (strict setting). The instance stays at that stage and nothing external happens. When the held stage is the one this call asked to run, the answer is 409 (503 for an unusable key) with `error`, `detail` and `executorRefusal` (`stageId`, `code`, `detail`), as the route-level refusals are; when it follows a transition this call made, the answer is 200 and carries `executorRefusal`. The artifact, check report, recheck and deploy-override routes carry the same field, and an Idempotency-Key replay of an artifact submit carries the refusal the instance still stands on. Retry once a key is usable."
+          }
+        }
+      }
+    },
+    "/v1/workflows/instances/{instanceId}/pending": {
+      "get": {
+        "operationId": "getV1WorkflowsInstancesByInstanceIdPending",
+        "summary": "ADR-0349: what this instance is waiting for (`version: 1`). `waitingOn` is one of approval, artifact, plan, trigger, execution, retry, check_report, advance, check_failed, deploy_handoff or nothing, with a plain `detail` sentence. It also carries the current stage, pending approvers, the execution claim (holder, renewal, lease expiry, live), the queued retry (attempt, next run), the stage deadline when one is set, and the last error. Read-only; the same readers as the instance.",
+        "tags": [
+          "workflows"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "parameters": [
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "403": {
+            "description": "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
           }
         }
       }
@@ -2971,6 +3087,40 @@
         "responses": {
           "400": {
             "description": "Request body failed schema validation."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
+    "/v1/state-machines": {
+      "get": {
+        "operationId": "getV1StateMachines",
+        "summary": "GET /v1/state-machines",
+        "tags": [
+          "state-machines"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "403": {
+            "description": "Refused. Among the reasons: `mfa_enrollment_required`, when the organization requires MFA for the credential's owner, who has not enrolled TOTP (ADR-0181). Audited."
           },
           "429": {
             "description": "Rate limited. Retry after the `retry-after` header."

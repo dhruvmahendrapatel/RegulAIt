@@ -60,7 +60,8 @@ import {
   type ResolutionMode,
 } from "@regulait/db";
 import { evaluateAgent } from "@regulait/policy-kernel";
-import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { auditRoutingClassification, classifyForRouting, routingClassifierDetail } from "./routing-classifier.js";
 import {
   isModelProviderKind,
   type ModelChatMessage,
@@ -94,7 +95,7 @@ import { PROJECT_HEADER } from "./project-header.js";
 // ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
 // too: an SDK pointed at this gateway has no RegulAIt UI to look in.
 import { beginTrace, finishTrace, recordSpan } from "./tracing.js";
-import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import { effectiveTechniqueMode, incrementalStreamInspection, loadOrgSettings } from "./org-settings.js";
 import {
   lookupSemanticCache,
   semanticCacheRequestKey,
@@ -104,7 +105,7 @@ import {
 import { recordRuleStepSaving, switchedRuleAnswer } from "./rule-step-serve.js";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
-import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
   engineKeyProjectPin,
   loadVirtualKeyContext,
@@ -443,6 +444,8 @@ export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "xai",
   "google",
+  // ADR-0352: Vertex runs the same @ai-sdk/google implementation as "google"
+  "vertex",
   "mock",
 ]);
 
@@ -537,6 +540,8 @@ export interface CompatPrepared {
    * for every other caller.
    */
   workloadGrantId?: string | undefined;
+  /** ADR-0251 slice 4b: the request's session facts, read during prepare, for the governed core's ABAC v5 request */
+  principal: AbacPrincipalContext;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -893,7 +898,15 @@ export async function prepareCompatCall(
         a.id === requested.id ||
         (a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a))),
     );
-    const complexity = classifyComplexity(args.text);
+    const routingMode = effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null);
+    // ADR-0353 part 2: the configured classifier is asked only when routing will actually run
+    const classification = await classifyForRouting(
+      db,
+      dataKey,
+      { routingClassifierScorerId: routingMode === "automatic" ? org.routingClassifierScorerId : null },
+      args.text,
+    );
+    const complexity = classification.complexity;
     const estimate = estimateTokens(args.text, complexity);
     const routing = routeModel({
       requestedAgentId: requested.id,
@@ -903,10 +916,18 @@ export async function prepareCompatCall(
         costPerMTokIn: a.costPerMTokIn ?? null,
         costPerMTokOut: a.costPerMTokOut ?? null,
       })),
-      routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
+      routingMode,
       complexity,
       ceilingTier,
       estimate,
+    });
+    await auditRoutingClassification(db, {
+      userId,
+      requestedAgentId: requested.id,
+      projectId,
+      classification,
+      routing,
+      surface: "compat",
     });
     served = registry.find((a) => a.id === routing.selectedAgentId) ?? requested;
     routerOverrode = served.id !== requested.id;
@@ -929,7 +950,7 @@ export async function prepareCompatCall(
         estimationBasis: routing.estimationBasis,
         ruleId: routing.ruleId,
         projectId,
-        detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE },
+        detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE, ...routingClassifierDetail(classification) },
       });
     }
   }
@@ -937,7 +958,9 @@ export async function prepareCompatCall(
   // --- ADR-0019 streaming suppression ---------------------------------------
   // Reused verbatim, not re-derived: on a block-mode project the OUTPUT PII
   // check can only run once the full text exists, so no delta may leave.
-  const streamingSuppressed = args.stream && (await projectPiiMode(db, projectId)) === "block";
+  // ADR-0352 slice 3: incremental output inspection keeps the stream live (windowed release)
+  const streamingSuppressed =
+    args.stream && !(await incrementalStreamInspection(db)) && (await projectPiiMode(db, projectId)) === "block";
   // ADR-0021: 'reject' refuses the stream request instead of quietly buffering
   // — the same admin choice the invoke path honours, held here so both shims
   // inherit it.
@@ -975,6 +998,7 @@ export async function prepareCompatCall(
       ignoredFields: args.ignoredFields ?? [],
       virtualKey,
       ...(req.authCtx.via === "workload" ? { workloadGrantId: req.authCtx.delegationGrantId ?? NO_DELEGATION_GRANT } : {}),
+      principal: abacPrincipalFromRequest(req),
       routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
     },
   };
@@ -1087,6 +1111,7 @@ export async function executeCompatCall(
       : undefined);
   const dispatchArgs: GovernedDispatchArgs = {
     ...(engineGrantId ? { delegationGrantId: engineGrantId } : {}),
+    principal: prepared.principal, // ADR-0251 slice 4b
     userId: prepared.userId,
     served: prepared.served,
     requestedAgentId: prepared.requested.id,
