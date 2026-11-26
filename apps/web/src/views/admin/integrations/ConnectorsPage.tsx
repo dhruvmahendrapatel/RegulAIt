@@ -4,7 +4,7 @@
  * structured-JSON multi-field convention validated at save time), grants
  * (mode + data scope), and the per-user entitlement view.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -26,6 +26,9 @@ import {
 import { DisabledBadge, countsText, useLifecycle } from "./LifecycleActions";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0238 (P12(d)) token-exchange card, in its own chunk (ADR-0344 per-route budgets, ADR-0200 lazy loading)
+const ConnectorTokenExchangeCard = lazy(() => import("./TokenExchange").then((m) => ({ default: m.ConnectorTokenExchangeCard })));
 
 /**
  * The execution adapters an admin can pick; "" is governance-only (no adapter).
@@ -173,6 +176,9 @@ export default function ConnectorsPage() {
 
         <CreateConnectorCard />
         <CredentialCard connectors={connectors.data?.connectors ?? []} />
+        <Suspense fallback={null}>
+          <ConnectorTokenExchangeCard connectors={connectors.data?.connectors ?? []} />
+        </Suspense>
 
         <Card title="Grant — mode + data scope">
           <GrantForm connectors={connectors.data?.connectors ?? []} users={users} />

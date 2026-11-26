@@ -403,6 +403,12 @@
     "limit": "3.0 kB"
   },
   {
+    "name": "chunk: TokenExchange",
+    "path": "dist/assets/TokenExchange-????????.js",
+    "gzip": true,
+    "limit": "5.7 kB"
+  },
+  {
     "name": "chunk: TotpQrCode",
     "path": "dist/assets/TotpQrCode-????????.js",
     "gzip": true,

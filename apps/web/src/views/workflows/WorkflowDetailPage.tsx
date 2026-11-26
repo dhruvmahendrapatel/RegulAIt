@@ -27,6 +27,7 @@ import {
 import { useAction } from "../admin/adminKit";
 import { useSession } from "../../session/SessionContext";
 import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
+import { ChangeTimeline } from "./ChangeTimeline";
 import v from "../views.module.css";
 import s from "./workflows.module.css";
 
@@ -166,6 +167,9 @@ export default function WorkflowDetailPage() {
             })}
           </div>
         </Card>
+
+        {/* the pilot's end-to-end story: work item → plan → sign-off → build → PR → checks → merge, and the history */}
+        <ChangeTimeline detail={q.data} />
 
         {/* PILLAR 2 §2 stage 2 (ADR-0079): the plan-only stage, made visible.
             The card says what the stage forbids, what it still allows, and the
