@@ -399,6 +399,11 @@ jobs:
       - name: Pre-flight — every gateway route has UI or a reason (route census)
         if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
         run: node scripts/preflight-ui-route-census.mjs
+      # #1265, ADR-0176 rule 3: every npm row of a THIRD_PARTY.md names a version its lockfile actually installs
+      # (pnpm-lock.yaml for a workspace package, the engine's own package-lock.json for an engine image). Static and
+      # offline; a stale row after a Dependabot bump fails here with "row X says A, the lockfile has B".
+      - name: Pre-flight — THIRD_PARTY.md versions match the lockfile
+        run: node scripts/preflight-third-party-lock.mjs
       # CONTRIBUTING_PARALLEL_SESSIONS §4.1, ADR-0252, review C-03: merged migrations and journal entries are
       # unchanged, the folder and the journal agree, and the journal grows only by the assign-at-merge step's
       # numbering of pending files (a new `when` below the base's newest would never apply). In the merge queue
