@@ -234,6 +234,11 @@ const stageSchema = z.object({
    * as before P30. Every verdict still commits as ONE transition. Only valid
    * on an automated_check stage with named checks. */
   checkConcurrency: z.number().int().min(1).max(16).optional(),
+  /** ADR-0349 incident console: an admin may SKIP this stage when it is stuck or failed (step-up, audited, a
+   * `stage_skipped` event). Absent = never (the strict default, ADR-0180). Only valid on an automated_check stage
+   * with named checks: a review, an approval, an artifact, a git or deploy stage can never be skipped, and skipping
+   * moves on to the next stage, so the next sign-off still stops the instance. */
+  skippable: z.boolean().optional(),
   /** ADR-0340 slice 2: a DEADLINE on the stage. When the instance enters it, timers are set; if the instance still
    * rests at that same stage entry when they fire, `warnAfterSeconds` sends a reminder and `breachAfterSeconds`
    * acts: `notify` (a notice to the initiator) or `fail` (the instance is cancelled, which compensates it when the
@@ -363,6 +368,13 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `stage '${s.id}' (${s.type}) cannot carry checkConcurrency — only an automated_check stage with named checks can`,
+        });
+      }
+      // ADR-0349: a skip is an incident-console escape hatch for a stuck check, and nothing else
+      if (s.skippable !== undefined && (s.type !== "automated_check" || (s.checks?.length ?? 0) === 0)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry skippable — only an automated_check stage with named checks can be skipped`,
         });
       }
       // ADR-0283: a retry policy only means something on a stage the gateway
@@ -880,6 +892,10 @@ export type WorkflowEvent =
   // sign-off); aborted / denied / rolled_back stay terminal. `reason` says why
   // (it is stored with the event).
   | { kind: "reopen"; stageId: string; reason: string }
+  // ADR-0349 incident console: an admin skips a stuck or failed check stage whose template marks it `skippable`.
+  // Accepted only while the instance waits on that stage (awaiting_execution or blocked_on_check); the stage is
+  // left completed and the instance runs forward, stopping at the next blocking stage. `reason` is stored with it.
+  | { kind: "stage_skipped"; stageId: string; reason: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -1620,6 +1636,27 @@ export function transition(
     };
     s.stageStatuses[s.currentStageIndex] = "completed";
     return { state: s, effects: [{ kind: "instance_rolled_back", stageId: current.id }] };
+  }
+
+  if (event.kind === "stage_skipped") {
+    if (state.status !== "awaiting_execution" && state.status !== "blocked_on_check") {
+      throw new WorkflowStateError(`instance is not waiting on a stage that can be skipped (status ${state.status})`);
+    }
+    if (!current || current.id !== event.stageId) {
+      throw new WorkflowStateError(`instance is not waiting on stage '${event.stageId}'`);
+    }
+    if (current.skippable !== true || current.type !== "automated_check") {
+      throw new WorkflowStateError(`stage '${event.stageId}' is not skippable: its template does not allow it`);
+    }
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    s.stageStatuses[s.currentStageIndex] = "completed";
+    s.currentStageIndex += 1;
+    return runForward(def, s);
   }
 
   if (event.kind === "human_trigger" || event.kind === "stage_completed") {

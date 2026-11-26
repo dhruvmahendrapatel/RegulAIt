@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { errFields, errLine, errMessage } from "./err-serializer.js";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
 import { wantsListContract, type ListReader, type ListSpec } from "./list-contract.js";
@@ -95,6 +95,7 @@ import {
 import { loadOrgSettings } from "./org-settings.js";
 import { databaseNow } from "./db-clock.js";
 import { currentRetryJob, describePendingWork, pendingApproversOf } from "./workflow-pending.js";
+import { actionsFor, incidentOf } from "./workflow-incidents.js";
 import { isUniqueViolation } from "./pg-errors.js";
 import { answerStartConflict, openInstanceForStartKey, startKeyOf, WORKFLOW_START_KEY_INDEX } from "./workflow-start-conflict.js";
 import {
@@ -4681,6 +4682,150 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const row = { ...loaded.instance, context: loaded.instance.context as Record<string, unknown> };
     const [now, retry, pendingApprovers] = await Promise.all([databaseNow(db), currentRetryJob(db, row), pendingApproversOf(db, row)]);
     return describePendingWork({ row, now, leaseMs: stageClaimTtlMs(), retry, pendingApprovers });
+  });
+
+  // ADR-0349 incident console (slice 5 extension): stuck or failed instances and the three actions on them. Every
+  // route here is admin-only (none is in NON_ADMIN_ROUTES), audited, and moves the instance only through the kernel.
+  const pendingViewOf = async (row: typeof workflowInstances.$inferSelect) => {
+    const r = { ...row, context: row.context as Record<string, unknown> };
+    const [now, retry, pendingApprovers] = await Promise.all([databaseNow(db), currentRetryJob(db, r), pendingApproversOf(db, r)]);
+    return describePendingWork({ row: r, now, leaseMs: stageClaimTtlMs(), retry, pendingApprovers });
+  };
+  const incidentListQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50), after: z.string().uuid().optional() }).strict();
+  app.get("/v1/workflows/incidents", async (req) => {
+    const q = incidentListQuery.parse(req.query ?? {});
+    // the candidates are the statuses an incident can rest in (served by workflow_instances_status_idx); the view
+    // decides. A page scans at most 500 candidates and says where to continue.
+    const candidates = await db
+      .select()
+      .from(workflowInstances)
+      .where(
+        and(
+          inArray(workflowInstances.status, ["awaiting_execution", "blocked_on_check", "blocked_on_deploy"]),
+          q.after ? sql`${workflowInstances.id} > ${q.after}` : undefined,
+        ),
+      )
+      .orderBy(workflowInstances.id)
+      .limit(500);
+    const incidents = [];
+    let last: string | null = null;
+    for (const row of candidates) {
+      last = row.id;
+      const view = await pendingViewOf(row);
+      const kind = incidentOf(view);
+      if (kind) incidents.push({ incident: kind, ...view, actions: actionsFor(view, row) });
+      if (incidents.length >= q.limit) break;
+    }
+    const more = incidents.length >= q.limit || candidates.length === 500;
+    return { version: 1, incidents, next: more ? last : null };
+  });
+
+  const incidentNote = z.object({ note: z.string().trim().min(1).max(1000) }).strict();
+  const incidentSkipBody = z.object({ stageId: z.string().min(1).max(200), note: z.string().trim().min(1).max(1000) }).strict();
+  /** load, check the action is allowed now, or answer 409 with the reason (the same words actionsFor gives) */
+  const incidentTarget = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    action: "retry" | "skip" | "cancel",
+  ): Promise<{ row: typeof workflowInstances.$inferSelect; stageId: string | null } | null> => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) {
+      await sendLoadError(reply, loaded.error);
+      return null;
+    }
+    if (!req.authCtx.userId) {
+      await reply.status(403).send({ error: "bootstrap_cannot_drive" });
+      return null;
+    }
+    const view = await pendingViewOf(loaded.instance);
+    const verdict = actionsFor(view, loaded.instance).find((a) => a.action === action)!;
+    if (!verdict.allowed) {
+      await reply.status(409).send({ error: "incident_action_not_allowed", action, detail: verdict.reason, waitingOn: view.waitingOn });
+      return null;
+    }
+    return { row: loaded.instance, stageId: view.currentStage?.id ?? null };
+  };
+  // S4 review [2]: the audit row is written in the same transaction as the transition (applyEvent's precondition runs
+  // under the instance lock), so a refused or raced transition rolls it back and the trail never claims an action that
+  // did not happen. The one path with no transition (re-running an executor) writes it after the run, with the outcome.
+  const auditIncident = (
+    q: Pick<Db, "insert">,
+    row: { id: string },
+    userId: string,
+    action: string,
+    detail: Record<string, unknown>,
+    reason: string,
+  ) =>
+    q.insert(auditLog).values({
+      userId,
+      objectType: "workflow",
+      objectId: row.id,
+      detail: { action, ...detail },
+      effect: "allow",
+      ruleId: `workflow:incident-${action}`,
+      ruleChain: [],
+      reason,
+    });
+  const answerInstance = async (id: string, userId: string, executed?: ExecutorOutcome) => {
+    const extra = await opts.onInstanceTransition?.(db, id, userId);
+    const [fresh] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, id));
+    return { ...(extra ?? {}), ...(executed ? refusalField(executed) : {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  };
+
+  app.post("/v1/workflows/instances/:instanceId/incident/retry", async (req, reply) => {
+    const b = incidentNote.parse(req.body);
+    const t = await incidentTarget(req, reply, "retry");
+    if (!t) return reply;
+    const userId = req.authCtx.userId!;
+    const detail = { stageId: t.stageId, note: b.note, status: t.row.status };
+    const reason = `incident console: retry of stage '${t.stageId}'`;
+    let executed: ExecutorOutcome;
+    if (t.row.status === "blocked_on_check") {
+      const r = await applyEvent(db, t.row.id, { kind: "recheck", stageId: t.stageId! }, userId, async (tx) => {
+        await auditIncident(tx, t.row, userId, "retry", detail, reason);
+        return true;
+      });
+      executed = await runExecutors(t.row.id, r.effects, userId);
+    } else {
+      executed = await runExecutors(t.row.id, [{ kind: "execute_stage", stageId: t.stageId! }], userId);
+      await auditIncident(db, t.row, userId, "retry", { ...detail, ...(executed.refused ? { refused: executed.refused } : {}) }, reason);
+    }
+    return answerInstance(t.row.id, userId, executed);
+  });
+
+  app.post("/v1/workflows/instances/:instanceId/incident/skip", async (req, reply) => {
+    const b = incidentSkipBody.parse(req.body);
+    const t = await incidentTarget(req, reply, "skip");
+    if (!t) return reply;
+    if (t.stageId !== b.stageId) {
+      return reply.status(409).send({ error: "incident_action_not_allowed", action: "skip", detail: `the instance waits on '${t.stageId}', not '${b.stageId}'` });
+    }
+    // skipping a check lifts a control: a settings_relax step-up bound to this instance and stage
+    const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "workflow_stage_skip", instanceId: t.row.id, stageId: b.stageId } });
+    if (!su.ok) return reply;
+    const userId = req.authCtx.userId!;
+    const r = await applyEvent(db, t.row.id, { kind: "stage_skipped", stageId: b.stageId, reason: b.note }, userId, async (tx) => {
+      await auditIncident(tx, t.row, userId, "skip", { stageId: b.stageId, note: b.note, status: t.row.status, stepUp: su.method }, `incident console: stage '${b.stageId}' skipped`);
+      return true;
+    });
+    const executed = await runExecutors(t.row.id, r.effects, userId);
+    return answerInstance(t.row.id, userId, executed);
+  });
+
+  app.post("/v1/workflows/instances/:instanceId/incident/cancel", async (req, reply) => {
+    const b = incidentNote.parse(req.body);
+    const t = await incidentTarget(req, reply, "cancel");
+    if (!t) return reply;
+    const userId = req.authCtx.userId!;
+    const applied = await applyEvent(db, t.row.id, { kind: "abort" }, userId, async (tx) => {
+      await auditIncident(tx, t.row, userId, "cancel", { stageId: t.stageId, note: b.note, status: t.row.status }, "incident console: instance cancelled");
+      return true;
+    });
+    // S4 review [1]: as /abort does, a cancel that starts compensating runs the first compensation now, as the admin
+    // who cancelled; without this the instance parks on the compensation stage and the deployed change stays live
+    const executed = await runExecutors(t.row.id, applied.effects, userId);
+    return answerInstance(t.row.id, userId, executed);
   });
 
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
