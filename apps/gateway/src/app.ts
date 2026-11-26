@@ -660,6 +660,7 @@ import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerPmImportRoutes } from "./pm-import.js";
 import { handlePmTriggers, registerPmTriggerRoutes } from "./pm-triggers.js";
 import { syncPmWriteBacks } from "./pm-write-back.js";
+import { registerPmAuditIngestRoutes } from "./pm-audit-ingest.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerSaasEntitlementRoutes } from "./saas-entitlement-routes.js";
@@ -6308,6 +6309,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     ...(opts.dataKey ? { triggers: (conn, delivery) => handlePmTriggers(db, opts.dataKey!, conn, delivery) } : {}),
   });
   registerPmTriggerRoutes(app, db);
+  registerPmAuditIngestRoutes(app, db, { dataKey: opts.dataKey });
 
   registerWorkflowRoutes(app, db, {
     dataKey: opts.dataKey,
