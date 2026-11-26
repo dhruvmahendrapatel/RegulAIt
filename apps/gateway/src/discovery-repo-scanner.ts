@@ -87,6 +87,8 @@ export interface RepoScanObservation {
   /** ADR-0195 lane A6: presence signature ids, never the env-variable names */
   presence?: string[];
   actorPseudonym?: string;
+  /** ADR-0083 §2: the compiled catalogue version the analyser matched against (2 or 3) */
+  catalogVersion: number;
 }
 
 export interface RepoScanContext {
@@ -106,7 +108,7 @@ export interface RepoScanContext {
   pseudonymise: (kind: DiscoveryPseudonymKind, displayName: string) => Promise<string>;
   heartbeat: () => Promise<boolean>;
   signal: AbortSignal;
-  catalogue: { matches: (observation: RepoScanObservation) => boolean };
+  catalogue: { matches: (observation: Omit<RepoScanObservation, "catalogVersion">) => boolean };
   /** ADR-0195 SD2b: present for a federated credential only */
   federation?: { sourceToken: (audience: string) => Promise<string> };
 }
@@ -208,6 +210,7 @@ export function toScanObservations(subject: string, analysis: RepoAnalysisResult
       subjectKind: "repo",
       subject,
       count: 1,
+      catalogVersion: analysis.catalogVersion,
       ...o,
       ...(location ? { location } : {}),
       ...(actorPseudonym ? { actorPseudonym } : {}),

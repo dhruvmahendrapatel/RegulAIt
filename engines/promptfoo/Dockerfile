@@ -41,7 +41,7 @@
 # binding cannot load. arm64 is an open item (ADR-0187 open question 10).
 
 # ---- stage 1: the pinned promptfoo release -----------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS promptfoo
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS promptfoo
 WORKDIR /opt/promptfoo
 COPY engines/promptfoo/package.json engines/promptfoo/package-lock.json engines/promptfoo/licence-gate.mjs ./
 COPY scripts/engine-images-normalise.mjs /tmp/engine-images-normalise.mjs
@@ -59,7 +59,7 @@ COPY engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs /tmp/telemet
 RUN node /tmp/telemetry-patch.mjs /opt/promptfoo/node_modules/promptfoo && rm /tmp/telemetry-patch.mjs
 
 # ---- stage 2: the runner shim -----------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS shim
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS shim
 RUN corepack enable
 WORKDIR /src
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
@@ -69,13 +69,13 @@ COPY apps ./apps
 # install finished in /out/node_modules/.modules.yaml; the normaliser sorts it and takes the time from SOURCE_DATE_EPOCH
 COPY scripts/engine-images-normalise.mjs ./scripts/engine-images-normalise.mjs
 ARG SOURCE_DATE_EPOCH
-RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+RUN NODE_OPTIONS=--max-old-space-size=6144 pnpm install --frozen-lockfile \
  && pnpm --filter "@regulait/engine-promptfoo..." build \
  && pnpm --filter @regulait/engine-promptfoo deploy --prod --legacy /out \
  && node scripts/engine-images-normalise.mjs modules-yaml /out/node_modules/.modules.yaml
 
 # ---- stage 3: runtime -------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS runtime
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
       org.regulait.engine-version="0.125.1" \
@@ -86,8 +86,10 @@ LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
 # then drop what apt and dpkg wrote with wall-clock content (the lists, their logs and ldconfig's
 # aux-cache), so the layer stays byte-reproducible (ADR-0187 addendum 2026-10-21: build and rebuild
 # must match). Remove this when a rebuilt base digest already carries the fix.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack

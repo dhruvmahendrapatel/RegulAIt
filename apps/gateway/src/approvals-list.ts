@@ -43,6 +43,11 @@ export const APPROVALS_LIST: ListSpec<ApprovalListRow> = {
     requester: { expr: nameOf(approvals.userId) },
     approver: { expr: nameOf(approvals.approverUserId) },
     decider: { expr: nameOf(approvals.decidedBy) },
+    // ADR-0342 slice 2: the task's priority (no assignment reads as normal) and due time, from its ADR-0046 assignment
+    priority: {
+      expr: sql`coalesce((select case aa.priority when 'urgent' then 4 when 'high' then 3 when 'low' then 1 else 2 end from approval_assignments aa where aa.approval_id = ${approvals.id}), 2)`,
+    },
+    due: { expr: sql`(select aa.due_at from approval_assignments aa where aa.approval_id = ${approvals.id})` },
   },
   columns: {
     item: {

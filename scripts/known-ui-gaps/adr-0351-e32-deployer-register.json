@@ -1,0 +1,9 @@
+{
+  "adr": "ADR-0351",
+  "lane": "E32",
+  "tracking": "ADR-0351 slice 2 (lane E32): owner decision 2026-11-17, the register is API-only; the UI is built by the design builders on #453",
+  "gaps": {
+    "GET /v1/compliance/deployer-register": "lists the EU AI Act deployer duties with their basis (observed or attested), lifecycle state, evidence link or attestation",
+    "POST /v1/compliance/deployer-register/attest": "attests one attested-basis deployer duty with an evidence reference and a review date, per the declared lifecycle (audited)"
+  }
+}

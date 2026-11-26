@@ -8,6 +8,7 @@
  * is scanned with indexOf.
  */
 import { z } from "zod";
+import { EU_AI_ACT_TIERS, type EuAiActTier } from "./eu-ai-act.js";
 import {
   FAIRNESS_DEFAULT_THRESHOLDS,
   FAIRNESS_LIMITS,
@@ -35,12 +36,62 @@ export const FAIRNESS_EVALUATION_LIMITS = {
   runMaxAgeDays: { min: 1, max: 365, default: 90 },
 } as const;
 
-/** the org settings this ADR adds, at their column defaults (migration fairness_evaluation) */
+/**
+ * ADR-0346 decision 9 (owner 2026-11-21): which ADR-0085 risk tiers force the promotion gate on a model card, at their
+ * column defaults (migration fairness_gate_risk_tiers). Secure by default (ADR-0180): the high-risk tiers force it;
+ * an admin may relax a tier, and that change is a stepped-up, audited settings relaxation.
+ */
+export const FAIRNESS_GATE_TIER_DEFAULTS: Readonly<Record<EuAiActTier, boolean>> = Object.freeze({
+  prohibited: true,
+  high: true,
+  limited: false,
+  minimal: false,
+});
+
+/** the org settings this ADR adds, at their column defaults (migrations fairness_evaluation, fairness_gate_risk_tiers) */
 export const FAIRNESS_EVALUATION_DEFAULT_SETTINGS = Object.freeze({
-  /** opt-in per tenant (ADR-0346 decision 9; a compliance tag that requires the gate forces it on) */
+  /** opt-in per tenant (ADR-0346 decision 9; a compliance tag or a forcing risk tier turns it on for a card) */
   fairnessPromotionGate: false as boolean,
   fairnessRunMaxAgeDays: FAIRNESS_EVALUATION_LIMITS.runMaxAgeDays.default as number,
+  fairnessGateTierProhibited: FAIRNESS_GATE_TIER_DEFAULTS.prohibited as boolean,
+  fairnessGateTierHigh: FAIRNESS_GATE_TIER_DEFAULTS.high as boolean,
+  fairnessGateTierLimited: FAIRNESS_GATE_TIER_DEFAULTS.limited as boolean,
+  fairnessGateTierMinimal: FAIRNESS_GATE_TIER_DEFAULTS.minimal as boolean,
 });
+
+/** why the promotion gate applies to one card (in this order; empty when it does not) */
+export const FAIRNESS_GATE_REASONS = ["compliance_tag", "risk_tier", "org_setting"] as const;
+export type FairnessGateReason = (typeof FAIRNESS_GATE_REASONS)[number];
+
+/**
+ * Does the fairness promotion gate apply to one model card's sign-off (ADR-0346 decision 9)? Any one source is enough,
+ * and none relaxes another: a compliance tag that requires it, the card's risk tier where that tier forces it, or the
+ * org-wide setting. `tier` is the card's effective ADR-0085 tier (the strictest among the use cases that intend its
+ * agent, after jurisdiction floors); an unscreened card is not forced by tier, since screening is its own sign-off
+ * step. Pure: the caller reads the settings and the tier.
+ */
+export function fairnessGateRequirement(input: {
+  orgGate: boolean;
+  tagRequires: boolean;
+  tier: EuAiActTier | "unscreened";
+  tierGates: Readonly<Record<EuAiActTier, boolean>>;
+}): { required: boolean; reasons: FairnessGateReason[] } {
+  const reasons: FairnessGateReason[] = [];
+  if (input.tagRequires) reasons.push("compliance_tag");
+  if (input.tier !== "unscreened" && EU_AI_ACT_TIERS.includes(input.tier) && input.tierGates[input.tier] === true) reasons.push("risk_tier");
+  if (input.orgGate) reasons.push("org_setting");
+  return { required: reasons.length > 0, reasons };
+}
+
+/** the per-tier gate switches as `fairnessGateRequirement` reads them, from an org settings row */
+export function fairnessGateTiersOf(row: {
+  fairnessGateTierProhibited: boolean;
+  fairnessGateTierHigh: boolean;
+  fairnessGateTierLimited: boolean;
+  fairnessGateTierMinimal: boolean;
+}): Readonly<Record<EuAiActTier, boolean>> {
+  return { prohibited: row.fairnessGateTierProhibited, high: row.fairnessGateTierHigh, limited: row.fairnessGateTierLimited, minimal: row.fairnessGateTierMinimal };
+}
 
 export const FAIRNESS_DATASET_KINDS = ["supplied_predictions", "model_inputs"] as const;
 export type FairnessDatasetKind = (typeof FAIRNESS_DATASET_KINDS)[number];
@@ -48,30 +99,9 @@ export const FAIRNESS_RUN_MODES = ["supplied", "model"] as const;
 export type FairnessRunMode = (typeof FAIRNESS_RUN_MODES)[number];
 export const FAIRNESS_BREACH_REVIEW_STATUSES = ["pending", "accepted", "rejected", "superseded"] as const;
 export type FairnessBreachReviewStatus = (typeof FAIRNESS_BREACH_REVIEW_STATUSES)[number];
-/**
- * The ONE declared lifecycle of a breach review (rule 12). `pending` is the only start; a person decides it
- * (`accepted` or `rejected`); a later passing run supersedes a pending or accepted review. `rejected` and `superseded`
- * are final. A lapsed acceptance stays `accepted` with its end date in the past (time decides it, not a write).
- */
-export const FAIRNESS_BREACH_REVIEW_TRANSITIONS: Readonly<Record<FairnessBreachReviewStatus, readonly FairnessBreachReviewStatus[]>> = {
-  pending: ["accepted", "rejected", "superseded"],
-  accepted: ["superseded"],
-  rejected: [],
-  superseded: [],
-};
-
 export const FAIRNESS_EVALUATION_STATUSES = ["active", "archived"] as const;
 export type FairnessEvaluationStatus = (typeof FAIRNESS_EVALUATION_STATUSES)[number];
-/** an evaluation is archived, never deleted (its runs cite it); archiving is final, so a run's definition never changes */
-export const FAIRNESS_EVALUATION_TRANSITIONS: Readonly<Record<FairnessEvaluationStatus, readonly FairnessEvaluationStatus[]>> = {
-  active: ["archived"],
-  archived: [],
-};
-
-/** may a row move from `from` to `to` under its declared table? (the one check every write path uses) */
-export function lifecycleAllows<S extends string>(table: Readonly<Record<S, readonly S[]>>, from: S, to: S): boolean {
-  return table[from]?.includes(to) ?? false;
-}
+// The two lifecycles (breach review, evaluation) are declared as ADR-0348 machines in state-machines.ts.
 
 /** the signed evidence body's version tag (the DB CHECK on `fairness_run_evidence` reads it) */
 export const FAIRNESS_RUN_EVIDENCE_VERSION = "regulait.fairness-run.v1";
@@ -166,8 +196,11 @@ export const createModelInputDatasetSchema = z
     favourableLabel: z.string().trim().min(1).max(FAIRNESS_LIMITS.maxCellChars),
     protectedAttributes: z.array(columnName).min(1).max(FAIRNESS_LIMITS.maxAttributes),
     inputColumns: z.array(columnName).min(1).max(FAIRNESS_EVALUATION_LIMITS.maxInputColumns),
-    /** the card the dataset is for: its project's cascade PII mode governs the upload (decision 3) */
+    /** the card the dataset is for */
     cardId: z.string().uuid(),
+    /** the project the evaluation's runs attribute to: its compliance cascade's PII mode governs the upload with the
+     * org default as the floor (decision 3). A model card has no project of its own. */
+    projectId: z.string().uuid().nullish(),
   })
   .strict()
   .refine(

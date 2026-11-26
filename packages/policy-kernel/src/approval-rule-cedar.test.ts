@@ -1,5 +1,8 @@
 /**
- * ADR-0239 slice 2 — the Cedar approval-rule MATCH against the hand-written one (`matchingApprovalRules`).
+ * ADR-0239 slice 2 — the Cedar approval-rule MATCH against the hand-written one. P8a (2026-11-21) removed the
+ * hand-written `matchingApprovalRules` from the kernel; it lives on below, transcribed independently, as the
+ * differential oracle (`referenceMatchingApprovalRules`), so the Cedar evaluator is still held to the exact answers the
+ * kernel gave before the move.
  *
  * The differential properties generate rules and calls from small pools (so matches, near-misses and every scope
  * shape occur often) and require the two to agree: on the matched set in precedence order, and on the whole kernel
@@ -10,8 +13,8 @@ import fc from "fast-check";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import {
   APPROVAL_RULE_ENGINE_ERROR_RULE_ID,
+  compareApprovalRulePrecedence,
   evaluate,
-  matchingApprovalRules,
   matchingApprovalRulesWith,
   type ApprovalRule,
   type ApprovalRuleEvaluator,
@@ -24,6 +27,36 @@ import {
   cedarApprovalRuleEvaluator,
   cedarApprovalRuleEvaluatorUnfiltered,
 } from "./approval-rule-cedar.js";
+
+/**
+ * THE ORACLE: the pre-Cedar kernel predicate, transcribed conjunct for conjunct (subject: a user-scoped or unscoped
+ * rule binds its own user only; server: `all` or this server; deploy mode: unscoped, or contained in the call's
+ * context; tool: only null is "every tool", so an absent toolName matches no tool; writeOnly only on a write), sorted
+ * by ADR-0229 precedence.
+ */
+function referenceMatchingApprovalRules(
+  rules: readonly ApprovalRule[],
+  ctx: { userId: string; serverId: string; tool: { name: string; kind: string }; deployContext?: readonly string[] | null | undefined },
+): ApprovalRule[] {
+  return rules
+    .filter(
+      (r) =>
+        ((r.scope ?? "user") === "user" ? r.userId === ctx.userId : true) &&
+        ((r.serverScope ?? "server") === "all" ? true : r.serverId === ctx.serverId) &&
+        (r.deployMode == null ? true : (ctx.deployContext ?? []).includes(r.deployMode)) &&
+        (r.toolName === null || r.toolName === ctx.tool.name) &&
+        (!r.writeOnly || ctx.tool.kind === "write"),
+    )
+    .sort(compareApprovalRulePrecedence);
+}
+/** the oracle as an engine, for whole-Decision comparisons now that "no engine" refuses */
+const referenceApprovalRuleEvaluator: ApprovalRuleEvaluator = {
+  engine: "reference",
+  matching: (rules, ctx) => ({
+    kind: "matched",
+    rules: referenceMatchingApprovalRules(rules, { userId: ctx.userId, serverId: ctx.serverId, tool: { name: ctx.toolName, kind: ctx.toolKind }, deployContext: ctx.deployContext }),
+  }),
+};
 
 const USERS = ["u-1", "u-2", 'u-"3'];
 const SERVERS = ["s-1", "s-2"];
@@ -85,7 +118,7 @@ describe("ADR-0239 slice 2 — Cedar approval-rule matching agrees with the hand
   it("returns the same matched rules, in the same precedence order", () => {
     fc.assert(
       fc.property(arbCall, fc.array(arbRule, { maxLength: 12 }), (call, rules) => {
-        const legacy = ids(matchingApprovalRules(rules, ctxOf(call)));
+        const legacy = ids(referenceMatchingApprovalRules(rules, ctxOf(call)));
         for (const ev of [cedarApprovalRuleEvaluator, cedarApprovalRuleEvaluatorUnfiltered]) {
           const v = matchingApprovalRulesWith(ev, rules, ctxOf(call));
           expect(v.kind).toBe("matched");
@@ -99,7 +132,7 @@ describe("ADR-0239 slice 2 — Cedar approval-rule matching agrees with the hand
   it("produces the same kernel Decision (effect, rule id, approver, trace and reason)", () => {
     fc.assert(
       fc.property(arbCall, fc.array(arbRule, { maxLength: 8 }), (call, rules) => {
-        expect(evaluate(inputFor(call, rules, cedarApprovalRuleEvaluator))).toEqual(evaluate(inputFor(call, rules)));
+        expect(evaluate(inputFor(call, rules, cedarApprovalRuleEvaluator))).toEqual(evaluate(inputFor(call, rules, referenceApprovalRuleEvaluator)));
       }),
       { numRuns: 2000 },
     );
@@ -109,7 +142,7 @@ describe("ADR-0239 slice 2 — Cedar approval-rule matching agrees with the hand
     fc.assert(
       fc.property(arbCall, fc.array(arbRule, { minLength: 257, maxLength: 300 }), (call, rules) => {
         const v = matchingApprovalRulesWith(cedarApprovalRuleEvaluatorUnfiltered, rules, ctxOf(call));
-        expect(v.kind === "matched" ? ids(v.rules) : v).toEqual(ids(matchingApprovalRules(rules, ctxOf(call))));
+        expect(v.kind === "matched" ? ids(v.rules) : v).toEqual(ids(referenceMatchingApprovalRules(rules, ctxOf(call))));
       }),
       { numRuns: 10 },
     );
@@ -143,6 +176,18 @@ describe("ADR-0239 slice 2 — fail closed", () => {
     expect(d.reason).toContain("engine down");
   });
 
+  it("P8a: no evaluator with an approval rule present refuses the call (the hand-written default is gone)", () => {
+    const d = evaluate(inputFor(call, [rule]));
+    expect(d).toMatchObject({ effect: "deny", ruleId: APPROVAL_RULE_ENGINE_ERROR_RULE_ID });
+    expect(d.reason).toContain("no approval-rule evaluator is configured");
+    expect(matchingApprovalRulesWith(null, [rule], ctxOf(call))).toEqual({ kind: "error", message: "no approval-rule evaluator is configured" });
+  });
+
+  it("P8a: no evaluator and no approval rules is not a refusal (nothing to match, no engine needed)", () => {
+    expect(evaluate(inputFor(call, []))).toMatchObject({ effect: "allow" });
+    expect(matchingApprovalRulesWith(undefined, [], ctxOf(call))).toEqual({ kind: "matched", rules: [] });
+  });
+
   it("an evaluator that throws refuses the call", () => {
     const throwing: ApprovalRuleEvaluator = {
       engine: "throwing",
@@ -169,4 +214,40 @@ describe("ADR-0239 slice 2 — the policies", () => {
     if (answer.type === "success") expect(answer.validationErrors).toEqual([]);
     for (const text of Object.values(approvalRulePolicySet(3))) expect(text).not.toMatch(/u-1|s-1|read_rows/);
   });
+});
+
+/**
+ * P8a, owner requirement (2026-11-24): retiring the hand-written matcher must never WIDEN access. Strictness rank:
+ * allow < require_approval < deny. Over generated calls that also vary the grant and the kill-switch posture (so the
+ * legacy kernel denies often), every Decision on Cedar, and every Decision with NO engine at all, is at least as strict
+ * as the legacy Decision; in particular every call the legacy matcher denied is still denied.
+ */
+describe("P8a — retiring the hand-written matcher never widens access", () => {
+  const RANK = { allow: 0, require_approval: 1, deny: 2 } as const;
+  const POSTURES = [{ mode: "normal" }, { mode: "read_only" }, { mode: "halted" }, { mode: "require_approval", approverUserId: "a-9" }] as const;
+
+  it("every legacy deny is still a deny, and no decision becomes looser (Cedar engine and no engine)", () => {
+    const seen = { deny: 0, require_approval: 0, allow: 0 };
+    fc.assert(
+      fc.property(arbCall, fc.array(arbRule, { maxLength: 8 }), fc.boolean(), fc.constantFrom(...POSTURES), (call, rules, granted, execution) => {
+        const at = (ev?: ApprovalRuleEvaluator) => {
+          const input = inputFor(call, rules, ev) as EvaluationInput & { execution: unknown; toolGrants: unknown };
+          return evaluate({ ...input, execution, toolGrants: granted ? input.toolGrants : [] } as EvaluationInput);
+        };
+        const legacy = at(referenceApprovalRuleEvaluator);
+        seen[legacy.effect]++;
+        for (const d of [at(cedarApprovalRuleEvaluator), at(undefined)]) {
+          expect(RANK[d.effect]).toBeGreaterThanOrEqual(RANK[legacy.effect]);
+          if (legacy.effect === "deny") expect(d.effect).toBe("deny");
+        }
+        // Cedar is not merely as strict: it is the same decision
+        expect(at(cedarApprovalRuleEvaluator)).toEqual(legacy);
+      }),
+      { numRuns: 3000 },
+    );
+    // non-vacuous: the generated inputs exercise all three legacy outcomes
+    expect(seen.deny).toBeGreaterThan(100);
+    expect(seen.require_approval).toBeGreaterThan(100);
+    expect(seen.allow).toBeGreaterThan(100);
+  }, PROPERTY_TIMEOUT_MS);
 });

@@ -200,6 +200,37 @@ variable "audit_retention_days" {
   default     = 2555
 }
 
+### Operator backups (ADR-0305 §2) ###
+
+variable "operator_backups" {
+  description = "Create the operator's backup bucket (versioned, SSE-KMS under the stack key, never force-deleted) and its write-only Pod Identity role. Turn off only when backups go to a PersistentVolumeClaim instead (spec.backup.destinationClaimName)."
+  type        = bool
+  default     = true
+}
+
+variable "backup_installation_name" {
+  description = "metadata.name of the RegulAItInstallation. The operator's backup Job runs as the ServiceAccount <name>-backup in gateway_namespace, and the Pod Identity association names exactly that account."
+  type        = string
+  default     = "regulait"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,44}[a-z0-9])?$", var.backup_installation_name))
+    error_message = "backup_installation_name must be a Kubernetes name of at most 46 characters (the ServiceAccount adds \"-backup\")."
+  }
+}
+
+variable "backup_retention_days" {
+  description = "Days a backup stays the current version before the bucket's lifecycle rule expires it. This is the only deletion: no principal is granted s3:DeleteObject."
+  type        = number
+  default     = 30
+}
+
+variable "backup_noncurrent_version_retention_days" {
+  description = "Days an overwritten (noncurrent) backup version is kept. Keep it shorter than backup_retention_days."
+  type        = number
+  default     = 7
+}
+
 ### Models ###
 
 variable "bedrock_model_ids" {

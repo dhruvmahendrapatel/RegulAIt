@@ -234,10 +234,12 @@ export default function InboxPage() {
           onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
       </Field>
       <div className={v.row}>
-        <Button size="sm" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+        {/* UIW-06: the server requires the reason for either decision (override_reason_required,
+            self_review_reason_required), so Deny waits for it exactly as Approve does */}
+        <Button size="sm" disabled={deciding === a.id || missingReason} onClick={() => void decide(a, "denied")}>Deny</Button>
         <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason || missingReason} onClick={() => void decide(a, "approved")}>Approve</Button>
       </div>
-      {missingReason && <span className={v.faint}>Approve unlocks once a reason is entered</span>}
+      {missingReason && <span className={v.faint}>Approve and Deny unlock once a reason is entered</span>}
       {toolCall && signatureModeOf(a) === "passkey" && (
         <span className={v.faint}>
           Signs with your passkey

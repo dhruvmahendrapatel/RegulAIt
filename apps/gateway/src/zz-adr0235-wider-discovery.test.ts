@@ -151,7 +151,7 @@ describe("ADR-0235 wider discovery sources", () => {
     // start from the migration's default for this file (other suites never turn a family on)
     await db.update(discoverySettings).set({ saasSourcesEnabled: false, identitySourcesEnabled: false, mlPlatformSourcesEnabled: false }).where(eq(discoverySettings.id, 1));
     const st = await inject("GET", "/v1/discovery/settings", adminKey);
-    expect(st.json().families).toEqual({ saas: false, identity: false, ml_platform: false });
+    expect(st.json().families).toEqual({ saas: false, identity: false, ml_platform: false, agent_registry: false });
     const c = await inject("POST", "/v1/discovery/sources", adminKey, { name: `entra-${RUN}`, kind: "idp_entra", target: { tenantId: TENANT }, scope: { orgLevel: true, include: [] } });
     expect(c.statusCode, c.body).toBe(409);
     expect(c.json().error).toBe("family_disabled");
@@ -170,7 +170,7 @@ describe("ADR-0235 wider discovery sources", () => {
     const on = await session(familiesStep(["identity"]));
     const r = await on("PUT", "/v1/discovery/settings", { version: v0, families: { identity: true } });
     expect(r.statusCode, r.body).toBe(200);
-    expect(r.json().families).toEqual({ saas: false, identity: true, ml_platform: false });
+    expect(r.json().families).toEqual({ saas: false, identity: true, ml_platform: false, agent_registry: false });
 
     // off is free (no grant), then back on for the next test
     const off = await inject("PUT", "/v1/discovery/settings", adminKey, { version: v0 + 1, families: { identity: false } });

@@ -1,3 +1,0 @@
-<!-- fold: state-recap -->
-
-**2026-11-15 - lane E4, gap G8: session distillation into the Shared Project context store, designed and paused ([ADR-0316](../decisions/0316-session-distillation-shared-context.md)).** A person distils their own project-attributed conversation into a revision of the existing store, through the one context write path and one governed, billed dispatch. Off by default per project; readers see a distilled revision only while they could read its inputs. Implementation is paused (owner direction, pilot focus); a working first slice is parked unmerged on `builder/e4-session-distillation`.

@@ -4,5 +4,5 @@
   {"input": "mcp-project-source.json", "policy": "enforce", "want": "deny"},
   {"input": "mcp-project-source.json", "policy": "audit", "want": "none"},
   {"input": "mcp-no-provenance.json", "policy": "enforce", "want": "deny"},
-  {"input": "builtin-bash.json", "policy": "none", "want": "none"}
+  {"input": "builtin-bash.json", "policy": "none", "want": "deny"}
 ]

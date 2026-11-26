@@ -18,6 +18,7 @@ import {
   type GovernedActor,
   type ToolRef,
 } from "./index.js";
+import { cedarApprovalRuleEvaluator } from "./approval-rule-cedar.js";
 
 const EXEC: ExecutionPosture = { mode: "normal" };
 const USER = "user-1";
@@ -256,10 +257,11 @@ describe("ADR-0188 S2 — the tool path intersection", () => {
     it("the sponsor's approval comes first, and any later deny still wins over it", () => {
       const rule = { id: "rule-1", userId: USER, serverId: SERVER, toolName: null, writeOnly: false, approverUserId: "boss" };
       const held = link(0, { abacDecision: { effect: "require_approval", policyId: "pol-hold", approverUserId: "approver-1" } });
-      const d = evaluate(toolInput(actor(1, {}, [held]), { approvalRules: [rule] }));
+      // P8a: approval rules need an engine (the hand-written default is gone); the one the gateway injects
+      const d = evaluate(toolInput(actor(1, {}, [held]), { approvalRules: [rule], approvalRuleEvaluator: cedarApprovalRuleEvaluator }));
       expect(d.effect).toBe("require_approval");
       expect(d.ruleId).toBe("rule-1");
-      const denied = evaluate(toolInput(actor(1, {}, [link(0, { entitlements: ents({ tools: [] }) })]), { approvalRules: [rule] }));
+      const denied = evaluate(toolInput(actor(1, {}, [link(0, { entitlements: ents({ tools: [] }) })]), { approvalRules: [rule], approvalRuleEvaluator: cedarApprovalRuleEvaluator }));
       expect(denied.ruleId).toBe("actor-allow-list");
     });
   });

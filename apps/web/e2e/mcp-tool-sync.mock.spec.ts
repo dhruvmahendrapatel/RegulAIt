@@ -49,7 +49,7 @@ async function mock(page: Page, sync: { status: number; body: unknown }) {
 
 async function openTools(page: Page) {
   await page.goto("/ui/admin/mcp-servers");
-  await page.getByRole("link", { name: `Show tools on ${SERVER.name}` }).click();
+  await page.getByRole("button", { name: `Show tools on ${SERVER.name}` }).click();
   await expect(page.getByText(`Tools on ${SERVER.name}`)).toBeVisible();
 }
 

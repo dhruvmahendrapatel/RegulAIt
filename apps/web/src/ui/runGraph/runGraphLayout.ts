@@ -7,7 +7,6 @@
  * canvas, so dagre stays out of the main bundle.
  */
 import dagre from "@dagrejs/dagre";
-import type { RunPathGraph } from "./runGraphModel";
 
 export const NODE_WIDTH = 220;
 export const NODE_HEIGHT = 72;
@@ -25,7 +24,13 @@ export interface RunGraphLayout {
   height: number;
 }
 
-export function layoutRunGraph(graph: Pick<RunPathGraph, "nodes" | "edges">): RunGraphLayout {
+/** what the layout reads: node ids and directed edges (the run graph, and since ADR-0341 the pipeline builder) */
+export interface LayoutInput {
+  nodes: ReadonlyArray<{ id: string }>;
+  edges: ReadonlyArray<{ from: string; to: string; kind: string }>;
+}
+
+export function layoutRunGraph(graph: LayoutInput): RunGraphLayout {
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: "LR", ranksep: 56, nodesep: 20, marginx: 8, marginy: 8 });
   g.setDefaultEdgeLabel(() => ({}));

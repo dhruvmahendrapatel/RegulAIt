@@ -1,0 +1,15 @@
+{
+  "adr": "ADR-0349",
+  "lane": "E30",
+  "tracking": "lane E30 slice 4 (decision in PR #925): the brief is API-only (lane rule 3); the schedules screen is for the design builder on #453",
+  "gaps": {
+    "POST /v1/workflows/schedules": "creates a workflow schedule that starts a template on a cron calendar as its creator (a relaxed overlap policy is a settings_relax step-up, audited)",
+    "GET /v1/workflows/schedules": "lists workflow schedules (paginated) with their state, next fire time and settings",
+    "GET /v1/workflows/schedules/:scheduleId": "shows one workflow schedule and its 50 most recent fire times with their outcomes",
+    "PATCH /v1/workflows/schedules/:scheduleId": "edits a workflow schedule's calendar, change, overlap, catch-up or jitter (audited; a relaxed overlap policy is a step-up)",
+    "POST /v1/workflows/schedules/:scheduleId/pause": "pauses a workflow schedule with a note (audited)",
+    "POST /v1/workflows/schedules/:scheduleId/resume": "resumes a paused workflow schedule from now, with a note (audited)",
+    "POST /v1/workflows/schedules/:scheduleId/backfill": "starts one instance per fire time in a past range, at most 100, under the overlap policy (audited)",
+    "POST /v1/workflows/schedules/run-due": "runs the workflow schedule sweep now (the same code the scheduler job runs)"
+  }
+}

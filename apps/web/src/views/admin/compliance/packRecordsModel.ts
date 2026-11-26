@@ -119,6 +119,7 @@ export const PACK_REFUSALS: RefusalSentences = {
   unknown_pack_control: "This pack has no control with that reference.",
   control_is_auto_evidenced:
     "That control is evidenced from the ledgers, so a person's statement cannot stand in for it.",
+  attestation_needs_a_person: "An attestation must be made by a named person. Sign in as yourself to attest.",
   unknown_pack_report: "That report no longer exists.",
   pack_scope_not_entitled: "This report covers projects outside what you may see.",
 };
