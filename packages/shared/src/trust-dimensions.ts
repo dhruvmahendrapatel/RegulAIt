@@ -25,6 +25,7 @@ import { ISO_PACK_DIMENSIONS } from "./iso-packs.js";
 import { PRIVACY_PACK_DIMENSIONS } from "./privacy-packs.js";
 import { SECTOR_PACK_DIMENSIONS } from "./sector-packs.js";
 import { AIUC_PACK_DIMENSIONS } from "./aiuc-packs.js";
+import { EU_AI_ACT_DEPLOYER_DIMENSIONS } from "./eu-ai-act-deployer.js";
 
 export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension>> = {
   // ADR-0295 (P18 B4): the attestation-only ISO/IEC 42001@2, 23894 and 42005 controls (classified in iso-packs.ts)
@@ -35,6 +36,8 @@ export const CONTROL_DIMENSION_OVERRIDES: Readonly<Record<string, TrustDimension
   ...SECTOR_PACK_DIMENSIONS,
   // ADR-0319 (gap G11): AIUC-1 requirements, classified by their principle (aiuc-packs.ts)
   ...AIUC_PACK_DIMENSIONS,
+  // ADR-0351 slice 2: the attestation-only deployer duties (eu-ai-act-deployer.ts)
+  ...EU_AI_ACT_DEPLOYER_DIMENSIONS,
   // EU AI Act — attestation-only
   "eu-ai-act:art-72-post-market-monitoring": "reliability",
   "eu-ai-act:art-4-ai-literacy": "compliance",
