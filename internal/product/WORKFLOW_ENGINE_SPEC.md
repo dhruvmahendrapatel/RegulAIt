@@ -76,6 +76,14 @@ number** of workflow templates, composed from a shared library of reusable stage
 - **Notification / webhook** — alert stakeholders or trigger an external system at any point.
 - **Conditional branch** — route to different subsequent stages based on outcome (e.g. "if security scan finds a critical issue, route to a remediation sub-workflow instead of merge approval").
 
+**Versions, canary and migration (2026-11-25, ADR-0340 slice 3 on ADR-0341's version store).** A template's versions
+are the builder's `workflow_template_versions` rows. Every new instance is pinned to the version that served it, and
+finishes on it. A publish may open a canary: a share (1 to 50 percent) of NEW instances gets the new version, the rest
+the one it replaced, until the canary is promoted or rolled back; no other publish lands meanwhile. A running instance
+moves to another version only through a governed migration: a dry-run diff, an approval by another admin in the one
+queue, and a re-check under the instance lock when it is applied. A migration may change only what is ahead of the
+instance.
+
 **Workflow definition**: expressed as a declarative, version-controllable spec (YAML/JSON), not
 only a drag-and-drop builder UI — consistent with the policy-as-code principle in the governance
 spec. Example:
