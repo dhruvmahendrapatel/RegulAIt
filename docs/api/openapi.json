@@ -1136,6 +1136,7 @@
                 "eval_run",
                 "compliance_profile",
                 "model_call",
+                "workflow_fragment",
                 "custom_classifier",
                 "decision_table",
                 "agent_risk_proof",

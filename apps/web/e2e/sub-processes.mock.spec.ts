@@ -84,10 +84,10 @@ test.describe("ADR-0341 follow-up: the sub-process catalogue", () => {
     await mockApi(page);
     await page.goto("/ui/admin/workflow-templates/sub-processes");
     await expect(page.getByRole("heading", { name: "Sub-process catalogue" })).toBeVisible();
-    // a row that opens its record is a link (the kit's clickable row)
-    await expect(page.getByRole("link", { name: "Open Security review" })).toContainText("v2 · 3 stages");
-    await expect(page.getByRole("link", { name: "Open Release checks" })).toContainText("Nothing approved yet");
-    await expect(page.getByRole("link", { name: "Open Release checks" })).toContainText("Waiting for review");
+    // a row that opens its record in place carries a button in its primary cell (the kit Table, UIS-04)
+    await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: "Open Security review" }) })).toContainText("v2 · 3 stages");
+    await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: "Open Release checks" }) })).toContainText("Nothing approved yet");
+    await expect(page.getByRole("row").filter({ has: page.getByRole("button", { name: "Open Release checks" }) })).toContainText("Waiting for review");
     await expectAxeClean(page, "the catalogue");
   });
 
@@ -127,13 +127,13 @@ test.describe("ADR-0341 follow-up: the sub-process catalogue", () => {
   test("proposes the next version from the latest one, and refuses while a version waits for review; axe-clean", async ({ page }) => {
     const mock = await mockApi(page);
     await page.goto("/ui/admin/workflow-templates/sub-processes");
-    await page.getByRole("link", { name: "Open Release checks" }).click();
+    await page.getByRole("button", { name: "Open Release checks" }).click();
     const waiting = page.getByRole("dialog", { name: "Release checks" });
     await expect(waiting.getByRole("button", { name: "Propose a new version" })).toHaveAttribute("aria-disabled", "true");
     await expect(waiting).toContainText("A version is waiting for review");
     await waiting.getByRole("button", { name: "Close" }).click();
 
-    await page.getByRole("link", { name: "Open Security review" }).click();
+    await page.getByRole("button", { name: "Open Security review" }).click();
     const detail = page.getByRole("dialog", { name: "Security review" });
     await expect(detail.getByRole("row").filter({ hasText: "v2" })).toContainText("Approved");
     await expectAxeClean(page, "the sub-process dialog");

@@ -89,7 +89,8 @@ afterAll(async () => {
 });
 
 /** machines whose column has no CHECK constraint yet; the migration that adds one is a follow-up batch */
-const NO_CHECK_YET = new Set(["approval"]);
+// workflow_fragment_version (ADR-0341 §9) is read from its approval row, so it shares approvals.status and its missing CHECK
+const NO_CHECK_YET = new Set(["approval", "workflow_fragment_version"]);
 
 describe("ADR-0348 machines equal their CHECK constraints", () => {
   it.each(Object.values(STATE_MACHINES).map((m) => [m.def.id, m] as const))("%s", async (_id, m) => {

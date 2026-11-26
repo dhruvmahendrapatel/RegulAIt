@@ -379,6 +379,12 @@
     "limit": "2.5 kB"
   },
   {
+    "name": "chunk: SubProcessesPage",
+    "path": "dist/assets/SubProcessesPage-????????.js",
+    "gzip": true,
+    "limit": "5.0 kB"
+  },
+  {
     "name": "chunk: SupplierAccessPanel",
     "path": "dist/assets/SupplierAccessPanel-????????.js",
     "gzip": true,

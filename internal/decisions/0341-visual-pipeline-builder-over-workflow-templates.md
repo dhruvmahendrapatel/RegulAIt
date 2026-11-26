@@ -139,8 +139,8 @@ Every rule here runs in the gateway on validate and again on publish; the UI onl
   - The graph libraries the two canvases now share are split out by the bundler as `runGraphLayout-*` (70.5 kB), under
     a new `lazy: graph libraries (shared)` ceiling of 74 kB. The unchanged `lazy: RunGraphCanvas` entry now measures 1.4 kB.
   - The entry grows by 0.08 kB (the route).
-  - `all JS` goes from 1,149.6 kB to 1,160.3 kB, over its 1,150 kB ceiling. Raising it is an owner decision
-    (ADR-0196), asked for in slice 2's PR.
+  - `all JS` went from 1,149.6 kB to 1,160.3 kB, over its then 1,150 kB ceiling. That ceiling was removed instead
+    (ADR-0344, addendum of 2026-11-21): the JS gate counts first-load JS only, with one ceiling per chunk.
 - Slice 3 adds the diff view, version history and the publish flow (relaxation acceptance, step-up).
 
 ### 8. Open source first (ADR-0176)
@@ -200,6 +200,7 @@ Owner-approved addition to this lane, recorded here rather than in a new ADR (ma
 2. Should non-admins (for example a business role) be able to edit drafts while only admins publish? Built meanwhile:
    admin only.
 3. A dedicated step-up kind for template publishes instead of `settings_relax` with an op?
-4. Template versions are kept in two places: `workflow_template_versions` here, and E21's `config_versions` rows of type
-   `workflow_template` (lane E21, #894, not yet merged). Which one is canonical? Built meanwhile: sub-process pins key
-   to `workflow_template_versions`.
+4. ~~Template versions are kept in two places: `workflow_template_versions` here, and E21's `config_versions` rows.
+   Which one is canonical?~~ Settled 2026-11-25: `workflow_template_versions` is canonical. E21's slice 3 was rebuilt on
+   it and the `config_versions` artifact type was dropped (ADR-0340, addendum of 2026-11-25). Sub-process pins key to
+   `workflow_template_versions`.
