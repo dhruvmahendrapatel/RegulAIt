@@ -92,6 +92,8 @@ const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "In
 const CampaignsPage = screen(() => import("./screens/admin-access-reviews"), "CampaignsPage");
 const RecommendationsPage = screen(() => import("./screens/admin-access-reviews"), "RecommendationsPage");
 const SodRulesPage = screen(() => import("./screens/admin-access-reviews"), "SodRulesPage");
+const AgentRiskPage = screen(() => import("./screens/admin-agent-risk"), "AgentRiskPage");
+const AgentRiskDetailPage = screen(() => import("./screens/admin-agent-risk"), "AgentRiskDetailPage");
 const PosturePage = screen(() => import("./screens/admin-overview"), "PosturePage");
 const RedTeamPage = screen(() => import("./screens/admin-quality-security"), "RedTeamPage");
 const AdmissionReviewPage = screen(() => import("./screens/admin-integrations"), "AdmissionReviewPage");
@@ -334,6 +336,11 @@ function ApplicationRoutes() {
                 <Route path="recommendations" element={<RecommendationsPage />} />
                 {/* ADR-0091 */}
                 <Route path="sod" element={<SodRulesPage />} />
+                {/* ADR-0339 */}
+                <Route path="agent-risk" element={<AgentRiskPage />} />
+                {/* one route per subject kind, so a detail URL never carries an unknown kind (ADR-0339) */}
+                <Route path="agent-risk/agent/:id" element={<AgentRiskDetailPage kind="agent" />} />
+                <Route path="agent-risk/builder_agent/:id" element={<AgentRiskDetailPage kind="builder_agent" />} />
                 <Route path="posture" element={<PosturePage />} />
                 <Route path="redteam" element={<RedTeamPage />} />
                 <Route path="reports" element={<ReportsPage />} />
