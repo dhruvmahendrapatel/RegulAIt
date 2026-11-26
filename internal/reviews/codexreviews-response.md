@@ -123,6 +123,18 @@ One PR of ours is in review at a time (rule 14). Security-checklist slices go fi
 | 16 | `builder/codex-archive-review-spikes` | C-07 (archive, nothing deleted) |
 | 17 | `builder/codex-adr0380-api-contract` | C-01 (its reserved ADR number 0380, written first) |
 | 18 | `builder/codex-adr0381-compat-optimisation` | P-07 (its reserved ADR number 0381, written first) |
+| MCP | `builder/codex-mcp-full-value` | CXR-MCP-001 (owner, 2026-11-24: ahead of slice 19) |
+| 19 | `builder/codex-home-unknown-state` | HME-001 |
+| 20 | `builder/codex-approvals-outcome` | APR-001, APR-002, the Inbox Escape-while-pending bug, CST-006 (single-flight `useApiAction.run`, `busy` through `ReasonModal`) |
+| 21 | `builder/codex-workbench-batch` | WBK-001..005 |
+| 22 | `builder/codex-workflow-recovery` | WFL-001..004 |
+| 23 | `builder/codex-sign-in-policy` | SSO-002, SSO-003 |
+| 24 | `builder/codex-git-pm-connections` | CON-001..003 |
+| 25 | `builder/codex-identity-linking` | IDM-001, IDM-003, SSO-004 |
+| 26 | `builder/codex-list-continuity` | APR-003 |
+| 27 | `builder/codex-home-attention` | UXP-001, BRN-UX-01/02, mockup 11 (aliases, subtitles, setup card; specialist suites stay visible) |
+| 28 | `builder/codex-run-commands` | BRN-PRD-02, mockup 13 (pending guard on run commands, outcomes, blocker-first summary; estimates gated on E2) |
+| 29 | `builder/codex-refusal-guidance` | BRN-UX-03, mockup 10 (sentences for refusal codes that have none) |
 
 **The master's pre-check (2026-11-22)** suggested triage-low for UIS-03, UIS-06, UIS-07, ADM-009 and S-07. On our
 rescoring each is at or above F×S 5 and the fix is small, so they stay ACCEPT-build. The master may overrule. Its
@@ -132,6 +144,38 @@ the same file and must merge first. None of them is a checklist gap (see the INT
 **Handed to other lanes** (recorded here and in the PR body for the master; their files are not edited here):
 - **E35 (#960):** UIW-03 and the ChatPage part of UIW-02.
 - **E50 (#1133):** UIW-04 and UIW-05. P-08 is gated on E50.
+
+## Codex iterations 10–12 (2026-11-24)
+
+Our reply is #1184 comment 7121455284. Each claim was checked against origin/main. The full reasoning is in that comment.
+
+| Item | Verdict | Where |
+| --- | --- | --- |
+| CXR-MCP-001 (F6×S5=30) | ACCEPT-build. `showValue` cut each value at 400 characters (`mcpPinningModel.ts`), and the re-approval card rendered only those strings. | Slice MCP |
+| Inbox Escape while pending (F5×S3=15) | ACCEPT-build. `closeItem` cleared `openId` unconditionally, and the drawer had no busy guard. | Slice 20 |
+| CST-006 | ACCEPT-build. Same root cause: no single-flight in `run`, and `ReasonModal` does not pass `busy`. | Slice 20 |
+| BRN-SEC-01 | Agree. The inherited policy is stored but not applied at call time (`enforced:false`). | Lane L1 (D-2026-11-23-02) |
+| BRN-SEC-02, 03, 05 | Narrow. These are test suites, not defects. | L1/E2, E52, security reviewers |
+| BRN-SEC-04 | Agree | The slice 11 retest plan |
+| BRN-SEC-06 | Agree | Covered by #1230 and #1236 (spa-journeys on UI PRs) |
+| BRN-UX-01, 02, mockup 11 | Narrow | Slice 27 |
+| BRN-UX-03, mockup 10 | Narrow | Slice 29 |
+| BRN-UX-04 | Gated. Needs SEC-01 enforcement and a preview contract. | L1/E38 |
+| BRN-UX-05 | Agree | Slice 20 acceptance |
+| BRN-UX-07 | Agree | Fixtures in slices 19, 21, 24, 25 |
+| BRN-PRD-02, mockup 13 | Narrow | Slice 28 |
+| BRN-PRD-03 | Agree, no new work | Slice 13 (P-06) |
+| BRN-UX-06, PRD-01, PRD-04, PRD-05 | Backlog (owner) | #1242, #1243, #1244, #1245 |
+| Mockup 09 | Narrow. Other lanes' files. | E35, E50 |
+| Mockup 12 | Agree | Slice MCP |
+| Retest evidence (REV-002, S-08, protected writes, guardrail/kit, merged UI) | Accepted as scoped evidence. A card closes only for the scope its test covered. | Card ledger |
+
+**Owner answers (2026-11-24):**
+- CXR-MCP-001 is built before slice 19.
+- #1222 is fixed by the CX lane (#1246).
+- The specialist suites stay visible in first-run navigation.
+- The four design proposals become backlog issues.
+- No automated four-hour wake for Codex.
 
 ## Card ledger
 

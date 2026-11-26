@@ -14,6 +14,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { SubpageTrail } from "../../../ui/ListPreview";
 import { Badge, Button, Card, EmptyState, Field, RecordError, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import { useAction, useUsers } from "../adminKit";
+import { DiffLineItem } from "./McpDiffLine";
 import { ActionError } from "./McpHighRisk";
 import {
   PAGE,
@@ -77,8 +78,6 @@ export function McpChangedSinceApprovalCard() {
     </Card>
   );
 }
-
-const text = (s: string | null) => (s === null ? "—" : <span className={`${v.mono} ${m.value}`}>{s}</span>);
 
 /** One server's changes: each changed item with its diff, and the re-approval. */
 export default function McpDefinitionPinsPage() {
@@ -189,12 +188,10 @@ export default function McpDefinitionPinsPage() {
                   />
                   Re-approve {pinLabel(p)}
                 </label>
-                {/* each operation as "what, where: approved → now served", all of it text */}
+                {/* each operation as "what, where: approved → now served", all of it text, with the full values on request */}
                 <ul aria-label={`What changed in ${pinLabel(p)}`}>
                   {describeDiff(p.approved, p.diff).map((l, i) => (
-                    <li key={i}>
-                      {l.action} <span className={v.mono}>{l.path}</span>: {text(l.before)} → {text(l.after)}
-                    </li>
+                    <DiffLineItem key={i} line={l} />
                   ))}
                 </ul>
               </Card>
