@@ -893,14 +893,20 @@ export async function auditCompliancePack(
   });
 }
 
+/** an attestation is a named person's statement: one with no user identity behind it (the bootstrap token) is refused */
+export const ATTESTATION_NEEDS_A_PERSON = "attestation_needs_a_person";
+
 /**
  * Record a person's attestation on an attestation-required control, and audit it. The ONE write path for pack
- * attestations: the pack route and the ADR-0351 deployer register both call it, after their own checks.
+ * attestations: the pack route and the ADR-0351 deployer register both call it, after their own checks (each refuses
+ * a caller with no user identity, audited, before calling). The row and its audit row are written in one
+ * transaction, so an attestation is never left unaudited.
  */
 export async function recordPackAttestation(
   db: Db,
   args: {
-    actor: string | null;
+    /** the named person attesting; never null (ADR-0180: an unattributed attestation is not evidence) */
+    actor: string;
     pack: Pick<CompliancePackRow, "id" | "framework" | "version">;
     controlRef: string;
     statement: string;
@@ -910,35 +916,39 @@ export async function recordPackAttestation(
     detail?: Record<string, unknown>;
   },
 ) {
-  const [row] = await db
-    .insert(compliancePackAttestations)
-    .values({
-      packId: args.pack.id,
-      controlRef: args.controlRef,
-      statement: args.statement,
-      evidenceRef: args.evidenceRef,
-      validUntil: args.validUntil,
-      attestedByUserId: args.actor,
-    })
-    .returning();
-  await auditCompliancePack(
-    db,
-    args.actor,
-    args.pack.id,
-    COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
-    `attestation recorded for '${args.controlRef}' on pack '${args.pack.framework}' v${args.pack.version} — this ` +
-      `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
-      `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
-      `no evidence for it and does not claim to have`,
-    {
-      controlRef: args.controlRef,
-      validUntil: args.validUntil ? args.validUntil.toISOString() : null,
-      framework: args.pack.framework,
-      version: args.pack.version,
-      ...(args.detail ?? {}),
-    },
-  );
-  return row!;
+  if (!args.actor) throw new Error(ATTESTATION_NEEDS_A_PERSON);
+  return db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
+    const [row] = await tx
+      .insert(compliancePackAttestations)
+      .values({
+        packId: args.pack.id,
+        controlRef: args.controlRef,
+        statement: args.statement,
+        evidenceRef: args.evidenceRef,
+        validUntil: args.validUntil,
+        attestedByUserId: args.actor,
+      })
+      .returning();
+    await auditCompliancePack(
+      tx,
+      args.actor,
+      args.pack.id,
+      COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
+      `attestation recorded for '${args.controlRef}' on pack '${args.pack.framework}' v${args.pack.version} — this ` +
+        `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
+        `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
+        `no evidence for it and does not claim to have`,
+      {
+        controlRef: args.controlRef,
+        validUntil: args.validUntil ? args.validUntil.toISOString() : null,
+        framework: args.pack.framework,
+        version: args.pack.version,
+        ...(args.detail ?? {}),
+      },
+    );
+    return row!;
+  });
 }
 
 export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void {
@@ -1425,8 +1435,25 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
           `status is computed from the ledger and cannot be attested.`,
       });
     }
+    const person = req.authCtx.userId;
+    if (!person) {
+      // REFUSED, and audited: an attestation is a named person's statement, and the bootstrap token is nobody
+      await audit(
+        null,
+        id,
+        COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
+        `refused an attestation on '${body.controlRef}': the caller has no user identity. An attestation is the ` +
+          `customer's statement attributed to a named human; sign in as a person to attest`,
+        { controlRef: body.controlRef, error: ATTESTATION_NEEDS_A_PERSON },
+        "deny",
+      );
+      return reply.status(403).send({
+        error: ATTESTATION_NEEDS_A_PERSON,
+        detail: "an attestation must be made by a named person; the bootstrap token cannot attest",
+      });
+    }
     const row = await recordPackAttestation(db, {
-      actor: req.authCtx.userId ?? null,
+      actor: person,
       pack,
       controlRef: body.controlRef,
       statement: body.statement,

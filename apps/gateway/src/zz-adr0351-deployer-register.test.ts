@@ -12,6 +12,7 @@ import { DEPLOYER_ITEM_TRANSITIONS, EU_AI_ACT_DEPLOYER_FRAMEWORK } from "@regula
 import { buildApp } from "./app.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { DEPLOYER_REGISTER_RULE_IDS } from "./deployer-register.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -27,6 +28,10 @@ const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString(
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let packId: string;
+/** a NAMED admin: an attestation is a person's statement, so the bootstrap token cannot make one */
+let attesterId: string;
+let attesterKey: { authorization: string };
+const restores: Array<() => Promise<void>> = [];
 
 const get = async () => {
   const res = await app.inject({ method: "GET", url: "/v1/compliance/deployer-register", headers: ADMIN });
@@ -34,15 +39,22 @@ const get = async () => {
   return res.json();
 };
 const item = (reg: { items: Array<{ controlRef: string }> }, ref: string) => reg.items.find((i) => i.controlRef === ref) as Record<string, any>;
-const attest = (payload: Record<string, unknown>) =>
-  app.inject({ method: "POST", url: "/v1/compliance/deployer-register/attest", headers: ADMIN, payload });
+const attest = (payload: Record<string, unknown>, headers: Record<string, string> = attesterKey) =>
+  app.inject({ method: "POST", url: "/v1/compliance/deployer-register/attest", headers, payload });
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
   await app.ready();
+  restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
   await installLicenseFixture(app, { features: ["compliance_packs"], auth: ADMIN });
+  const u = await app.inject({ method: "POST", url: "/v1/users", headers: ADMIN, payload: { email: `adr0351-attester-${RUN}@example.com`, displayName: "adr0351 attester", isAdmin: true } });
+  expect(u.statusCode, u.body).toBe(201);
+  attesterId = u.json().id as string;
+  const k = await app.inject({ method: "POST", url: `/v1/users/${attesterId}/keys`, headers: ADMIN, payload: { name: "attester" } });
+  expect(k.statusCode, k.body).toBe(201);
+  attesterKey = { authorization: `Bearer ${k.json().token}` };
   const seeded = await app.inject({ method: "POST", url: "/v1/compliance/packs/seed", headers: ADMIN, payload: {} });
   expect(seeded.statusCode, seeded.body).toBe(201);
   const [pack] = await db
@@ -58,6 +70,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await removeLicenseFixture(db);
+  for (const r of restores.reverse()) await r();
   await app?.close();
 });
 
@@ -113,6 +126,22 @@ describe("attesting", () => {
     expect((await attest({ controlRef: `${EU_AI_ACT_DEPLOYER_FRAMEWORK}:nope`, statement: "s", evidenceRef: "d", reviewDate: inDays(30) })).statusCode).toBe(404);
   });
 
+  it("refuses an attestation with no named person behind it (the bootstrap token), audited, and writes nothing", async () => {
+    const before = await db.select().from(compliancePackAttestations).where(eq(compliancePackAttestations.packId, packId));
+    const res = await attest({ controlRef: ATTESTED, statement: `nobody ${RUN}`, evidenceRef: `doc-${RUN}`, reviewDate: inDays(90) }, ADMIN);
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("attestation_needs_a_person");
+    const after = await db.select().from(compliancePackAttestations).where(eq(compliancePackAttestations.packId, packId));
+    expect(after).toHaveLength(before.length);
+    const [refusal] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, DEPLOYER_REGISTER_RULE_IDS.attestRefused), sql`${auditLog.detail} ->> 'error' = 'attestation_needs_a_person'`))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(refusal).toMatchObject({ effect: "deny" });
+  });
+
   it("records who and when, moves the item to attested, and shows it in the register", async () => {
     const before = item(await get(), ATTESTED).state;
     const res = await attest({ controlRef: ATTESTED, statement: `DPIA done ${RUN}`, evidenceRef: `dpia-${RUN}`, reviewDate: inDays(180) });
@@ -122,6 +151,8 @@ describe("attesting", () => {
     const att = item(reg, ATTESTED);
     expect(att.state).toBe("attested");
     expect(att.attestation).toMatchObject({ statement: `DPIA done ${RUN}`, evidenceRef: `dpia-${RUN}` });
+    expect(res.json().attestation.attestedBy).toBe(attesterId);
+    expect(att.attestation.attestedBy).toBe(attesterId);
     expect(att.attestation.attestedAt).toBeTruthy();
     expect(att.attestation.reviewDate).toBeTruthy();
     const [audit] = await db
@@ -131,6 +162,7 @@ describe("attesting", () => {
       .orderBy(desc(auditLog.at))
       .limit(1);
     expect(audit?.detail).toMatchObject({ register: "eu-ai-act-deployer", transition: { from: before, event: "attest", to: "attested" } });
+    expect(audit?.userId).toBe(attesterId);
   });
 
   it("a passed review date makes the item review_due, and attesting again returns it to attested", async () => {
