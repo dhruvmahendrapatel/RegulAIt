@@ -4,8 +4,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { FAIRNESS_DEFAULT_THRESHOLDS } from "./fairness.js";
+import { FAIRNESS_BREACH_REVIEW_MACHINE, FAIRNESS_EVALUATION_MACHINE, STATE_MACHINES } from "./state-machines.js";
 import {
   FAIRNESS_EVALUATION_DEFAULT_SETTINGS,
+  FAIRNESS_GATE_TIER_DEFAULTS,
+  fairnessGateRequirement,
+  fairnessGateTiersOf,
   acceptFairnessBreachSchema,
   breachAcceptanceInForce,
   createFairnessEvaluationSchema,
@@ -22,9 +26,6 @@ import {
   templateColumns,
   unparseableOverCap,
   FAIRNESS_BREACH_REVIEW_STATUSES,
-  FAIRNESS_BREACH_REVIEW_TRANSITIONS,
-  FAIRNESS_EVALUATION_TRANSITIONS,
-  lifecycleAllows,
   type GateCandidateRun,
 } from "./fairness-evaluation.js";
 
@@ -191,20 +192,54 @@ describe("breaches and the promotion gate", () => {
   });
 });
 
-describe("the declared lifecycles (rule 12)", () => {
+describe("the declared lifecycles (ADR-0348 machines)", () => {
   it("a breach review starts pending, is decided once, and only supersession follows an acceptance", () => {
-    const T = FAIRNESS_BREACH_REVIEW_TRANSITIONS;
-    expect(Object.keys(T).sort()).toEqual([...FAIRNESS_BREACH_REVIEW_STATUSES].sort());
-    expect(lifecycleAllows(T, "pending", "accepted")).toBe(true);
-    expect(lifecycleAllows(T, "pending", "rejected")).toBe(true);
-    expect(lifecycleAllows(T, "accepted", "superseded")).toBe(true);
-    expect(lifecycleAllows(T, "accepted", "rejected")).toBe(false);
-    expect(lifecycleAllows(T, "rejected", "accepted")).toBe(false);
-    expect(lifecycleAllows(T, "superseded", "pending")).toBe(false);
-    expect(lifecycleAllows(T, "pending", "pending")).toBe(false);
+    const M = FAIRNESS_BREACH_REVIEW_MACHINE;
+    expect([...M.def.states]).toEqual([...FAIRNESS_BREACH_REVIEW_STATUSES]);
+    expect(STATE_MACHINES[M.def.id]).toBe(M);
+    expect(M.can("pending", "accept")).toBe(true);
+    expect(M.can("pending", "reject")).toBe(true);
+    expect(M.can("accepted", "supersede")).toBe(true);
+    expect(M.can("accepted", "reject")).toBe(false);
+    expect(M.can("rejected", "accept")).toBe(false);
+    expect(M.isTerminal("superseded")).toBe(true);
+    expect([...M.sourcesOf("supersede")].sort()).toEqual(["accepted", "pending"]);
   });
   it("archiving an evaluation is final", () => {
-    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "active", "archived")).toBe(true);
-    expect(lifecycleAllows(FAIRNESS_EVALUATION_TRANSITIONS, "archived", "active")).toBe(false);
+    const M = FAIRNESS_EVALUATION_MACHINE;
+    expect(STATE_MACHINES[M.def.id]).toBe(M);
+    expect(M.next("active", "archive")).toBe("archived");
+    expect(M.isTerminal("archived")).toBe(true);
+  });
+});
+
+describe("ADR-0346 decision 9: when the promotion gate applies to a card (owner 2026-11-21: risk tiers)", () => {
+  const defaults = FAIRNESS_GATE_TIER_DEFAULTS;
+  const req = (tier: Parameters<typeof fairnessGateRequirement>[0]["tier"], over: Partial<Parameters<typeof fairnessGateRequirement>[0]> = {}) =>
+    fairnessGateRequirement({ orgGate: false, tagRequires: false, tier, tierGates: defaults, ...over });
+
+  it("secure by default: the high-risk tiers force the gate, the others do not, and the defaults match the settings", () => {
+    expect(defaults).toEqual({ prohibited: true, high: true, limited: false, minimal: false });
+    expect(req("high")).toEqual({ required: true, reasons: ["risk_tier"] });
+    expect(req("prohibited")).toEqual({ required: true, reasons: ["risk_tier"] });
+    expect(req("limited")).toEqual({ required: false, reasons: [] });
+    expect(req("minimal")).toEqual({ required: false, reasons: [] });
+    // an unscreened card is not forced by tier (screening is its own sign-off step)
+    expect(req("unscreened")).toEqual({ required: false, reasons: [] });
+    expect(fairnessGateTiersOf(FAIRNESS_EVALUATION_DEFAULT_SETTINGS)).toEqual(defaults);
+  });
+
+  it("an admin may relax a tier, and may also add one; no source relaxes another", () => {
+    expect(req("high", { tierGates: { ...defaults, high: false } })).toEqual({ required: false, reasons: [] });
+    expect(req("limited", { tierGates: { ...defaults, limited: true } })).toEqual({ required: true, reasons: ["risk_tier"] });
+    // a relaxed tier never overrides a compliance tag or the org setting
+    expect(req("high", { tierGates: { ...defaults, high: false }, tagRequires: true })).toEqual({ required: true, reasons: ["compliance_tag"] });
+    expect(req("minimal", { orgGate: true })).toEqual({ required: true, reasons: ["org_setting"] });
+    expect(req("high", { orgGate: true, tagRequires: true })).toEqual({ required: true, reasons: ["compliance_tag", "risk_tier", "org_setting"] });
+  });
+
+  it("fails closed on an unknown tier value: it is not a tier, so only the other sources decide", () => {
+    expect(req("severe" as never)).toEqual({ required: false, reasons: [] });
+    expect(req("severe" as never, { orgGate: true })).toEqual({ required: true, reasons: ["org_setting"] });
   });
 });

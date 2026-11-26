@@ -88,6 +88,18 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
    (mode `model`, linked to its evaluation and its engine run), so ADR-0222's hold, staleness and screens read it
    unchanged. ADR-0222's narrow exception for supplied-prediction runs stands: they need no engine, and the golden test
    ties their formulas to fairlearn.
+   **What is and is not verified (review S8 2 / R8 [2], 2026-11-21).**
+   - **Verified by the gateway:**
+     - the metric arithmetic (recomputed and compared, as above);
+     - that the result names this run, evaluation and pinned input;
+     - that every answered row is backed by a model call the gateway itself served under the run's keys since the
+       input was placed (its own `usage_events` ledger). Fewer served calls than answered rows is `calls_missing`;
+       more calls than rows is `calls_exceed_rows`, which would let an engine choose favourable replies. Either one
+       makes the run `inconclusive`.
+   - **Still the engine's report:** which reply mapped to which prediction. The signed result says so
+     (`predictionsSource: "engine"`, with `servedCalls`, `answered` and `rows`), so a verifier knows what the signature
+     covers.
+   - Matching each reply's digest to its row is a follow-up.
 6. **Schedules reuse `engine_schedules`.** A definition may carry an interval (1 to 720 hours, as every engine
    schedule); the schedule row holds the engine-run request and the person it runs as, and the existing sweep starts
    each run. A definition with no schedule runs on demand.
@@ -113,6 +125,15 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
    current model version that passed, or whose breach is accepted, no older than `fairness_run_max_age_days`
    (default 90, 1 to 365). This is ADR-0222's second follow-up. Turning the org gate off is a stepped-up, audited
    relaxation; a tag that requires it cannot be overridden by the org setting.
+   **Amended (owner, 2026-11-21): a risk tier forces the gate too.** Four org settings,
+   `fairness_gate_tier_{prohibited,high,limited,minimal}`, name the ADR-0085 risk tiers whose model cards the gate
+   always covers. Secure by default (ADR-0180): `prohibited` and `high` are on, `limited` and `minimal` off
+   (migration `fairness_gate_risk_tiers`). A card's tier is its effective ADR-0085 tier: the strictest among the use
+   cases that intend its agent, after jurisdiction floors (`effectiveRiskTier`). An unscreened card is not forced by
+   tier, since screening is its own sign-off step. An admin may turn a tier off; that is a stepped-up, audited settings
+   relaxation, and an admin may also turn a tier on. The sources compose by OR and none relaxes another
+   (`fairnessGateRequirement` in `@regulait/shared`): a requiring tag, a forcing tier or the org setting is each
+   enough.
 10. **Red-team bias results in the same view.** `GET /v1/mrm/cards/:id/fairness` returns the card's fairness runs
     (supplied and model), its evaluations and schedules, open breach items, the gate's verdict and the card agent's
     red-team results for the `bias` attack class (ADR-0057's runs and engine runs, read from the existing red-team
@@ -125,13 +146,29 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 12. **Row-level security.** The new tables are admin-only under RLS (ENABLE and FORCE), with the `system_task` reason
     for the scheduler and `credential_request` for the engine runner's result on the run-related tables, and
     `migration`; nothing else reads them.
+13. **libgomp is a narrow ADR-0176 exception (owner, 2026-11-21).** The fairlearn image ships the GNU OpenMP runtime
+    that scikit-learn's wheel bundles.
+    - **What exactly:** `scikit_learn.libs/libgomp-e985bcbb.so.1.0.0`, built by GCC 8.5.0 (2021-05-14), file sha256
+      `a43904e4fa297301d4640dc1bb3c8a3480b406f99e498eba9b1914b68aab604a`. It ships inside the hash-pinned
+      `scikit-learn==1.9.1` wheel (sha256 `e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e`).
+    - **Licence:** GPL-3.0-or-later WITH GCC-exception-3.1. The GCC Runtime Library Exception permits linking and
+      distributing it with code under any licence.
+    - **Unmet requirement:** scikit-learn's published wheels compile OpenMP in and always bundle libgomp. fairlearn
+      requires scikit-learn, and no validated alternative to fairlearn fits (the comparison in the PR).
+    - **How it is pinned:** the lockfile (`requirements.txt`, `--require-hashes`) pins the wheel. The licence gate's
+      allow entry pins the file's sha256: any other libgomp is DENIED and the image build fails. The gate also refuses
+      any owner-accepted GPL-family entry that does not pin its file.
+    - **Re-check when:** scikit-learn's version or wheel hash changes; the bundled libgomp changes (the gate fails the
+      build first); or scikit-learn ships a wheel without libgomp.
+    - **Recorded in:** `engines/fairlearn/licence-allow.json` ("accepted by owner 2026-11-21 (ADR-0346 decision 13)")
+      and `engines/fairlearn/THIRD_PARTY.md`.
 
 ### Secure-by-default notes (ADR-0180)
 
 - Every new setting starts strict except the org promotion gate, which the brief makes opt-in. The reason is ADR-0222
   decision 4's: many cards (a general assistant) have no binary decision a fairness dataset could cover, so a default-on
   gate would refuse every such card's sign-off. Where a compliance tag requires it the gate is on and cannot be relaxed.
-  **Owner question open:** should a risk tier (rather than only a tag) also force the gate?
+  The high-risk tiers force it by default (decision 9 as amended, owner 2026-11-21); relaxing a tier is audited.
 - The engine is off until its first signed image publish, and a model run needs fairness testing turned on (ADR-0222's
   stepped-up setting).
 
@@ -162,9 +199,56 @@ card's sign-off (draft → pending → approved), so that sign-off is the promot
 - The content-credential guard (ADR-0233) covers `fairness_evaluations.name` and
   `fairness_dataset_input_columns.column_name` (which has a surrogate `id` for the guard's report); the signed
   evidence body is excluded as `signed_evidence`. ADR-0233's generated inventory is regenerated.
-- The two status fields have one declared lifecycle each (`FAIRNESS_BREACH_REVIEW_TRANSITIONS`,
-  `FAIRNESS_EVALUATION_TRANSITIONS`, checked with `lifecycleAllows`); slice 3's write paths use them.
+- The two status fields have one declared lifecycle each. Slice 1 shipped them as plain transition tables; slice 2
+  moved them onto ADR-0348's `defineMachine` (`FAIRNESS_BREACH_REVIEW_MACHINE`, `FAIRNESS_EVALUATION_MACHINE`,
+  registered in `STATE_MACHINES`) once that landed, so there is one machine pattern in the app.
 - `rule-loosening.ts` classifies `fairness_gate_required` true → false/NULL as a loosening.
 - A card whose runs carry signed evidence cannot be deleted (RESTRICT). No evidence row is written until slice 2,
   which makes the card delete route refuse it with a named 409.
 - Slices 2 (engine, metrics, evidence) and 3 (gate and APIs) follow in their own PRs.
+
+### Slice 2: the engine, the gateway's measurement and signed evidence
+
+- **The engine.** `packages/engine-fairlearn` (runner adapter, task, exchange, self-test) and `engines/fairlearn/`
+  (the image: the spikee/garak shape, every base pinned by digest, the hash-pinned closure in `requirements.txt`, the
+  licence gate on the installed closure, an offline `--network=none` proof that runs `fairlearn_metrics.py`). The
+  engine id joins `ENGINE_IDS` as kind `eval` with a null lock entry, so it cannot be enabled until a signed publish
+  (pending migration `fairlearn_engine` adds the `engines` row, off). Calls are one at a time; a 402/429 answer stops
+  the run `budget_exhausted`, another refusal `gateway_refused`, a 5xx leaves only that row unanswered. The metric
+  step reads the kept rows from a scratch file (the engine-runner's spawn guard gives a child no stdin pipe).
+  Licence-gate admissions reuse ADR-0187 decision 106 for numpy's and scipy's bundled GCC runtime and quadmath
+  libraries. scikit-learn's bundled `libgomp` is the owner's narrow exception (decision 13): an accepted entry pinned
+  to the file's sha256, which the gate enforces (a fourth gate addition, file pins).
+- **Owner answers folded in (2026-11-21).** Decision 13 (libgomp) and decision 9's risk-tier amendment: the four
+  `fairness_gate_tier_*` org settings (pending migration `fairness_gate_risk_tiers`) and the pure
+  `fairnessGateRequirement`. Slice 3's gate reads them with the card's effective tier, and its settings route makes
+  turning a tier off a `settings_relax` step-up with an audit row.
+- **Verified on 2026-11-17:** the closure installs with no network in the pinned `python:3.12-slim-trixie` base
+  (`--require-hashes --no-deps --only-binary :all:`, `pip check` clean), and fairlearn 0.15.0 reproduces ADR-0222's
+  golden fixture exactly. A local image build passed every step (1.08 GB on disk).
+- **The input never passes through the runner.** A fairlearn job directory holds `job.json` and a
+  `gateway-input.json` marker; the task bridge turns the marker into the upload's `subject` (ADR-0242's mechanism,
+  widened to this one agent-run case), and the gateway's task start builds `fairness-input.json` from the evaluation
+  and its encrypted dataset (`fairnessInputTx`) and pins its sha256 in `fairness_engine_inputs` (pending migration
+  `fairness_evaluation_engine_input`). A wrong path is refused before anything is pinned. A refusal to build ends the
+  run `not_run` with `fairness_<code>`.
+- **Bounds of a model run:** at most 2,000 rows (one gateway call each), prompts of at most 16,000 characters after
+  the template is filled, an 8 MiB input file and a 2 MiB result.
+- **The measurement** (`measureModelRun`): the result must name the run, the evaluation and the pinned input sha256;
+  the parseable rows are measured with `computeFairness` and compared with fairlearn's values to 1e-9 (a metric the
+  gateway cannot compute is not compared: it is already inconclusive). The run is `inconclusive`, with a closed
+  problem code on the result, for no result, an invalid or mismatched result, an engine problem, unparseable replies
+  over the cap, a disagreement or purged rows. A cancelled, refused or expired run records nothing.
+- **Signed evidence for every run.** `signFairnessRunEvidenceTx` signs the canonical body (`canonicalJson`) with the
+  receipt key (ADR-0189), stores it in `fairness_run_evidence` and cites the run as `model_card_evidence` kind
+  `fairness_run`; ADR-0222's supplied-prediction runs are signed too. With no usable key the run is kept, no evidence
+  row is stored, and an audit row says why.
+- **Deviation from decision 3:** a model card has no project, so the upload names the project the evaluation's runs
+  attribute to (`projectId`, optional); the PII mode is the stricter of that project's cascade mode and the org
+  default, and `redact` stores the redacted text. Model-input datasets hold at most 2,000 rows.
+- **The card keeps its evidence.** `DELETE /v1/mrm/cards/:id` answers 409 `model_card_has_fairness_evidence` for a
+  card with signed evidence or an evaluation that ran. `mrm.test.ts` and `zz-adr0222-fairness.test.ts` no longer wipe
+  such cards in their cleanup.
+- **Compliance packs.** ADR-0150's `model_card_fairness` collector also counts a card whose latest run passed on its
+  current model version with signed evidence (`fairnessCardMeasuredSql`, a leaf module so the packs import no signing
+  code). Naming in a pack which of the two kinds it found is left for slice 3, with the card view.

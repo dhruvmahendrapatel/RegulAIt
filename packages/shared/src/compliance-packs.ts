@@ -65,6 +65,8 @@ import { PRIVACY_PACKS } from "./privacy-packs.js";
 import { SECTOR_PACKS } from "./sector-packs.js";
 // ADR-0319 (gap G11): the AIUC-1 AI agent standard, ID-only (`aiuc-packs.ts`, type-only imports back)
 import { AIUC_PACKS } from "./aiuc-packs.js";
+// ADR-0351 slice 2: the EU AI Act deployer-obligation register (`eu-ai-act-deployer.ts`, type-only imports back)
+import { EU_AI_ACT_DEPLOYER_PACKS } from "./eu-ai-act-deployer.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -109,6 +111,8 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "nyc-ll144",
   // ADR-0319 (gap G11): the AIUC-1 AI agent standard (`aiuc-packs.ts`)
   "aiuc-1",
+  // ADR-0351 slice 2: the EU AI Act deployer-obligation register (`eu-ai-act-deployer.ts`)
+  "eu-ai-act-deployer",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -1838,4 +1842,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
   ...SECTOR_PACKS,
   // ADR-0319 (gap G11): aiuc-1@1 (15 October 2026 release)
   ...AIUC_PACKS,
+  // ADR-0351 slice 2: eu-ai-act-deployer@1 (the deployer-obligation register)
+  ...EU_AI_ACT_DEPLOYER_PACKS,
 );

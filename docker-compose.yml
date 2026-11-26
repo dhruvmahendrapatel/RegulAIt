@@ -51,7 +51,7 @@ x-postgres: &postgres
 
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
-# Each engine (promptfoo, modelscan, garak, spikee, mcpscanner, skillscanner, contentextract) runs as ONE long-running runner
+# Each engine (promptfoo, modelscan, garak, spikee, mcpscanner, skillscanner, contentextract, fairlearn) runs as ONE long-running runner
 # container that pulls work from the gateway over a lease; the gateway never
 # starts containers and has no Docker socket. Every engine is OFF in the product
 # until an admin enables it after the runner's self-test passes. The per-engine
@@ -757,6 +757,32 @@ services:
       REGULAIT_ADMISSION_JOBS_DIR: /jobs
       REGULAIT_ADMISSION_RESULTS_DIR: /results
 
+  # --- fairlearn engine: runner (profile: engines) — ADR-0346 ----------------
+  #
+  # As spikee (ADR-0190 I5): the runner never calls a model, never runs
+  # fairlearn and never sees a dataset row; each run executes as an engine TASK
+  # in the executor's sandbox under the run's `engine_worker` placement, with
+  # the run's key as the task secret, the gateway's own input file at the task
+  # input root and the gateway channel as its only route. Its digest default is
+  # all-zero (no image) until the first signed publish is recorded in
+  # engines/images.lock.json, so it cannot start.
+  engine-fairlearn:
+    <<: *engine-runner
+    platform: linux/amd64
+    image: ${REGULAIT_ENGINE_FAIRLEARN_REPOSITORY:-regulait/engine-fairlearn}@${REGULAIT_ENGINE_FAIRLEARN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    volumes:
+      - engine-fairlearn-state:/state
+      - engine-fairlearn-jobs:/jobs
+      - engine-fairlearn-results:/results
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_FAIRLEARN_ENROLLMENT_TOKEN:-}
+      REGULAIT_ENGINE_IMAGE_REF: ${REGULAIT_ENGINE_FAIRLEARN_REPOSITORY:-regulait/engine-fairlearn}@${REGULAIT_ENGINE_FAIRLEARN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_FAIRLEARN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+      REGULAIT_FAIRLEARN_JOBS_DIR: /jobs
+      REGULAIT_FAIRLEARN_RESULTS_DIR: /results
+
+
   # --- engine task images (profile: engine-images) — ADR-0190 I5 follow-up --
   #
   # Each engine has ONE image with two uses (engines/*/Dockerfile): the runner
@@ -768,7 +794,7 @@ services:
   # by digest and every image runs as uid 10001:
   #
   #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image \
-  #     engine-spikee-image engine-mcpscanner-image engine-skillscanner-image engine-contentextract-image
+  #     engine-spikee-image engine-mcpscanner-image engine-skillscanner-image engine-contentextract-image engine-fairlearn-image
   #
   # (pending execution: no session that wrote this had a Docker daemon.)
   # They are never services: `up` with this profile runs each as an inert
@@ -833,6 +859,14 @@ services:
       context: .
       dockerfile: engines/contentextract/Dockerfile
     image: regulait/engine-contentextract:local
+
+  engine-fairlearn-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/fairlearn/Dockerfile
+    image: regulait/engine-fairlearn:local
+
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
@@ -1501,6 +1535,21 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=32m,uid=10001,gid=10001,mode=0750"
+  # ADR-0346: the fairlearn runner's own state (its runner key only) and its two
+  # tmpfs-backed exchange volumes, sized as spikee's
+  engine-fairlearn-state:
+  engine-fairlearn-jobs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=10001,gid=10001,mode=0750"
+  engine-fairlearn-results:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=256m,uid=10001,gid=10001,mode=0750"
   # ADR-0190 I4: the sandbox executor's own state (its key only)
   sandbox-executor-state:
   # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon

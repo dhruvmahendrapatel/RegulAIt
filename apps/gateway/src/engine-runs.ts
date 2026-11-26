@@ -98,6 +98,7 @@ import {
   normaliseEngineResult,
   garakConfigProblem,
   spikeeConfigProblem,
+  fairlearnConfigProblem,
   promptfooConfigProblem,
   updateEngineScheduleSchema,
   type CreateEngineRunInput,
@@ -118,6 +119,7 @@ import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPl
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { admissionReportOf, recordSubjectRunEndTx, setAdmissionScanRuntime, subjectInputTx } from "./admission-scan-runs.js";
+import { recordFairnessRunEndTx, setFairnessEvaluationRuntime } from "./fairness-evaluation.js";
 import { CONTENTEXTRACT_ENGINE_ID, recordContentExtractRunEndTx, setContentInspectionRuntime, sweepContentInspectionOrphans } from "./content-inspection-runs.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -146,6 +148,8 @@ export function setEngineRuntime(opts: EngineOptions): void {
   runtime = opts;
   // ADR-0242 L4.3: the admission-scan runs encrypt their MCP manifest snapshot under the same data key
   setAdmissionScanRuntime({ dataKey: opts.dataKey });
+  // ADR-0346: the fairness evaluation runs decrypt their model-input dataset under the same data key
+  setFairnessEvaluationRuntime({ dataKey: opts.dataKey });
   // ADR-0362: the content-extraction runs encrypt their bundle and result under it too, and cancel a run nobody awaits
   setContentInspectionRuntime({ dataKey: opts.dataKey, cancelRun: cancelEngineRunAsSystem });
 }
@@ -367,7 +371,10 @@ export async function validateEngineRunRequest(
         : // ADR-0245: spikee needs a dataset
           input.engineId === "spikee"
           ? spikeeConfigProblem(input.config)
-          : null;
+          : // ADR-0346: fairlearn names its one set and the evaluation
+            input.engineId === "fairlearn"
+            ? fairlearnConfigProblem(input.config)
+            : null;
   if (configProblem) return { ok: false, status: 422, error: "engine_config_invalid", detail: configProblem };
   if (!engine.enabled) {
     return { ok: false, status: 409, error: "engine_disabled", detail: `engine ${input.engineId} is off; an admin enables it after its runner self-test passes` };
@@ -580,6 +587,8 @@ export interface FinishArgs {
   requirePlacedTask?: boolean;
   /** ADR-0242 L4.3: a `subject` run's engine report (the decoded raw report), recorded at the run's end */
   admissionReport?: unknown;
+  /** ADR-0346: a fairlearn run's raw report content (base64), measured and recorded at the run's end */
+  fairnessReportBase64?: string;
 }
 
 /**
@@ -718,6 +727,22 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
     await tx
       .update(engineRuns)
       .set({ summary: { ...summary, verdict: admission.verdict === "pass" ? "pass" : admission.verdict === "fail" ? "fail" : "unknown", admission } })
+      .where(eq(engineRuns.id, runId));
+  }
+  // ADR-0346: a fairness evaluation run lands as a fairness run on its card, in this same transaction; anything short of
+  // an agreeing, complete measurement is inconclusive (it holds the card), and the run's evidence is signed
+  const fairness =
+    locked.engineId === "fairlearn"
+      ? await recordFairnessRunEndTx(tx as unknown as Parameters<typeof recordFairnessRunEndTx>[0], locked, {
+          status: args.status,
+          placed: !unplaced && locked.taskPlacementId !== null,
+          rawReportContentBase64: args.fairnessReportBase64,
+        })
+      : null;
+  if (fairness) {
+    await tx
+      .update(engineRuns)
+      .set({ summary: { ...summary, verdict: fairness.outcome === "pass" ? "pass" : fairness.outcome === "fail" ? "fail" : "unknown", fairness } })
       .where(eq(engineRuns.id, runId));
   }
   // ADR-0362: a content-extraction run's result waits, encrypted, for the request that queued it (only a run an engine
@@ -2366,6 +2391,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         rawReport,
         // ADR-0242 L4.3: a subject run's report is the engine's admission-scan report (untrusted; parsed strictly later)
         ...(run.targetKind === "subject" ? { admissionReport: admissionReportOf(envelope!.rawReport?.contentBase64) } : {}),
+        ...(run.engineId === "fairlearn" && envelope!.rawReport?.contentBase64 !== undefined ? { fairnessReportBase64: envelope!.rawReport.contentBase64 } : {}),
         requireLive: true,
         requirePlacedTask: true,
       });

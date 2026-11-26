@@ -105,6 +105,7 @@ import {
 import { MRM_AUTO_RETEST_NOTE, attachRetestsToRequest, retestsForCard } from "./mrm-retest-store.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { projectMrmRequiredBy } from "./projects.js";
+import { fairnessCardDeleteBlock } from "./fairness-evaluation.js";
 import { FAIRNESS_RULE_IDS, fairnessHold } from "./fairness.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
@@ -1091,6 +1092,16 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     const { id } = idParam.parse(req.params);
     const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
     if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+    // ADR-0346: a card's signed fairness evidence, and its evaluations' runs, are kept: the card cannot be deleted
+    const block = await fairnessCardDeleteBlock(db, id);
+    if (block) {
+      return reply.status(409).send({
+        error: "model_card_has_fairness_evidence",
+        detail: block === "signed_fairness_evidence"
+          ? "this card holds signed fairness evidence, which is kept for the audit trail; retire the card's approval instead of deleting it"
+          : "this card has fairness evaluations that ran; their record is kept, so the card cannot be deleted",
+      });
+    }
     await db.delete(modelCards).where(eq(modelCards.id, id));
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
