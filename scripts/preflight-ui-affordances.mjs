@@ -102,6 +102,7 @@ export const DELIBERATELY_API_ONLY = new Map([
 export const NO_REMOVE_BY_DESIGN = new Map([
   ["/v1/pm/audit-sources", "ADR-0356: an Atlassian audit feed is the source its stored third-party evidence names (append-only rows reference it); it is turned off with PATCH enabled:false, never deleted"],
   ["/v1/workflows/schedules", "lane E30 slice 4 (decision in PR #925): a workflow schedule is paused, never deleted; its fire-time history (workflow_schedule_runs) is the evidence of every automatic start and would go with it (FK cascade). Pause, with an audited note, stops it"],
+  ["/v1/workflows/fragments", "ADR-0341 §9: a sub-process version is an approval-backed, append-only record, pinned by the template versions that call it (FK RESTRICT); a newer approved version supersedes it, and templates keep their pin until republished, so it is never deleted"],
   ["/v1/decision-tables", "ADR-0327 addendum: each version is an approval-backed record of who published which rules and when; a newer version supersedes it, and a table is removed only with its agent (FK cascade)"],
   ["/v1/discovery/sources/:x/edr-connections", "ADR-0360 slice 2: a connection is retired by PUT /v1/edr-connections/:id/settings {enabled: false} (audited); it is kept because its isolation requests and signals are evidence, and it goes with its source (FK cascade)"],
   ["/v1/discovery/sources/:x/update-rollouts", "ADR-0360: a rollout is evidence of what was offered to which devices; it is retired by POST /v1/discovery/update-rollouts/:id/abort (or completes), never deleted"],
