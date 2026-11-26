@@ -40,6 +40,7 @@
 import { z } from "zod";
 import { JUDGE_BACKED_SCORER_KINDS } from "./evals.js";
 import { GUARDRAIL_SCORER_KINDS } from "./trained-detectors.js";
+import { TEXT_EMBEDDING_SCORER_KIND, embeddingClaimRefusal } from "./semantic-cache-similarity.js";
 import {
   EXTERNAL_SCORER_ADAPTERS,
   vendorAdapterOptionsSchema,
@@ -234,7 +235,39 @@ export function externalScorerAvailabilityFor(
  * (ADR-0220) the three guardrail kinds a trained-detector service serves at
  * dispatch time. A deterministic (lexical) kind is not claimable, so the
  * registration surface cannot even express "route claim_support externally". */
-export const EXTERNAL_SCORER_CLAIMABLE_KINDS = [...JUDGE_BACKED_SCORER_KINDS, ...GUARDRAIL_SCORER_KINDS] as const;
+/** ADR-0353 part 2: the kind a pluggable routing classifier claims. Its score in [0, 1] picks the dispatch's
+ * complexity for `routeModel` (optimizer-kernel `complexityFromScore`); it is never an eval metric or a guardrail. */
+export const ROUTING_SCORER_KIND = "routing_complexity" as const;
+export const ROUTING_SCORER_KINDS = [ROUTING_SCORER_KIND] as const;
+export const EXTERNAL_SCORER_CLAIMABLE_KINDS = [
+  ...JUDGE_BACKED_SCORER_KINDS,
+  ...GUARDRAIL_SCORER_KINDS,
+  ...ROUTING_SCORER_KINDS,
+  // ADR-0352: a local embedder for the meaning-based cache tier (claimed alone)
+  TEXT_EMBEDDING_SCORER_KIND,
+] as const;
+
+/**
+ * ADR-0353 part 2: may this registered scorer be the org's routing classifier? Null = yes; otherwise the 422 body.
+ * Only an enabled scorer that claims `routing_complexity` and speaks our own contract (adapter `regulait`): a
+ * third-party vendor dialect scans for guardrail kinds and never picks a model.
+ */
+export function routingClassifierProblem(
+  scorer: { name: string; enabled: boolean; scorerKinds: readonly string[]; adapter: string } | null,
+): { error: "routing_classifier_invalid"; detail: string } | null {
+  const bad = (detail: string) => ({ error: "routing_classifier_invalid" as const, detail: `${detail}. Nothing was saved.` });
+  if (!scorer) return bad("routingClassifierScorerId names no registered external scorer");
+  if (scorer.adapter !== "regulait") {
+    return bad(`external scorer '${scorer.name}' uses the '${scorer.adapter}' adapter; a routing classifier must speak the RegulAIt contract`);
+  }
+  if (!scorer.scorerKinds.includes(ROUTING_SCORER_KIND)) {
+    return bad(`external scorer '${scorer.name}' does not claim the '${ROUTING_SCORER_KIND}' kind`);
+  }
+  if (!scorer.enabled) {
+    return bad(`external scorer '${scorer.name}' is not enabled; it must pass its connection test and be enabled first`);
+  }
+  return null;
+}
 export const externalScorerKindSchema = z.enum(
   EXTERNAL_SCORER_CLAIMABLE_KINDS as unknown as [string, ...string[]],
 );
@@ -265,6 +298,8 @@ export const createExternalScorerSchema = z
       options: b.adapterOptions,
     });
     if (refusal) ctx.addIssue({ code: "custom", path: ["adapter"], message: refusal });
+    const embedding = embeddingClaimRefusal(b.scorerKinds);
+    if (embedding) ctx.addIssue({ code: "custom", path: ["scorerKinds"], message: embedding });
   });
 export type CreateExternalScorer = z.infer<typeof createExternalScorerSchema>;
 

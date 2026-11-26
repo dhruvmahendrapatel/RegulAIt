@@ -155,7 +155,7 @@ export async function setDemoPasswords(db: Db, env: NodeJS.ProcessEnv): Promise<
     await db
       .update(users)
       .set({
-        passwordHash: hashPassword(pw.password),
+        passwordHash: await hashPassword(pw.password),
         passwordUpdatedAt: now,
         mustChangePassword: false,
         failedLoginCount: 0,

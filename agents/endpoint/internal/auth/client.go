@@ -67,6 +67,12 @@ type Client struct {
 
 // Send is one request with no access token (enrolment and registration, which carry a bearer secret).
 func Send(ctx context.Context, c *http.Client, method, u string, header http.Header, body []byte) (*Response, error) {
+	return send(ctx, c, method, u, header, body, nil)
+}
+
+// send is Send with an optional sink: a 200 answer's body is handed to sink unread (and Response.Body is nil), so a
+// caller can stream a large body under its own bound. Every other answer is read as Send reads it.
+func send(ctx context.Context, c *http.Client, method, u string, header http.Header, body []byte, sink func(http.Header, io.Reader) error) (*Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -82,6 +88,12 @@ func Send(ctx context.Context, c *http.Client, method, u string, header http.Hea
 		return nil, err
 	}
 	defer res.Body.Close()
+	if sink != nil && res.StatusCode == http.StatusOK {
+		if err := sink(res.Header, res.Body); err != nil {
+			return nil, err
+		}
+		return &Response{Status: res.StatusCode, Header: res.Header}, nil
+	}
 	b, err := io.ReadAll(io.LimitReader(res.Body, MaxResponseBytes+1))
 	if err != nil {
 		return nil, err
@@ -167,6 +179,17 @@ func (c *Client) token(ctx context.Context) (string, error) {
 // signature is made fresh for each). A `use_dpop_nonce` challenge is retried once with the new nonce; another
 // 401 drops the token and retries once with a fresh one.
 func (c *Client) Do(ctx context.Context, method, path string, body []byte, extra func(http.Header) error) (*Response, error) {
+	return c.do(ctx, method, path, body, extra, nil)
+}
+
+// Download is an authorized GET whose 200 body is streamed to sink rather than read into memory (the self-update
+// binary, ADR-0360 §4). sink bounds what it reads; the returned Response has no Body then. Any other answer is
+// returned as Do returns it.
+func (c *Client) Download(ctx context.Context, path string, sink func(http.Header, io.Reader) error) (*Response, error) {
+	return c.do(ctx, http.MethodGet, path, nil, nil, sink)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body []byte, extra func(http.Header) error, sink func(http.Header, io.Reader) error) (*Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	u := c.Issuer + path
@@ -189,7 +212,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, extra
 				return nil, err
 			}
 		}
-		res, err := Send(ctx, c.HTTP, method, u, h, body)
+		res, err := send(ctx, c.HTTP, method, u, h, body, sink)
 		if err != nil {
 			return nil, err
 		}

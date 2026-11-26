@@ -164,21 +164,22 @@ export class RunscDockerBackend extends DockerSandboxBackend {
   }
 
   /** before any sandbox: the daemon has the runtime, and its binary is the pinned runsc */
-  protected async checkRuntime(force: boolean): Promise<RuntimeCheck> {
-    const rt = runtimeFromInfo(await this.api("/info"), this.opts.runtimeName);
-    if (!rt.path) throw new RunscBackendError(`the Docker daemon has no runtime named ${this.opts.runtimeName}; register runsc in daemon.json (see INSTALL.md)`);
-    if (rt.path !== this.opts.runscHostPath) throw new RunscBackendError(`the runtime ${this.opts.runtimeName} is ${rt.path}, not the gVisor install at ${this.opts.runscHostPath}`);
+  protected async checkRuntime(force: boolean, runtimeName: string): Promise<RuntimeCheck> {
+    const rt = runtimeFromInfo(await this.api("/info"), runtimeName);
+    if (!rt.path) throw new RunscBackendError(`the Docker daemon has no runtime named ${runtimeName}; register runsc in daemon.json (see INSTALL.md)`);
+    if (rt.path !== this.opts.runscHostPath) throw new RunscBackendError(`the runtime ${runtimeName} is ${rt.path}, not the gVisor install at ${this.opts.runscHostPath}`);
     const verified = await this.binaryVerified(rt.path, force);
     if (!verified) throw new RunscBackendError(`the binary at ${this.opts.runscHostPath} is not gVisor ${this.opts.runtimeVersion} (its sha512 is not the pinned one)`);
     return { path: rt.path, args: rt.args, verified };
   }
 
   /** the daemon's binary for THIS container's runtime (looked up by the name inspect reports, not the one asked for) */
-  protected async containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck): Promise<boolean> {
-    return containerRuntime === this.opts.runtimeName && rt.verified && (await this.binaryVerified(runtimeFromInfo(await this.api("/info"), containerRuntime).path, false));
+  protected async containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck, runtimeName: string): Promise<boolean> {
+    return containerRuntime === runtimeName && rt.verified && (await this.binaryVerified(runtimeFromInfo(await this.api("/info"), containerRuntime).path, false));
   }
 
-  protected probesFor(init: InitObservation, side: ExecutorSideObservation, _profile: ExecutionProfileBody, wanted: readonly AttestationProbe[]): ProbeSet {
-    return probesFrom(init, side, { runtimeName: this.opts.runtimeName }, wanted);
+  protected probesFor(init: InitObservation, side: ExecutorSideObservation, _profile: ExecutionProfileBody, wanted: readonly AttestationProbe[], runtimeName: string): ProbeSet {
+    // ADR-0364 S3: a robot sandbox runs under the second runsc runtime (`--network=sandbox`); its flags are its own
+    return probesFrom(init, side, { runtimeName }, wanted);
   }
 }

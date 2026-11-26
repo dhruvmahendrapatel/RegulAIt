@@ -1950,3 +1950,98 @@ and the file was restored and re-edited.
 Rule: never rename by a repo-wide or file-wide string replace in a shared file (`schema.ts`, `_journal.json`, `app.ts`,
 STATE.md). Count the occurrences in each file first (`grep -c` on `HEAD`'s version); if any exist that the change did not
 add, edit the new block only, then check that `git diff` shows no `-` line outside it.
+
+### M-115 (2026-11-18) - A PR was marked ready for review before it had any approval
+
+On #1004 (master-authored) the master posted READY and also called the ready-for-review route straight away. Marking a
+PR ready is half of "release" in this process. No harm followed, because the merge loop merges only what is listed in
+released.txt, but the PR looked released to anyone reading GitHub.
+
+Rule: a master-authored PR stays a draft until both verdicts are posted at its head. Mark it ready only together with
+the released.txt line.
+
+### M-116 (2026-11-18) - Container restarts silently stopped the merge loop three times
+
+The merge loop runs as a background task in the master's container. Restarts at about 19:00, 01:10, 03:54 and 05:40
+killed it. Once (19:00-22:00) nothing merged for three hours, and a READY (#941) went unrouted.
+
+Rule: on every wake, check `pgrep -fa merge-loop.sh` first and restart the loop if it is gone. Keep the hand-over state
+in the repo (internal/process/orchestration/), not only in the scratchpad.
+
+### M-117 (2026-11-18) - REPEAT: a doc cited an ADR that is only on an open PR
+
+#1011 cited lane E45's ADR by number while it is still only on #1010, and `scripts/adr-index.test.mjs` failed after the push. The same mistake
+happened on 2026-11-17 with two other lane ADRs. The test was run, but the failure was not read before pushing (the
+commit was chained in the same command).
+
+Rule: cite an unmerged ADR by its PR number and lane, never by its ADR number. Run the adr-index test as its own step, and
+push only after it prints all passed; never chain the push into the same command as the test.
+
+### M-118 (2026-11-18) - Six PRs that all edit one counter were released at once
+
+At 13:13 the master released #903, #744, #848, #855, #902 and #883 together. Each one edits `KNOWN_UI_GAPS_MAX` in
+`scripts/preflight-ui-route-census.mjs` and its test pin. #903 merged first, and the other five conflicted at once. Each
+then needed a main merge, a full CI run and a delta review, so five approved PRs lost about four hours.
+
+Rule: before releasing a batch, run `git diff --name-only origin/main...origin/<branch>` for each PR and look for a
+shared hand-edited file (the census counter, a journal, an index). Release only one PR that edits such a file at a time;
+release the next after the previous one merges and its builder has merged main. PRs that do not touch the file can be
+released in parallel.
+
+Superseded by the computed counter (2026-11-19, ADR-0252 addendum): `KNOWN_UI_GAPS_MAX` and its pin are gone, and each
+ADR and lane's gaps are a file of their own in `scripts/known-ui-gaps/`, so census PRs no longer share a line. The rule
+still holds for any other shared hand-edited file.
+
+### M-119 (2026-11-21) - REPEAT: subscribed to the wrong PR number after opening a PR
+
+Lane E17 opened #1130 and subscribed to #1133, a PR it does not own. The same slip happened earlier in the lane
+(#1117 instead of #1111). Both times the subscribe call was sent in the same response as the create call, with a guessed
+number, before the create call had returned its URL.
+
+Rule: subscribe only after the create call has returned, using the number in the URL it returned; never send the two in
+the same response.
+
+### M-120 (2026-11-22) - REPEAT of M-117: the master cited reserved, unwritten ADR numbers as ADR-NNNN
+
+The master's DecisionLog row D-2026-11-22-03 (#1199) wrote the reserved numbers 0380 and 0381 in ADR-NNNN form, although it had only
+reserved them for lane CX. Neither file exists, so `scripts/adr-index.test.mjs` failed `build-and-test` on main from about
+07:17 to 09:48 and on every PR rebuilt in that window. #1201 fixed it. The PR itself looked green because CI scope skips
+`build-and-test` (and so the adr-index test) for docs-only changes. The test was not run locally before the push.
+
+Rule: never write `ADR-NNNN` for an ADR that has no file in `internal/decisions/` on main. A reserved number is written
+as "ADR number NNNN (reserved, not written yet)". Before pushing any change to `internal/`, `.github/`, `scripts/` or
+CLAUDE.md, run `npx vitest run scripts/adr-index.test.mjs` as its own step and read the result, even for docs-only PRs,
+because CI will not run it for them.
+
+### M-121 (2026-11-22) - REPEAT of M-117: cited a reserved, not-yet-written ADR by its number
+
+Lane CX recorded the owner's two reserved ADR numbers (0380 for C-01, 0381 for P-07) in the `ADR-` form in `internal/reviews/codexreviews-response.md`
+on #1194. Neither file exists yet, so `scripts/adr-index.test.mjs` failed `build-and-test`. The adr-index test was not run
+before the push, because the change looked like prose only.
+
+Rule: any edit under `internal/`, `scripts/` or `.github/` that writes `ADR-` followed by four digits runs
+`pnpm exec vitest run --dir scripts adr-index` before the push. A reserved or unmerged ADR is written as "ADR number NNNN
+(reserved)" or by its PR, never as `ADR-NNNN`.
+
+### M-122 (2026-11-23) - Released a UI PR whose browser journeys never ran on the PR
+
+The master released #1227 (row semantics) with every PR check green. `spa-journeys`, the real-gateway Playwright
+journeys, was skipped on the PR, because ADR-0262 runs it only in the full suite (merge queue, push to main, nightly,
+manual), and this user-owned repository has no merge queue. The check first ran on main after the merge and failed on two
+specs, so main was red from about 10:05 to 15:50 and four other PRs went red with it. The fix PR #1230 was itself first
+approved with the check skipped. The master held it, dispatched `ci.yml` by hand on its branch, and released it only
+after `spa-journeys` passed. #1236 now runs the check on UI and gateway PRs.
+
+Rule: before releasing a PR, compare the checks that ran on it with the checks main runs. A check that main runs and the
+PR skipped blocks the release until it has passed on the PR's head, if necessary through a dispatched `ci.yml` run on the
+branch. "All checks green" includes checking that none of them was skipped.
+
+### M-123 (2026-11-18) - A sub-agent's worktree branch was merged into a lane branch
+
+Lane E27 built the fairlearn engine package in a sub-agent worktree (`builder/e27-fairlearn-engine-pkg`) and brought it
+back with `git merge` (1875afb2 merging fe343996) before opening #996. The branch-merge preflight refuses any merge of a
+non-main branch, a revert does not remove the merge from `base..head`, and the rules forbid a force-push. So #996 could
+never go green: every build and test job was skipped behind `ci / scope`, and a linear replacement branch was needed.
+
+Rule: work from a sub-agent or worktree comes back by `git cherry-pick`, never by `git merge`. Before opening a PR, run
+`node scripts/preflight-branch-merges.mjs origin/main HEAD --main origin/main` and open it only when that passes.

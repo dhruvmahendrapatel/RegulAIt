@@ -16,12 +16,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agents,
+  and,
   auditLog,
   createDb,
   eq,
   fairnessDatasets,
   fairnessRuns,
   inArray,
+  isNotNull,
   modelCardApprovals,
   modelCards,
   orgSettings,
@@ -142,9 +144,9 @@ afterAll(async () => {
     .update(orgSettings)
     .set({ mrmEnforced: STRICT_GOVERNANCE_GATES.mrmEnforced, mrmStalenessRecertEnabled: STRICT_GOVERNANCE_GATES.mrmStalenessRecertEnabled })
     .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  await db.delete(modelCards).where(eq(modelCards.id, cardId)); // cascades its runs and approvals
-  if (datasetIds.length) await db.delete(fairnessDatasets).where(inArray(fairnessDatasets.id, datasetIds));
-  await db.delete(agents).where(eq(agents.id, agentId));
+  // ADR-0346: every run is now signed evidence on its card (append-only, RESTRICT), so the card, its runs, their
+  // datasets and the agent stay; this suite's rows carry its own run-unique names and touch no other suite's
+  await db.update(fairnessDatasets).set({ rowsCiphertext: null, purgedAt: new Date(), purgeReason: "deleted" }).where(and(inArray(fairnessDatasets.id, datasetIds.length ? datasetIds : [NO_IDENTITY]), isNotNull(fairnessDatasets.rowsCiphertext)));
   await app.close();
 });
 

@@ -19,8 +19,10 @@
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
 import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
+import { FAIRLEARN_ENGINE_VERSION, FAIRLEARN_USAGE_DATA_ENV, FAIRLEARN_WORKER_SELF_TEST_SWITCH, fairlearnManifestSets } from "./fairlearn.js";
 import { SPIKEE_ENGINE_VERSION, SPIKEE_USAGE_DATA_ENV, SPIKEE_WORKER_SELF_TEST_SWITCH, spikeeJudgeSets, spikeeManifestSets, spikeeReducedSet } from "./spikee.js";
 import { ADMISSION_SCAN_ENGINES } from "./admission-scan.js";
+import { CONTENTEXTRACT_ENGINE_VERSION, CONTENTEXTRACT_SET, CONTENTEXTRACT_WORKER_SELF_TEST_SWITCH } from "./contentextract.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
@@ -248,16 +250,17 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     ],
   },
   // ADR-0242: mcp-scanner, run by our offline driver (engines/mcpscanner/scan.py) on one MCP server manifest. Its runs are started by the
-  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
-  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
-  // cannot be enabled (secure default).
+  // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
+  // the Node runner stage (§6.1) and its digests come from the lock (§6.3, L4.5), which stays null until CI's first
+  // signed publish is recorded, so until then no runner passes the self-test and the engine cannot be enabled.
   mcpscanner: {
     id: "mcpscanner",
     kind: "admission_scan",
     displayName: "mcp-scanner",
     version: ADMISSION_SCAN_ENGINES.mcpscanner.version,
-    generation: 1,
-    imageDigest: null,
+    // bump with every build change; plus one per recorded publish (the lock moves it, ADR-0242 L4.5)
+    generation: 1 + ENGINE_IMAGES_LOCK.mcpscanner.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.mcpscanner.manifestDigest,
     licence: "Apache-2.0",
     maintainerCount: null,
     // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
@@ -268,30 +271,35 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     requiresJudge: false,
     judgeSets: [],
     credentialIsolation: false,
-    taskImage: null,
-    taskEntry: { command: "/opt/mcpscanner/venv/bin/python", args: ["-I", "/opt/mcpscanner/scan.py", "/in", "/out/report.json"] },
+    taskImage: ENGINE_IMAGES_LOCK.mcpscanner.imageId,
+    // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
+    // subject file, runs our driver on it as a child process group and sends the report back as frames
+    // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
+    // because the sandbox init gives the workload no environment but PATH and HOME
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "mcpscanner"] },
     sets: { scan: "standard" },
     airGappedReducedSet: [],
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "image digest and signature: the engine is publishable (ADR-0242 §6.3, L4.5) but no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
       "maintainer count",
       "transitive licences: the PSF-2.0, MPL-2.0, MIT-0 and CNRI-Python terms are the ones the owner accepted for garak (ADR-0187 decision 193); yara-python is built from source without OpenSSL",
-      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+      "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },
   // ADR-0242: skill-scanner, run by our offline driver (engines/skillscanner/scan.py) on one agent skill (SKILL.md and its files). Its runs are started by the
-  // admission gate, never by a person, and its verdict joins that subject's admission state. No image is
-  // published yet (phase 2 adds the runner stage and the lock entry), so the digest is null and the engine
-  // cannot be enabled (secure default).
+  // admission gate, never by a person, and its verdict joins that subject's admission state. The image carries
+  // the Node runner stage (§6.1) and its digests come from the lock (§6.3, L4.5), which stays null until CI's first
+  // signed publish is recorded, so until then no runner passes the self-test and the engine cannot be enabled.
   skillscanner: {
     id: "skillscanner",
     kind: "admission_scan",
     displayName: "skill-scanner",
     version: ADMISSION_SCAN_ENGINES.skillscanner.version,
-    generation: 1,
-    imageDigest: null,
+    // bump with every build change; plus one per recorded publish (the lock moves it, ADR-0242 L4.5)
+    generation: 1 + ENGINE_IMAGES_LOCK.skillscanner.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.skillscanner.manifestDigest,
     licence: "Apache-2.0",
     maintainerCount: null,
     // the driver refuses to start with any cloud analyzer credential set and builds only local analyzers
@@ -302,17 +310,21 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     requiresJudge: false,
     judgeSets: [],
     credentialIsolation: false,
-    taskImage: null,
-    taskEntry: { command: "/opt/skillscanner/venv/bin/python", args: ["-I", "/opt/skillscanner/scan.py", "/in", "/out/report.json"] },
+    taskImage: ENGINE_IMAGES_LOCK.skillscanner.imageId,
+    // ADR-0242 §6.1: the Node task (packages/engine-admission-scan) checks the input root holds only the gateway's
+    // subject file, runs our driver on it as a child process group and sends the report back as frames
+    // (stdout is the frame channel, so the driver is never the workload itself); the engine is named in argv,
+    // because the sandbox init gives the workload no environment but PATH and HOME
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "skillscanner"] },
     sets: { scan: "standard" },
     airGappedReducedSet: [],
     lastVerified: "2026-11-07",
     reCheckBy: "2027-05-07",
     unverified: [
-      "the published image, its digest and signature (phase 2: the runner stage and the publish)",
+      "image digest and signature: the engine is publishable (ADR-0242 §6.3, L4.5) but no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
       "maintainer count",
-      "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms awaiting an owner decision; pcodedmp (GPL-3.0) is excluded",
-      "the runner and sandbox path (phase 2); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
+      "transitive licences: as mcpscanner, plus numpy's (ADR-0187 decision 106); yara-x's statically linked Rust crates carry Apache-2.0 WITH LLVM-exception, Zlib and Unicode-3.0 terms (owner-accepted, ADR-0242 owner decision Q3); pcodedmp (GPL-3.0) is excluded",
+      "the runner and task inside the built image and the sandbox limits (phase 2 §6.4; the shim is tested without Docker); the driver and the image's offline smoke scan were measured on 2026-11-07 (ADR-0242 §3)",
     ],
   },
   // ADR-0245: spikee (indirect prompt injection in documents). Off, and no image until its first signed publish:
@@ -346,6 +358,76 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
       "maintainer count",
       "transitive licences inside the image beyond the hash-pinned closure's metadata (CI's image scan)",
       "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
+    ],
+  },
+  // ADR-0346: fairlearn (group-fairness metrics on a model's decisions). Off, and no image until its first signed
+  // publish: the lock's null digest means no runner passes the self-test, so it cannot be enabled.
+  fairlearn: {
+    id: "fairlearn",
+    kind: "eval",
+    displayName: "Fairlearn",
+    version: FAIRLEARN_ENGINE_VERSION,
+    generation: 1 + ENGINE_IMAGES_LOCK.fairlearn.publishGeneration,
+    imageDigest: ENGINE_IMAGES_LOCK.fairlearn.manifestDigest,
+    licence: "MIT",
+    maintainerCount: null,
+    usageDataEnv: { ...FAIRLEARN_USAGE_DATA_ENV, [FAIRLEARN_WORKER_SELF_TEST_SWITCH]: "1" },
+    workerAttestedSwitches: [...Object.keys(FAIRLEARN_USAGE_DATA_ENV), FAIRLEARN_WORKER_SELF_TEST_SWITCH],
+    // each row is one call to the card's model through the gateway, with the run's key
+    needsModelAccess: true,
+    // the reply is mapped by exact match to the evaluation's two declared outputs: no judge model
+    requiresJudge: false,
+    judgeSets: [],
+    credentialIsolation: true,
+    taskImage: ENGINE_IMAGES_LOCK.fairlearn.imageId,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
+    sets: fairlearnManifestSets(),
+    airGappedReducedSet: [],
+    lastVerified: "2026-11-17",
+    reCheckBy: "2027-02-17",
+    unverified: [
+      "image digest and signature: no publish is recorded yet (engines/images.lock.json), so the engine cannot be enabled",
+      "maintainer count",
+      "transitive licences inside the image beyond the hash-pinned closure's metadata (CI's image scan)",
+      "runtime behaviour inside the built image (the worker's egress test, an air-gapped run)",
+    ],
+  },
+  // ADR-0362: our own content extractor (engines/contentextract/extract.py), turning one request's files into text for
+  // the gateway's own detectors. Its runs are `subject` runs (trigger `inspection`) the gateway queues itself, never a
+  // person. HELD UNPUBLISHED (like mcpscanner and skillscanner) until the owner decides ADR-0362 owner question 1 (the
+  // licences bundled in libpdfium.so): it has no images-lock entry, so the digest and task image are hardcoded null, no
+  // runner passes the self-test and nothing can be placed or enabled (secure by construction).
+  contentextract: {
+    id: "contentextract",
+    kind: "content_extract",
+    displayName: "content extraction",
+    version: CONTENTEXTRACT_ENGINE_VERSION,
+    generation: 1,
+    imageDigest: null,
+    // our own code; the shipped closure's licences are in engines/contentextract/THIRD_PARTY.md
+    licence: "LicenseRef-RegulAIt",
+    maintainerCount: null,
+    // no telemetry, update check, download or remote analyzer exists to switch off: the one entry is the worker's own
+    // isolation self-test in the task sandbox (as modelscan's), attested by the worker or a fresh executor attestation
+    usageDataEnv: { [CONTENTEXTRACT_WORKER_SELF_TEST_SWITCH]: "1" },
+    workerAttestedSwitches: [CONTENTEXTRACT_WORKER_SELF_TEST_SWITCH],
+    needsModelAccess: false,
+    requiresJudge: false,
+    judgeSets: [],
+    credentialIsolation: false,
+    taskImage: null,
+    // the admission-scan shim's Node task (packages/engine-admission-scan), with the engine in argv (the sandbox init
+    // gives the workload no environment but PATH and HOME); it runs extract.py on the gateway's bundle.json
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js", "contentextract"] },
+    sets: { [CONTENTEXTRACT_SET]: "standard" },
+    airGappedReducedSet: [],
+    lastVerified: "2026-11-17",
+    reCheckBy: "2027-05-17",
+    unverified: [
+      "the published image, its digest and signature: held unpublished until the owner decides ADR-0362 owner question 1 (built and compared by CI only), so the engine cannot be enabled",
+      "transitive licences: the components bundled in libpdfium.so outside the ADR-0176 list await an owner decision (ADR-0362 owner question 1)",
+      "runtime behaviour inside the built image (the worker's egress test, the extractor's limits under the sandbox's)",
+      "the gateway's request-path call and its deadline (ADR-0362 slice 1b-ii)",
     ],
   },
 });

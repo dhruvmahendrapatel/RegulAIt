@@ -3,8 +3,10 @@ import path from "node:path";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "./index.js";
+import { WORKFLOW_TERMINAL_STATUSES_SQL_LIST } from "@regulait/shared";
 import { resolveMigrationsFolder } from "./pending-migrations.js";
 import { auditLog } from "./schema.js";
+import { SESSION_LOCK_KEYS, withSessionAdvisoryLock } from "./session-lock.js";
 
 /** the identity a migration's audit rows are attributed to: the system itself */
 export const MIGRATION_AUDIT_ACTOR = "00000000-0000-0000-0000-000000000000";
@@ -15,6 +17,16 @@ export const MIGRATION_AUDIT_ACTOR = "00000000-0000-0000-0000-000000000000";
  * the numbered ones, in the order the assign-at-merge step would number them now.
  */
 export async function runMigrations(db: Db, migrationsFolder: string) {
+  // ADR-0343: N replicas (and the migration Job) may boot at once. drizzle's migrator takes no lock: two runs both read
+  // the same watermark and both apply the same files, one transaction each, so the second fails on "already exists"
+  // or, for a data step without a guard, applies it twice. One cluster-wide session lock makes the runs take turns; the
+  // one that waited finds nothing left to apply.
+  await withSessionAdvisoryLock(db, SESSION_LOCK_KEYS.migrations, () => runMigrationsLocked(db, migrationsFolder), {
+    onWait: () => console.log("[regulait] migrations: another process is migrating this database; waiting for it"),
+  });
+}
+
+async function runMigrationsLocked(db: Db, migrationsFolder: string) {
   const { folder, provisional, cleanup } = resolveMigrationsFolder(migrationsFolder);
   try {
     if (provisional.length) console.log(`[regulait] migrations: applying ${provisional.length} unassigned migration(s) with provisional numbers (disposable database): ${provisional.map((a) => a.to).join(", ")}`);
@@ -49,7 +61,76 @@ export const CONCURRENT_INDEXES: ReadonlyArray<{ migration: string; name: string
     name: "workflow_instances_project_open_idx",
     create:
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_open_idx" ON "workflow_instances" ("project_id") ` +
-      `WHERE "status" NOT IN ('completed', 'aborted', 'denied', 'rolled_back')`,
+      `WHERE "status" NOT IN (${WORKFLOW_TERMINAL_STATUSES_SQL_LIST})`,
+  },
+  {
+    // ADR-0349 slice 2: at most one OPEN instance per template set (in any order) + target + work item (the start
+    // conflict policy). `regulait_workflow_template_set` is created by the slice's migration.
+    migration: "workflow_start_conflict",
+    name: "workflow_instances_open_start_uq",
+    create:
+      `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_open_start_uq" ON "workflow_instances" ` +
+      `(regulait_workflow_template_set("template_ids"), ("change"->>'targetSystem'), "work_item_ref") NULLS NOT DISTINCT ` +
+      `WHERE "work_item_ref" IS NOT NULL AND "status" NOT IN (${WORKFLOW_TERMINAL_STATUSES_SQL_LIST})`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `template` (template_ids @> [id]) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_template_ids_gin",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_template_ids_gin" ON "workflow_instances" USING gin ("template_ids" jsonb_path_ops)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `target` search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_target_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_target_idx" ON "workflow_instances" (("change"->>'targetSystem'))`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `workItem` (closed instances too; the start-key index covers open ones only) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_work_item_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_work_item_idx" ON "workflow_instances" ("work_item_ref") WHERE "work_item_ref" IS NOT NULL`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `owner`, and every non-admin's own-instances list search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_initiator_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_initiator_idx" ON "workflow_instances" ("initiator_user_id", "created_at" DESC)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `stage` (the current stage id) search field
+    migration: "workflow_instance_search",
+    name: "workflow_instances_current_stage_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_current_stage_idx" ON "workflow_instances" (("definition" -> 'stages' -> (("state" ->> 'currentStageIndex')::int) ->> 'id'))`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `complianceTag` (projects whose classifications hold the tag) search field
+    migration: "workflow_instance_search",
+    name: "projects_classifications_gin",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "projects_classifications_gin" ON "projects" USING gin ("classifications" jsonb_path_ops)`,
+  },
+  {
+    // ADR-0349 slice 5: the instances list's `complianceTag` search field, the other side of the join (the existing
+    // project index is partial, open instances only)
+    migration: "workflow_instance_search",
+    name: "workflow_instances_project_idx",
+    create: `CREATE INDEX CONCURRENTLY IF NOT EXISTS "workflow_instances_project_idx" ON "workflow_instances" ("project_id")`,
+  },
+  {
+    // ADR-0312 (cost per outcome): the outcome spend join reads a run's metered rows by `detail.runId`
+    migration: "cost_outcomes",
+    name: "usage_events_run_id_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "usage_events_run_id_idx" ON "usage_events" (("detail"->>'runId')) ` +
+      `WHERE ("detail"->>'runId') IS NOT NULL`,
+  },
+  {
+    // ADR-0312: an outcome with no run id reads every run of its workflow instance (the spend join's IN subquery)
+    migration: "cost_outcomes",
+    name: "orchestration_runs_workflow_instance_idx",
+    create:
+      `CREATE INDEX CONCURRENTLY IF NOT EXISTS "orchestration_runs_workflow_instance_idx" ON "orchestration_runs" ` +
+      `("workflow_instance_id") WHERE "workflow_instance_id" IS NOT NULL`,
   },
 ];
 

@@ -1,0 +1,96 @@
+name: HA failover suite
+
+# ADR-0343 slice 3: kill a gateway replica, then the database primary, and check that no committed governance
+# decision or audit row is lost and that the hash chain still verifies (deploy/ha-test/README.md).
+#
+# `native` runs Postgres 16 binaries from the runner image and gateway processes, with no Docker. It runs on pull
+# requests that touch the HA code, at merge time, on main and nightly. `compose` builds the gateway image and runs the
+# same suite on Docker Compose: nightly and on demand only, to keep the image build off every PR.
+on:
+  pull_request:
+    paths:
+      - 'deploy/ha-test/**'
+      - 'packages/db/src/session-lock.ts'
+      - 'packages/db/src/migrate.ts'
+      - 'packages/db/src/audit-chain.ts'
+      - 'apps/gateway/src/cluster-leader.ts'
+      - 'apps/gateway/src/readiness.ts'
+      - 'apps/gateway/src/boot.ts'
+      - '.github/workflows/ha-failover.yml'
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ha-failover-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The gateway type-check needs about 4.6 GB, over Node's default heap of about 4 GB (CI OOM, PR #1194). Runners have 16 GB.
+  NODE_OPTIONS: --max-old-space-size=6144
+
+jobs:
+  native:
+    name: ha / failover suite (native Postgres)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - name: Failover suite (synchronous replication)
+        run: |
+          set -o pipefail
+          PG_BIN="$(ls -d /usr/lib/postgresql/16/bin)" node deploy/ha-test/failover-suite.mjs --report "$RUNNER_TEMP/ha-report.json"
+      - name: Negative control (asynchronous replication must lose decisions, and the suite must say so)
+        run: |
+          if PG_BIN="$(ls -d /usr/lib/postgresql/16/bin)" node deploy/ha-test/failover-suite.mjs --async --report "$RUNNER_TEMP/ha-async-report.json"; then
+            echo "::error::the suite passed with asynchronous replication: it can no longer see a lost decision"
+            exit 1
+          fi
+          node -e 'const r=require(process.argv[1]); const m=r.checks?.everyAcknowledgedDecisionIsCommitted?.missingCount; if(!(m>0)){console.error("the async run failed for another reason:", r.error ?? JSON.stringify(r.checks)); process.exit(1)} console.log(`negative control: ${m} acknowledged decisions lost, as expected`)' "$RUNNER_TEMP/ha-async-report.json"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ha-failover-native
+          path: ${{ runner.temp }}/ha-*report.json
+          if-no-files-found: ignore
+
+  compose:
+    name: ha / failover suite (Docker Compose)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - name: Failover suite on Docker Compose
+        run: node deploy/ha-test/failover-suite.mjs --backend compose --report "$RUNNER_TEMP/ha-compose-report.json"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ha-failover-compose
+          path: ${{ runner.temp }}/ha-compose-report.json
+          if-no-files-found: ignore

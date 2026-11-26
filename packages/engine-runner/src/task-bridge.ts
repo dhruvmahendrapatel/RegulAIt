@@ -19,6 +19,10 @@
  *      ENGINE_TASK_HTTP_MAX_IN_FLIGHT at once, each answer read under a byte cap (forwardGatewayRequest);
  *   3. a cancel (`jobs/<runId>/cancel`, or the job directory gone) closes the task: the executor stops the sandbox.
  *
+ * ADR-0242 L4.3 (a SUBJECT run, task-subject.ts): a job directory holding only `subject.json` becomes an input with
+ * no files, no artifact and no secret, naming where the gateway places its own subject file (the input root); the
+ * task's results under `subject/` are written under `results/<runId>/`.
+ *
  * Nothing here starts a process: the bridge only reads and writes files and speaks HTTP (the static guard
  * `adr0190-i5-engine-runner-no-spawn.test.ts` checks every runner entry point's import closure).
  */
@@ -40,6 +44,7 @@ import {
 } from "@regulait/shared";
 import type { RunnerClient } from "./runner.js";
 import { signalTaskOver } from "./task-signal.js";
+import { GATEWAY_INPUT_JOB_FILE, parseSubjectJob, SUBJECT_JOB_FILE, SUBJECT_TASK_RUN_DIR } from "./task-subject.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** the top-level result files a task may write besides its run's own (the worker's in-sandbox self-test) */
@@ -77,7 +82,22 @@ export async function taskInputFromJobDir(jobsRoot: string, runId: string, isArt
   let inline = 0;
   const entries = (await readdir(dir, { withFileTypes: true })).filter((e) => e.name !== "cancel").sort((a, b) => (a.name < b.name ? -1 : 1));
   if (entries.length === 0 || entries.length > ENGINE_TASK_MAX_FILES) throw new TaskBridgeError("a job holds 1 to 16 files");
+  // ADR-0242 L4.3: a subject run's only input is the gateway's file; the runner sends nothing of its own
+  if (entries.some((e) => e.name === SUBJECT_JOB_FILE)) {
+    if (entries.length !== 1 || !entries[0]!.isFile()) throw new TaskBridgeError("a subject job holds its marker only");
+    const subject = parseSubjectJob(await readFile(path.join(dir, SUBJECT_JOB_FILE), "utf8"));
+    if (!subject) throw new TaskBridgeError("the subject marker does not name one file at the input root");
+    return { files: [], artifact: null, subject, secret: null };
+  }
+  // ADR-0346: an agent run whose gateway places one data file of its own at the input root (the job's files still travel)
+  let subject: EngineTaskInputUpload["subject"] = null;
   for (const e of entries) {
+    if (e.name === GATEWAY_INPUT_JOB_FILE) {
+      if (!e.isFile()) throw new TaskBridgeError("the gateway input marker is not a plain file");
+      subject = parseSubjectJob(await readFile(path.join(dir, e.name), "utf8"));
+      if (!subject) throw new TaskBridgeError("the gateway input marker does not name one file at the input root");
+      continue;
+    }
     const rel = `${runId}/${e.name}`;
     if (!e.isFile() || !isEngineTaskPath(rel)) throw new TaskBridgeError(`job entry ${e.name} is not a plain file`);
     if (isArtifact(e.name)) {
@@ -99,7 +119,13 @@ export async function taskInputFromJobDir(jobsRoot: string, runId: string, isArt
     if (inline > ENGINE_TASK_INLINE_MAX_BYTES) throw new TaskBridgeError("the job's inline files are too large");
     files.push({ path: rel, data: bytes.toString("base64") });
   }
-  return { files, artifact, secret };
+  if (subject && (artifact || files.length === 0)) throw new TaskBridgeError("a gateway input file goes beside a job, never beside an artifact");
+  return subject ? { files, artifact, subject, secret } : { files, artifact, secret };
+}
+
+/** ADR-0242 L4.3: a subject task's `subject/<file>` is the run's own `<runId>/<file>`; any other path is unchanged */
+export function subjectResultPath(runId: string, p: string): string {
+  return p.startsWith(`${SUBJECT_TASK_RUN_DIR}/`) ? `${runId}/${p.slice(SUBJECT_TASK_RUN_DIR.length + 1)}` : p;
 }
 
 /** a result path the task may write: the run's own files, or a top-level self-test file */
@@ -256,8 +282,9 @@ export class ExecutorTaskBridge {
           }
           const m = parsed.data;
           if (m.t === "file") {
-            if (!resultPathAllowed(runId, m.path)) throw new TaskBridgeError(`a result path outside the run: ${m.path}`);
-            await this.writeChunk(parts, m);
+            const p = input.subject ? subjectResultPath(runId, m.path) : m.path;
+            if (!resultPathAllowed(runId, p)) throw new TaskBridgeError(`a result path outside the run: ${m.path}`);
+            await this.writeChunk(parts, { ...m, path: p });
           } else if (m.t === "http") {
             // answered in the background: a slow model call never holds the frame reader; bounded per task (MEDIUM-1)
             const deliver = (answer: EngineTaskInFrame) =>

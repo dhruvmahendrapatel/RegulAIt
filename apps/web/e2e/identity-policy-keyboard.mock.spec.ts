@@ -72,7 +72,7 @@ async function cancelModal(page: Page, trigger: ReturnType<Page["getByRole"]>, t
 test("users: row activation, MFA reason validation, trap and return focus", async ({ page }) => {
   const f = await fixture(page);
   await page.goto("/ui/admin/users");
-  await activate(page, page.getByRole("link", { name: "Manage Dana Developer" }));
+  await activate(page, page.getByRole("button", { name: "Manage Dana Developer" }));
   const trigger = page.getByRole("button", { name: "Clear MFA", exact: true });
   await activate(page, trigger);
   const dialog = page.getByRole("dialog", { name: "Clear MFA (lost authenticator)" });
@@ -97,7 +97,7 @@ test("roles: nested delete does not also open grants; row Enter still works", as
   await expect(page.getByText("Select a role to view and edit its grants and holders", { exact: true })).toBeVisible();
   await expectDialogTrap(page, dialog); await expectAxeClean(page, "role deletion");
   await escapeToTrigger(page, dialog, trigger);
-  await activate(page, page.getByRole("link", { name: "Open grants for Auditor" }));
+  await activate(page, page.getByRole("button", { name: "Open grants for Auditor" }));
   await expect(page.getByText("Held by", { exact: true })).toBeVisible();
   await expectAxeClean(page, "role grants");
 });

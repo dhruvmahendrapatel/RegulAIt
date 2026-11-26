@@ -1,0 +1,11 @@
+{
+  "adr": "ADR-0349",
+  "lane": "E30",
+  "tracking": "lane E30 incident console (decision in PR #925): the brief is API-only (lane rule 3); the incident console screen is for the design builder on #453",
+  "gaps": {
+    "GET /v1/workflows/incidents": "lists stuck or failed workflow instances (failed stage, failed check, deploy handoff, lapsed claim) with what each waits on and which actions are allowed and why not",
+    "POST /v1/workflows/instances/:instanceId/incident/retry": "re-runs the stuck or failed stage of a workflow instance (the executor, or a recheck of a failed check), with a note, audited",
+    "POST /v1/workflows/instances/:instanceId/incident/skip": "skips a stuck check stage the template marks skippable (never a review or approval), with a note, step-up and audit",
+    "POST /v1/workflows/instances/:instanceId/incident/cancel": "cancels (aborts) a stuck or failed workflow instance, with a note, audited"
+  }
+}

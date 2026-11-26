@@ -81,7 +81,7 @@ import {
 } from "@regulait/shared";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { fileGovernanceAlertTicket, governanceAlertTicket, governanceAlertTickets } from "./pm.js";
+import { asPmSync, fileGovernanceAlertTicket, governanceAlertTicket, governanceAlertTickets } from "./pm.js";
 import { errMessage } from "./err-serializer.js";
 
 export const ALERT_SLA_SWEEP_JOB_NAME = "alert-sla-sweep";
@@ -110,7 +110,11 @@ async function namedTicketConnection(
 ): Promise<{ named: string | null; id: string | null }> {
   const named = (settings as { alertTicketConnectionId?: string | null }).alertTicketConnectionId ?? null;
   if (!named) return { named: null, id: null };
-  const [conn] = await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, named));
+  // ADR-0234 PM batch: pm_connections is under row-level security; a non-admin request that raises an alert reads the
+  // named connection through the pm_sync principal step.
+  const [conn] = await asPmSync("alerts.ticket-connection", () =>
+    db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, named)),
+  );
   return { named, id: conn?.id ?? null };
 }
 
@@ -593,6 +597,9 @@ export function registerAlertOwnershipRoutes(app: FastifyInstance, db: Db, opts:
     if (a.status === "resolved") return reply.status(409).send({ error: "alert_resolved" });
     const [target] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, body.userId), isNull(users.disabledAt)));
     if (!target) return reply.status(422).send({ error: "unknown_or_inactive_user", detail: "the new owner must be an active user" });
+    // ADR-0234 PM follow-on: a non-admin owner stops seeing the episode's ticket link the moment they hand it on, so
+    // read it while they still own it; the response shows the ticket the caller could see when it decided.
+    const ticketBefore = (await governanceAlertTickets(db, [alertId])).get(alertId);
     const [updated] = await db
       .update(governanceAlerts)
       .set({ ownerUserId: body.userId, ownerSource: "assigned" })
@@ -609,7 +616,10 @@ export function registerAlertOwnershipRoutes(app: FastifyInstance, db: Db, opts:
         by: req.authCtx.isAdmin ? "admin" : "owner",
       });
     const view = (await alertOwnershipViews(db, [updated])).get(alertId)!;
-    return { id: alertId, ...view };
+    const ticket = view.ticket ?? (ticketBefore
+      ? { connectionId: ticketBefore.connectionId, connectionName: ticketBefore.connectionName, externalId: ticketBefore.externalId, externalUrl: ticketBefore.externalUrl }
+      : null);
+    return { id: alertId, ...view, ticket };
   });
 
   app.post("/v1/governance/alerts/:alertId/ticket", async (req, reply: FastifyReply) => {

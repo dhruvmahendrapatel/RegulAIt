@@ -36,6 +36,7 @@ import {
   ne,
   or,
   count,
+  externalScorers,
   orgSettings,
   ORG_SETTINGS_ID,
   pmConnections,
@@ -56,6 +57,7 @@ import {
   accountabilitySettingRelaxed,
   aiBomSnapshotTriggerPosture,
   alertTicketSettingsProblem,
+  routingClassifierProblem,
   composeAuditRetentionDays,
   type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
@@ -65,6 +67,7 @@ import {
   setRevocationScopeSchema,
   setRuleDeployModeSchema,
   updateOrgSettingsSchema,
+  TEXT_EMBEDDING_SCORER_KIND,
 } from "@regulait/shared";
 import { z } from "zod";
 // ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
@@ -83,6 +86,7 @@ import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } f
 import { settingTransitions } from "./setting-transitions.js";
 import { revokeAuditorAccessOnDisable, revokeAuditorSessionsOnMfaRequired } from "./trust-pages-revoke.js";
 import { databaseNow } from "./db-clock.js";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
 import {
   approvalRuleStepUp,
   breakGlassChange,
@@ -93,12 +97,19 @@ import {
   settingsRelaxStepUpRefusal,
   stepUpRefusal,
 } from "./step-up.js";
+import { pruneRuleStepSuggestions } from "./rule-step-retention.js";
 
 export type { OrgSettingsRow };
 
 /** The singleton row, created on first read if migration seeding was skipped
  * (belt-and-braces; 0038 inserts it) — byte-for-byte the
  * loadInterceptionSettings pattern. */
+/** ADR-0352 slice 3: whether a stream under an output-phase block policy is released
+ * incrementally (windowed scans) instead of suppressed or buffered. Strict default: no. */
+export async function incrementalStreamInspection(db: Db): Promise<boolean> {
+  return (await loadOrgSettings(db)).streamOutputInspection === "incremental";
+}
+
 export async function loadOrgSettings(db: Db): Promise<OrgSettingsRow> {
   const [row] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   if (row) return row;
@@ -299,6 +310,8 @@ export interface AuditPruneResult {
   deleted: number;
   /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
   tracesDeleted: number;
+  /** ADR-0327: rule-like step suggestions (which copy span input values) removed under the same floor */
+  ruleStepSuggestionsDeleted: number;
   retainedDays: number | null;
   floorSource: string[];
 }
@@ -317,7 +330,7 @@ export function runAuditPruneOnce(db: Db, actorUserId: string | null, auto: bool
 async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, auto: boolean): Promise<AuditPruneResult> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
-    return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
+    return { deleted: 0, tracesDeleted: 0, ruleStepSuggestionsDeleted: 0, retainedDays: null, floorSource: [] };
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
@@ -401,9 +414,21 @@ async function runAuditPruneOnceUnscoped(db: Db, actorUserId: string | null, aut
     // never let trace pruning fail the audit prune it rides along with
     tracesDeleted = 0;
   }
+  // ADR-0327 slice 3 — RULE-LIKE STEP SUGGESTIONS FOLLOW THE SAME FLOOR. A suggestion's rule copies input values out
+  // of trace spans, and its scan window ends at `detected_at`, so a suggestion detected before the cutoff draws only on
+  // spans this pass has just removed (a held trace keeps its evidence, not the suggestion derived from it). Deleted,
+  // not redacted: the next scan rebuilds it from spans still held.
+  let ruleStepSuggestionsDeleted = 0;
+  try {
+    ruleStepSuggestionsDeleted = await pruneRuleStepSuggestions(db, f.cutoff);
+  } catch {
+    // like the trace prune, never let it fail the audit prune it rides along with
+    ruleStepSuggestionsDeleted = 0;
+  }
   return {
     deleted: deleted.length,
     tracesDeleted,
+    ruleStepSuggestionsDeleted,
     retainedDays: f.retainedDays,
     floorSource: f.floorSource,
   };
@@ -441,11 +466,16 @@ export async function auditPruneTick(db: Db, state: SchedulerTickState): Promise
   }
 }
 
-export function startAuditPruneScheduler(db: Db): () => void {
+export function startAuditPruneScheduler(db: Db): () => Promise<void> {
   const state: SchedulerTickState = { lastRunAt: 0 };
-  const timer = setInterval(() => void auditPruneTick(db, state), 3600 * 1000);
+  // ADR-0343: one replica of the cluster prunes, not every replica
+  const leader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.auditPrune);
+  const timer = setInterval(leaderOnly(leader, () => auditPruneTick(db, state)), 3600 * 1000);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await leader.release();
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +490,10 @@ const ENV_KEY_NAMES: ReadonlyArray<{ provider: string; envVar: string; aliases: 
   { provider: "openai", envVar: "OPENAI_API_KEY", aliases: [] },
   { provider: "google", envVar: "GOOGLE_API_KEY", aliases: ["GEMINI_API_KEY"] },
   { provider: "xai", envVar: "XAI_API_KEY", aliases: [] },
+  // ADR-0352
+  { provider: "mistral", envVar: "MISTRAL_API_KEY", aliases: [] },
+  { provider: "cohere", envVar: "COHERE_API_KEY", aliases: ["CO_API_KEY"] },
+  { provider: "qwen", envVar: "DASHSCOPE_API_KEY", aliases: ["ALIBABA_API_KEY"] },
 ];
 
 /** which conventional platform-key env vars are currently PRESENT on this
@@ -758,11 +792,47 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         });
       }
     }
+    // ADR-0366: rogue-agent containment proposals are decided by an administrator, so the named approver must be an
+    // ACTIVE ADMIN — anyone else could never decide them, and every proposal would wait unrouted
+    if (body.containmentApproverUserId) {
+      const [approver] = await db
+        .select({ isAdmin: users.isAdmin, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.containmentApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (!approver.isAdmin || approver.disabledAt) {
+        return reply.status(422).send({
+          error: "containment_approver_not_admin",
+          detail: "the containment approver must be an active administrator",
+        });
+      }
+    }
     // The sign-in lockout guards (ADR-0025/0036 sso_only, ADR-0174
     // break-glass) run further down, INSIDE the sign-in invariant lock, over
     // the row as re-read under that lock (AER-056). `before` here serves only
     // the checks that do not count sign-in doors.
     const before = await loadOrgSettings(db);
+    // ADR-0352: the meaning-based tier may only be ON with a usable local embedder named:
+    // an external scorer claiming `text_embedding` alone, enabled (it passed its connection test)
+    {
+      const nextEnabled = body.semanticCacheSimilarityEnabled ?? before.semanticCacheSimilarityEnabled;
+      const nextEmbedder = body.semanticCacheEmbedderId !== undefined ? body.semanticCacheEmbedderId : before.semanticCacheEmbedderId;
+      if (nextEmbedder && body.semanticCacheEmbedderId !== undefined) {
+        const [scorer] = await db
+          .select({ enabled: externalScorers.enabled, kinds: externalScorers.scorerKinds })
+          .from(externalScorers)
+          .where(eq(externalScorers.id, nextEmbedder));
+        if (!scorer || !(scorer.kinds as string[]).includes(TEXT_EMBEDDING_SCORER_KIND)) {
+          return reply.status(422).send({ error: "unknown_embedder", detail: "semanticCacheEmbedderId must name an external scorer that claims text_embedding" });
+        }
+        if (!scorer.enabled) {
+          return reply.status(422).send({ error: "embedder_disabled", detail: "the embedder must pass its connection test and be enabled first" });
+        }
+      }
+      if (nextEnabled && !nextEmbedder) {
+        return reply.status(422).send({ error: "embedder_required", detail: "turning on semanticCacheSimilarityEnabled needs semanticCacheEmbedderId" });
+      }
+    }
     // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
     // would silently match nothing at evaluation time (fail closed per
     // entry), so the honest failure is a 400 here, before anything is saved.
@@ -831,6 +901,21 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
         ? await db.select({ id: pmConnections.id }).from(pmConnections).where(eq(pmConnections.id, connectionId))
         : [];
       const problem = alertTicketSettingsProblem({ mode, connectionId, connectionExists: Boolean(conn) });
+      if (problem) return reply.status(422).send(problem);
+    }
+    // ADR-0353 part 2: a routing classifier must be an enabled RegulAIt-contract scorer claiming routing_complexity.
+    // Clearing it (null) always passes: the heuristic is the default.
+    if (body.routingClassifierScorerId) {
+      const [scorer] = await db
+        .select({
+          name: externalScorers.name,
+          enabled: externalScorers.enabled,
+          scorerKinds: externalScorers.scorerKinds,
+          adapter: externalScorers.adapter,
+        })
+        .from(externalScorers)
+        .where(eq(externalScorers.id, body.routingClassifierScorerId));
+      const problem = routingClassifierProblem(scorer ? { ...scorer, scorerKinds: scorer.scorerKinds ?? [] } : null);
       if (problem) return reply.status(422).send(problem);
     }
     // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes

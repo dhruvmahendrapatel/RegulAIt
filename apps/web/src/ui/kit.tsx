@@ -18,12 +18,13 @@ import {
   type ButtonHTMLAttributes,
   type FocusEvent as ReactFocusEvent,
   type InputHTMLAttributes,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
 import { createPortal } from "react-dom";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useSession } from "../session/SessionContext";
 import s from "./kit.module.css";
 import { errorText } from "../api/format";
@@ -34,6 +35,12 @@ type ButtonVariant = "default" | "primary" | "danger" | "ghost";
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: "md" | "sm";
+  /**
+   * Busy (a request in flight), but still focusable (DESIGN_GUIDELINES: `aria-disabled` plus a guard, not `disabled`):
+   * focus stays on the button mid-request, so a step-up dialog can return to it. A click does nothing, and a submit
+   * button does not submit.
+   */
+  busy?: boolean;
 }
 const variantClass: Record<ButtonVariant, string> = {
   default: s.btn!,
@@ -42,14 +49,59 @@ const variantClass: Record<ButtonVariant, string> = {
   ghost: s.btnGhost!,
 };
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "default", size = "md", className, type, ...rest },
+  { variant = "default", size = "md", className, type, busy, onClick, ...rest },
   ref,
 ) {
   const cls = [variantClass[variant], size === "sm" ? s.btnSm : "", className ?? ""]
     .filter(Boolean)
     .join(" ");
-  return <button ref={ref} type={type ?? "button"} className={cls} {...rest} />;
+  return (
+    <button
+      ref={ref}
+      type={type ?? "button"}
+      className={cls}
+      {...rest}
+      aria-disabled={busy || rest["aria-disabled"] === true || rest["aria-disabled"] === "true" || undefined}
+      onClick={(e) => {
+        if (busy) return e.preventDefault();
+        onClick?.(e);
+      }}
+    />
+  );
 });
+
+/**
+ * The one on/off switch (`role="switch"`), named by a visible label (`labelledBy`) or `label`. While `busy` or
+ * `disabled` it stays focusable (`aria-disabled`) and ignores clicks, so focus does not drop to the page mid-request.
+ * `size="sm"` is the compact one the agent builder uses (review of #744: one switch in the repo).
+ */
+export function Switch(props: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label?: string;
+  labelledBy?: string;
+  describedBy?: string;
+  busy?: boolean;
+  disabled?: boolean;
+  size?: "sm";
+}) {
+  const inert = props.busy || props.disabled;
+  return (
+    <button
+      type="button"
+      role="switch"
+      className={props.size === "sm" ? `${s.switch} ${s.switchSm}` : s.switch}
+      aria-checked={props.checked}
+      aria-label={props.labelledBy ? undefined : props.label}
+      aria-labelledby={props.labelledBy}
+      aria-describedby={props.describedBy}
+      aria-disabled={inert || undefined}
+      onClick={() => {
+        if (!inert) props.onChange(!props.checked);
+      }}
+    />
+  );
+}
 
 // ---- fields ---------------------------------------------------------------
 
@@ -123,10 +175,18 @@ export function Field(props: {
   // cannot name is a control a screen reader cannot name either.
   const labelable = only !== null && isValidElement(only) &&
     (only.type === Input || only.type === Select || only.type === Textarea);
-  const single = labelable && isValidElement<{ id?: string }>(only) ? only : null;
+  const single =
+    labelable && isValidElement<{ id?: string; "aria-describedby"?: string; "aria-invalid"?: InputHTMLAttributes<HTMLInputElement>["aria-invalid"] }>(only)
+      ? only
+      : null;
 
   if (single) {
     const id = single.props.id ?? auto;
+    // UIS-02: the error is announced with the control, not only drawn under it: the control's aria-describedby names
+    // it (after any description the caller already gave), and the control reports aria-invalid while it shows
+    const errorId = `${auto}-error`;
+    const hasError = Boolean(props.error);
+    const describedBy = [single.props["aria-describedby"], hasError ? errorId : null].filter(Boolean).join(" ") || undefined;
     return (
       <div className={fieldClass(props.grow)} {...growAttr(props.grow)}>
         <div className={s.fieldLabelRow}>
@@ -139,8 +199,16 @@ export function Field(props: {
             </InfoButton>
           ) : null}
         </div>
-        {single.props.id ? single : cloneElement(single, { id })}
-        {props.error ? <span className={s.fieldError}>{props.error}</span> : null}
+        {cloneElement(single, {
+          id,
+          "aria-describedby": describedBy,
+          "aria-invalid": hasError ? true : single.props["aria-invalid"],
+        })}
+        {hasError ? (
+          <span id={errorId} className={s.fieldError}>
+            {props.error}
+          </span>
+        ) : null}
       </div>
     );
   }
@@ -979,6 +1047,16 @@ export interface Column<T> {
   /** set by FoldTable: after the header, the names of the columns folded into this one; `sortKeys` are its sorts */
   head?: (sort: TableSort) => ReactNode;
   sortKeys?: string[];
+  /**
+   * UIS-04: the row's primary cell. Where the table's rows are clickable, this cell's value sits inside the row's one
+   * real control (a link for `rowHref`, a button for `onRowClick`). Defaults to the first shown column.
+   */
+  primary?: boolean;
+  /**
+   * shown in the cell after its value and outside the row's link or button, for a control that sits beside the value
+   * (one control cannot sit inside another). FoldTable puts the folded columns' lines here too.
+   */
+  after?: (row: T) => ReactNode;
 }
 
 /** the sort a Table hands to a column's `head`, so a column folded into another keeps its own sort (ui/fold.tsx) */
@@ -998,7 +1076,14 @@ export type TableProps<T> = {
    */
   error?: unknown;
   onRetry?: () => void;
+  /**
+   * UIS-04 (owner, 2026-11-22): a row that opens another page. Its primary cell holds a real link to this path, so
+   * the keyboard, a screen reader and "open in a new tab" all get a native link. Wins over `onRowClick`.
+   */
+  rowHref?: (row: T) => string;
+  /** a row that selects or opens something in place: its primary cell holds a real button that calls this */
   onRowClick?: (row: T) => void;
+  /** the accessible name of the row's link or button; without it, the primary cell's text names it */
   rowLabel?: (row: T) => string;
   /**
    * A sort the server applies (DataList): the rows arrive already sorted, a column with `sort` set is sortable and its
@@ -1006,6 +1091,51 @@ export type TableProps<T> = {
    */
   sort?: TableSort;
 };
+
+// ---- clickable rows (UIS-04) ------------------------------------------------
+
+const ROW_INNER_CONTROL = "a,button,input,select,textarea,label,summary,[role=button],[role=link],[role=checkbox],[contenteditable=true]";
+
+/**
+ * UIS-04: a clickable row carries ONE native control, a link or a button in its primary cell; the <tr> itself is not
+ * focusable and has no role. A mouse click elsewhere on the row is a convenience that activates that control. A click
+ * on the control itself, or on any other control in the row (a row action, a checkbox), is left alone, so nothing
+ * fires twice.
+ */
+export function rowClickThrough(e: ReactMouseEvent<HTMLTableRowElement>) {
+  // a click inside a dialog or popover portalled from the row bubbles here through React, not through the DOM
+  if (e.defaultPrevented || !e.currentTarget.contains(e.target as Node)) return;
+  const hit = (e.target as HTMLElement).closest(ROW_INNER_CONTROL);
+  if (hit && e.currentTarget.contains(hit)) return;
+  const control = e.currentTarget.querySelector<HTMLElement>("[data-row-control]");
+  if (!control) return;
+  // focus first, so a drawer that hands focus back on close finds the control that opened it
+  control.focus({ preventScroll: true });
+  control.click();
+}
+
+/** true when the table's rows are clickable, by link or by button */
+export const rowsClickable = <T,>(props: Pick<TableProps<T>, "rowHref" | "onRowClick">) => Boolean(props.rowHref || props.onRowClick);
+
+/** the key of the column whose cell holds the row's control: the one marked `primary`, else the first shown */
+export const primaryColumn = <T,>(shown: Array<Column<T>>) => (shown.find((c) => c.primary) ?? shown[0])?.key;
+
+/** the row's one control around `content`: a router link for `rowHref`, otherwise a button calling `onRowClick` */
+export function rowControl<T>(props: Pick<TableProps<T>, "rowHref" | "onRowClick" | "rowLabel">, row: T, content: ReactNode) {
+  const label = props.rowLabel?.(row);
+  if (props.rowHref) {
+    return (
+      <Link to={props.rowHref(row)} className={s.rowControl} data-row-control="" aria-label={label}>
+        {content}
+      </Link>
+    );
+  }
+  return (
+    <button type="button" className={s.rowControl} data-row-control="" aria-label={label} onClick={() => props.onRowClick?.(row)}>
+      {content}
+    </button>
+  );
+}
 
 export function Table<T>(props: TableProps<T>) {
   const [localKey, setSortKey] = useState<string | null>(null);
@@ -1033,6 +1163,7 @@ export function Table<T>(props: TableProps<T>) {
     }
   };
   const shown = props.columns.filter((c) => !c.hidden);
+  const primaryKey = primaryColumn(shown);
 
   return (
     <div className={s.tableWrap}>
@@ -1079,29 +1210,17 @@ export function Table<T>(props: TableProps<T>) {
                 </tr>
               ))
             : sorted.map((row) => {
-                const clickable = Boolean(props.onRowClick);
+                const clickable = rowsClickable(props);
                 return (
                   <tr
                     key={props.rowKey(row)}
                     className={clickable ? s.rowClickable : undefined}
-                    tabIndex={clickable ? 0 : undefined}
-                    role={clickable ? "link" : undefined}
-                    aria-label={clickable ? props.rowLabel?.(row) : undefined}
-                    onClick={clickable ? () => props.onRowClick!(row) : undefined}
-                    onKeyDown={
-                      clickable
-                        ? (e) => {
-                            if (e.target === e.currentTarget && e.key === "Enter") {
-                              e.preventDefault();
-                              props.onRowClick!(row);
-                            }
-                          }
-                        : undefined
-                    }
+                    onClick={clickable ? rowClickThrough : undefined}
                   >
                     {shown.map((c) => (
                       <td key={c.key} style={{ textAlign: c.align ?? "left" }}>
-                        {c.render(row)}
+                        {clickable && c.key === primaryKey ? rowControl(props, row, c.render(row)) : c.render(row)}
+                        {c.after?.(row)}
                       </td>
                     ))}
                   </tr>
@@ -1236,8 +1355,21 @@ export function Modal(props: {
   wide?: boolean;
   /** near full screen — the expanded view of a contained card (X6) */
   full?: boolean;
+  /** UIS-09: a save is in flight; Escape, a backdrop click and the Close button leave the dialog open until it ends */
+  busy?: boolean;
+  /**
+   * UIS-09: the draft differs from what is saved. Escape, a backdrop click and the Close button then ask "Discard
+   * changes?" first (owner, 2026-11-22). A Cancel button the caller renders in `actions` stays the caller's to wire.
+   */
+  dirty?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [asking, setAsking] = useState(false);
+  const close = () => {
+    if (props.busy) return;
+    if (props.dirty) setAsking(true);
+    else props.onClose();
+  };
   useEffect(() => {
     if (!props.open) return;
     const dialog = ref.current;
@@ -1273,14 +1405,26 @@ export function Modal(props: {
       tabIndex={-1}
       ref={ref}
       onCancel={(event) => {
+        // a dialog nested in this one (the discard prompt) cancels itself; React would hand its cancel up to here
+        if (event.target !== event.currentTarget) return;
         event.preventDefault();
-        props.onClose();
+        close();
+      }}
+      onClose={(event) => {
+        // the browser closes a dialog itself on a repeated Escape with no click between (its cancel is then not
+        // cancelable): while busy or dirty it goes straight back up, otherwise the close is reported like any other
+        const dialog = event.currentTarget;
+        if (event.target !== dialog || !dialog.isConnected || dialog.open) return;
+        if (props.busy || props.dirty) {
+          dialog.showModal();
+          close();
+        } else props.onClose();
       }}
       onMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         const bounds = event.currentTarget.getBoundingClientRect();
         if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
-          props.onClose();
+          close();
         }
       }}
     >
@@ -1291,7 +1435,7 @@ export function Modal(props: {
           style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", background: "var(--surface-1)" }}
         >
           <span style={{ flex: 1 }}>{props.title}</span>
-          <Button size="sm" onClick={props.onClose}>
+          <Button size="sm" disabled={props.busy} onClick={close}>
             Close
           </Button>
         </div>
@@ -1300,6 +1444,21 @@ export function Modal(props: {
       )}
       {props.children != null && <div className={s.modalBody}>{props.children}</div>}
       {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
+      {/* nested, so it opens in the top layer above this dialog; closing it hands focus back inside this one */}
+      <ConfirmModal
+        open={asking}
+        title="Discard changes?"
+        body="What you changed here has not been saved."
+        cancelLabel="Keep editing"
+        focusCancel
+        confirmLabel="Discard"
+        danger
+        onCancel={() => setAsking(false)}
+        onConfirm={() => {
+          setAsking(false);
+          props.onClose();
+        }}
+      />
     </dialog>
   );
 }
@@ -1310,6 +1469,10 @@ export function ConfirmModal(props: {
   title: string;
   body?: ReactNode;
   confirmLabel?: string;
+  /** the label of the safe choice */
+  cancelLabel?: string;
+  /** the safe choice holds focus when the confirm opens */
+  focusCancel?: boolean;
   danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -1321,7 +1484,9 @@ export function ConfirmModal(props: {
       onClose={props.onCancel}
       actions={
         <>
-          <Button onClick={props.onCancel}>Cancel</Button>
+          <Button autoFocus={props.focusCancel} onClick={props.onCancel}>
+            {props.cancelLabel ?? "Cancel"}
+          </Button>
           <Button variant={props.danger ? "danger" : "primary"} onClick={props.onConfirm}>
             {props.confirmLabel ?? "Confirm"}
           </Button>
@@ -1478,7 +1643,8 @@ export function ErrorState(props: {
         {props.access ? "You don't have access to this view" : (props.title ?? "Couldn't load this view")}
       </div>
       <div className={s.emptyBody}>{props.message}</div>
-      {props.onRetry && (
+      {/* UIS-08: an access refusal answers the same on a retry, so it offers none */}
+      {props.onRetry && !props.access && (
         <Button size="sm" onClick={props.onRetry}>
           Retry
         </Button>

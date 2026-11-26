@@ -1,0 +1,17 @@
+{
+  "adr": "ADR-0364",
+  "lane": "E45",
+  "tracking": "ADR-0364 S2 (lane E45): API-only by the master brief (2026-11-19); the Robots screens (list, detail, review) are for the design builder on #453",
+  "gaps": {
+    "GET /v1/robots": "pages the robots the caller owns (all, for an admin) with their computed status and how many agents use them",
+    "POST /v1/robots": "creates a robot (browser engine only in this release), owned by the caller, audited",
+    "GET /v1/robots/:robotId": "one robot with every version (content, allow-list, bindings, lifecycle) and its secrets' names and last four (never a value)",
+    "POST /v1/robots/:robotId/retire": "retires a robot: approved versions retired and their tools halted, drafts discarded, a pending review superseded, audited",
+    "POST /v1/robots/:robotId/versions": "drafts a new robot version (steps_v1 script, https allow-list, secret bindings), audited",
+    "PUT /v1/robots/:robotId/versions/:version": "replaces a draft version's content; refused once it is submitted (frozen), audited",
+    "POST /v1/robots/:robotId/versions/:version/submit": "submits a draft for review in the approvals queue, bound to its content digest; needs a passing test run on that digest, audited",
+    "POST /v1/robots/:robotId/versions/:version/retire": "retires an approved robot version and halts its tool, audited",
+    "PUT /v1/robots/:robotId/secrets/:name/:scope": "sets a robot's live or test secret, encrypted (settings_relax step-up, audited without the value)",
+    "DELETE /v1/robots/:robotId/secrets/:name/:scope": "clears a robot secret no submitted version is bound to, audited"
+  }
+}

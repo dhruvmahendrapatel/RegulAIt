@@ -58,7 +58,7 @@ builds on its own.
 
 | Package | What it does |
 |---|---|
-| `policy-kernel` | Pure default-deny decision core: `evaluate`, `evaluateAgent`, `evaluateConnector`, `visibleTools`, `executionGate` (kill switch), `literacyGate`, `matchingApprovalRules`; `./abac` and `./actor` wrap Cedar. |
+| `policy-kernel` | Pure default-deny decision core: `evaluate`, `evaluateAgent`, `evaluateConnector`, `visibleTools`, `executionGate` (kill switch), `literacyGate`, `matchingApprovalRulesWith`, `composeResourceDecision`; the graduated agent-response table (`agent-response.ts`, ADR-0354: advise, correct, block session, disable over the three effects); `./abac` and `./actor` wrap Cedar, and rate limits and approval-rule matching run only on the injected Cedar engines (`./rate-limit-cedar`, `./approval-rule-cedar`, `./resource-approval-rule-cedar`; no engine refuses, ADR-0239). |
 | `optimizer-kernel` | Pillar 6, pure functions: model routing, complexity, token estimates, compaction, prompt-cache planning, lazy tool selection, edit-vs-rewrite, batching, reference preprocessing. |
 | `orchestration-kernel` | Pillar 7, pure task-DAG and delegation core. |
 | `workflow-kernel` | Pillar 2, declarative template validation and stage types. |
@@ -73,6 +73,7 @@ builds on its own.
 | `training-provider` | The pure training half of the in-house model work. |
 | `engine-runner` | Sidecar runner core for the evaluation engines; hands every run to the executor, never runs one itself. |
 | `engine-promptfoo`, `engine-modelscan`, `engine-garak` | Per-engine shims (adapter, config, mapper, worker). |
+| `engine-admission-scan` | The runner and task shim of both ADR-0242 admission-scan images (mcpscanner, skillscanner): subject runs on the task bridge, the driver's report posted as the raw report. |
 | `sandbox-executor` | The isolation executor: `runc` (L1 hardened container) and `gvisor` (L2 user-space kernel) backends, chosen by `REGULAIT_EXECUTOR_BACKEND`. |
 | `api-client` | The supported TypeScript client for the public API (generated from [openapi.json](../docs/api/openapi.json)). |
 
@@ -84,6 +85,7 @@ builds on its own.
 | [integrations/](../integrations) | Kong plugin and Envoy `ext_authz` config that call `POST /v1/evaluate` as an external decision point. |
 | [endpoint-discovery/](../endpoint-discovery) | The osquery pack for endpoint AI discovery. |
 | [agents/endpoint](../agents/endpoint) | The read-only Go endpoint agent; sends signed, pseudonymous snapshots. |
+| [agents/browser](../agents/browser) | The managed MV3 browser extension (ADR-0334): blocks governed AI sites until a signed per-user policy allows them, checks prompts against the shared credential rules, reports breaches with per-device proofs. |
 | [security/](../security) | Third-party inventory and the audit, image and SAST allow-lists. |
 | [scripts/](../scripts) | CI gates and tooling: ADR index test, licence gate, `preflight-*` checks, engine image lock and verify, BOM tooling, bundle signing, `install.sh`, `scripts/master/` merge loop. |
 | [spikes/](../spikes) | Throwaway probes behind individual ADRs; not shipped. |
@@ -92,7 +94,10 @@ builds on its own.
 Key ADRs: [0009](decisions/0009-typescript-fastify-stack.md), [0003](decisions/0003-terraform-over-cloudformation.md),
 [0053](decisions/0053-public-api-sdks.md), [0127](decisions/0127-authorization-callout.md),
 [0176](decisions/0176-open-source-first.md), [0187](decisions/0187-batch5-sidecar-engines.md),
-[0195](decisions/0195-shadow-ai-active-discovery.md).
+[0195](decisions/0195-shadow-ai-active-discovery.md). The SaaS entitlement graph (which OAuth scopes agents hold in
+M365, Google Workspace, Salesforce and Slack) is read by `entitlement_*` discovery sources on the same framework, and
+each vendor app is linked to a RegulAIt agent on an exact identifier match or by an admin (declared machine
+`saas_app_agent_link`): [0337](decisions/0337-saas-entitlement-graph.md).
 
 ## Request path through the gateway
 
@@ -224,8 +229,8 @@ runtime [0125](decisions/0125-shared-enforcement-counters.md),
 
 | Store | Use |
 |---|---|
-| **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). |
-| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
+| **Postgres 16** (compose `db`, pinned by digest) | Everything: config, decisions, approvals, usage, audit. Drizzle ORM over `pg`. Shared enforcement counters live here (no Redis). The live context graph (ADR-0365) is plain node, edge and node-scope tables here, read through a recursive CTE under row-level security (no graph database). |
+| **Postgres schema `regulait_queue`** | pg-boss's job queue under pillar 2's stage runner (ADR-0282): automatic stage retries (ADR-0283) and stage deadline timers (ADR-0340, queue `workflow-stage-deadline`). Installed by our journal from the pinned version's `getConstructionPlans`; jobs carry ids only. The worker runs on the boot path unless `REGULAIT_WORKFLOW_RETRY_WORKER=off`. The `public`-schema rules below (search_path pinning, refused TRUNCATE) do not apply to it. |
 | **Object Lock bucket** (compose `objectstore`, SeaweedFS) | Audit-chain anchors only; the gateway runs if it is down. |
 | **Nightly `pg_dump` to S3** | Backups (`infra/scripts/pg-backup.sh`). The data key is deliberately not in the backup. |
 | **Engine volumes** | Per-engine state, jobs and results. |

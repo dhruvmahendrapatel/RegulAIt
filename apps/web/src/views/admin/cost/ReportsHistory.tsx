@@ -20,7 +20,7 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 
 const REPORT_REFUSALS: Readonly<Record<string, string>> = {
-  unknown_report_definition: "This report definition no longer exists. It may have been deleted; reload the page.",
+  unknown_report_definition: "There is no report definition with this ID. Reload the page.",
   unknown_report_run: "There is no report run with this ID. Reload the page.",
   report_scope_not_entitled: "This report covers projects outside what you can see, so it is not shown. The refused read is recorded in the audit log.",
 };
@@ -28,18 +28,42 @@ const REPORT_REFUSALS: Readonly<Record<string, string>> = {
 const obj = (x: unknown): Record<string, unknown> => (x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : {});
 const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
 
-/** the figures a stored report payload carries, read defensively (nothing is invented) */
-function ReportPayloadView(props: { payload: unknown }) {
+const str = (x: unknown): string | null => (typeof x === "string" ? x : null);
+const usd = (x: unknown) => (num(x) === null ? "—" : fmtUsd(num(x)));
+
+/**
+ * The ONE renderer of a report payload (CXR-REV-005): the report just generated on the Reports page and a stored run
+ * opened from the history both render through it, so a section computed by the gateway is never shown in one view and
+ * dropped in the other. It reads defensively and invents nothing: a figure the payload does not carry is not shown,
+ * and a median the period had no decisions for reads "not measured", never 0.
+ */
+export function ReportPayloadView(props: { payload: unknown }) {
   const p = obj(props.payload);
+  const has = (k: string) => p[k] !== null && typeof p[k] === "object";
   const spend = obj(p.spend);
   const gov = obj(p.governance);
+  const wf = obj(p.workflow);
   const controls = obj(p.controls);
   const lines = Array.isArray(spend.lines) ? spend.lines.map(obj) : [];
   const controlRows = Array.isArray(controls.controls) ? controls.controls.map(obj) : [];
   const rows: Array<[string, string]> = [];
   if (num(spend.totalCostUsd) !== null) rows.push(["Total spend (estimate)", fmtUsd(num(spend.totalCostUsd))]);
   if (num(spend.totalEvents) !== null) rows.push(["Metered calls", String(num(spend.totalEvents))]);
+  if (has("spend") && "totalBudgetUsd" in spend) rows.push(["Budget", usd(spend.totalBudgetUsd)]);
+  if (has("spend") && "budgetVarianceUsd" in spend) rows.push(["Variance", usd(spend.budgetVarianceUsd)]);
   if (num(gov.totalDecisions) !== null) rows.push(["Governed decisions", `${num(gov.totalDecisions)} (${num(gov.deny) ?? 0} denied)`]);
+  if (num(gov.requireApproval) !== null) rows.push(["Sent for approval", String(num(gov.requireApproval))]);
+  if (num(gov.denyRate) !== null) rows.push(["Deny rate", `${Math.round(num(gov.denyRate)! * 1000) / 10}%`]);
+  if (num(wf.approvalsRequested) !== null) rows.push(["Approvals requested", String(num(wf.approvalsRequested))]);
+  if (num(wf.approvalsDecided) !== null) {
+    const split = num(wf.approvalsApproved) !== null ? ` (${num(wf.approvalsApproved)} approved, ${num(wf.approvalsDenied) ?? 0} denied)` : "";
+    rows.push(["Approvals decided", `${num(wf.approvalsDecided)}${split}`]);
+  }
+  if (num(wf.approvalsPending) !== null) rows.push(["Approvals pending", String(num(wf.approvalsPending))]);
+  if (has("workflow")) {
+    const m = num(wf.medianDecisionMinutes);
+    rows.push(["Median decision time", m === null ? "not measured (no decision in the period)" : `${Math.round(m * 10) / 10} min`]);
+  }
   if (num(controls.met) !== null) rows.push(["Controls", `${num(controls.met)} met, ${num(controls.gaps) ?? 0} gaps`]);
   return (
     <div className={v.stack}>
@@ -53,9 +77,11 @@ function ReportPayloadView(props: { payload: unknown }) {
             { key: "p", header: "Project", render: (l) => (typeof l.projectName === "string" ? l.projectName : <span className={v.faint}>(unattributed)</span>) },
             { key: "c", header: "Spend", align: "right", render: (l) => fmtUsd(num(l.costUsd)) },
             { key: "e", header: "Calls", align: "right", render: (l) => num(l.events) ?? "—" },
+            { key: "b", header: "Budget", align: "right", render: (l) => usd(l.budgetUsd) },
           ]}
         />
       )}
+      {str(controls.note) && <p className={v.faint}>{str(controls.note)}</p>}
       {controlRows.length > 0 && (
         <Table
           rows={controlRows}
@@ -63,6 +89,8 @@ function ReportPayloadView(props: { payload: unknown }) {
           columns={[
             { key: "t", header: "Control", render: (c) => String(c.title ?? c.id ?? "") },
             { key: "s", header: "Status", render: (c) => <Badge tone={c.status === "met" ? "ok" : "danger"}>{String(c.status ?? "unknown")}</Badge> },
+            { key: "e", header: "Evidence", align: "right", render: (c) => num(c.evidenceCount) ?? "—" },
+            { key: "n", header: "Note", render: (c) => <span className={v.faint}>{str(c.note) ?? ""}</span> },
           ]}
         />
       )}
@@ -132,6 +160,9 @@ interface DefinitionDetail {
     entitlementScope: string;
     description: string | null;
     createdAt: string;
+    /** absent from a gateway that predates archiving */
+    status?: "active" | "archived";
+    archivedAt?: string | null;
   };
   scopeProjectIds: string[] | null;
   schedules: Array<{ id: string; cadence: string; enabled: boolean; lastGeneratedAt: string | null; lastRunId: string | null }>;
@@ -165,6 +196,9 @@ export function ReportDefinitionDetail(props: { id: string; onClose: () => void;
               ["Format", d.definition.format],
               ["Description", d.definition.description ?? "none"],
               ["Created", fmtAt(d.definition.createdAt)],
+              ...(d.definition.status === "archived"
+                ? ([["Status", `archived ${d.definition.archivedAt ? fmtAt(d.definition.archivedAt) : ""}: its schedules do not fire, and its runs are kept`]] as Array<[string, string]>)
+                : []),
             ]}
           />
           <div className={v.sectionTitle}>Resolved scope</div>

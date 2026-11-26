@@ -35,6 +35,38 @@ regexes = [
 ]
 
 [[allowlists]]
+# ADR-0311 (slice 2): the first commit of mcp-modern.test.ts slice 2 (PR #1164) passed the MCP method name
+# "regulait/unknown" next to `users.alice.auth`, which the generic-api-key rule reads as a key. It is a JSON-RPC method
+# name, not a secret. The test now holds it in a constant, but that commit stays in the PR's scanned range, so its exact
+# value is listed here for that one file only.
+description = "An MCP method name the generic rule misreads in the 2026-07-28 path tests (ADR-0311)"
+condition = "AND"
+paths = ['''^apps/gateway/src/mcp-modern\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^regulait/unknown$''']
+
+[[allowlists]]
+# ADR-0343: the first commit of the replica readiness test (PR #887) used the same synthetic data-key fixture as
+# process-lifecycle.test.ts (allow-listed below). The test now generates its key at run time, but that commit stays in
+# the PR's scanned range, so its exact value is listed here for that one file only.
+description = "Synthetic data-key fixture in the ADR-0343 replica readiness test"
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0343-leader-and-readiness\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^3f9a1c7e2b8d4f60a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718$''']
+
+[[allowlists]]
+# ADR-0348: the first commit of the slice 3 race test (PR #923) named a red-team fixture probe with the literal
+# `probeKey: "adr0348-probe"`, which the generic-api-key rule reads as a key. It is a probe name, not a secret; the test
+# now builds the name at run time, but that commit stays in the PR's scanned range, so its exact value is listed here
+# for that one file only.
+description = "Red-team fixture probe name in the ADR-0348 slice 3 race test (not a secret)"
+condition = "AND"
+paths = ['''^apps/gateway/src/adr0348-slice3-races\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^adr0348-probe$''']
+
+[[allowlists]]
 description = "Synthetic test credentials: redaction, DLP and scrub test inputs"
 condition = "AND"
 paths = [
@@ -147,7 +179,14 @@ regexTarget = "secret"
 regexes = ['''^(hallucination|scope-drift|shadow-ai)-scenario-[0-9]+$''']
 
 [[allowlists]]
-description = "ADR-0220, ADR-0247: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
+description = "ADR-0352 (lane E33): a made-up AWS-style secret access key in the first commit of the vendor-adapter test (replaced by an obviously synthetic value in the next commit; it stays in branch history, which this scan reads). Never a real credential. Exact value, this one test file."
+condition = "AND"
+paths = ['''^apps/gateway/src/zz-adr0352-vendor-adapters\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^wJalrXUtnFEMI/K7MDENG\+bPxRfiCYADR0352KEY$''']
+
+[[allowlists]]
+description = "ADR-0220, ADR-0247, ADR-0352: sha256 digests of public model files (tokenizer and special-token files on a public model hub), pinned so the build can verify them; the generic rule reads the 'token' in the file names as a key name. Exact values, this one lock file."
 condition = "AND"
 paths = ['''^agents/trained-detectors/models\.lock\.json$''']
 regexTarget = "secret"
@@ -160,6 +199,9 @@ regexes = [
   '''^8823984edea41294b27aac79047c15d33909ac913ecdbcbd30e139326226d29a$''',
   # ADR-0247: leolee99/PIGuard tokenizer.json
   '''^5124ef2ead1a10a717703bc436de7f353da76d6340e4587719b42b1693707964$''',
+  # ADR-0352: sentence-transformers/all-MiniLM-L6-v2 tokenizer.json and tokenizer_config.json
+  '''^be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037$''',
+  '''^acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b$''',
 ]
 
 [[allowlists]]
@@ -328,3 +370,11 @@ regexes = [
   '''^opaque-token-value-0123456789$''',
   '''^placeholder-secret-0123456789$''',
 ]
+
+[[allowlists]]
+description = "HISTORY ONLY: synthetic GitHub-token-shaped guidance fixture (ADR-0354, lane E35) in the commit that added it; the next commit builds the token at runtime, so the literal is no longer in the tree"
+condition = "AND"
+paths = ['''^packages/shared/src/agent-guidance\.test\.ts$''']
+commits = ["c69bf54bb06851251cfab557a3e04f729dacceb3"]
+regexTarget = "secret"
+regexes = ['''^ghp_0123456789abcdefghijABCDEFGHIJ012345$''']

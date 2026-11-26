@@ -8,6 +8,10 @@
     "@libsql/linux-x64-gnu": "0.5.29",
     "promptfoo": "0.125.1"
   },
+  "optionalDependencies": {
+    "chokidar": "file:absent-optional-peer",
+    "puppeteer-extra-plugin-stealth": "file:absent-optional-peer"
+  },
   "overrides": {
     "basic-ftp": "6.2.6",
     "body-parser": "2.4.0",
@@ -18,9 +22,13 @@
     "follow-redirects": "1.16.2",
     "@hono/node-server": "2.1.8",
     "promptfoo": {
-      ".": "0.125.1",
-      "glob": "14.0.3",
-      "minimatch": "11.0.5"
-    }
+      ".": "0.125.1"
+    },
+    "puppeteer-extra-plugin-stealth": "$puppeteer-extra-plugin-stealth",
+    "nunjucks": {
+      "chokidar": "$chokidar"
+    },
+    "glob": "14.0.3",
+    "minimatch": "11.0.5"
   }
 }

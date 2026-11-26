@@ -196,6 +196,7 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   identity_manage: "changing an agent identity",
   pseudonym_reveal: "revealing a person's name",
   key_management: "changing a signing key or recording a key's custody",
+  endpoint_remediation: "removing an MCP server from employees' machines",
 };
 
 /**

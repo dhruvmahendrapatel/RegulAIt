@@ -394,9 +394,14 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const record = list.useCases.find((u) => u.name.startsWith("Govern ")) ?? list.useCases[0];
     expect(record, "the registry has a use case").toBeTruthy();
     recordId = record!.id;
+    // #745: the record opens on its decision summary (the default tab); the lifecycle tracker is on Overview
     await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);
-    await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
+    await expect(ada.getByTestId("decision-panel")).toBeVisible();
+    await expect(ada.getByTestId("next-action")).toBeVisible();
     await capture(ada, ADA, "ds-g1b-use-case-record");
+    await ada.getByRole("tab", { name: /^Overview\b/ }).click();
+    await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
+    await capture(ada, ADA, "ds-g1b2-use-case-lifecycle");
     // #465: the use case's own audit trail, its true total, and (admin only) the link into the audit log's filter
     await ada.getByRole("tab", { name: /^Audit\b/ }).click();
     await expect(ada.getByText("Recent use-case audit evidence")).toBeVisible();
@@ -457,8 +462,8 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("G5 an alert in the shared detail drawer: a side panel above 900 px, a modal at 900 px and below", async () => {
     await ada.goto("/ui/admin/governance/alerts");
     await expect(ada.getByRole("heading", { name: "Governance alerts", exact: true })).toBeVisible();
-    // each alert row in the list is a link named for its alert; it opens the alert in the shared detail drawer
-    const rows = ada.getByRole("link", { name: /^Open alert / });
+    // each alert row carries a button named for its alert (UIS-04); it opens the alert in the shared detail drawer
+    const rows = ada.getByRole("button", { name: /^Open alert / });
     // the list has loaded (a row, or its empty state) before the rows are counted
     await expect(rows.first().or(ada.getByText("No active alerts", { exact: true }))).toBeVisible();
     if ((await rows.count()) === 0) {

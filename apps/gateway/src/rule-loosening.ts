@@ -180,6 +180,14 @@ export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.
     looser: (b, a) => b === true && a !== true,
     why: "the framework no longer requires model risk management sign-off",
   },
+  // ADR-0346 decision 9: true -> false/null stops the framework forcing the fairness promotion gate on its cards
+  fairnessGateRequired: {
+    kind: "compare",
+    looser: (b, a) => b === true && a !== true,
+    why: "the framework no longer requires a passing fairness evaluation before a model card is signed off",
+  },
+  // ADR-0347: a longer (or no) memory lifetime keeps agent-written memory readable for longer
+  memoryTtlHours: { kind: "compare", looser: ceilingRaised, why: "a longer (or no) agent memory lifetime" },
 };
 
 const BY_KIND: Readonly<Record<string, Readonly<Record<string, FieldClass>>>> = {

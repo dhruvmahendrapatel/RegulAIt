@@ -24,11 +24,11 @@ output "vpc_id" {
 }
 
 output "db_endpoint" {
-  value = module.db.db_instance_address
+  value = module.pg.address
 }
 
 output "db_port" {
-  value = module.db.db_instance_port
+  value = module.pg.port
 }
 
 output "db_name" {
@@ -37,7 +37,7 @@ output "db_name" {
 
 output "db_master_secret_arn" {
   description = "Secrets Manager secret holding the database master username and password (managed and encrypted by RDS)."
-  value       = module.db.db_instance_master_user_secret_arn
+  value       = module.pg.master_user_secret_arn
 }
 
 output "kms_key_arn" {
@@ -54,6 +54,33 @@ output "audit_object_lock_mode" {
 
 output "gateway_role_arn" {
   value = module.gateway_pod_identity.iam_role_arn
+}
+
+output "backup_bucket" {
+  description = "The operator's backup bucket, or null when operator_backups is false."
+  value       = var.operator_backups ? module.backup_target[0].bucket : null
+}
+
+output "backup_role_arn" {
+  description = "The backup Job's Pod Identity role. Not needed in the spec: the association names the ServiceAccount."
+  value       = var.operator_backups ? module.backup_pod_identity.iam_role_arn : null
+}
+
+output "backup_spec" {
+  description = "spec.backup.s3 for the RegulAItInstallation (ADR-0305), less uploaderImage, which comes from the signed bundle. Null when operator_backups is false."
+  value = var.operator_backups ? yamlencode({
+    s3 = {
+      bucket              = module.backup_target[0].bucket
+      region              = local.region
+      prefix              = "${module.backup_target[0].prefix}/"
+      kmsKeyARN           = module.kms.key_arn
+      expectedBucketOwner = local.account
+      podIdentity         = true
+      # The STS interface endpoint and S3's published ranges (the S3 gateway
+      # endpoint), opened on 443 for the backup pods only.
+      egressCIDRs = concat(local.endpoint_subnets, data.aws_ec2_managed_prefix_list.s3.entries[*].cidr)
+    }
+  }) : null
 }
 
 output "ecr_repository_urls" {
@@ -129,7 +156,7 @@ output "data_boundary" {
     Control plane and agent-execution plane: BOTH run in this account (EKS
     cluster ${module.eks.cluster_name}, region ${local.region}). Every prompt,
     completion, connector payload, audit row and key stays here: RDS
-    ${module.db.db_instance_identifier}, audit bucket ${module.audit_anchors.bucket},
+    ${module.pg.identifier}, audit bucket ${module.audit_anchors.bucket},
     KMS key ${module.kms.key_arn}.
     To RegulAIt (the vendor): nothing. The product has no telemetry, licence
     check or update call (docs/deployment/DATA_BOUNDARY.md section 1), and this

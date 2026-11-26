@@ -103,7 +103,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
 
 - Every base image is pinned by digest: `python:3.12-slim-trixie@sha256:4840d514…`, `node:22-trixie-slim@sha256:be1e2a3d…`
   for the licence gate, `python:3.12-trixie@sha256:cad37dd2…` to build yara-python (all CPython 3.12.16), and
-  `golang:1.27-trixie@sha256:af1bfc26…` (Go 1.27.3) to rebuild skill-scanner's CEL helper.
+  `golang:1.27-trixie@sha256:f18c3d73…` (Go 1.27.4; was `af1bfc26…`, Go 1.27.3, until CVE-2026-97054) to rebuild skill-scanner's CEL helper.
 - The closure comes from our lockfile (`requirements.txt`): every wheel is pinned by sha256 and installed with
   `--require-hashes --no-deps --only-binary :all:`. That is 110 wheels for mcp-scanner and 99 for skill-scanner,
   resolved for cp312 manylinux x86_64. pip is removed from the image.
@@ -119,7 +119,7 @@ The driver is the only code we write around each engine (ADR-0176). It is run as
     lockfiles override filelock to 4.2.9. garak already ships filelock 4.x with litellm; the smoke scans prove both
     engines still run.
   - skill-scanner's wheel bundles a Go CEL helper built with Go 1.27.1, whose standard library carries four advisories.
-    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.3 (`golang:1.27-trixie`, pinned
+    The image rebuilds it from skill-scanner's own sdist (sha256 checked) with Go 1.27.4 (`golang:1.27-trixie`, pinned
     by digest) and the flags of its packaging script. `cel-helper.py` swaps it in and rewrites the four
     build-describing fields of its manifest, which skill-scanner checks at every start. The module downloads are
     checked against the sdist's `go.sum` and happen at build time only.
@@ -401,6 +401,113 @@ The gateway can now run the two admission-scan engines itself. Pending migration
 - **Left for later L4 slices:** the Node shim per image and the sandbox-limit proof (§6.1 and §6.4), publishing and
   locking the images (§6.3), and re-queueing MCP servers held only by a pending engine scan whose run expired. The
   ADR-0100 MCP sweep skips `held` servers; today a new live sync re-queues them.
+
+### L4.4 The runner shim (§6.1, 2026-11-16)
+
+`packages/engine-admission-scan` is the Node runner and task shim for both images, built in each Dockerfile's new
+`shim` stage exactly as modelscan's (pinned node stage, `pnpm deploy`, the normalised `.modules.yaml`; the node binary
+in the runtime with its libstdc++ and libgcc checked against the runtime base). The scanner stages and the smoke scans
+are unchanged. The image's default command is now the runner (`node /app/dist/main.js`, `REGULAIT_ADMISSION_ENGINE`
+set by the image and validated, fail closed).
+
+- **The task entry changed.** The manifest named the driver itself (`python -I scan.py /in /out/report.json`) as the
+  sandbox workload. That cannot run under ADR-0190 I5: the input is mounted at `/jobs`, the root is read-only, the
+  workload's stdout is the frame channel and nothing else, and the sandbox init passes the workload no environment but
+  PATH and HOME. The entry is now `node /app/dist/task-main.js <engine>` (the engine in argv). That task checks the input
+  root holds exactly the gateway's subject file, writes the worker self-test, runs the driver on the input root as a
+  child process group (10 minutes, inside the profile's wall clock) with an environment it builds (the offline switch, a
+  scratch HOME and TMPDIR), and sends the report back as frames.
+- **A subject run on the task bridge** (`@regulait/engine-runner` `task-subject.ts`). The runner's job directory holds
+  only `subject.json` (`{"path": "tools.json" | "SKILL.md"}`); the bridge starts the task with no files, no artifact,
+  no secret and that root subject path, which is what the gateway's task start requires. The task cannot know its run
+  id (the input has no run directory), so it writes under `subject/` and the bridge writes those frames under
+  `<runId>/`.
+- **The result.** The report is posted as the envelope's raw report, byte for byte (base64, sha256, bytes); the runner
+  never parses or logs it. A missing report, one that is not the bytes the task hashed, or one over the gateway's
+  raw-report cap (`ENGINE_RESULT_LIMITS.maxRawReportBytes`, 3 MiB) is posted as `failed` with no report; the gateway
+  records `unknown`. A driver that exited non-zero posts `failed` (`scan_failed`) with its own report attached.
+- **The worker-attested switch.** As spikee's: the task's self-test reports the offline switch only with the switch set
+  in the driver's environment, no remote-analyzer credential there (the drivers' `REMOTE_SWITCHES`, kept in lockstep by
+  a test), no runner credential in reach and nothing reachable. Before the first enable there is no report, so the
+  runner reports it false and the gateway rests it on the executor's attestation.
+- **The publish gate** (`scripts/engine-images-gate.mjs`) now counts the shim package's closure as both images' inputs
+  (`ENGINE_PACKAGES`), so the reproducible build archives a commit that has it. Both engines stay in
+  `UNPUBLISHED_ENGINE_IDS`; publishing, the lock entries, compose services and the §6.4 sandbox-limit proof are later
+  slices. The Dockerfile change has not been built locally (Docker Hub rate-limits this sandbox); CI's
+  `engine-images-build` builds it twice and compares.
+- **Shared helpers, not copies (#874 review).** The job-directory exchange (`JobExchange`, `jobDirRunId`: staging,
+  rename to live, the cancel file, release, reconcile) and the worker self-test's generic part (the report file, its
+  maximum age, the runner credential's locations, the common report schema, the isolation failures) live in
+  `@regulait/engine-runner` (`src/job-exchange.ts`, `src/worker-selftest.ts`); the admission scan keeps only its done
+  file, task errors, offline switch and remote-analyzer check. garak, spikee, modelscan and promptfoo still carry their
+  own copies and move onto these helpers next (PENDING).
+
+### L4.5 Publish (§6.3, 2026-11-17)
+
+Both images are now publishable by the existing pipeline, exactly as spikee was made publishable (ADR-0245). Nothing
+is published by this change: CI's `engine-images.yml` publishes, signs keylessly and records them on its next run on
+main, and the lock-update branch is merged by a person.
+
+- **The published set.** `mcpscanner` and `skillscanner` join `ENGINE_IDS` (`scripts/engine-images-lock.mjs`), so the
+  publish gate plans them (`never published` until their first publish), the lock validates them and the lock bot
+  records them. `UNPUBLISHED_ENGINE_IDS` (`scripts/engine-images-gate.mjs`) is now empty; the reproducible-build
+  check still covers both. `scripts/build-engine-image.sh push` no longer refuses them.
+- **The lock.** `engines/images.lock.json` carries an all-null entry for each with `publishGeneration` 0, and the
+  generated `packages/shared/src/engines/images-lock.ts` and the compose defaults were regenerated with
+  `node scripts/engine-images-lock.mjs --write`.
+- **The manifest.** Each engine reads `imageDigest`, `taskImage` and its generation step (`1 + publishGeneration`)
+  from `ENGINE_IMAGES_LOCK`, as spikee does. The generation is unchanged (1) while the entry is null. The null digest
+  still keeps both engines un-enableable until a signed publish is recorded (secure by default): no runner passes the
+  self-test (`image_not_built`) and no task is placed (`taskImage` null). The `unverified` line now says the engine is
+  publishable with no publish recorded; skillscanner's yara-x line cites owner decision Q3 instead of "awaiting".
+- **Compose.** `engine-mcpscanner` and `engine-skillscanner` runners (profile `engines`) merge the hardened
+  `x-engine-runner` template on the internal `engines` network, digest-pinned by one variable each
+  (`REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `_DIGEST`, defaults written from the lock: all-zero until a publish, so
+  nothing starts), with their own state volume and two tmpfs exchange volumes (16 MiB jobs: the job directory holds
+  only `subject.json`; 64 MiB results: frames, one report of at most 3 MiB and the self-test). The environment is
+  what `packages/engine-admission-scan/src/main.ts` reads: the gateway URL, a per-engine enrolment token, the image
+  reference and digest, `REGULAIT_ADMISSION_ENGINE` (the same value the image sets) and the jobs and results
+  directories. Build-only `engine-<id>-image` services (profile `engine-images`) build each Dockerfile, as the other
+  engines'. There is no per-engine executor configuration: the executor starts a task by the manifest's `taskImage`.
+- **Also mirrored from spikee:** Dependabot pip entries for both engine directories and both in the base-image
+  digest group.
+- **Already in place, so unchanged:** the build-and-compare matrix (`engine-images-build.yml`), the publish workflow's
+  path filter (`packages/engine-admission-scan/**`), and the image-level Trivy and SBOM scan in `security.yml`,
+  which discovers every `engines/*/Dockerfile`.
+- **Not mirrored:** the air-gapped bundle (`scripts/build-image-bundle.sh --with-engines`) and the installer's bundled
+  tags still name promptfoo, modelscan and garak only, as for spikee: adding an engine with no recorded publish
+  would make `--with-engines` fail. They join the bundle with spikee once the first publish is recorded.
+- **Still open:** the first publish itself (CI), the §6.4 sandbox-limit proof, re-recording the report fixtures with
+  the published image, and the Q5 tuning on the `anthropics/skills` corpus.
+
+### L4.6 Fixtures re-recorded, and the engine measured on the vulnerable MCP fixtures (2026-11-17)
+
+- **Re-recorded.** Both images were built locally from the committed Dockerfiles, with this sandbox's TLS-proxy CA
+  added to a scratch copy and host networking for the build only, as in §3. Their in-image smoke scans passed. The
+  seven report fixtures were re-recorded with `--network=none --read-only --cap-drop=ALL`, no new privileges,
+  uid 10001 and no `/tmp`. They are byte-for-byte the earlier reports plus the driver's `inputs` echo, which names
+  the engine's own fixture file and its real sha256 (a test checks this). The tests no longer add `inputs` to the
+  recordings; the interpretation cases still pin an expected input explicitly.
+- **The vulnerable MCP fixtures (ADR-0246; P23's scanners on the fixtures).** `scripts/mcp-vuln-scan-inputs.mjs`
+  writes the `tools.json` the gateway would hand the driver for each of the eight attack classes, plus rug-pull's
+  pulled phase. The image scanned each one under the same flags. The reports are committed under
+  `packages/shared/src/engines/fixtures/admission-scan/vuln/`, and `scripts/mcp-vuln-scan-inputs.test.mjs` proves
+  each one is about today's fixture bytes. Measured at the MCP hold line (`high`):
+
+  | Class | mcpscanner | The control that catches it (the fixture's `expected`) |
+  |---|---|---|
+  | tool-poisoning | **held** (high: aisubtech 1.1.1, 8.2.3) | admission scanning, the in-process scanner, and now this engine |
+  | tool-shadowing | **held** (high: aisubtech 1.1.1) | admission scanning, and the reserved-prefix name rule (ADR-0185 G3/G4) |
+  | param-exfiltration | not held | the in-process scanner's `mcp.exfil.*` rule; this engine adds nothing here |
+  | rug-pull (approved and pulled) | not held | ADR-0246 definition pinning, the change-since-approval block |
+  | excessive-permissions | not held | write-kind default-deny and approvals |
+  | secret-leak | not held | the output guardrail's `dlp.secret.*` (the secret is in a call result, which admission never sees) |
+  | indirect-injection | not held | the output guardrail's prompt-injection detector (also in a result) |
+  | offensive-tooling | not held | the ADR-0246 high-risk classification and its policy template |
+
+  So the engine is defence in depth for two classes and never the only control for any. Its one blind spot that the
+  fixture names as an admission catch, param-exfiltration, is covered by the in-process scanner. This is measured,
+  not a defect in our code, so no change follows from it.
 
 ## Owner decisions (2026-11-15)
 

@@ -123,6 +123,99 @@ named, tagged or designated production.
 - **Preflight** `infra/modules/byoc-aws/preflight/preflight.sh` (read-only): tools, signed-in account, region and
   zones, quotas, Network Firewall and endpoint availability, Bedrock model access, and free names.
 
+### PR 3: the install runbook and the rehearsal workflow
+
+- **[docs/deployment/BYOC_AWS_INSTALL.md](../../docs/deployment/BYOC_AWS_INSTALL.md)** is written for a platform
+  team that does not know RegulAIt. It runs about two hours hands-on plus about 45 minutes of waiting, and covers
+  prerequisites, quotas and Bedrock access, bundle verification, preflight, one `terraform apply`, the chart install
+  (images mirrored into the customer's ECR, secrets generated in place, the data-key warning), the internal ALB, the
+  first admin, Entra ID OIDC, the smoke test, upgrade and rollback, uninstall (the COMPLIANCE bucket is kept as
+  evidence), the support bundle, the data boundary and the known gaps. The uninstall is ordered (load balancer first,
+  then the two protections off in one reviewed apply, then the mirrored images, then destroy) and lists what is left
+  behind on purpose: the final RDS snapshot, the COMPLIANCE anchors, the KMS key in its 30-day waiting period and the
+  retained install-secrets volume (#868 review, finding 5).
+- **`infra/modules/byoc-aws/smoke/smoke-test.sh`** runs its checks from short-lived pods under the gateway's own
+  namespace and service account, using images by digest through the ECR pull-through cache. It checks that:
+  - nodes are Ready;
+  - the pod gets the gateway role through Pod Identity;
+  - the bucket has Object Lock, and (optionally) a delete of a probe object is refused;
+  - one Bedrock Converse call works;
+  - the database accepts TLS and refuses plain connections;
+  - an allow-listed host is reachable and `example.com` is not;
+  - default-deny NetworkPolicy is enforced.
+
+  **`support-bundle.sh`** collects statuses, events and the last 500 log lines, with no secret values and no state,
+  and the installer reviews it before sending.
+- **`.github/workflows/byoc-rehearsal.yml`** runs on manual dispatch, in the `rehearsal` environment, so a reviewer
+  must approve each run. It:
+  - exchanges the job's OIDC token for a three-hour session of the rehearsal role with the AWS CLI (no third-party
+    action);
+  - refuses any account but regulait-dev: the caller must match the role ARN, and the account's IAM alias must equal
+    `EXPECTED_ACCOUNT_ALIAS`, which is committed in the workflow (#873 review, finding 1). The role ARN comes from an
+    environment variable, so it proves nothing alone. The alias is used, not a hash of the account ID, because the
+    repository is public and a hash of a 12-digit ID can be reversed by brute force. The account ID is masked in logs;
+  - refuses to start while anything tagged `purpose=rehearsal` is still live, so a missed teardown blocks the next
+    rehearsal instead of piling up (finding 2);
+  - runs the preflight, applies the customer root with `rehearsal.tfvars.example`, and runs the smoke test with the
+    WORM probe. For the length of the run, the cluster's public API endpoint is open to the runner's own /32, read from
+    `checkip.amazonaws.com`, and to nothing else. It is gone when the stack is destroyed;
+  - caps every step so the caps add up to the job's 170 minutes (apply 70, smoke 20, destroy 55). The 180-minute
+    session starts after setup and outlives the job, so destroy always has time and live credentials, even after a
+    hung apply (finding 2). State is local to the runner, which is why the leftovers gate exists: a lost runner loses
+    the state, and the next run refuses to start until the owner clears what it left;
+  - **always** destroys, after `infra/scripts/byoc-rehearsal-sweep.sh` empties the GOVERNANCE-mode rehearsal bucket
+    and the cache repositories (the sweep refuses any prefix that is not `regulait-rehearsal*`, and any bucket in
+    COMPLIANCE mode);
+  - lists anything still tagged `purpose=rehearsal`, and writes every step's start, duration and result to the run
+    summary, which the lane copies into its PR.
+
+- The runbook's §6 is idempotent (finding 3). It uses `--dry-run=client | kubectl apply`, `helm upgrade --install`
+  and `helm repo add --force-update`. §6.3 keeps an existing `regulait` Secret and never generates a second data key,
+  because a re-run that rotated it would leave every stored credential unreadable (ADR-0035). The database URL asks
+  for `sslmode=verify-full`. Until the chart can mount the RDS CA bundle, that is listed as a known gap rather than
+  weakened (ADR-0180).
+- **Operator backups to S3 (ADR-0305 §2) are not in this PR** (#868 review, finding 4). `backup-target-s3` grants
+  `s3:ListBucket` (ADR-0305 forbids it) and no S3-conditioned `kms:GenerateDataKey`/`kms:Decrypt`, so composing it
+  as is would break the operator's least-privilege contract, and changing it touches its other callers. A follow-up
+  PR extends it with a Pod Identity writer mode that matches ADR-0305 exactly and composes it in `byoc-aws`. Until
+  then a BYOC install backs up to the operator's PVC path, and RDS point-in-time backups cover the database.
+
+### PR 4: operator backups to S3 (ADR-0305 §2)
+
+The follow-up named in PR 3. No AWS step: plan-only tests, like the rest of the lane.
+
+- **`backup-target-s3` gains `writer_profile`.** `host` (the default) is the existing grant, unchanged, so
+  `regulait-dev-app` and `demo-host` see no difference. `kubernetes_job` is exactly the ADR-0305 contract:
+  - `s3:PutObject` on the prefix;
+  - `kms:GenerateDataKey` and `kms:Decrypt` on the key, conditioned on `kms:ViaService = s3.<region>.amazonaws.com`
+    and on `kms:EncryptionContext:aws:s3:arn` being this bucket;
+  - no `ListBucket`, `GetObject`, `Delete` or CloudWatch.
+
+  The profile needs `kms_key_arn` (a precondition). The grant is built from the bucket name, so the plan shows it in
+  full. The module also gains `writer_role_arns`, for roles that attach `writer_policy_arn` themselves: they are still
+  named in the bucket policy's explicit Deny. Its provider floor moves to `>= 6.0`, which every caller already locks.
+  The module has its first plan-only tests, and `infra-terraform` now runs them.
+- **`byoc-aws/backup.tf`** composes it:
+  - a bucket `<prefix>-backups-<account>`, versioned, SSE-KMS with the stack key, never force-deleted, current
+    versions kept 30 days;
+  - a Pod Identity role `<prefix>-operator-backup` (terraform-aws-modules/eks-pod-identity 2.10.0, already pinned)
+    bound to `<installation>-backup` in the installation namespace, under the workload boundary.
+
+  `operator_backups` defaults to on. The deployer boundary needs no change, because names and actions are inside
+  the prefix it already allows. The freshness alarm is off for this writer, because the Job publishes no heartbeat
+  and an alarm with nothing to watch is always red. The operator's `BackupConfigured` condition and the CronJob
+  status report each run instead.
+- **Output `backup_spec`** is `spec.backup.s3` ready to paste: bucket, region, `pg/`, key, owner account,
+  `podIdentity: true`, and `egressCIDRs` (the endpoint subnets and S3's published ranges). The runbook's §6.9 adds
+  the ADR-0305 acceptance check: a real-size Job upload, then a download of it with the admin's own credentials
+  and `pg_restore --list` plus a full read. §6.9.1 is the restore ADR-0305 names (#1162 review R3, finding 1). It
+  covers the admin read grant, choosing an object version, an in-cluster `pg_restore` pod (RDS is reachable only from
+  the nodes), the master password from Secrets Manager and the matching data key (ADR-0035). The uninstall section
+  asks whether to keep the dumps. An automated restore rehearsal stays open (ADR-0305) until the rehearsal is
+  un-parked.
+- **The rehearsal** sets `backup_retention_days = 1`. `byoc-rehearsal-sweep.sh pre-destroy` empties the rehearsal
+  backup bucket and refuses one with Object Lock, so `terraform destroy` is not stopped by a non-empty bucket.
+
 ### Open source first (ADR-0176)
 
 Searched: `terraform-aws-modules/iam` (Apache-2.0) has `iam-github-oidc-provider` and `iam-github-oidc-role`

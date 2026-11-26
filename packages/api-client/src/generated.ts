@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   75
+// Operations:   77
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -120,6 +120,19 @@ export type PostV1UsersByUserIdRolesBody = {
     roleId: string;
   };
 
+export type PostV1WorkflowsInstancesBody = {
+    projectId?: string;
+    change: {
+      description: string;
+      paths: Array<string>;
+      changeType: string;
+      environment: string;
+      targetSystem?: string;
+    };
+    templateId?: string;
+    workItem?: string;
+  };
+
 export class GeneratedRegulAItClient extends BaseClient {
   /**
  * GET /.well-known/oauth-protected-resource
@@ -138,7 +151,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Liveness probe. The only route that is never rate limited.
+ * Liveness probe. Never rate limited (nor is the internal readiness probe, /ready).
  * @stability public-stable — auth: public
    */
   getHealth<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -548,6 +561,14 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * GET /v1/state-machines
+ * @stability public-beta — auth: user
+   */
+  getV1StateMachines<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/state-machines`, undefined, options);
+  }
+
+  /**
  * The raw usage ledger, one row per governed call (priced or not). With `sort`, `dir`, `cursor`, `offset` or `count` it answers the shared list contract (ADR-0226), with `userId`, `objectType` and `excludeObjectType` filters.
  * @stability public-stable — auth: user
    */
@@ -704,7 +725,7 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Workflow instances.
+ * Workflow instances. ADR-0349: typed search fields `status`, `template`, `target`, `workItem`, `owner` (initiator), `stage` (current stage id) and `complianceTag` (the attributed project's classification), each index-served. A non-admin sees only their own instances. Add any ADR-0226 list parameter (`sort`, `cursor`, `offset`, `count`) for the paginated contract.
  * @stability public-stable — auth: user
    */
   getV1WorkflowsInstances<T = unknown>(options?: RequestOptions): Promise<T> {
@@ -712,11 +733,10 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
- * Start a workflow instance from a template.
+ * Start a workflow instance from a template. ADR-0349: with `workItem` (the PM tool's key for the work item), at most one open instance may exist per template set + target system + work item. A second start is refused 409 `workflow_start_conflict`, naming the open instance to a caller who may read it (audited). Under the org setting `workflowStartConflictPolicy: use_existing` (an audited, step-up relaxation) it answers 200 with that instance and `reused: true`.
  * @stability public-stable — auth: user
- * @remarks this route declares no request schema in the spec, so `body` is untyped.
    */
-  postV1WorkflowsInstances<T = unknown>(body?: unknown, options?: RequestOptions): Promise<T> {
+  postV1WorkflowsInstances<T = unknown>(body: PostV1WorkflowsInstancesBody, options?: RequestOptions): Promise<T> {
     return this.request<T>("POST", `/v1/workflows/instances`, body, options);
   }
 
@@ -735,6 +755,14 @@ export class GeneratedRegulAItClient extends BaseClient {
    */
   postV1WorkflowsInstancesByInstanceIdAdvance<T = unknown>(instanceId: string, body?: unknown, options?: RequestOptions): Promise<T> {
     return this.request<T>("POST", `/v1/workflows/instances/${encodeURIComponent(instanceId)}/advance`, body, options);
+  }
+
+  /**
+ * ADR-0349: what this instance is waiting for (`version: 1`). `waitingOn` is one of approval, artifact, plan, trigger, execution, retry, check_report, advance, check_failed, deploy_handoff or nothing, with a plain `detail` sentence. It also carries the current stage, pending approvers, the execution claim (holder, renewal, lease expiry, live), the queued retry (attempt, next run), the stage deadline when one is set, and the last error. Read-only; the same readers as the instance.
+ * @stability public-beta — auth: user
+   */
+  getV1WorkflowsInstancesByInstanceIdPending<T = unknown>(instanceId: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/workflows/instances/${encodeURIComponent(instanceId)}/pending`, undefined, options);
   }
 }
 
@@ -1002,6 +1030,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "path": "/v1/spend/forecast"
   },
   {
+    "id": "getV1StateMachines",
+    "method": "GET",
+    "path": "/v1/state-machines"
+  },
+  {
     "id": "getV1UsageEvents",
     "method": "GET",
     "path": "/v1/usage-events"
@@ -1115,5 +1148,10 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "postV1WorkflowsInstancesByInstanceIdAdvance",
     "method": "POST",
     "path": "/v1/workflows/instances/{instanceId}/advance"
+  },
+  {
+    "id": "getV1WorkflowsInstancesByInstanceIdPending",
+    "method": "GET",
+    "path": "/v1/workflows/instances/{instanceId}/pending"
   }
 ];

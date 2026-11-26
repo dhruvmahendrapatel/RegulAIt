@@ -195,5 +195,64 @@ def score(kind: str, text: str, models: Mapping[str, Callable]) -> dict:
 
 def supported(models: Mapping[str, object]) -> Sequence[str]:
     """The guardrail kinds this instance can serve (for /healthz)."""
-    have = {"prompt_injection": "guardrail_prompt_injection", "harm": "guardrail_harm", "pii": "guardrail_pii"}
+    have = {
+        "prompt_injection": "guardrail_prompt_injection",
+        "harm": "guardrail_harm",
+        "pii": "guardrail_pii",
+        "embedding": EMBEDDING_KIND,
+    }
     return [have[k] for k in have if k in models]
+
+
+# ---------------------------------------------------------------------------
+# ADR-0352 (lane E33 slice 2): text embeddings for the meaning-based cache tier.
+# The gateway compares two inputs' embeddings inside one mandatory partition; the
+# reply carries numbers and the model identity, never request text.
+# ---------------------------------------------------------------------------
+
+EMBEDDING_KIND = "text_embedding"
+# the gateway sends one prompt; past this an encoder truncates anyway
+MAX_EMBED_CHARS = 32_000
+
+
+def parse_embed_request(body: object) -> str:
+    """Validate a decoded /embed request; return the text."""
+    if not isinstance(body, dict):
+        raise RequestError("request is not a JSON object")
+    if body.get("scorerKind") != EMBEDDING_KIND:
+        raise RequestError("unsupported scorerKind")
+    text = body.get("input")
+    if not isinstance(text, str) or not text:
+        raise RequestError("`input` must be a non-empty string")
+    if len(text) > MAX_EMBED_CHARS:
+        raise RequestError("text too long")
+    return text
+
+
+def mean_pool_normalise(token_vectors: Sequence[Sequence[float]], mask: Sequence[int]) -> list[float]:
+    """Sentence-transformers pooling: the mean of the token vectors the attention
+    mask keeps, then L2-normalised so cosine similarity is a dot product."""
+    kept = [v for v, m in zip(token_vectors, mask) if m]
+    if not kept:
+        raise ValueError("no tokens to pool")
+    width = len(kept[0])
+    if width == 0 or any(len(v) != width for v in kept):
+        raise ValueError("ragged token vectors")
+    mean = [sum(v[i] for v in kept) / len(kept) for i in range(width)]
+    if any(not math.isfinite(x) for x in mean):
+        raise ValueError("model returned a non-finite vector")
+    norm = math.sqrt(sum(x * x for x in mean))
+    if norm == 0:
+        raise ValueError("zero vector")
+    return [x / norm for x in mean]
+
+
+def embed(text: str, encoder: Callable[[str], tuple[Sequence[float], bool]], model_id: str) -> dict:
+    """One validated text through ``encoder`` (text -> (unit vector, truncated)).
+
+    ``truncated`` is True when the encoder cut the input to its token window: the
+    vector then stands for a prefix only, and the gateway never serves or stores a
+    similarity match for it (R3 #969 finding 1)."""
+    raw, truncated = encoder(text)
+    vector = [float(x) for x in raw]
+    return {"embedding": vector, "dims": len(vector), "model": model_id, "truncated": bool(truncated)}

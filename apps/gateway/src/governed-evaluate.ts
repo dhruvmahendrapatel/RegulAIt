@@ -26,7 +26,7 @@ import {
   sql,
 } from "@regulait/db";
 import { sapStoredToolKind, serverSystemClass } from "./sap-tool-kind.js";
-import { evaluate, matchingApprovalRulesWith, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { evaluate, matchingApprovalRulesWith, withAgentResponse, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 // ADR-0239 slice 2: approval rules are matched on Cedar, here and in the kernel call below, so the gateway's reads of
 // the matched rules (consent scope, quorum) and the kernel's decision come from ONE engine and cannot disagree
 import { cedarApprovalRuleEvaluator } from "@regulait/policy-kernel/approval-rule-cedar";
@@ -46,6 +46,7 @@ import {
   type ApprovalTargetRef,
   type ConsentRetirementReason,
   type PreparedPiiApproval,
+  WORKFLOW_TERMINAL_STATUSES,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import {
@@ -221,7 +222,7 @@ export interface RetiredApproval {
 
 /** the workflow statuses under which attributed work is still "landing on" its
  * deploy targets — terminal instances no longer bind a mode context */
-const TERMINAL_INSTANCE_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+const TERMINAL_INSTANCE_STATUSES: readonly string[] = WORKFLOW_TERMINAL_STATUSES;
 
 /**
  * A4 (ADR-0027): derive the SERVER-SIDE deploy context of an attributed call —
@@ -457,7 +458,9 @@ export async function governedEvaluate(
    * never from the request) is decided as the kernel's intersection, and each actor is also evaluated by Cedar
    * as `Agent` against the active v4 policies — lazily, only when one is active.
    */
-  opts: { origin?: GovernedCallOrigin; actor: GovernedActor | null },
+  /** ADR-0230 A3: `bindArguments` = the consent binds the exact arguments whatever the matched rules' scope (an SAP
+   * business write, whose arguments carry its idempotency key: one approval authorises exactly one order). */
+  opts: { origin?: GovernedCallOrigin; actor: GovernedActor | null; bindArguments?: boolean },
 ): Promise<GovernedEvaluation> {
   if (preparedPii && preparedPii.originalArgumentsDigest !== approvalArgumentsDigest({ projectId, arguments: args })) {
     throw new Error("Prepared PII action does not match the original arguments");
@@ -800,7 +803,7 @@ export async function governedEvaluate(
   // On an engine error the kernel call below refuses this call (`approval-rule-engine-error`, same engine, same
   // rules), so no consent is ever bound or spent on it; the strict default scope is read meanwhile.
   const matchedARules = matchedVerdict.kind === "matched" ? matchedVerdict.rules : [];
-  const approvalScope = preparedPii ? "action" : effectiveApprovalScope(matchedARules);
+  const approvalScope = preparedPii || opts.bindArguments ? "action" : effectiveApprovalScope(matchedARules);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
@@ -1026,9 +1029,14 @@ export async function governedEvaluate(
   // BEFORE any shadow work starts. Everything after this point is measurement.
   // With no consent held it IS `pendingDecision` — the same pure function of
   // the same inputs — so the second call is made only when a row satisfied.
-  const decision = approvedApprovalId
-    ? evaluateWith(servedARules, limitsWithCounts, servedScopeRules, approvedApprovalId)
-    : pendingDecision;
+  // ADR-0354: the served decision carries the governing policy's graduated response (advise, correct,
+  // block_session, disable) when that policy produced it; the effect is never changed by it.
+  const decision = withAgentResponse(
+    approvedApprovalId
+      ? evaluateWith(servedARules, limitsWithCounts, servedScopeRules, approvedApprovalId)
+      : pendingDecision,
+    abacDecision?.response,
+  );
 
   // ---------------------------------------------------------------------
   // ADR-0073 §2 — THE SHADOW PASS.

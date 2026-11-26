@@ -79,6 +79,7 @@ import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects
 import { errMessage } from "./err-serializer.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { retiredTagRefusal, retiredTagsAmong } from "./compliance-profile-facts.js";
+import { CLUSTER_LEADER_KEYS, ClusterLeader, leaderOnly } from "./cluster-leader.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -1261,15 +1262,20 @@ export async function backupVerifyTick(db: Db, state: SchedulerTickState): Promi
   }
 }
 
-export function startBackupVerifyScheduler(db: Db): () => void {
+export function startBackupVerifyScheduler(db: Db): () => Promise<void> {
   const state: SchedulerTickState = { lastRunAt: 0 };
+  // ADR-0343: one replica of the cluster verifies, not every replica
+  const leader = new ClusterLeader(db, CLUSTER_LEADER_KEYS.backupVerify);
   // ADR-0234 batch 7a: the tick has no principal; it runs under the named `system_task` reason
   const timer = setInterval(
-    () => void runWithRlsSystem("system_task", "timer.backup-verify", () => backupVerifyTick(db, state)),
+    leaderOnly(leader, () => runWithRlsSystem("system_task", "timer.backup-verify", () => backupVerifyTick(db, state))),
     3600 * 1000,
   );
   timer.unref?.();
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await leader.release();
+  };
 }
 
 // ===========================================================================
@@ -1991,36 +1997,48 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     const actorId = await resolveActor(db, req.authCtx.userId);
     const [resource] = await db.select().from(infraResources).where(eq(infraResources.id, finding.resourceId));
 
-    const [approval] = await db
-      .insert(approvals)
-      .values({
+    // ADR-0348: the move to remediation_proposed is the claim, guarded on 'open' and committed with its approval, so
+    // two concurrent proposals cannot both pass the check above and queue two approvals (approving the second would
+    // re-run the provider remediation)
+    const approval = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [claimed] = await tx
+        .update(infraFindings)
+        .set({ status: "remediation_proposed" })
+        .where(and(eq(infraFindings.id, finding.id), eq(infraFindings.status, "open")))
+        .returning({ id: infraFindings.id });
+      if (!claimed) return null;
+      const [queued] = await tx
+        .insert(approvals)
+        .values({
+          userId: actorId,
+          objectType: "infra_operation",
+          stageId: `${INFRA_REMEDIATION_PREFIX}${finding.id}`,
+          approverUserId: body.approverUserId,
+        })
+        .returning({ id: approvals.id });
+      await tx.insert(auditLog).values({
         userId: actorId,
         objectType: "infra_operation",
-        stageId: `${INFRA_REMEDIATION_PREFIX}${finding.id}`,
-        approverUserId: body.approverUserId,
-      })
-      .returning({ id: approvals.id });
-    await db
-      .update(infraFindings)
-      .set({ status: "remediation_proposed" })
-      .where(eq(infraFindings.id, finding.id));
-    await db.insert(auditLog).values({
-      userId: actorId,
-      objectType: "infra_operation",
-      objectId: finding.id,
-      detail: {
-        phase: "remediation-proposed",
-        kind: finding.kind,
-        severity: finding.severity,
-        resource: resource?.name ?? finding.resourceId,
-        approverUserId: body.approverUserId,
-      },
-      effect: "require_approval",
-      ruleId: "infra-remediation-proposed",
-      ruleChain: [],
-      reason: `governed remediation for ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} pends the named approver — infra state unchanged until approval`,
+        objectId: finding.id,
+        detail: {
+          phase: "remediation-proposed",
+          kind: finding.kind,
+          severity: finding.severity,
+          resource: resource?.name ?? finding.resourceId,
+          approverUserId: body.approverUserId,
+        },
+        effect: "require_approval",
+        ruleId: "infra-remediation-proposed",
+        ruleChain: [],
+        reason: `governed remediation for ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} pends the named approver — infra state unchanged until approval`,
+      });
+      return queued!;
     });
-    return reply.status(202).send({ pending: true, approvalId: approval!.id });
+    if (!approval) {
+      return reply.status(409).send({ error: "not_open", detail: "the finding changed state while this remediation was proposed; reload it" });
+    }
+    return reply.status(202).send({ pending: true, approvalId: approval.id });
   });
 
   // === ADR-0017 automation ledgers ======================================
@@ -2061,8 +2079,8 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     // two re-proposable terminal states (a denied or failed attempt is a
     // recorded outcome, not a dead end). rotation_proposed (already pending),
     // rotated and expired stay 409s.
-    const REPROPOSABLE = ["active", "rotation_denied", "rotation_failed"];
-    if (!REPROPOSABLE.includes(cert.status)) {
+    const REPROPOSABLE = ["active", "rotation_denied", "rotation_failed"] as const;
+    if (!(REPROPOSABLE as readonly string[]).includes(cert.status)) {
       return reply.status(409).send({
         error: "not_rotatable",
         detail: `cert is '${cert.status}' — a rotation can be proposed from ${REPROPOSABLE.join("/")} only`,
@@ -2072,33 +2090,45 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (retiredCert) return reply.status(409).send(retiredCert);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
-    await db.update(certInventory).set({ status: "rotation_proposed" }).where(eq(certInventory.id, certId));
-    // O6: the attempt's own ledger row, created AT PROPOSE (status
-    // 'proposed'); the /decide hook advances it to rotated/denied/failed —
-    // every attempt leaves a durable, reasoned record.
-    // ADR-0107 (F01): see the note on `applyInfraActionDecision` — the rotation
-    // attempt is stamped with the finding that is currently live, not with
-    // whichever of several the planner reached first.
-    const [linkedFinding] = await db
-      .select({ id: infraFindings.id })
-      .from(infraFindings)
-      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)))
-      .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
-      .limit(1);
-    await db.insert(certRotations).values({
-      certId,
-      findingId: linkedFinding?.id ?? null,
-      oldSerial: cert.serial ?? null,
-      status: "proposed",
+    // ADR-0348: the move to the proposed state is the claim. It is guarded on the state checked above and commits
+    // with the approval it creates, so two concurrent proposals cannot both pass and queue two approvals.
+    const proposed = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [claimed] = await tx
+        .update(certInventory)
+        .set({ status: "rotation_proposed" })
+        .where(and(eq(certInventory.id, certId), inArray(certInventory.status, [...REPROPOSABLE])))
+        .returning({ id: certInventory.id });
+      if (!claimed) return null;
+      // O6: the attempt's own ledger row, created AT PROPOSE (status
+      // 'proposed'); the /decide hook advances it to rotated/denied/failed —
+      // every attempt leaves a durable, reasoned record.
+      // ADR-0107 (F01): see the note on `applyInfraActionDecision` — the rotation
+      // attempt is stamped with the finding that is currently live, not with
+      // whichever of several the planner reached first.
+      const [linkedFinding] = await tx
+        .select({ id: infraFindings.id })
+        .from(infraFindings)
+        .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)))
+        .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+        .limit(1);
+      await tx.insert(certRotations).values({
+        certId,
+        findingId: linkedFinding?.id ?? null,
+        oldSerial: cert.serial ?? null,
+        status: "proposed",
+      });
+      const approvalId = await proposeInfraAction(
+        tx,
+        "cert_rotate",
+        { id: certId, resourceId: cert.resourceId, refTable: "cert_inventory" },
+        body.approverUserId,
+        actorId,
+      );
+      return approvalId;
     });
-    const approvalId = await proposeInfraAction(
-      db,
-      "cert_rotate",
-      { id: certId, resourceId: cert.resourceId, refTable: "cert_inventory" },
-      body.approverUserId,
-      actorId,
-    );
-    return reply.status(202).send({ pending: true, approvalId });
+    if (proposed === null) return reply.status(409).send({ error: "not_rotatable", detail: "the certificate changed state while this rotation was proposed; reload it" });
+    return reply.status(202).send({ pending: true, approvalId: proposed });
   });
 
   // --- CVE patches ------------------------------------------------------
@@ -2124,15 +2154,27 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (retiredPatch) return reply.status(409).send(retiredPatch);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
-    await db.update(patchRecords).set({ status: "patch_proposed" }).where(eq(patchRecords.id, patchId));
-    const approvalId = await proposeInfraAction(
-      db,
-      "patch_apply",
-      { id: patchId, resourceId: patch.resourceId, refTable: "patch_records" },
-      body.approverUserId,
-      actorId,
-    );
-    return reply.status(202).send({ pending: true, approvalId });
+    // ADR-0348: the move to the proposed state is the claim. It is guarded on the state checked above and commits
+    // with the approval it creates, so two concurrent proposals cannot both pass and queue two approvals.
+    const proposed = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [claimed] = await tx
+        .update(patchRecords)
+        .set({ status: "patch_proposed" })
+        .where(and(eq(patchRecords.id, patchId), eq(patchRecords.status, "open")))
+        .returning({ id: patchRecords.id });
+      if (!claimed) return null;
+      const approvalId = await proposeInfraAction(
+        tx,
+        "patch_apply",
+        { id: patchId, resourceId: patch.resourceId, refTable: "patch_records" },
+        body.approverUserId,
+        actorId,
+      );
+      return approvalId;
+    });
+    if (proposed === null) return reply.status(409).send({ error: "not_applicable", detail: "the patch changed state while this was proposed; reload it" });
+    return reply.status(202).send({ pending: true, approvalId: proposed });
   });
 
   // --- backups ----------------------------------------------------------
@@ -2158,15 +2200,27 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     if (retiredBackup) return reply.status(409).send(retiredBackup);
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
-    await db.update(backupRuns).set({ status: "restore_proposed" }).where(eq(backupRuns.id, backupId));
-    const approvalId = await proposeInfraAction(
-      db,
-      "backup_restore",
-      { id: backupId, resourceId: run.resourceId, refTable: "backup_runs" },
-      body.approverUserId,
-      actorId,
-    );
-    return reply.status(202).send({ pending: true, approvalId });
+    // ADR-0348: the move to the proposed state is the claim. It is guarded on the state checked above and commits
+    // with the approval it creates, so two concurrent proposals cannot both pass and queue two approvals.
+    const proposed = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [claimed] = await tx
+        .update(backupRuns)
+        .set({ status: "restore_proposed" })
+        .where(and(eq(backupRuns.id, backupId), eq(backupRuns.status, "missed")))
+        .returning({ id: backupRuns.id });
+      if (!claimed) return null;
+      const approvalId = await proposeInfraAction(
+        tx,
+        "backup_restore",
+        { id: backupId, resourceId: run.resourceId, refTable: "backup_runs" },
+        body.approverUserId,
+        actorId,
+      );
+      return approvalId;
+    });
+    if (proposed === null) return reply.status(409).send({ error: "not_restorable", detail: "the backup run changed state while this restore was proposed; reload it" });
+    return reply.status(202).send({ pending: true, approvalId: proposed });
   });
 }
 
