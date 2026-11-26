@@ -31,7 +31,6 @@ import {
   FLAG_LABEL,
   FLAG_TONE,
   historyUrl,
-  isSubjectKind,
   LINK_REFUSALS,
   LINK_STATUS_LABEL,
   LINK_STATUS_TONE,
@@ -61,9 +60,8 @@ import v from "../../views.module.css";
 
 const back = <Link to="/admin/agent-risk">Back to agent risk</Link>;
 
-export default function AgentRiskDetailPage() {
-  const { kind = "", id = "" } = useParams();
-  if (!isSubjectKind(kind)) return <RecordError noun="agent" error={{ status: 404 }} action={back} />;
+export default function AgentRiskDetailPage({ kind }: { kind: SubjectKind }) {
+  const { id = "" } = useParams();
   return <Detail kind={kind} id={id} />;
 }
 

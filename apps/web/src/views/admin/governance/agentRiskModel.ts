@@ -241,7 +241,6 @@ export interface OwnershipFinding {
 // ---- paths and sentences -------------------------------------------------------------------------------------------
 
 export const detailPath = (kind: SubjectKind, id: string) => `/admin/agent-risk/${kind}/${id}`;
-export const isSubjectKind = (k: string | undefined): k is SubjectKind => (AGENT_RISK_SUBJECT_KINDS as readonly string[]).includes(k ?? "");
 
 export function rankedUrl(kind: SubjectKind, cursor: string | null): string {
   const q = new URLSearchParams({ kind, limit: "50" });

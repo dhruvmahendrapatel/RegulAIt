@@ -61,8 +61,6 @@ describe("paths and sentences", () => {
     expect(m.rankedUrl("agent", null)).toBe("/v1/agent-risk?kind=agent&limit=50");
     expect(m.rankedUrl("builder_agent", "abc")).toBe("/v1/agent-risk?kind=builder_agent&limit=50&cursor=abc");
     expect(m.historyUrl("agent", "id1", null)).toBe("/v1/agent-risk/agent/id1/history?limit=20");
-    expect(m.isSubjectKind("builder_agent")).toBe(true);
-    expect(m.isSubjectKind("user")).toBe(false);
   });
 
   it("says what a sweep did", () => {

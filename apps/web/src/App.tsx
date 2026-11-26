@@ -335,7 +335,9 @@ function ApplicationRoutes() {
                 <Route path="sod" element={<SodRulesPage />} />
                 {/* ADR-0339 */}
                 <Route path="agent-risk" element={<AgentRiskPage />} />
-                <Route path="agent-risk/:kind/:id" element={<AgentRiskDetailPage />} />
+                {/* one route per subject kind, so a detail URL never carries an unknown kind (ADR-0339) */}
+                <Route path="agent-risk/agent/:id" element={<AgentRiskDetailPage kind="agent" />} />
+                <Route path="agent-risk/builder_agent/:id" element={<AgentRiskDetailPage kind="builder_agent" />} />
                 <Route path="posture" element={<PosturePage />} />
                 <Route path="redteam" element={<RedTeamPage />} />
                 <Route path="reports" element={<ReportsPage />} />
