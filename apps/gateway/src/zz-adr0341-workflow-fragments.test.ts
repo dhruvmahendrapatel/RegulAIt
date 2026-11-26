@@ -7,7 +7,9 @@
  *  - a draft that calls the approved version expands into its stages (the plan gate is met by the sub-process),
  *    publishes with the pin recorded, and reopens with the call stage as written;
  *  - a new version needs its own approval and does not move a template's pin; one pending version at a time;
- *  - versions and pins are append-only.
+ *  - versions and pins are append-only;
+ *  - every other path that writes a template version records its pins: a governance-config apply (which publishes
+ *    once, then plans and applies clean: no new version for an unchanged file) and a canary rollback (review of #977).
  *
  * Global state (M-068): the step-up posture and MFA relaxation are put back in afterAll. Fixtures are `wf-<run>`.
  */
@@ -31,10 +33,11 @@ import {
   workflowTemplateVersions,
   type Db,
 } from "@regulait/db";
-import { BATCH4_STRICT_DEFAULTS } from "@regulait/shared";
+import { BATCH4_STRICT_DEFAULTS, GOVERNANCE_CONFIG_API_VERSION } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { PUBLISH_STEP_UP_OP } from "./workflow-builder.js";
 import { FRAGMENT_RULE_IDS } from "./workflow-fragments.js";
+import { CANARY_ROLLBACK_STEP_UP_OP } from "./workflow-template-versions.js";
 import { grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
@@ -79,7 +82,7 @@ async function makeUser(name: string, isAdmin: boolean): Promise<Person> {
   expect(k.statusCode, k.body).toBe(201);
   return { id: u.json().id as string, auth: { authorization: `Bearer ${k.json().token}` } };
 }
-const as = (who: Person | null, method: "GET" | "POST" | "PUT", url: string, payload?: object) =>
+const as = (who: Person | null, method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: object) =>
   app.inject({ method, url, headers: who ? { ...who.auth, "x-regulait-csrf": "1" } : AUTH, ...(payload ? { payload } : {}) });
 const decide = (who: Person, approvalId: string, decision: "approved" | "denied", reason?: string) =>
   relaxStepUpAround(db, () =>
@@ -237,5 +240,125 @@ describe("ADR-0341 follow-up: the sub-process catalogue", () => {
     await expect(db.execute(sql`delete from workflow_fragment_versions where fragment_id = ${fragmentId}`)).rejects.toThrow();
     await expect(db.execute(sql`truncate workflow_template_version_fragments`)).rejects.toThrow();
     await expect(db.execute(sql`delete from workflow_template_version_fragments where call_stage_id = 'review'`)).rejects.toThrow();
+  });
+});
+
+/** a template's versions, oldest first, each with the pins it recorded */
+async function versionsWithPins(id: string) {
+  const vs = await db.select().from(workflowTemplateVersions).where(eq(workflowTemplateVersions.templateId, id)).orderBy(workflowTemplateVersions.version);
+  return Promise.all(
+    vs.map(async (v) => ({
+      version: v.version,
+      origin: v.origin,
+      contentHash: v.contentHash,
+      pins: (await db.select().from(workflowTemplateVersionFragments).where(eq(workflowTemplateVersionFragments.templateVersionId, v.id))).map((p) => [
+        p.callStageId,
+        p.fragmentVersionId,
+      ]),
+    })),
+  );
+}
+const fragmentVersionId = async (version: number) =>
+  (await db.select().from(workflowFragmentVersions).where(and(eq(workflowFragmentVersions.fragmentId, fragmentId), eq(workflowFragmentVersions.version, version))))[0]!.id;
+
+describe("ADR-0341 §9: every other path that writes a template version records its pins (review of #977)", () => {
+  it("a governance-config file that calls a sub-process publishes once with the pin, exports as written, and an unchanged file publishes nothing", async () => {
+    const t = await as(null, "POST", "/v1/workflows/templates", { name: `wf-${RUN}-gov`, definition: { workflow: `wf-${RUN}`, stages: [{ id: "intake", type: "trigger" }, { id: "plan", type: "planning" }] } });
+    expect(t.statusCode, t.body).toBe(201);
+    const govId = t.json().id as string;
+    const exported = async () => {
+      const r = await as(null, "GET", "/v1/governance-config/export?format=json");
+      expect(r.statusCode, r.body).toBe(200);
+      return r.json().spec as Record<string, unknown> & { workflowTemplates: Array<{ name: string; definition: unknown }> };
+    };
+    const documentWith = async (definition: unknown) => {
+      const spec = await exported();
+      return {
+        apiVersion: GOVERNANCE_CONFIG_API_VERSION,
+        kind: "GovernanceConfig",
+        spec: { ...spec, workflowTemplates: spec.workflowTemplates.map((w) => (w.name === `wf-${RUN}-gov` ? { ...w, definition } : w)) },
+      };
+    };
+    const planOf = async (document: unknown) => {
+      const r = await as(null, "POST", "/v1/governance-config/plan", { document });
+      expect(r.statusCode, r.body).toBe(200);
+      return r.json() as { plan: { planHash: string; changes: Array<{ section: string; key: string }> }; widenings: unknown[]; issues?: unknown[] };
+    };
+
+    const document = await documentWith(draftCalling(1));
+    const plan = await planOf(document);
+    expect(plan.plan.changes.filter((c) => c.section === "workflowTemplates")).toEqual([expect.objectContaining({ key: `wf-${RUN}-gov` })]);
+    const g = await grantStepUpForTest(db, author.id, { kind: "settings_relax", facts: { op: "governance_config_apply", planHash: plan.plan.planHash, widenings: plan.widenings } });
+    const r = await app.inject({ method: "POST", url: "/v1/governance-config/apply", ...stepUpRequest(g), payload: { document, planHash: plan.plan.planHash } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ applied: true });
+
+    // the published version records the sub-process version its call stage was expanded from
+    const after = await versionsWithPins(govId);
+    expect(after.map((v) => [v.version, v.origin])).toEqual([
+      [1, "baseline"],
+      [2, "governance_apply"],
+    ]);
+    expect(after[1]!.pins).toEqual([["review", await fragmentVersionId(1)]]);
+    const [live] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, govId));
+    expect((live!.definition as { stages: Array<{ id: string }> }).stages.map((s) => s.id)).toEqual(["intake", "review.plan", "review.req", "review.sign-off", "build", "checks"]);
+
+    // read back as written (the call stage, not its expansion), so the same file plans clean ...
+    expect((await exported()).workflowTemplates.find((w) => w.name === `wf-${RUN}-gov`)!.definition).toEqual(draftCalling(1));
+    const again = await planOf(await documentWith(draftCalling(1)));
+    expect(again.plan.changes.filter((c) => c.section === "workflowTemplates")).toEqual([]);
+    // ... and a file holding the expansion itself is the same definition: applying it publishes nothing new either
+    const expanded = await documentWith(live!.definition);
+    const expandedPlan = await planOf(expanded);
+    // (the plan compares as written, so it lists it; the apply compares the expanded content and writes no version)
+    expect(expandedPlan.plan.changes.filter((c) => c.section === "workflowTemplates")).toEqual([expect.objectContaining({ key: `wf-${RUN}-gov` })]);
+    const g2 = await grantStepUpForTest(db, author.id, { kind: "settings_relax", facts: { op: "governance_config_apply", planHash: expandedPlan.plan.planHash, widenings: expandedPlan.widenings } });
+    const r2 = await app.inject({ method: "POST", url: "/v1/governance-config/apply", ...stepUpRequest(g2), payload: { document: expanded, planHash: expandedPlan.plan.planHash } });
+    expect(r2.statusCode, r2.body).toBe(200);
+    expect((await versionsWithPins(govId)).map((v) => v.version)).toEqual([1, 2]);
+  });
+
+  it("a canary rollback restores the stable version with its pins, so a draft reopens with the call as written", async () => {
+    // templateId's live version (2) calls review v1 (the builder test above); publish a canary that adds a check
+    await as(null, "DELETE", `/v1/workflows/builder/templates/${templateId}/draft`);
+    let r = await as(null, "POST", `/v1/workflows/builder/templates/${templateId}/draft`, {});
+    expect(r.statusCode, r.body).toBe(201);
+    const withE2e = { ...draftCalling(1), stages: draftCalling(1).stages.map((s) => (s.id === "checks" ? { ...s, checks: ["unit", "e2e"] } : s)) };
+    r = await as(null, "PUT", `/v1/workflows/builder/templates/${templateId}/draft`, { revision: r.json().draft.revision, definition: withE2e });
+    expect(r.statusCode, r.body).toBe(200);
+    const revision = r.json().draft.revision as number;
+    const before = await versionsWithPins(templateId);
+    const stable = before.at(-1)!;
+    expect(stable.pins).toEqual([["review", await fragmentVersionId(1)]]);
+    const pub = await grantStepUpForTest(db, author.id, {
+      kind: "settings_relax",
+      facts: { op: PUBLISH_STEP_UP_OP, templateId, fromVersion: stable.version, contentHash: r.json().validation.contentHash, canaryPercent: 50 },
+    });
+    r = await app.inject({ method: "POST", url: `/v1/workflows/builder/templates/${templateId}/publish`, ...stepUpRequest(pub), payload: { revision, canaryPercent: 50 } });
+    expect(r.statusCode, r.body).toBe(201);
+    const canaryVersion = (await versionsWithPins(templateId)).at(-1)!;
+    expect(canaryVersion.pins).toEqual([["review", await fragmentVersionId(1)]]);
+
+    const canary = await as(null, "GET", `/v1/workflows/builder/templates/${templateId}/canary`);
+    const canaryId = canary.json().canary.id as string;
+    const reason = "the e2e check needs a runner first";
+    const end = await grantStepUpForTest(db, author.id, {
+      kind: "settings_relax",
+      facts: { op: CANARY_ROLLBACK_STEP_UP_OP, templateId, canaryId, fromVersion: canaryVersion.version, contentHash: stable.contentHash },
+    });
+    r = await app.inject({
+      method: "POST",
+      url: `/v1/workflows/builder/templates/${templateId}/canary/end`,
+      ...stepUpRequest(end),
+      payload: { outcome: "rollback", reason, acceptRelaxations: true },
+    });
+    expect(r.statusCode, r.body).toBe(200);
+
+    const restored = (await versionsWithPins(templateId)).at(-1)!;
+    expect(restored).toMatchObject({ version: canaryVersion.version + 1, origin: "canary_rollback", contentHash: stable.contentHash, pins: stable.pins });
+    r = await as(null, "POST", `/v1/workflows/builder/templates/${templateId}/draft`, {});
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().draft.definition).toEqual(draftCalling(1));
+    await as(null, "DELETE", `/v1/workflows/builder/templates/${templateId}/draft`);
   });
 });

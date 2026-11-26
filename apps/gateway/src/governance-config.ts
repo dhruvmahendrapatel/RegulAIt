@@ -64,6 +64,7 @@ import { MCP_BUNDLE_MAX_ITEMS } from "./mcp-bundles.js";
 import { isReservedToolName } from "./mcp-protocol.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { validateBuilderDefinition } from "./workflow-builder.js";
+import { liveDefinitionsAsWritten } from "./workflow-fragments.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -242,6 +243,7 @@ export async function readLive(db: Db): Promise<{ spec: Required<NormalSpec>; in
     });
 
   // normalizeSpec sorts and dedupes; feed it the shared schema's input shape
+  const templateDefinitions = await liveDefinitionsAsWritten(db, templateRows);
   const spec = normalizeSpec({
     roles: roleList.map((r) => ({ ...r })),
     rateLimits: limits.map((l) => l.limit),
@@ -253,9 +255,10 @@ export async function readLive(db: Db): Promise<{ spec: Required<NormalSpec>; in
       items: b.items,
       grants: b.grants.map((g) => (g.role !== null ? { role: g.role, maxTier: g.maxTier } : { team: g.team!, maxTier: g.maxTier })),
     })),
+    // as written: a template that calls a sub-process reads with its call stages, not their expansion (ADR-0341 §9)
     workflowTemplates: templateRows.map((t) => ({
       name: t.name,
-      definition: (t.definition ?? {}) as Record<string, unknown>,
+      definition: templateDefinitions.get(t.id)!,
       retired: t.retiredAt !== null,
     })),
     budgets: budgetRows.map((b) => ({

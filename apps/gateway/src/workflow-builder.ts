@@ -30,7 +30,6 @@ import {
   users,
   workflowTemplateDrafts,
   workflowTemplates,
-  workflowTemplateVersionFragments,
   workflowTemplateVersions,
   type Db,
   type WorkflowTemplateDraftRow,
@@ -51,7 +50,7 @@ import {
   type WorkflowDefinition,
 } from "@regulait/workflow-kernel";
 import { checkWorkflowTemplateReferences } from "./workflows.js";
-import { callsOfTemplateVersion, expandDefinitionCalls } from "./workflow-fragments.js";
+import { callsOfTemplateVersion, expandDefinitionCalls, insertTemplateVersion } from "./workflow-fragments.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { CANARY_OPEN_REFUSAL, openCanary, startCanary } from "./workflow-template-versions.js";
 
@@ -598,15 +597,11 @@ async function publish(db: Db, req: FastifyRequest, reply: FastifyReply) {
     // fail closed: what the step-up was decided on must still be what is there (ADR-0186 A, Class A)
     if (!locked || locked.retiredAt || nowLatest?.id !== latest.id || !nowDraft || nowDraft.revision !== d.revision) return null;
     if (await openCanary(tx, templateId)) return null;
-    const [version] = await tx
-      .insert(workflowTemplateVersions)
-      .values({ templateId, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "builder", publishedBy: actor })
-      .returning();
-    if (v.calls.length > 0) {
-      await tx
-        .insert(workflowTemplateVersionFragments)
-        .values(v.calls.map((c) => ({ templateVersionId: version!.id, callStageId: c.callStageId, fragmentVersionId: c.fragmentVersionId })));
-    }
+    const version = await insertTemplateVersion(
+      tx,
+      { templateId, version: latest.version + 1, definition: v.definition, contentHash: v.contentHash, origin: "builder", publishedBy: actor },
+      v.calls,
+    );
     await tx.update(workflowTemplates).set({ definition: v.definition }).where(eq(workflowTemplates.id, templateId));
     await tx.delete(workflowTemplateDrafts).where(eq(workflowTemplateDrafts.id, nowDraft.id));
     const canary =

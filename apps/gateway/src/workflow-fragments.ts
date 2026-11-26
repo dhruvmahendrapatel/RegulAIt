@@ -30,6 +30,7 @@ import {
   workflowFragments,
   workflowFragmentVersions,
   workflowTemplateVersionFragments,
+  workflowTemplateVersions,
   type Db,
 } from "@regulait/db";
 import {
@@ -40,7 +41,7 @@ import {
   sha256Hex,
   type WorkflowFragmentVersionState as FragmentVersionState,
 } from "@regulait/shared";
-import { expandCalls, isCallStage, validateFragmentStages, type CallIssue, type ResolvedCall } from "@regulait/workflow-kernel";
+import { collapseCalls, expandCalls, isCallStage, validateFragmentStages, type CallIssue, type ResolvedCall } from "@regulait/workflow-kernel";
 
 /** the approval row's `stage_id` names the version it decides */
 export const FRAGMENT_VERSION_PREFIX = "workflow-fragment-version:";
@@ -203,6 +204,80 @@ export async function callsOfTemplateVersion(db: Db, templateVersionId: string):
     .innerJoin(workflowFragmentVersions, eq(workflowFragmentVersions.id, workflowTemplateVersionFragments.fragmentVersionId))
     .where(eq(workflowTemplateVersionFragments.templateVersionId, templateVersionId));
   return rows.map((r) => ({ ...r, stages: r.stages as Record<string, unknown>[] }));
+}
+
+/** one recorded call: the call stage's id and the sub-process version it expanded */
+export type TemplateVersionPin = { callStageId: string; fragmentVersionId: string };
+
+/**
+ * ADR-0341 §9: every path that writes a template version writes it here, with the sub-process versions its call
+ * stages were expanded from (the builder publish, a governance-config apply, a canary rollback, a baseline of a live
+ * definition), so no version holds an expansion it has no record of. In the caller's transaction.
+ */
+export async function insertTemplateVersion(
+  tx: Db,
+  values: typeof workflowTemplateVersions.$inferInsert,
+  pins: ReadonlyArray<TemplateVersionPin>,
+): Promise<typeof workflowTemplateVersions.$inferSelect> {
+  const [version] = await tx.insert(workflowTemplateVersions).values(values).returning();
+  if (pins.length > 0) {
+    await tx
+      .insert(workflowTemplateVersionFragments)
+      .values(pins.map((p) => ({ templateVersionId: version!.id, callStageId: p.callStageId, fragmentVersionId: p.fragmentVersionId })));
+  }
+  return version!;
+}
+
+/** the pins a template version recorded, as insertTemplateVersion takes them (a restore or re-record copies them) */
+export async function pinsOfTemplateVersion(db: Pick<Db, "select">, templateVersionId: string): Promise<TemplateVersionPin[]> {
+  return db
+    .select({ callStageId: workflowTemplateVersionFragments.callStageId, fragmentVersionId: workflowTemplateVersionFragments.fragmentVersionId })
+    .from(workflowTemplateVersionFragments)
+    .where(eq(workflowTemplateVersionFragments.templateVersionId, templateVersionId))
+    .orderBy(workflowTemplateVersionFragments.callStageId);
+}
+
+/**
+ * Each template's live definition as it was written: collapsed back into the call stages its latest version recorded
+ * (a definition with no recorded calls is returned as is). The governance-config export and plan read templates this
+ * way, so a file that calls a sub-process compares equal to what it published. Two queries for any number of templates.
+ */
+export async function liveDefinitionsAsWritten(
+  db: Db,
+  templates: ReadonlyArray<{ id: string; definition: unknown }>,
+): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map(templates.map((t) => [t.id, (t.definition ?? {}) as Record<string, unknown>]));
+  if (templates.length === 0) return out;
+  const latest = await db
+    .selectDistinctOn([workflowTemplateVersions.templateId], { id: workflowTemplateVersions.id, templateId: workflowTemplateVersions.templateId })
+    .from(workflowTemplateVersions)
+    .where(inArray(workflowTemplateVersions.templateId, templates.map((t) => t.id)))
+    .orderBy(workflowTemplateVersions.templateId, desc(workflowTemplateVersions.version));
+  if (latest.length === 0) return out;
+  const rows = await db
+    .select({
+      templateVersionId: workflowTemplateVersionFragments.templateVersionId,
+      callStageId: workflowTemplateVersionFragments.callStageId,
+      fragmentId: workflowFragmentVersions.fragmentId,
+      version: workflowFragmentVersions.version,
+      stages: workflowFragmentVersions.stages,
+    })
+    .from(workflowTemplateVersionFragments)
+    .innerJoin(workflowFragmentVersions, eq(workflowFragmentVersions.id, workflowTemplateVersionFragments.fragmentVersionId))
+    .where(inArray(workflowTemplateVersionFragments.templateVersionId, latest.map((l) => l.id)));
+  const templateOf = new Map(latest.map((l) => [l.id, l.templateId]));
+  const callsByTemplate = new Map<string, ResolvedCall[]>();
+  for (const r of rows) {
+    const templateId = templateOf.get(r.templateVersionId)!;
+    const list = callsByTemplate.get(templateId) ?? [];
+    list.push({ callStageId: r.callStageId, fragmentId: r.fragmentId, version: r.version, stages: r.stages as Record<string, unknown>[] });
+    callsByTemplate.set(templateId, list);
+  }
+  for (const [templateId, calls] of callsByTemplate) {
+    const def = out.get(templateId)!;
+    if (Array.isArray((def as { stages?: unknown }).stages)) out.set(templateId, collapseCalls(def, calls));
+  }
+  return out;
 }
 
 /** files the version and its approval row, audited, in the caller's transaction */
