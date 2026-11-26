@@ -535,6 +535,8 @@ export default function EvalsPage() {
               defaultSort={{ key: "name", dir: "asc" }}
               rowKey={(r) => r.id}
               onRowClick={(r) => setSelectedDataset(r.id)}
+              // the version too, so two versions of one dataset are two distinct buttons (UIS-04)
+              rowLabel={(r) => `${r.name} v${r.version}`}
               empty={
                 <EmptyState
                   title="No datasets yet"

@@ -77,7 +77,7 @@ test("inventory renders ownership and alignment as flags — 'no owner recorded'
   await expect(page.getByText("no owner recorded").first()).toBeVisible();
 
   // open a detail: both new cards render with their honesty notes
-  await page.getByRole("cell", { name: "balanced-mock", exact: true }).click();
+  await page.getByRole("button", { name: "Open the dependencies of balanced-mock" }).click();
   await expect(page.getByText("Ownership & lifecycle — the accountability record")).toBeVisible();
   await expect(page.getByText("Intended vs granted — approved intent only")).toBeVisible();
   await expect(page.getByText(/never a default/).first()).toBeVisible();

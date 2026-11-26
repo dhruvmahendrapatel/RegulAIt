@@ -25,6 +25,12 @@ import { setEngineTaskPlacementAffinityForTest, startEngineTask } from "../engin
 import type { ArtifactStore } from "../model-artifacts.js";
 import { deploymentEnvironment } from "../oauth/common.js";
 
+/**
+ * How long `place` waits for the executor's signed placement report (#1222). A suite whose test places a task under
+ * load gives that test a timeout above this; vitest's own 20 s default would otherwise end the test first.
+ */
+export const PLACEMENT_REPORT_DEADLINE_MS = 45_000;
+
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
 interface InjectApp {
   inject(opts: { method: Method; url: string; headers?: Record<string, string>; payload?: unknown }): Promise<{ statusCode: number; body: string; rawPayload: Buffer; json(): any }>;
@@ -124,7 +130,8 @@ export async function startEngineTaskRig(o: EngineTaskRigOptions): Promise<Engin
       // a subject run's only input is the gateway's subject file, at the input root (#843 security review)
       files: run.targetKind === "subject" ? [] : [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }],
       artifact: run.targetKind === "artifact" ? { path: `${runId}/artifact.pkl` } : null,
-      subject: run.targetKind === "subject" ? { path: run.engineId === "mcpscanner" ? "tools.json" : "SKILL.md" } : null,
+      // (ADR-0362: the content extractor's subject is the request's bundle.json)
+      subject: run.targetKind === "subject" ? { path: run.engineId === "mcpscanner" ? "tools.json" : run.engineId === "contentextract" ? "bundle.json" : "SKILL.md" } : null,
       secret: m.needsModelAccess ? `rig-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` : null,
     };
     setEngineTaskPlacementAffinityForTest([executorId]);
@@ -148,16 +155,23 @@ export async function startEngineTaskRig(o: EngineTaskRigOptions): Promise<Engin
     }
     if (out.kind !== "offered") return null;
     const placementId = out.task.placementId;
-    for (let i = 0; i < 400; i++) {
+    // #1222: wait for the executor's report against a wall-clock deadline, not a fixed number of polls. On a loaded
+    // CI runner (the web-readers shard runs 80+ files at once) the in-process executor can take well over the old
+    // fixed 10 s to stream the offer and report it; a fixed poll count then failed a correct run.
+    const started = Date.now();
+    const deadline = started + PLACEMENT_REPORT_DEADLINE_MS;
+    let pause = 25;
+    while (Date.now() < deadline) {
       const r = pickLinkedReport(await o.db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, placementId)));
       if (r?.outcome === "placed") return placementId;
       if (r) {
         console.warn(`engine task rig: run ${runId}'s placement was reported ${r.outcome} (${r.refusalCode ?? r.endCode ?? ""})`);
         return null;
       }
-      await new Promise((res) => setTimeout(res, 25));
+      await new Promise((res) => setTimeout(res, pause));
+      pause = Math.min(pause * 2, 250);
     }
-    console.warn(`engine task rig: run ${runId}'s placement was never reported`);
+    console.warn(`engine task rig: run ${runId}'s placement was never reported (waited ${Date.now() - started} ms)`);
     return null;
   }
 

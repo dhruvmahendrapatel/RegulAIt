@@ -147,9 +147,9 @@ test("G4 MCP servers: actions sit next to the name; edit, disable and an in-use 
   });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("/ui/admin/mcp-servers");
-  await expect(page.getByRole("link", { name: /doc-archive/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show tools on doc-archive", exact: true })).toBeVisible();
   // G4: the table is wide; the actions column is the second one, so its buttons are on screen without scrolling
-  const serverTable = page.getByRole("table").filter({ has: page.getByRole("link", { name: /doc-archive/ }) });
+  const serverTable = page.getByRole("table").filter({ has: page.getByRole("button", { name: "Show tools on doc-archive", exact: true }) });
   // the header row (its cells are the column headers as the table kit renders them)
   const headers = await serverTable.getByRole("row").first().getByRole("cell").allTextContents();
   expect(headers.slice(0, 2).map((h) => h.trim())).toEqual(["Name", "Actions"]);

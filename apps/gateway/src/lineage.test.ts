@@ -245,7 +245,7 @@ beforeAll(async () => {
   // exact key AND VERSION lineage will claim was supplied is observable in the
   // real dispatch output. If injection and capture ever diverged, this fails
   // before any graph assertion does.
-  expect(a.outputText).toContain("spec v1");
+  expect(a.outputText).toContain('"spec" v1'); // ADR-0347: the manifest JSON-quotes each key (#905 security review [1])
 
   // ---- 3. run A's finding is written back, DECLARING the producing run ----
   await writeContext(projectId, {
@@ -261,7 +261,7 @@ beforeAll(async () => {
     contextKeys: ["findings"],
   });
   runBId = b.runId;
-  expect(b.outputText).toContain("findings v1");
+  expect(b.outputText).toContain('"findings" v1'); // ADR-0347: the manifest JSON-quotes each key (#905 security review [1])
 
   // ---- 5. a human revises findings to v2, on top of v1 --------------------
   await writeContext(projectId, {

@@ -22,6 +22,11 @@
  * name: never credential material) are kept. A system message, prompt, tool description, HTTP parameter or pinned
  * data is never read into a record. Pinned data is excluded at the source.
  *
+ * Plaintext credentials (decision 4, slice 4): every string parameter of every node of an agent workflow (a system
+ * message, an HTTP tool's header value, a code node's source) is passed in memory through the vendored secret matcher.
+ * A hit is reported as `agent_config` evidence by its path (`workflows/<id>/nodes/<node id>/parameters/<keys>`, built
+ * from ids and parameter keys only) and its rule id. The text is dropped when the page is done.
+ *
  * Paging passes `nextCursor` back as the `cursor` query parameter on our own first URL, after a shape check; no URL
  * from a response is ever fetched.
  *
@@ -32,7 +37,7 @@
 import type { DiscoveryReadOutcome } from "@regulait/shared";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { REGISTRY_COMPONENTS_PER_RECORD_MAX } from "./agent-registry-records.js";
-import { attrs, finishRegistry, fullyRead, includeSet } from "./agent-registry-scanners.js";
+import { ConfigSecretCollector, attrs, finishRegistry, fullyRead, includeSet, pathSegment, type ConfigField } from "./agent-registry-scanners.js";
 import { scannerFetch } from "./discovery-cloud-scanners.js";
 import { ITEM_CAP, ReadFailure, WIDER_MAX_ITEMS, WiderSourceConfigError, atPath, getJson, httpsTargetProblem, readListing, str } from "./discovery-wider-scanners.js";
 import type { RegistryAgentComponent, RegistryAgentRecord, ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -229,6 +234,32 @@ function workflowState(w: unknown): "active" | "inactive" | null {
   return a === true ? "active" : a === false ? "inactive" : null;
 }
 
+/** at most this many string parameters of one workflow are scanned, at most this deep */
+export const N8N_SCANNED_STRINGS_MAX = 2_000;
+const N8N_SCAN_DEPTH = 8;
+
+/**
+ * Slice 4: every string parameter of a workflow's nodes, with a value-free path. A path segment is a node id or a
+ * parameter key when it is a plain identifier, otherwise its position, so no user text reaches the path.
+ */
+export function workflowScannedFields(workflowId: string, nodesRaw: unknown): ConfigField[] {
+  const out: ConfigField[] = [];
+  if (!Array.isArray(nodesRaw)) return out;
+  const walk = (v: unknown, path: string, depth: number) => {
+    if (out.length >= N8N_SCANNED_STRINGS_MAX || depth > N8N_SCAN_DEPTH) return;
+    if (typeof v === "string") out.push({ path, text: v });
+    else if (Array.isArray(v)) v.slice(0, 200).forEach((x, i) => walk(x, `${path}/${i}`, depth + 1));
+    else if (v && typeof v === "object") {
+      Object.entries(v as Record<string, unknown>).slice(0, 200).forEach(([k, x], i) => walk(x, `${path}/${pathSegment(k, `#${i}`)}`, depth + 1));
+    }
+  };
+  nodesRaw.slice(0, N8N_NODES_PER_WORKFLOW_MAX).forEach((n, i) => {
+    const id = pathSegment(atPath(n, "id"), `#${i}`);
+    walk(n && typeof n === "object" && Object.hasOwn(n, "parameters") ? (n as Record<string, unknown>).parameters : undefined, `workflows/${workflowId}/nodes/${id}/parameters`, 0);
+  });
+  return out;
+}
+
 async function runN8n(ctx: ScanContext): Promise<ScanResult> {
   const problem = n8nTargetProblem(ctx.source.target, ctx.source.scope);
   if (problem) throw new WiderSourceConfigError(`${KIND}: ${problem}`);
@@ -241,6 +272,7 @@ async function runN8n(ctx: ScanContext): Promise<ScanResult> {
   const get = (url: string) => getJson(fetchImpl, url, { "x-n8n-api-key": c.secret! }, ctx.signal);
   const outcomes: DiscoveryReadOutcome[] = [];
   const records: RegistryAgentRecord[] = [];
+  const secrets = new ConfigSecretCollector();
 
   // 1. the key's own scopes, where the instance can say (n8n 2.14+): a write scope refuses it before anything is read
   const SCOPES = `credential scopes in ${host}`;
@@ -300,6 +332,7 @@ async function runN8n(ctx: ScanContext): Promise<ScanResult> {
         }),
       };
       records.push(components !== null && !tooMany ? { ...rec, components } : rec);
+      secrets.scan(rec.externalId, workflowScannedFields(id, atPath(w, "nodes")));
     }
     const next = cursorNext(first, body);
     if (next === PARTIAL) {
@@ -311,7 +344,9 @@ async function runN8n(ctx: ScanContext): Promise<ScanResult> {
   if (overCap > 0) outcomes.push({ read: `agent components in ${host}`, status: "read", detail: `${overCap} workflow(s) use more than ${REGISTRY_COMPONENTS_PER_RECORD_MAX} components: their components were not staged, so the stored set is kept` });
   const complete = fullyRead(outcomes, READ) && !cut;
   if (cut) outcomes.push({ read: READ, status: "error", detail: "the next-page cursor was not of the expected shape, so the rest was not read" });
-  return finishRegistry(records, outcomes, complete ? ["n8n"] : [], writeScope);
+  const capped = secrets.outcome(`plaintext credentials in workflows in ${host}`);
+  if (capped) outcomes.push(capped);
+  return finishRegistry(records, outcomes, complete ? ["n8n"] : [], writeScope, secrets.observations);
 }
 
 export const N8N_SCANNER: Scanner = Object.freeze({

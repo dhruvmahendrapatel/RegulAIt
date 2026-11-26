@@ -176,6 +176,9 @@ function normalized(e: {
 // the link's externalId) keys the event; status.name is the reported state.
 // ---------------------------------------------------------------------------
 
+/** ADR-0356: the `webhookEvent` a Jira Automation rule sends to hand an item to RegulAIt (body set by the admin). */
+export const JIRA_TRIGGER_RULE_EVENT = "regulait:trigger";
+
 const jiraPayloadSchema = z
   .object({
     webhookEvent: z.string(),
@@ -240,6 +243,12 @@ function parseJiraVerified(input: InboundWebhookInput): InboundWebhookResult {
         }),
       ],
     };
+  }
+  // ADR-0356: a Jira Automation "Send web request" rule that hands the item to RegulAIt. It carries no drift event, so
+  // it yields none, but it is an "events" result so the in-body timestamp check and the delivery record apply to it
+  if (webhookEvent === JIRA_TRIGGER_RULE_EVENT) {
+    if (!issue) throw new PmProviderError(`jira ${webhookEvent} payload carries no issue`, 400);
+    return { kind: "events", events: [] };
   }
   return { kind: "ignored", reason: `jira event '${webhookEvent}' is not consumed` };
 }

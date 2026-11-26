@@ -88,6 +88,21 @@ variable "db_backup_retention_days" {
   default = 14
 }
 
+variable "operator_backups" {
+  type    = bool
+  default = true
+}
+
+variable "backup_installation_name" {
+  type    = string
+  default = "regulait"
+}
+
+variable "backup_retention_days" {
+  type    = number
+  default = 30
+}
+
 variable "firewall_delete_protection" {
   type    = bool
   default = true

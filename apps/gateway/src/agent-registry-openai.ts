@@ -21,6 +21,10 @@
  * `categories`, `action_openapi_raw`, `action_privacy_policy_url` and file contents are never read into a record.
  * Files are listed with `file_format=id`, so no download URL is ever returned.
  *
+ * Plaintext credentials (decision 4, slice 4): the fields in `OPENAI_GPT_SCANNED_FIELDS`, which the listing already
+ * returns, are passed in memory through the vendored secret matcher; a hit is reported as `agent_config` evidence by
+ * field path and rule id only, and the text is dropped when the page is done.
+ *
  * Paging passes `last_id` back as `after` on our own first URL, after a shape check; no URL from a response is fetched.
  *
  * TARGET (key=value fields on the source): workspaceId (the ChatGPT workspace's id, a UUID). Scope:
@@ -29,7 +33,7 @@
 import type { DiscoveryReadOutcome } from "@regulait/shared";
 import { allowListedFetch, type EndpointRule } from "./agent-platform-endpoints.js";
 import { REGISTRY_COMPONENTS_PER_RECORD_MAX } from "./agent-registry-records.js";
-import { attrs, finishRegistry, fullyRead, includeSet } from "./agent-registry-scanners.js";
+import { ConfigSecretCollector, attrs, finishRegistry, fullyRead, includeSet, pathSegment, type ConfigField } from "./agent-registry-scanners.js";
 import { scannerFetch } from "./discovery-cloud-scanners.js";
 import { GUID, ITEM_CAP, WIDER_MAX_ITEMS, WiderSourceConfigError, atPath, getJson, readListing, str } from "./discovery-wider-scanners.js";
 import type { RegistryAgentComponent, RegistryAgentRecord, ScanContext, ScanResult, Scanner } from "./discovery-scanners.js";
@@ -67,6 +71,33 @@ export const OPENAI_GPT_FIELDS = Object.freeze({
   tool: ["type", "action_domain", "auth_type"],
   file: ["id", "name"],
 } as const);
+
+/**
+ * Slice 4: the content fields scanned in memory for plaintext credentials and then dropped (never kept: see
+ * `OPENAI_GPT_FIELDS`). All come in the same listing response; nothing more is fetched for them.
+ */
+export const OPENAI_GPT_SCANNED_FIELDS = Object.freeze({
+  config: ["instructions", "description", "conversation_starters"],
+  tool: ["action_openapi_raw"],
+} as const);
+
+/** a GPT configuration's scanned fields, with value-free paths (ids and the action domain only) */
+export function gptScannedFields(gptId: string, config: unknown): ConfigField[] {
+  const base = `gpts/${gptId}/configs/${pathSegment(atPath(config, "id"), "latest")}`;
+  const out: ConfigField[] = [
+    { path: `${base}/instructions`, text: atPath(config, "instructions") },
+    { path: `${base}/description`, text: atPath(config, "description") },
+  ];
+  const starters = atPath(config, "conversation_starters");
+  if (Array.isArray(starters)) starters.slice(0, 50).forEach((t, i) => out.push({ path: `${base}/conversation_starters/${i}`, text: t }));
+  const tools = listData(atPath(config, "tools"));
+  tools?.slice(0, 100).forEach((t, i) => {
+    if (atPath(t, "type") !== "custom_action") return;
+    const domain = str(atPath(t, "action_domain"), 253)?.toLowerCase();
+    out.push({ path: `${base}/tools/${domain && DOMAIN.test(domain) ? `custom_action:${domain}` : String(i)}/action_openapi_raw`, text: atPath(t, "action_openapi_raw") });
+  });
+  return out;
+}
 
 export function openaiTargetProblem(target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
   if (!target.workspaceId || !GUID.test(target.workspaceId)) return "'workspaceId' must be the workspace's id (a UUID)";
@@ -137,6 +168,7 @@ async function runOpenai(ctx: ScanContext): Promise<ScanResult> {
   const outcomes: DiscoveryReadOutcome[] = [];
   const records: RegistryAgentRecord[] = [];
   const owners: Array<{ rec: RegistryAgentRecord; who: string }> = [];
+  const secrets = new ConfigSecretCollector();
 
   const READ = `GPTs in workspace ${workspaceId}`;
   const first = `${OPENAI_COMPLIANCE_ORIGIN}/v1/compliance/workspaces/${workspaceId}/gpts?limit=${OPENAI_PAGE_LIMIT}&file_format=id`;
@@ -168,6 +200,7 @@ async function runOpenai(ctx: ScanContext): Promise<ScanResult> {
           visibility: visibility && (VISIBILITIES as readonly string[]).includes(visibility) ? visibility : null,
         }),
       };
+      if (config) secrets.scan(rec.externalId, gptScannedFields(id, config));
       const components = config ? gptComponents(config) : null;
       const tooMany = components !== null && components.length > REGISTRY_COMPONENTS_PER_RECORD_MAX;
       if (tooMany) overCap++;
@@ -189,7 +222,9 @@ async function runOpenai(ctx: ScanContext): Promise<ScanResult> {
   if (cut) outcomes.push({ read: READ, status: "error", detail: "the next-page id was not of the expected shape, so the rest was not read" });
   const complete = fullyRead(outcomes, READ) && !cut;
   // decision 5: no API shows a Compliance key's scope, so the run never proves read-only
-  return finishRegistry(records, outcomes, complete ? ["openai_gpts"] : [], "unverified");
+  const capped = secrets.outcome(`plaintext credentials in GPT configurations in workspace ${workspaceId}`);
+  if (capped) outcomes.push(capped);
+  return finishRegistry(records, outcomes, complete ? ["openai_gpts"] : [], "unverified", secrets.observations);
 }
 
 export const OPENAI_SCANNER: Scanner = Object.freeze({

@@ -1,0 +1,159 @@
+{
+  "fixture": 1,
+  "name": "intake-reopened-after-completion",
+  "note": "AER-049: a completed instance re-opened to its sign-off",
+  "definition": {
+    "workflow": "intake-to-merge",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "plan",
+        "type": "planning"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "build",
+        "type": "automated_build",
+        "scope": "requirements"
+      },
+      {
+        "id": "branch",
+        "type": "git_operation",
+        "action": "create_branch",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "pr",
+        "type": "git_operation",
+        "action": "open_pr",
+        "connection": "gh",
+        "repo": "acme/app"
+      },
+      {
+        "id": "checks",
+        "type": "automated_check",
+        "checks": [
+          "unit",
+          "lint"
+        ],
+        "retry": {
+          "maxAttempts": 2,
+          "delaySeconds": 30,
+          "backoff": true,
+          "maxDelaySeconds": 3600
+        }
+      },
+      {
+        "id": "merge-approval",
+        "type": "human_approval",
+        "approvers": [
+          "00000000-0000-4000-8000-0000000000a1"
+        ],
+        "quorum": "any"
+      },
+      {
+        "id": "merge",
+        "type": "git_operation",
+        "action": "merge",
+        "connection": "gh",
+        "repo": "acme/app",
+        "strategy": "merge"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    },
+    {
+      "kind": "stage_completed",
+      "stageId": "plan"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    },
+    {
+      "kind": "approval_granted",
+      "stageId": "signoff"
+    },
+    {
+      "kind": "human_trigger",
+      "stageId": "build"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "branch"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "pr"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "checks"
+    },
+    {
+      "kind": "approval_granted",
+      "stageId": "merge-approval"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "merge"
+    },
+    {
+      "kind": "reopen",
+      "stageId": "requirements",
+      "reason": "recertification"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "blocked_on_approval",
+      "currentStageIndex": 3,
+      "stageStatuses": [
+        "completed",
+        "completed",
+        "completed",
+        "active",
+        "reopened",
+        "reopened",
+        "reopened",
+        "reopened",
+        "reopened",
+        "reopened"
+      ],
+      "artifactVersions": {
+        "requirements": 1
+      }
+    },
+    "statuses": [
+      "blocked_on_plan",
+      "blocked_on_artifact",
+      "blocked_on_approval",
+      "awaiting_trigger",
+      "awaiting_execution",
+      "awaiting_execution",
+      "awaiting_execution",
+      "blocked_on_approval",
+      "awaiting_execution",
+      "completed",
+      "blocked_on_approval"
+    ]
+  }
+}

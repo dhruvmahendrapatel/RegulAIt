@@ -1,7 +1,8 @@
 /**
  * ADR-0242 §6.1 (as spikee's and modelscan's, ADR-0187 decisions 104 and 141) — the WORKER's own self-test, reported
  * through the runner, for the manifest's one worker-attested switch (`REGULAIT_MCPSCANNER_OFFLINE_ANALYZERS_ONLY` /
- * `REGULAIT_SKILLSCANNER_OFFLINE_ANALYZERS_ONLY`).
+ * `REGULAIT_SKILLSCANNER_OFFLINE_ANALYZERS_ONLY` / ADR-0362 `REGULAIT_CONTENTEXTRACT_WORKER_ISOLATED`, the extractor having no
+ * usage-data switch of its own, as modelscan's scanner).
  *
  * The scanner runs only in the task's sandbox, so the task probes from inside it at the start of every task (name
  * resolution, a TCP connect by name, a public literal address), checks the environment it starts the driver with (the
@@ -30,13 +31,13 @@ import {
   writeWorkerSelfTestFile,
   type EgressProbeOptions,
 } from "@regulait/engine-runner";
-import type { AdmissionScanEngineId, RunnerSelfTest, SandboxRuntimeObservation } from "@regulait/shared";
-import { offlineSwitch, pinnedVersion, REMOTE_ANALYZER_ENV } from "./config.js";
+import type { RunnerSelfTest, SandboxRuntimeObservation } from "@regulait/shared";
+import { offlineSwitch, pinnedVersion, REMOTE_ANALYZER_ENV, type SubjectEngineId } from "./config.js";
 
 export { RUNNER_CREDENTIAL_ENV, RUNNER_CREDENTIAL_PATHS, WORKER_SELF_TEST_FILE, WORKER_SELF_TEST_MAX_AGE_MS } from "@regulait/engine-runner";
 
 const reportSchema = workerSelfTestSchema({
-  engine: z.enum(["mcpscanner", "skillscanner"]),
+  engine: z.enum(["mcpscanner", "skillscanner", "contentextract"] satisfies readonly SubjectEngineId[]),
   engineVersion: z.string().max(64),
   remoteAnalyzerEnvSet: z.boolean(),
 });
@@ -50,7 +51,7 @@ export function workerSelfTestBlocks(r: WorkerSelfTest): boolean {
 /** the worker writes its report (atomically), judging `env`: the environment it starts the driver with */
 export async function writeWorkerSelfTest(
   resultsRoot: string,
-  args: { engine: AdmissionScanEngineId; engineVersion: string; env: Record<string, string | undefined>; egress?: EgressProbeOptions; credentialPaths?: readonly string[]; now?: Date; runtime?: SandboxRuntimeObservation },
+  args: { engine: SubjectEngineId; engineVersion: string; env: Record<string, string | undefined>; egress?: EgressProbeOptions; credentialPaths?: readonly string[]; now?: Date; runtime?: SandboxRuntimeObservation },
 ): Promise<WorkerSelfTest> {
   const sw = offlineSwitch(args.engine);
   const remoteAnalyzerEnvSet = REMOTE_ANALYZER_ENV[args.engine].some((n) => (args.env[n] ?? "") !== "");
@@ -70,7 +71,7 @@ export async function writeWorkerSelfTest(
 }
 
 /** the runner's judgement of the worker's report: every condition must hold, and each failure is named */
-export async function judgeWorkerSelfTest(engine: AdmissionScanEngineId, resultsRoot: string, now = new Date()): Promise<{ passed: boolean; failures: string[] }> {
+export async function judgeWorkerSelfTest(engine: SubjectEngineId, resultsRoot: string, now = new Date()): Promise<{ passed: boolean; failures: string[] }> {
   const read = await readWorkerSelfTest(resultsRoot, reportSchema);
   if ("failure" in read) return { passed: false, failures: [read.failure] };
   const report = read.report;
@@ -87,7 +88,7 @@ export async function judgeWorkerSelfTest(engine: AdmissionScanEngineId, results
 
 /** the runner's self-test: its own egress probe, and the worker-attested switch from the worker's report */
 export async function admissionRunnerSelfTest(args: {
-  engine: AdmissionScanEngineId;
+  engine: SubjectEngineId;
   imageDigest: string;
   engineVersion: string;
   resultsRoot: string;

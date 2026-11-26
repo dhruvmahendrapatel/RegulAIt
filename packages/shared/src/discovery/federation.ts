@@ -27,6 +27,11 @@ export const FEDERATION_KEY_OVERLAP_SECONDS = 600;
 
 /** the token subject for one discovery source: the customer's trust policy names it exactly */
 export const federationSourceSubject = (sourceId: string): string => `regulait:discovery-source:${sourceId}`;
+/**
+ * ADR-0338: the token subject of one source's vendor CONTROL credential, distinct from its read subject, so the
+ * customer's write app trusts only this subject and a read token can never be exchanged for the write app
+ */
+export const vendorAgentControlSubject = (sourceId: string): string => `regulait:vendor-agent-control:${sourceId}`;
 /** the token subject of RegulAIt's own AWS principal (the role it assumes customer roles from, with an external id) */
 export const FEDERATION_AWS_PRINCIPAL_SUBJECT = "regulait:aws-principal";
 /** the `sub` of a token RegulAIt presents for a vendor usage connector (ADR-0322 slice 4a); the customer's role pins it */

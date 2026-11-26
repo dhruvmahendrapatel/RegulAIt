@@ -23,6 +23,8 @@ export const EXTERNAL_WRITE_OPERATIONS = [
   // (restore) puts it back
   "vendor_agent_control.apply",
   "vendor_agent_control.reverse",
+  // ADR-0361 slice 3: deleting a monitored conversation in a sanctioned AI SaaS tenant (ai-saas-remediation.ts)
+  "vendor.delete_conversation",
 ] as const;
 
 export type ExternalWriteOperation = (typeof EXTERNAL_WRITE_OPERATIONS)[number];

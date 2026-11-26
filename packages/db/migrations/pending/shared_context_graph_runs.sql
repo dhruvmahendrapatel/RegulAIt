@@ -1,6 +1,6 @@
 -- ADR-0365 slice 2 (lane E46): scheduled sync, and edges from PM work items to RegulAIt orchestration runs through
--- pm_links. Hand-authored (never drizzle-kit generate), additive and idempotent. The file name sorts right after
--- `shared_context_graph.sql` (byte order: '.' < '_'), which it extends. It adds no system reason, so it does not
+-- pm_links. Hand-authored (never drizzle-kit generate), additive and idempotent. It extends slice 1
+-- (`0394_shared_context_graph.sql`), which is numbered and so applies first. It adds no system reason, so it does not
 -- redefine regulait_rls_system_reason().
 --
 -- What changes:

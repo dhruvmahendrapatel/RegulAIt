@@ -6,8 +6,8 @@
 - **Index**: **Live context graph (pillar 4, PENDING P2), slice 1: node, edge and node-scope tables in Postgres (3NF, forced row-level security), an incremental sync from PM work items an admin binds to one project (a `settings_relax` step-up, audited), and a query API that returns only nodes whose every scope the caller can read; a hidden node is a 404. Graph-in-Postgres chosen over Apache AGE, graphology and a separate graph database. Boundary with ADR-0316: the graph indexes source-system objects and stores no content; distillation writes text into the context store and never into the graph.**
 - **Backlog item**: PENDING P2 ("a live, synced context graph")
 - **Built in**: lane E46, branch `builder/e46-context-graph` (slice 1)
-- **Migration**: `pending/shared_context_graph.sql` (slice 1) and `pending/shared_context_graph_runs.sql` (slice 2),
-  numbered at merge (ADR-0252)
+- **Migration**: `0394_shared_context_graph.sql` (slice 1) and `pending/shared_context_graph_runs.sql` (slice 2,
+  numbered at merge, ADR-0252)
 - **Related**: ADR-0011 (Shared Projects and the context store), ADR-0054 and ADR-0289 (PM work-item importer),
   ADR-0234 (row-level security), ADR-0316 (session distillation), ADR-0337 (SaaS entitlement graph, a different
   graph: agents' vendor grants), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security

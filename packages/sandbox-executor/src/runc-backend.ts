@@ -36,6 +36,7 @@ import type { BackendDescription, ProbeSet } from "./backend.js";
 import {
   DockerBackendError,
   DockerSandboxBackend,
+  EGRESS_NETWORK_NAME,
   notRun,
   probesFromObservation,
   runtimeFromInfo,
@@ -75,7 +76,13 @@ const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
  * What the container's own HostConfig contradicts, as `[probe, code]` pairs (pure). Every check is on the executor's
  * outside view: the workload cannot influence `docker inspect`.
  */
-export function runcHostConfigFailures(hostConfig: ContainerHostConfig, containerRuntime: string | null, runtimeName: string): Array<[AttestationProbe, string]> {
+export function runcHostConfigFailures(
+  hostConfig: ContainerHostConfig,
+  containerRuntime: string | null,
+  runtimeName: string,
+  /** ADR-0364 S3: `none`, or the robot run's own internal network the executor attached it to */
+  expectedNetworkMode = "none",
+): Array<[AttestationProbe, string]> {
   const out: Array<[AttestationProbe, string]> = [];
   const h = hostConfig;
   if (containerRuntime !== runtimeName) {
@@ -94,7 +101,7 @@ export function runcHostConfigFailures(hostConfig: ContainerHostConfig, containe
   if (sec.some((o) => o === "systempaths=unconfined" || o === "systempaths:unconfined")) out.push(["runtime_identity", "host_systempaths_unconfined"]);
   if (sec.some((o) => o === "label=disable" || o === "label:disable")) out.push(["runtime_identity", "host_label_disabled"]);
   if (h.ReadonlyRootfs !== true) out.push(["root_read_only", "host_root_writable"]);
-  if (h.NetworkMode !== "none") out.push(["network_interfaces", "host_network"]);
+  if (h.NetworkMode !== expectedNetworkMode || (expectedNetworkMode !== "none" && !EGRESS_NETWORK_NAME.test(expectedNetworkMode))) out.push(["network_interfaces", "host_network"]);
   if (h.IpcMode !== "none") out.push(["runtime_identity", "host_ipc_shared"]);
   if (typeof h.PidMode === "string" ? h.PidMode !== "" : h.PidMode !== undefined && h.PidMode !== null) out.push(["runtime_identity", "host_pid_shared"]);
   if (h.UsernsMode === "host") out.push(["runtime_identity", "host_userns"]);
@@ -121,7 +128,7 @@ export function runcHostConfigFailures(hostConfig: ContainerHostConfig, containe
  */
 export function runcProbesFrom(init: InitObservation, side: ExecutorSideObservation, opts: { runtimeName: string }, wanted: readonly AttestationProbe[]): ProbeSet {
   const out = probesFromObservation(init, side, { runtime: "runc", flags: [] }, wanted) as Record<string, unknown>;
-  for (const [probe, code] of runcHostConfigFailures(side.hostConfig ?? {}, side.containerRuntime, opts.runtimeName)) {
+  for (const [probe, code] of runcHostConfigFailures(side.hostConfig ?? {}, side.containerRuntime, opts.runtimeName, side.expectedNetworkMode ?? "none")) {
     const target = wanted.includes(probe) ? probe : "runtime_identity";
     // the first contradiction per probe is kept (each one alone fails the report)
     const cur = out[target] as { observed: unknown } | undefined;
@@ -145,16 +152,21 @@ export class RuncDockerBackend extends DockerSandboxBackend {
   }
 
   /** before any container starts: the daemon has the runtime, seccomp that is not unconfined, and user-namespace remapping */
-  protected async checkRuntime(): Promise<RuntimeCheck> {
+  protected async checkRuntime(_force: boolean, runtimeName: string): Promise<RuntimeCheck> {
     const info = await this.api("/info");
-    const problem = runcDaemonProblem(info, this.opts.runtimeName);
+    const problem = runcDaemonProblem(info, runtimeName);
     if (problem) throw new DockerBackendError(`${problem}; nothing was started (ADR-0190 L1)`);
-    const rt = runtimeFromInfo(info, this.opts.runtimeName);
+    const rt = runtimeFromInfo(info, runtimeName);
     return { path: rt.path, args: rt.args, verified: true };
   }
 
-  protected async containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck): Promise<boolean> {
-    return rt.verified && containerRuntime === this.opts.runtimeName;
+  protected async containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck, runtimeName: string): Promise<boolean> {
+    return rt.verified && containerRuntime === runtimeName;
+  }
+
+  /** ADR-0364 S3: runc has no network flag, so a robot sandbox runs under the same runtime (on its internal network) */
+  protected override defaultEgressRuntime(): string | null {
+    return this.opts.runtimeName;
   }
 
   /** L1 asks for a private cgroup namespace explicitly (the host's is refused from outside) */
@@ -162,7 +174,7 @@ export class RuncDockerBackend extends DockerSandboxBackend {
     return { cgroupnsPrivate: true };
   }
 
-  protected probesFor(init: InitObservation, side: ExecutorSideObservation, _profile: ExecutionProfileBody, wanted: readonly AttestationProbe[]): ProbeSet {
-    return runcProbesFrom(init, side, { runtimeName: this.opts.runtimeName }, wanted);
+  protected probesFor(init: InitObservation, side: ExecutorSideObservation, _profile: ExecutionProfileBody, wanted: readonly AttestationProbe[], runtimeName: string): ProbeSet {
+    return runcProbesFrom(init, side, { runtimeName }, wanted);
   }
 }

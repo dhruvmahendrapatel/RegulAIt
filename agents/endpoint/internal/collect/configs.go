@@ -58,17 +58,25 @@ func keysIn(as []assignment, listed []string) []contract.KeyFound {
 				name = "(unnamed)"
 			}
 		}
-		prev, had := byName[name]
+		// one entry per name and credential: two distinct secrets under one name (often "(unnamed)") are both kept
+		kf := keyFound(name, rule, a.value)
+		slot := name + "\x00" + kf.Fingerprint
+		prev, had := byName[slot]
 		if had && prev.RuleID != "" {
 			continue
 		}
-		byName[name] = contract.KeyFound{KeyName: name, RuleID: rule, Present: true}
+		byName[slot] = kf
 	}
 	out := make([]contract.KeyFound, 0, len(byName))
 	for _, kf := range byName {
 		out = append(out, kf)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].KeyName < out[j].KeyName })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].KeyName != out[j].KeyName {
+			return out[i].KeyName < out[j].KeyName
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
+	})
 	if len(out) == 0 {
 		return nil
 	}

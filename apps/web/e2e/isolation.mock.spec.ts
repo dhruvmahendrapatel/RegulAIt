@@ -19,9 +19,10 @@ const strict = {
   isolationFloorRegulated: "microvm",
   isolationFloorMcpStdio: "user_space_kernel",
   isolationFloorEngineWorker: "user_space_kernel",
+  isolationFloorRobotBrowser: "user_space_kernel",
   executorAttestationMaxAgeMinutes: 120,
 };
-const EDITABLE = 7;
+const EDITABLE = 8;
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -383,7 +384,7 @@ for (const [label, envelope] of MALFORMED_ENVELOPES) {
     await expect(page.getByTestId("engine-promptfoo").getByText("On — self-test passed")).toBeVisible();
     // the settings tab says it is unmeasured in its label, before anyone opens it
     await page.getByRole("tab", { name: "Run settings · unmeasured" }).click();
-    await expect(page.getByText(/Isolation settings are unmeasured: the gateway has not reported all eight values/)).toBeVisible();
+    await expect(page.getByText(/Isolation settings are unmeasured: the gateway has not reported all nine values/)).toBeVisible();
     await expect(save(page)).toBeDisabled();
     const controls = save(page).locator("xpath=ancestor::form").locator("input, select");
     await expect(controls).toHaveCount(EDITABLE);
@@ -450,11 +451,11 @@ test("builder and MCP: a stricter profile is assigned without step-up, a looser 
   await page.route("**/v1/users", (route) => json(route, { users: [] }));
   await page.goto("/ui/admin/mcp-servers");
   await expect(page.getByRole("heading", { level: 1, name: "MCP servers", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Show tools on Synthetic stdio" }).click();
+  await page.getByRole("button", { name: "Show tools on Synthetic stdio" }).click();
   const serverSelect = page.getByLabel("Execution profile · Synthetic stdio", { exact: true });
   await expect(serverSelect).toBeEnabled();
   await expect(serverSelect).toHaveValue("");
-  await page.getByRole("link", { name: "Show tools on Synthetic remote" }).click();
+  await page.getByRole("button", { name: "Show tools on Synthetic remote" }).click();
   await expect(page.getByText(/This is a remote MCP server: it runs on its own host, which regulAIt does not isolate/)).toBeVisible();
   await axe(page);
 });
