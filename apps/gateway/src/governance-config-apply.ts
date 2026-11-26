@@ -78,6 +78,7 @@ import { checkSodMint, type SodMint } from "./sod.js";
 import { requireStepUp } from "./step-up.js";
 import { lockRoleOrRefuse, RoleNotFoundError } from "./workload-identity-admin.js";
 import { BUILDER_RULE_IDS, builderDiff, ensureBaseline, validateBuilderDefinition } from "./workflow-builder.js";
+import { CANARY_OPEN_REFUSAL, openCanary } from "./workflow-template-versions.js";
 import { createWorkflowTemplateValidated, retireWorkflowTemplateLocked } from "./workflows.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
@@ -534,6 +535,8 @@ async function retireOrRefuse(tx: Db, templateId: string, reason: string, actor:
 /** a new version (origin governance_apply) over the baseline, as the builder's publish writes one */
 async function publishVersion(ctx: Ctx, locked: typeof workflowTemplates.$inferSelect, raw: Record<string, unknown>, key: string) {
   const { tx } = ctx;
+  // ADR-0340 slice 3: the two versions of an open canary cannot move under it, from the builder or from here
+  if (await openCanary(tx, locked.id)) throw new ApplyRefusal(CANARY_OPEN_REFUSAL.status, CANARY_OPEN_REFUSAL.body.error, `template ${key}: ${CANARY_OPEN_REFUSAL.body.detail}`);
   const v = await validateBuilderDefinition(tx, raw);
   if (!v.valid) throw new ApplyRefusal(422, "invalid_workflow_definition", `template ${key}: ${v.issues.map((i) => i.message).join("; ").slice(0, 500)}`);
   const latest = await ensureBaseline(tx, locked, ctx.actor);

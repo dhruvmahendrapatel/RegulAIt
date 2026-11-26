@@ -135,6 +135,9 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.a2aAgentRevocations, ["reason"]],
   // ADR-0327 addendum — why the author proposed a decision-table version
   [s.decisionTableVersions, ["reason"]],
+  // ADR-0340 slice 3: why an admin asked to migrate a running instance, and why a canary ended
+  [s.workflowInstanceMigrations, ["reason"]],
+  [s.workflowTemplateCanaries, ["endReason"]],
   // ADR-0327 slice 4a — why an admin asked to switch a rule-like step, and why it was reverted
   [s.ruleStepSwitches, ["reason", "revertReason"]],
   // ADR-0207 — why an admin disabled a connector (the server twin is on the mcp_servers entry above)

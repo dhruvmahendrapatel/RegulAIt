@@ -116,6 +116,8 @@ roadmap: ../product/ROADMAP.md
 ## Where we are (read this paragraph first)
 <!-- fold:state-recap newest-first -->
 
+**2026-11-25 - E21 slice 3: instance pinning, canary and governed migration, rebuilt on ADR-0341's version store ([ADR-0340](../decisions/0340-workflow-process-reliability.md) addendum 2026-11-25, migration `pending/workflow_template_canary_pinning.sql` numbered at merge; supersedes #894).** Every new instance is pinned to the `workflow_template_versions` row that served it (a template with no version records its live definition as one at start). A builder publish with `canaryPercent` (1 to 50, bound into the step-up) serves that share of NEW instances the new version and the rest the one it replaced, sticky per instance id; while it is open no publish lands (builder or governance apply), and it ends once, promoted or rolled back (the stable definition published again, origin `canary_rollback`). A running single-template instance moves to another version only by a migration another admin approves in the approvals queue (kind `workflow_migration`), re-planned under the instance lock or recorded stale. The draft's `config_versions` artifact type was dropped (one version store, ADR-0200). API-only: one KNOWN_UI_GAPS file on #453.
+
 **2026-11-17 - E42 slice 1: monitoring sanctioned AI SaaS through vendor compliance APIs ([ADR-0361](../decisions/0361-sanctioned-ai-saas-compliance-monitoring.md), migration `pending/ai_saas_monitoring.sql`, numbered at merge).**
 - Forcepoint gap 1. An admin registers a read-only connector to a Microsoft 365 Copilot tenant (Graph
   `getAllEnterpriseInteractions`, `AiEnterpriseInteraction.Read.All`); a run records each interaction as append-only
