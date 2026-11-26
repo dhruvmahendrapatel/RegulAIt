@@ -98,6 +98,8 @@ export default function McpServersPage() {
 }
 
 // ADR-0207 (G4): the edit dialog loads only when it is opened
+// ADR-0238 (P12(d)) token-exchange card, in its own chunk (ADR-0344 per-route budgets, ADR-0200 lazy loading)
+const McpTokenExchangeCard = lazy(() => import("./TokenExchange").then((m) => ({ default: m.McpTokenExchangeCard })));
 const EditServerDialog = lazy(() => import("./IntegrationEditDialogs").then((m) => ({ default: m.EditServerDialog })));
 
 function McpServersTab() {
@@ -241,6 +243,11 @@ function McpServersTab() {
             key={selectedId}
             server={selected!}
           />
+        )}
+        {selectedId && (
+          <Suspense fallback={null}>
+            <McpTokenExchangeCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />
+          </Suspense>
         )}
 
         <RegisterToolCard servers={servers.data?.servers ?? []} />
