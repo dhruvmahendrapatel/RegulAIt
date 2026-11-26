@@ -1,0 +1,73 @@
+{
+  "sourceCommit": "267e12e4951d14c3f71531f3eeba9ffb4eb63022",
+  "mode": "Local Chromium synthetic fixture;admin headline queries only;no real mutations",
+  "homeChecksPassed": 4,
+  "seconds": 9.1,
+  "existingFeatureChecksPassed": 12,
+  "featureSeconds": 45.6,
+  "currentRouteCensus": 151,
+  "initialGenericHarnessRoutes": 150,
+  "observations": {
+    "home-unavailable-375": {
+      "width": 375,
+      "failedApprovalOrUsageResponses": 4,
+      "headlineValues": [
+        "0",
+        "0",
+        "\u2014"
+      ],
+      "alertsInsideCard": 0,
+      "retryButtonsInsideCard": 0,
+      "pageHorizontalOverflow": false,
+      "dismissButtonAvailable": true,
+      "mutationSent": false
+    },
+    "home-unavailable-1440": {
+      "width": 1440,
+      "failedApprovalOrUsageResponses": 4,
+      "headlineValues": [
+        "0",
+        "0",
+        "\u2014"
+      ],
+      "alertsInsideCard": 0,
+      "retryButtonsInsideCard": 0,
+      "pageHorizontalOverflow": false,
+      "dismissButtonAvailable": true,
+      "mutationSent": false
+    },
+    "home-populated-375": {
+      "width": 375,
+      "headlineValues": [
+        "12",
+        "75",
+        "$4.5"
+      ],
+      "headlineLinks": [
+        "See your governance posture",
+        "Register an AI use case",
+        "Open the agent inventory",
+        "Open the cost dashboard"
+      ],
+      "partialFixture": "Only headline approval/usage reads populated; other panels deliberately unavailable",
+      "mutationSent": false
+    },
+    "home-populated-1440": {
+      "width": 1440,
+      "headlineValues": [
+        "12",
+        "75",
+        "$4.5"
+      ],
+      "headlineLinks": [
+        "See your governance posture",
+        "Register an AI use case",
+        "Open the agent inventory",
+        "Open the cost dashboard"
+      ],
+      "partialFixture": "Only headline approval/usage reads populated; other panels deliberately unavailable",
+      "mutationSent": false
+    }
+  },
+  "outageScope": "Both headline endpoints refused initial reads and their configured retries; other panels are separate queries"
+}

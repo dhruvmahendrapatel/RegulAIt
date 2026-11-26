@@ -1,0 +1,70 @@
+{
+  "recorded_at": "2026-11-24T03:13:36.419595+00:00",
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "authored_scope": "Review/mockup/evidence only",
+  "workspace_build_exit": 0,
+  "migration_guard_exit": 0,
+  "adr_index": {
+    "passed": 8,
+    "failed": 0
+  },
+  "bundle_budgets_passed": 115,
+  "gzip_bytes": [
+    {
+      "name": "entry JS (index)",
+      "passed": true,
+      "size": 40751,
+      "sizeLimit": 139500
+    },
+    {
+      "name": "entry CSS (index)",
+      "passed": true,
+      "size": 6013,
+      "sizeLimit": 10700
+    },
+    {
+      "name": "first-load JS",
+      "passed": true,
+      "size": 135327,
+      "sizeLimit": 139500
+    },
+    {
+      "name": "first-paint JS",
+      "passed": true,
+      "size": 179666,
+      "sizeLimit": 182000
+    }
+  ],
+  "protected_browser_tests": {
+    "passed": 13,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "duration_seconds": 34.1,
+    "gateway_and_provider_mocked": true
+  },
+  "definition_diff_probes": {
+    "passed": 2,
+    "duration_seconds": 3.3,
+    "widths": [
+      375,
+      1440
+    ],
+    "write_requests": 0,
+    "purpose": "Reproduces invisible changed suffix while reapproval becomes available, not a product acceptance success"
+  },
+  "mockup_files_including_index": 13,
+  "wireframes": 12,
+  "links_fences_acceptance": "pass",
+  "numbered_feedback_cards": 72,
+  "uxp_proposals": 6,
+  "brn_topics": 18,
+  "route_inventory_only": 157,
+  "verification_note": "Initial ADR link check caught this referenced validation artifact before it had been written. Artifact created and full ADR link suite rerun before commit.",
+  "limits": [
+    "No real reapproval/provider or native proof",
+    "No production/cloud/product implementation",
+    "No whole-function/route certification",
+    "No persistent scheduler available or created"
+  ]
+}

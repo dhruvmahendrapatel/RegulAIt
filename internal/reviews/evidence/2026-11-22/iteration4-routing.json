@@ -1,0 +1,11 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Pure compiled schema/matcher calls; no DB, provider or mutations",
+  "pathOnlyRuleSchemaAccepted": true,
+  "pathOnlyMatches": [
+    "00000000-0000-4000-8000-000000000901"
+  ],
+  "sameTypeDifferentTargetMatches": [
+    "00000000-0000-4000-8000-000000000901"
+  ]
+}

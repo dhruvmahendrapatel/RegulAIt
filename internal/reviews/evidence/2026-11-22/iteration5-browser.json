@@ -1,0 +1,79 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Local Chromium+synthetic intercepted API contracts;no external providers or real successful mutations",
+  "testsPassed": 9,
+  "seconds": 8.4,
+  "feedbackCardsCovered": 8,
+  "observations": {
+    "workload-outage": {
+      "failedReads": 1,
+      "noOpenApprovalsVisible": true,
+      "nothingWaitingTextVisible": true,
+      "alerts": [],
+      "retryButtons": 0,
+      "pendingQueueInputCount": 1
+    },
+    "bulk-result-hidden": {
+      "posts": 1,
+      "queueReads": 2,
+      "queueEmptyAfterRefresh": true,
+      "perItemErrorVisible": false,
+      "perItemDetailVisible": false,
+      "aggregateNoticeVisible": true,
+      "postMocked": true
+    },
+    "sla-target-mismatch": {
+      "displayKind": "user",
+      "targetRetained": true,
+      "postedAction": "reassign",
+      "postedTargetKind": "team",
+      "postedTeamId": true,
+      "postMockedAndRefused": true
+    },
+    "sla-scheduler-copy": {
+      "categoricalNoSchedulerHelpVisible": true,
+      "configuredSchedulerHealth": "not exposed or proven by this probe",
+      "actualSchedulerCapability": "source cross-check: registered approval-sla-sweep job; optional operator configuration",
+      "mutationSent": false
+    },
+    "bulk-pending-conflict": {
+      "firstBulkPending": true,
+      "approveDisabled": true,
+      "denyEnabled": true,
+      "submittedDecisions": [
+        "approved",
+        "denied"
+      ],
+      "bothRequestsMockedAndRefused": true
+    },
+    "role-inherited-result": {
+      "deletes": 1,
+      "confirmationPromisedBundleLoss": true,
+      "responseStillHeldViaGroup": true,
+      "successToastVisible": true,
+      "groupContinuationMessageVisible": false,
+      "deleteMocked": true
+    },
+    "role-stepup": {
+      "deletes": 1,
+      "proofOptionsRequests": 0,
+      "proofDialogs": 0,
+      "deleteMockedAndRefused": true
+    },
+    "admin-count-unavailable": {
+      "failedCounts": 1,
+      "lastActiveAdminClaimVisible": true,
+      "demoteDisabled": true,
+      "actualActiveAdminCount": "unknown:count request503",
+      "mutationSent": false
+    },
+    "session-counts-unavailable": {
+      "countErrors": 2,
+      "zeroCountClaimVisible": true,
+      "liveSessionRowVisible": true,
+      "revokeAllDisabled": true,
+      "individualRevokeEnabled": true,
+      "mutationSent": false
+    }
+  }
+}

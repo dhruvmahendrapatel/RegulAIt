@@ -1,0 +1,14 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Compiled schema/provider construction;no fetch/DB/create",
+  "azure": {
+    "missingUrlAcceptedByCreateSchema": true,
+    "missingUrlRejectedByProvider": true,
+    "withOrganizationUrlProviderConstructed": true
+  },
+  "pm": {
+    "slashNameAccepted": true,
+    "nonJiraVersionAccepted": false,
+    "nonJiraWithoutVersionAccepted": true
+  }
+}

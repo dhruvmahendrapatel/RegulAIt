@@ -1,0 +1,2342 @@
+# Codex reviews
+
+## Purpose and current status
+
+This is the owner-requested continuing review and discussion record for regulAIt.
+
+Read: [latest run-context and retest round](#continuing-review--iteration-12-2026-11-24-run-context-and-accepted-fix-verification), [tool-review finding](#deep-audit--iteration-11-2026-11-24-inspect-the-full-tool-change-before-approval), [Claude response and next-round recommendations](#continuing-review--iteration-10-2026-11-24-claude-response-and-prioritised-next-steps), [previous review and retests](#deep-audit--iteration-9-2026-11-23-current-contract-mockups-and-proof-retests), [Markdown mockups for Claude](mockups/README.md), [latest findings and UI/UX plan](#deep-audit--iteration-7-2026-11-22-claude-reconciliation-and-a-uiux-improvement-plan), [initial recommendations](#initial-recommendations--posted-before-the-deeper-audit), [research](#research-and-comparison), [deep audit](#deep-audit--iteration-1-2026-11-21), [second iteration](#deep-audit--iteration-2-2026-11-21), [Claude discussion](#claudecodex-discussion-ledger), and [historical baseline](#historical-baseline--2026-11-07). It replaces the filename `2026-11-07-whole-build-review.md`; the original dated report is retained under **Historical baseline** below. This file contains feedback and proposals, not permission to merge, deploy, remove a hold or relax production policy.
+
+- **Assessed snapshots:** initial product source `9797d6f42798689d896103b9e9ce04278e01a4ad`; latest review baseline main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. Each iteration anchors its evidence to its stated source. Current main adds catalogue/ingest UI and backend capabilities; only the named current-round checks cover those changes.
+- **Initial assessment:** all 39 numbered rows of the November 7 report were reassessed. That is 39 review rows, not 39 independently reproduced vulnerabilities.
+- **Research:** primary documentation was retrieved on November 21–22; sources and limits are below.
+- **Deep audit:** twelve iterations (including design/reconciliation work), 72 numbered feedback cards plus six UI/UX proposals and 18 separately labelled brainstorm topics, targeted browser reproductions and scoped real-gateway role checks are published below; full per-page/per-role/per-function completion remains explicitly tracked. The original whole-route run covered 150 screens; the latest route inventory has 157. Later routes require their own deep coverage; no new whole-route browser run is claimed. Inventory or a generic error-state screenshot does not mean a page's complete user journey has been reviewed.
+- **UI handoff:** thirteen desktop/phone Markdown mockups and a pickup index are now linked below. They turn the six design proposals into concrete layouts, copy, states and acceptance checks; they are not extra bug cards or shipped UI.
+- **Product source changes in this lane:** none. Recommendations require review and an assigned implementation slice.
+
+## Initial recommendations — posted before the deeper audit
+
+1. **Use the old report as a dated baseline, not today's backlog.** Major RLS, bootstrap-secret, webhook replay, grant-mint, A2A governance, attribution and project-plan enforcement remedies now exist. Reopening their original implementation tasks would duplicate work. Validate their remaining coverage and failure modes rather than equating implementation with complete assurance.
+2. **Correct the false positive and qualify the broad claims.** C-05's `expect(1).toBe(1)` is inside a source fixture used to test a scanner; the real test checks that scanner's result. An assertion-count gate, raw RLS table percentage, missing direct import or the presence of an installed library is not sufficient evidence of security or quality by itself.
+3. **Prioritize current user-visible correctness and genuine gaps.** Current source still supports follow-up on authentication before expensive parsing, synchronous password hashing, the pre-auth bearer tier, eval/playground JSON Schema disagreement, serial orchestration dispatch, limited IDE optimization and shared-context coverage. Their actual user impact, incidence and risk need evidence; old severities are not automatic current release verdicts.
+4. **Reduce security friction by finishing the workflow first.** A protected action must explain its consequences, offer the applicable proof, preserve work on refusal and retry the exact authorized action. A stranded 403 is not a reason to turn MFA off. Expose existing scoped, expiring exceptions where the server already supports them; show inherited floors, effective mode, scope and expiry.
+5. **Offer deliberate tuning, not a universal security slider.** Strict defaults remain. Administrators may use appropriate existing per-project/rule controls with reason, impact preview, audit, maximum duration and automatic expiry. Identity, object authorization, credential confidentiality, integrity/signatures, replay protection and sensitive-change audit are mandatory boundaries. Detailed research-backed distinctions are below.
+6. **Make this an evidence and reasoning loop.** Codex records a falsifiable finding and recommendation; Claude checks the evidence and responds with a counterexample, agreement or narrower interpretation; the agreed builder links the fix; an independent retest closes it. An opinion or a green baseline test alone does not close a finding.
+
+## How Claude and Codex use this file
+
+The owner requested continuous feedback and reasoning, including page, section, function, UI, UX and usability review. Use stable finding IDs; never renumber an existing finding. Add a new dated iteration when the source head changes. Preserve disputed and refuted findings with their explanation rather than quietly deleting them.
+
+For each new finding record:
+
+| Field | Required content |
+| --- | --- |
+| Evidence | Exact source commit; page, section, function, role and state; file:line; reproduction and observed/expected behavior. Mark source inspection, mock-browser reproduction and real-gateway reproduction separately. |
+| Reason and impact | The user's task, what is confusing/broken/risky, consequence and why it deserves attention. State uncertainty and avoid inventing production incidence. |
+| Triage | Frequency and severity, each 1–10, with rationale. A confirmed security-checklist gap blocks irrespective of product score. A confirmed bug with F×S < 5 is an issue/deferred item, not a reason for a speculative code fix. |
+| Recommendation | Concrete change, relevant best practice, tradeoff, reuse of existing components/server policy, security tuning implications and proposed acceptance checks. |
+| Claude response | Date and reviewed head; agree/disagree/partly agree; evidence and reasoning. A disagreement needs a reproducible counterexample or source trace, not an unsupported dismissal. |
+| Disposition | Reported → under discussion → agreed / narrowed / refuted / deferred → fix proposed → independently retested → closed. These are review-record states, not a new product lifecycle helper. |
+| Closure | Fix PR/full SHA, acceptance evidence, retest head and remaining limits. A builder's claim is not independent confirmation. |
+
+Use the draft review PR for notifications and discussion, then fold the reasoned result into this file. The owner has authorized repo coordination for this loop. Do not post secrets, customer data or identifying records. This file does not create an unattended background agent; updates occur during active review sessions and in response to Claude's recorded feedback.
+
+## Research and comparison
+
+## Primary-source research for the continuing regulAIt review
+
+Research date: **2026-11-21 UTC**. This is guidance for evaluating the product, not evidence that the product passes these checks. Public documentation was fetched with an HTTP client; no vendor account, vendor UI or live integration was tested. No dependency was installed and no product change was implemented during this review.
+
+### 1. Source-backed review principles
+
+| ID | Principle and why it matters | Concrete review/acceptance question | Primary evidence |
+| --- | --- | --- | --- |
+| BP-01 | **Start with the user's task, current state and next permitted action.** A technically complete page can still fail if a user cannot tell what to do. | For each role, can the user identify where they are, whether a value is measured/current, what blocks progress and the next allowed action? Does a successful mutation visibly update the state? | [NN/g heuristics](https://www.nngroup.com/articles/ten-usability-heuristics/): visibility of status; match with the real world; recognition rather than recall. |
+| BP-02 | **Show advanced controls progressively, but keep essential consequences visible.** Reducing visual density is useful; hiding the policy that will block a workflow is harmful. | Are rarely needed settings collapsed with meaningful labels, while required input, inherited policy, warning impact and the primary task remain visible? Is the security explanation available before a refusal? | [GOV.UK Details](https://design-system.service.gov.uk/components/details/): do not hide information most users need. |
+| BP-03 | **Make errors actionable and preserve work.** Generic toasts force users to guess and repeat expensive input. | After submit, does an error summary explain what failed, link to the exact field, match the inline text, receive appropriate focus, retain valid input and permit safe retry? For API policy errors, is there a permitted recovery action or named administrator/request path? | [GOV.UK Error summary](https://design-system.service.gov.uk/components/error-summary/); [WCAG 3.3.3](https://www.w3.org/WAI/WCAG22/Understanding/error-suggestion.html). Suggestions must not jeopardize security. |
+| BP-04 | **Do not repeatedly ask for the same information in one process without a reason.** Re-entering project, purpose or configuration after navigation increases mistakes and abandonment. | Do drafts, back navigation and retries preserve authorized non-secret values? Is repeated entry essential, stale or security-required, rather than an implementation accident? Never preserve plaintext secrets merely to satisfy this principle. | [WCAG 3.3.7](https://www.w3.org/WAI/WCAG22/Understanding/redundant-entry.html): previously supplied information should be auto-populated or selectable, with defined security/essential/staleness exceptions. |
+| BP-05 | **Accessible authentication reduces friction without removing authentication.** Password-manager support and passkeys are better first remedies than weakening account security. | Can users paste passwords and OTPs, use a password manager, operate every control by keyboard and select an accessible alternative? Does a step-up return them to the action with their non-secret work intact? | [WCAG 3.3.8](https://www.w3.org/WAI/WCAG22/Understanding/accessible-authentication-minimum.html): support password managers and copy/paste; avoid an unsupported cognitive test. |
+| BP-06 | **Treat keyboard focus, touch targets and overlays as functional requirements.** Screenshots cannot establish that a modal, sticky footer or icon-only control is usable. | Does focus move predictably, stay visible, return on dialog close and avoid being entirely hidden by sticky UI? Are pointer targets at least 24×24 CSS px or covered by a valid spacing/other exception? Aim larger for frequent/high-impact actions. | [WCAG 2.4.11](https://www.w3.org/WAI/WCAG22/Understanding/focus-not-obscured-minimum.html), [WCAG 2.5.8](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html). Do not misstate the AA target-size criterion as an unconditional 44px rule. |
+| BP-07 | **Make task status look like status, and task actions look actionable.** Color alone, fake progress and button-shaped labels mislead people. | Are incomplete/blocked/reviewed/completed states explicit and distinguishable without color? Can the user identify ownership, urgency and what can be done now? Do read-only badges avoid hover/click affordances? | [GOV.UK Task list](https://design-system.service.gov.uk/components/task-list/): research found users mistook statuses for buttons; the redesigned linked row and sentence-case status address that confusion. |
+| BP-08 | **Apply reauthentication to sensitive events and transactions, not reflexively to every read.** Repeated ceremonies can drive users into workarounds; removing assurance from sensitive actions creates a different failure. | Is a fresh challenge justified by a specific security-sensitive change or risk event? Are prompts scoped to the intended action and facts? Can passkeys/SSO reduce ceremony without reusing approval for a different operation? | [OWASP Authentication](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html): risk-based/context-aware reauthentication and “Minimize User Friction”; sensitive actions still require reauthentication. |
+| BP-09 | **Expose the effective policy and the narrowest authorized exception.** Users should not have to understand the internal inheritance graph just to unblock a legitimate task. | Does the interface show which organization/project setting caused the outcome, who may change it, the exact scope of an exception, affected resources, expiry and impact preview? Can it offer a request/change path when the user lacks authority? | [Defender ASR deployment](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-deployment-test), [Sentinel automation](https://learn.microsoft.com/en-us/azure/sentinel/create-manage-use-automation-rules). This does **not** justify changing regulAIt's strict first-load defaults. |
+| BP-10 | **Authorization remains server-enforced on every request.** Friendly UI cannot substitute for tenant/project/resource checks. | Do list, count, export, detail, bulk, retry, embedded widget and mutation paths share the same visibility and authority rules? Does changing a client-side role or hidden field fail on the server? | [OWASP Authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html): least privilege, deny by default and validate permissions on every request. |
+| BP-11 | **Failed workflows need a recovery model, not only a red status.** A retry button can duplicate side effects unless the backend defines its semantics. | Can the user locate the failed step, inspect permitted evidence, know which side effects committed, distinguish retry/resume/restart, and safely recover or escalate? Does cancellation have an honest terminal outcome? | [n8n error handling](https://docs.n8n.io/build/flow-logic/handle-errors-gracefully.md): execution inspection/debugging and reusable error workflows; [NN/g](https://www.nngroup.com/articles/ten-usability-heuristics/) error recovery/user control. |
+| BP-12 | **Assess every page through its underlying function contract.** Counting buttons or endpoints is not deep coverage. | For each action trace input validation → identity/scope → transition/precondition → atomic side effect/audit → response/UI state → failure/retry/cancel. For each displayed metric trace its source, time window, denominator and unknown/partial state. | OWASP per-request authorization, NN/g status/error-prevention principles, [Camunda user-task lifecycle](https://docs.camunda.io/docs/apis-tools/frontend-development/task-applications/user-task-lifecycle/). This is a proposed audit method, not a claim to have completed all function traces. |
+
+### 2. Competitor and adjacent-product patterns
+
+These are documented patterns, not a claim that regulAIt lacks every feature, that a competitor implements it perfectly, or that vendor pages prove live behavior. Licensing/plan terms are separate from UX patterns; do not import code/assets from these products under this comparison.
+
+| Product / source | Verified documentation behavior | Useful comparison for regulAIt | Constraint / avoid copying blindly |
+| --- | --- | --- | --- |
+| **Camunda Tasklist** — [priorities](https://docs.camunda.io/docs/components/tasklist/userguide/defining-task-priorities/), [managing tasks](https://docs.camunda.io/docs/components/tasklist/userguide/managing-tasks/), [access control](https://docs.camunda.io/docs/components/tasklist/userguide/access-control/) | Task priorities are 0–100, default 50, displayed as labels and sortable. The guide distinguishes unassigned, assigned-to-me and completed tasks, with assignment followed by form completion. | Compare queue triage, ownership, priority visibility, state labels, task detail and post-completion navigation against the existing single approvals queue. Test both a reviewer and a requester. | Do not add an unnecessary numeric-priority scheme or duplicate task engine just to match Camunda. Preserve existing policy, step-up, quorum and signature requirements. Current served docs identify version 8.10; earlier versions may differ. |
+| **Microsoft Defender ASR** — [test deployment](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-deployment-test), [exclusions](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure) | Deployment guidance uses a small pilot group, audit observations, impact reporting and rule-specific exclusions; it explicitly recommends exclusions/Warn where suitable over turning a whole rule off. | Review whether an administrator can understand a false positive, preview impact, choose a narrow authorized scope and see what protection changes. Report mode and actual enforcement honestly. | Microsoft's audit-first rollout advice conflicts with regulAIt's strict-by-default rule if applied globally. Transfer the controlled-preview/exception pattern, not a warn-only default. An exclusion broadens risk and needs explanation, authorization, audit and bounded scope. |
+| **Microsoft Sentinel** — [automation rules](https://learn.microsoft.com/en-us/azure/sentinel/create-manage-use-automation-rules) | Rules support explicit conditions, ordered actions and an optional expiration date/time; incident history can be queried to see automation actions. | Compare temporary exceptions, readable conditions, precedence, expiration and decision history. A visible reason and expiry are easier to reason about than a silent global toggle. | The cited page proves optional rule expiration, not that all Sentinel exceptions expire by default or that every automation action has reversible effects. Do not claim those stronger properties. |
+| **n8n** — [handle errors gracefully](https://docs.n8n.io/build/flow-logic/handle-errors-gracefully.md) | Users can inspect failed executions, load execution data for debugging and configure a reusable error workflow in workflow settings. | Compare recovery discoverability, context linking from failure to execution, the difference between re-run and retry, and reusable administrative handling of failures. | Do not duplicate governed dispatch or expose raw customer payloads/secrets in a friendly debugger. Documentation is a UX reference; n8n is not proposed as an allowed-license runtime dependency. |
+| **Retool** — [permissions](https://docs.retool.com/permissions/) | Documentation distinguishes default groups from plan-dependent custom groups, object permissions and per-environment resource access. | Compare whether settings explain the effective permission, resource and environment scope, and why a person can view but cannot change something. | Plan-dependent capabilities must be acknowledged. No claim about observed Retool UI or tenant isolation is made; no Retool code/assets are being adopted. |
+
+### 3. Security tuning: useful options versus invariants
+
+The goal is to remove unnecessary ceremony and false-positive disruption while preserving actual trust boundaries. Recommendations below are candidates for policy/design review, **not changes already authorized or implemented**. Reuse existing server settings, scopes and state machines; do not introduce an independent bypass path.
+
+Every relaxation should display: **what changes, why, who is affected, who approved it, inherited floor, expiry/review date, remaining protection and rollback**. Persist changes with their audit in one transaction. Enforce expiry on the server; a countdown in the browser is not enforcement. When an inherited/legal/tenant policy disallows relaxation, explain it and offer an authorized request path rather than an editable control that cannot succeed.
+
+| Control area | Usability/tuning option worth evaluating | Boundary that remains enforced |
+| --- | --- | --- |
+| Repeated authentication | Passkeys/SSO, password-manager/paste support, accessible alternatives, and risk/action-based prompts; consider bounded recent-auth reuse only where the existing value-bound action semantics remain satisfied. | Required admin MFA, authentication, resource authorization and fresh assurance on sensitive security changes. Never make a token for one action authorize another. |
+| Low-risk reads and routine navigation | Avoid needless step-ups; retain an authenticated session within permitted idle/absolute limits. Preserve non-secret form state if a challenge interrupts a task. | Session validity/revocation, tenant/project boundaries and restricted reads. |
+| Detection false positives | Existing policy thresholds/modes or a narrowly scoped, admin-approved exception with explanation, evidence, impact preview and expiry, if the effective policy permits it. | No silent downgrade below organization/project floors; mandatory verification and hard safety bounds stay in force. Default remains strict. |
+| Approval friction | Better assignment/delegation, bulk triage and trusted low-risk policy exemptions where explicitly permitted; make the scope/decision clear before save. | Separation of duties, eligible approver/quorum/signature requirements and server transition guards for actions that require them. |
+| Rate limits and budgets | Per-user/project/provider limits with impact preview and authorized bounded temporary increases; explain which limit was reached and when it resets. | No uncontrolled amplification, unbounded input/body/response sizes, or bypass of another user's budget/entitlement. |
+| Timeouts and session expiry | Administratively configurable bounded durations, advance warning where appropriate, drafts and safe retry/resume. | Server deadlines, revocation and maximum limits; saving drafts must not retain plaintext credentials or protected data outside authorized storage. |
+| Emergency access | If required, explicit short-lived narrowly scoped break-glass grants, named owner/reason, independent review and post-use audit; implement through the existing policy engine. | No universal “security off” switch, silent grant escalation, identity substitution or audit suppression. |
+| Network and imports | Clear allow-list management and quarantined previews, using existing approved policy controls. | TLS/credential protection on remote connections; SSRF validation, signature/replay checks, import integrity, algorithm/key/version validation and bounded parsing. A development-only relaxation must remain explicitly scoped, never an ambient customer default. |
+| Audit and evidence | Role-appropriate explanations and redacted summaries rather than raw internal logs; flexible authorized retention above mandatory floors. | Audit of sensitive changes, relaxations and imports cannot be skipped to make an operation faster. Secret values must not enter logs or explanation text. |
+
+**Avoid a security slider.** “Low/medium/high security” hides several independent consequences. Prefer task-specific controls with a summary of effective settings and inherited locks. If presets are eventually introduced, show their exact diff, applicability, expiration and authorization requirements before applying them; a preset must not bypass individual control floors.
+
+### 4. How to use this in each deep page/function review
+
+For every page and its important sections, record: intended users/task; data source and authorization; primary/secondary actions; empty/loading/error/denied/partial/stale/success states; keyboard/focus/screen-reader/mobile behavior; preservation of work and recovery; task completion evidence; policy-friction hotspots and any justified tuning. Inspect both a permitted and denied role. Trace every mutation to the backend function/transition and relevant side effects rather than inferring behavior from the button label.
+
+Measure actual task outcomes when possible: task completion, time/steps, wrong-action and recovery rate, repeated prompts, abandoned steps, permission-refusal clarity and ability to locate the next action. Do not invent numerical targets or claim user testing from static inspection. A mock API proves a rendered state under that fixture; a source trace proves the inspected path; neither alone proves the live end-to-end journey.
+
+A finding card should separate **observation** from **recommendation** and include: ID, reviewed commit/page/role/state, reproduction and evidence, user/business impact, cause/function references, frequency/severity with rationale, proposed change and tradeoff, default/tuning implications, acceptance check, confidence, Claude response, agreed disposition, fixing commit and independent retest evidence. Mark “not yet inspected” explicitly; an inventory row is not completed coverage.
+
+### 5. Retrieval record and limitations
+
+All final URLs linked above returned **HTTP 200** on 2026-11-21. HTML/Markdown and retrieval metadata are preserved locally under `/tmp/review-research/` (`sources.json`, `sources-extra.json`). Initial guessed Camunda lifecycle/priority URLs and a Sentinel exception URL returned 404; they were not used as evidence. Correct Camunda links were located in the site's public sitemap; the Sentinel claim is limited to its verified automation-rule page. The n8n URL redirected to its current Markdown document, and the Defender exclusions URL redirected to its current canonical URL; final URLs are cited above.
+
+These sources provide design/security criteria and documented comparisons. They do **not** certify regulatory compliance, prove vendor behavior, establish all current regulAIt defects, or justify relaxing mandatory policy. No new library is recommended, so no unvalidated dependency comparison is substituted for the repository's required open-source due diligence.
+
+## Deep audit — iteration 1, 2026-11-21
+
+This iteration adds **26 feedback cards**, six targeted mock-browser reproductions and a known harness observation. Cards include functional defects, usability gaps and explicit design proposals; they are not 26 independently proven security vulnerabilities. Frequency scores estimate encounter frequency within the affected workflow, not measured production incidence. Overlapping cards identify shared causes rather than independent bug totals.
+
+### Priority recommendations for Claude to challenge
+
+1. **Unstrand protected scorer actions (CXR-ADM-001).** Connect the existing proof-and-retry UI to the server's protected action. Keep step-up and all server checks; repair the journey instead of weakening them.
+2. **Preserve work and honor input methods (UIW-01/02, CXR-ADM-008).** Failed writes must not erase a prompt or configuration draft. Enter during composition must not submit early. Preserve authorized non-secret work without persisting credentials or blindly replaying a possibly committed mutation.
+3. **Make keyboard navigation and overlays functional (UIS-01/03).** A closed mobile rail must not take invisible focus. A global shortcut must not create an unusable overlay behind a native modal. Reuse existing focus/overlay primitives.
+4. **Make security status and previews honest (CXR-ADM-002–007).** Explain where text goes, expose the existing bounded troubleshooting window, distinguish expired overrides, and label stale or partial sample results. Unknown inventory is not zero inventory.
+5. **Improve error recovery, policy explanations and list continuity (UIW-03–08, UIS-05/06/08).** Preserve context through outages, distinguish missing access from retryable failures and restore an investigator's view after drill-down. Avoid adding more confirmation prompts to routine work.
+
+### Browser evidence and its limits
+
+- Existing enterprise harness: **445 expected passes, 5 public-page state skips, 0 unexpected failures** over 150 routes. There are 300 light/dark axe records, 150 responsive records, 145 state records and 145 density records. These are automatic error/loading-state checks, not end-to-end task completion.
+- There were no serious/critical axe findings in those rendered states and no viewport overflow findings at the harness's768–1920px widths. Those widths omit phones; they did not catch the375px off-screen keyboard failure.
+- One known baseline observation remains: `/builder/playground` lacks an error alert under the harness's generic503 responses. The baseline permits it. A green ratchet therefore does not establish a completely clean UI.
+- Six targeted probes use existing synthetic fixtures. Four were first reproduced, then the guardrail-sample and synthetic-IME probes were rerun after the harness's preview server had stopped. Initial connection-refused setup failures were not counted as product defects. The final two probes completed on a verified local preview.
+- Raw sanitized results are in [browser coverage](evidence/2026-11-21/browser-coverage.json) and [targeted observations](evidence/2026-11-21/runtime-probes.json). Reproduction steps and proposed regression locations are in each card. Screenshots were inspected locally and are not a claim of live vendor, customer-data or screen-reader testing.
+
+### CXR-RUN-001 — Existing baseline permits a missing playground error state
+
+**Observation:** under the generic503 fixture, `/builder/playground` recorded `error-not-shown:1`; the test still passed because this count is already in the committed baseline. **Provisional F6×S3=18** for a user facing an unavailable dependency. This is a rendered-state observation, not proof that every playground failure lacks recovery.
+
+**Reason and recommendation:** a user must distinguish “no eligible agents” from “the agent list could not be read.” Claude should reproduce with the page's real API contract, inspect the intended degraded state, and either add actionable inline error/retry guidance or document why another accessible recovery path satisfies it. Do not raise or silently clear the baseline to dismiss the observation. Closure requires populated, empty, denied and unavailable fixtures.
+
+## Deep admin usability assessment — first source batch
+
+Assessed source: `/workspace/codexreviews`, main `9797d6f42798689d896103b9e9ce04278e01a4ad`. Read-only. This contribution did not run a browser, a gateway, or tests. Findings marked source-confirmed follow executable handlers and their server contracts; runtime recipes below are requested validation, not claimed results. Recommendations marked design are product proposals, not vulnerabilities. F and S use the owner's 1–10 scales; frequency is conditional on the described journey, not a measured production incidence.
+
+### Key recommendations
+
+1. Complete existing protected workflows in the UI instead of asking operators to weaken step-up settings when the UI cannot request a proof.
+2. Expose the **existing** server-expiring guardrail window in the override form. Preserve compliance floors, value-bound step-up and audit; do not build a second exception engine.
+3. Make safety status truthful: show expiry, bind test results to the tested input, and distinguish unread inventory from zero inventory.
+4. Add an explicit review of bulk-hardening changes. A user should see affected controls and likely refusal effects before the immediately effective operation.
+
+### Findings
+
+#### CXR-ADM-001 — Protected scorer edits and enablement cannot complete through the ordinary page
+
+**Root verification:** The browser sent one protected enable request, received step_up_required, opened zero verification dialogs and made zero step-up options/verify calls. The page displayed the refusal but offered no way to finish it. This is a mock-browser UI reproduction, not a fresh backend exploit. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+- **Type/status:** functional integration defect; source-confirmed. **F7 × S6 = 42**, High.
+- **Evidence:** `apps/web/src/views/admin/integrations/ExternalScorersPage.tsx:301` uses ordinary `api.post` for enable/disable. `apps/web/src/views/admin/editForms.tsx:223` uses ordinary `api.patch` for scorer edits. The gateway requires value-bound step-up for changes to an instrument used by an enabled trained detector (`apps/gateway/src/external-scorers.ts:464`) and guarded enablement (`:635`). The shared client announces a refusal, but its `StepUpRequest` has no retry callback (`apps/web/src/api/client.ts:27`). The global listener explicitly returns when that callback is absent (`apps/web/src/stepup/stepUp.ts:149`). There is no implicit prompt-and-retry to rescue these calls.
+- **User impact/reason:** an entitled admin with a configured second factor clicks a supported action and gets a refusal with no usable way to complete it on this page. This looks like excessive security, but the actual defect is an unwired security workflow. It encourages global policy weakening or abandoning the product.
+- **Reproduce:** use a signed-in admin session with TOTP/passkey, strict step-up and a scorer referenced by an enabled trained detector. Change its endpoint/credential/kinds, or re-enable the referenced scorer. The request receives `step_up_required`; no identity dialog is opened. A vendor-adapter enablement that requires the same guard is another case. Test as a session, not an API key, because API keys correctly cannot step up.
+- **Recommendation:** use the existing `withStepUp` and header-aware request helpers at both call sites, keeping the draft through cancel/refusal and refreshing the scorer after success. Add a route-level browser regression for proof → retry → successful state change.
+- **Preserve:** admin permission, exact action-bound proof, scorer/binding locks, fresh server facts, CSRF, audit and egress restrictions. Do not fix by disabling step-up.
+- **Claude question:** can the shared request abstraction make protected-action coverage explicit so future server guards cannot strand older pages?
+
+#### CXR-ADM-002 — External-scorer explanation incorrectly says inline guardrails remain local-only
+
+- **Type/status:** incorrect product/data-boundary disclosure; source-confirmed. **F8 × S5 = 40**, Medium.
+- **Evidence:** the visible help in `ExternalScorersPage.tsx:97`–`:103` says the inline guardrail path stays local-detector only and deliberately does not make the latency/data-egress decision. The same page offers guardrail scorer kinds (`:44`–`:49`). `TrainedDetectorsPanel.tsx:194` directs users to register a scorer here and bind it to a trained detector. The gateway's trained detector execution uses that scoring service beside local detection.
+- **User impact/reason:** the admin can believe content is checked locally even after configuring a service that receives scanned content. A service may be self-hosted; that does not make the "local-detector only" statement true. Informed privacy and latency choices depend on the actual destination.
+- **Reproduce:** read the scorer help, register a scorer claiming a guardrail kind, then open Guardrails → Trained detectors and choose it. Compare the claimed boundary with the configured call path.
+- **Recommendation:** explain eval-only and inline-trained uses separately, show the chosen endpoint/hosting boundary and affected phases, and disclose which data is sent before enabling. Link directly to the relevant guardrail setup. Counts-only audit storage must not be described as "text never leaves this gateway."
+- **Preserve:** no automatic third-party opt-in, air-gap checks, per-host egress and audited activation.
+
+#### CXR-ADM-003 — The safe temporary guardrail-relaxation option exists on the server but is absent from the form
+
+- **Type/status:** capability/discoverability gap; source-confirmed UI omission. **F6 × S5 = 30**, Medium.
+- **Evidence:** `GuardrailsPage.tsx:485` sends only `{modes: ovModes}`. The server already supports `assuranceWindow: {ttlMinutes}` (`apps/gateway/src/guardrails.ts:555`–`:562`), refuses replacement of an ordinary active admin override (`:794`), and binds window opening/extension into step-up facts (`:804`). The window expires server-side rather than relying on an open browser.
+- **User impact/reason:** an operator handling a false positive can only discover a lasting override through this form, while the safer self-expiring alternative is hidden in API semantics. This is exactly where security friction can be reduced without silently weakening the deployment forever.
+- **Reproduce:** open Guardrails → Overrides and attempt to relax one detector for one agent for a short troubleshooting interval. There is no duration/window choice, although the same endpoint accepts it.
+- **Recommendation:** expose "temporary troubleshooting window" with bounded duration, exact target, old → effective modes, reason and expiry preview. Default any relaxation journey to the shortest useful scoped window; leave permanent changes as an explicit separately explained choice. Reuse the existing server mechanism; add any missing reason support through the same audit path rather than parallel storage.
+- **Preserve:** compliance floors, admin authorization, value-bound proof, no automatic extension, server expiry and an always-visible active-window status.
+- **Claude question:** what duration and renewal experience is appropriate for real operations, and should recurring false positives lead to a reviewed rule exception rather than repeated windows?
+
+#### CXR-ADM-004 — Expired overrides still look effective until the cleanup sweep removes them
+
+- **Type/status:** policy-status display defect; source-confirmed. **F5 × S5 = 25**, Medium.
+- **Evidence:** the backend deliberately lists an expired row until the sweep and returns `expired` (`guardrails.ts:641`–`:647`), while runtime policy ignores expired rows. The frontend `ConfigRow` type has no expiry fields (`GuardrailsPage.tsx:65`), counts every returned row (`:210`), and renders every mode as an ordinary status badge in the override table (`:543`–`:553`).
+- **User impact/reason:** users see a relaxing override after it has ceased to apply, misdiagnose a renewed block, or assume a stricter override is still protecting traffic. The effective-policy card can disagree with the list without explaining why.
+- **Reproduce:** create a short window through the existing API, wait past its expiry without running the removal sweep, and open the Overrides tab. The API says `expired: true`, but the table has no expired indication and the count includes it.
+- **Recommendation:** include expiry in the typed view, distinguish active/expired, show the server timestamp, and label counts as active versus awaiting cleanup. Do not infer validity solely from row presence. Effective policy remains the authority.
+- **Preserve:** server enforcement independent of cleanup and browser timers.
+
+#### CXR-ADM-005 — Sample results can describe old text and a failed rerun only appears in a toast
+
+**Root verification:** The visible clean badge remained after changing the input and after a second sample request returned503. Two synthetic requests were observed. The screenshot was inspected; the result was not bound to the currently edited input. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+- **Type/status:** stale-result/error-recovery defect; source-confirmed. **F8 × S5 = 40**, Medium.
+- **Evidence:** editing the text only updates `sample` (`GuardrailsPage.tsx:606`) while `sampleOut` remains visible (`:625`). A failed request does not clear it (`:614`–`:620`); the Sample tab has no inline `act.error`. The shared action handler catches failures and emits a toast (`adminKit.tsx:379`–`:384`). Thus a previous green "No detector fired" can persist beside changed text or an unsuccessful new check.
+- **User impact/reason:** tuning a security rule depends on knowing exactly which text was tested. A stale green result creates false confidence; a transient toast is insufficient for operators comparing results or assistive-technology users returning to the card.
+- **Reproduce:** detect benign text and receive clean=true. Replace the text with a different payload without detecting again: green remains. Then return 503 for the next sample request: green still remains after the toast closes.
+- **Recommendation:** bind each result to the submitted input and phase; mark it out of date on edits, show pending and failed states inline, and cancel or ignore obsolete requests. Preserve the last successful result only with a clear label identifying what it belongs to.
+- **Preserve:** no unconsented model/scorer dispatch, no sample-content audit leakage, and no use of this local preview as an enforcement override.
+
+#### CXR-ADM-006 — "Try a sample" overstates coverage and cannot select the output phase
+
+- **Type/status:** misleading preview scope; source-confirmed. **F7 × S4 = 28**, Medium.
+- **Evidence:** help says "Runs every detector" and invites a prompt or completion (`GuardrailsPage.tsx:596`,`:607`). It sends only text (`:618`), so `guardrailSampleSchema` defaults to `phase: input` (`packages/shared/src/index.ts:768`). The handler calls only local `evaluateGuardrails` (`apps/gateway/src/guardrails.ts:1021`), not the trained-detector service, effective-policy resolver or published-classifier loader. The local evaluator filters detectors by phase (`packages/shared/src/guardrails.ts:719`).
+- **User impact/reason:** users may interpret a local rule preview as an end-to-end test of trained services, live project policy or an output completion. It does not establish those facts. This makes false-positive tuning and data-egress decisions unreliable.
+- **Reproduce:** enable a trained-only detector whose service would flag a fixture that local heuristics do not. The Sample tab can still return clean. Inspect the submitted body for a completion: phase is absent and input is used.
+- **Recommendation:** label the existing action "Test local rules", show included and excluded layers, add an explicit phase choice, and display effective policy separately. A future governed full-pipeline preview must be a distinct opt-in with explicit destination/cost disclosure, not a silent extension of the local-only sample.
+- **Preserve:** no outbound data from the existing local preview and no assertion that a clean preview guarantees safety.
+
+#### CXR-ADM-007 — Credential inventory reports zero before its inventory has been read
+
+- **Type/status:** unknown-to-zero presentation defect; source-confirmed. **F10 × S3 = 30**, Medium.
+- **Evidence:** `CredentialsPage.tsx:238` renders `Inventory · ${inv?.counts.total ?? 0} credentials, ${inv?.counts.flagged ?? 0} flagged`. `inv` starts null and is populated only by the nested DataList's onRows callback (`:217`,`:276`). The outer heading therefore shows zero during loading and can retain zero when the request fails, even though the child list renders an error.
+- **User impact/reason:** an operator checking for exposed or stale credentials can see a reassuring empty count while no answer was obtained. This contradicts the existing design rule that an unread or failed measurement is not zero.
+- **Reproduce:** hold or fail GET `/v1/admin/credentials` on first visit to `/admin/credentials`; inspect the heading independently of the DataList loading/error region.
+- **Recommendation:** render "Loading inventory"/unknown counts until a successful read, and keep a visible stale timestamp when old data is deliberately retained after failure. Populate inventory-wide metadata from a clearly defined response rather than treating null as a measured empty set.
+- **Preserve:** permission-scoped totals and counts-only inventory; no credential plaintext added for convenience.
+
+#### CXR-ADM-008 — An unsuccessful monitoring-threshold save clears the user's draft
+
+- **Type/status:** form recovery defect; source-confirmed. **F6 × S3 = 18**, Medium.
+- **Evidence:** `CredentialsPage.tsx:334` unconditionally resets `days` in `.then(() => setDays(""))`. `useAction.run` resolves `false` on failure rather than rejecting (`adminKit.tsx:379`–`:384`). The input then falls back to the stored old threshold (`CredentialsPage.tsx:314`), losing the typed value after a server error or cancelled step-up.
+- **User impact/reason:** retrying an ordinary tuning change requires re-entering it, and the form appears to have reverted while only a toast explains why. Repeated friction is a reason users stop maintaining thresholds.
+- **Reproduce:** change the unused-days threshold, fail the PUT, and inspect the input after the promise settles. It shows the old saved value rather than the attempted one.
+- **Recommendation:** reset only when `ok === true`; retain the draft and inline refusal on failure/cancel. Follow the successful pattern already used in ExternalScorersPage and SsoPage registration handlers.
+- **Preserve:** server validation, step-up where required and the audit record of successful writes.
+
+#### CXR-ADM-009 — Bulk hardening has an immediate-effect warning but no review of the actual changes
+
+- **Type/status:** usability/safe-operation recommendation, not a hidden behavior or proven authorization flaw. **F4 × S5 = 20**, Medium.
+- **Evidence:** `EnforcementPosturePage.tsx:195` posts the enforcement preset directly; its button at286 does not open a review step. The page **does disclose** "Takes effect immediately · no dry run" at284 and lists generic refusal effects. That warning should be acknowledged rather than claiming the action is undisclosed.
+- **User impact/reason:** operators must mentally compare a large matrix and predict which currently working journeys will start failing. A one-click safety improvement can create an availability incident and then cause indiscriminate relaxation to recover.
+- **Recommendation:** add a review delta listing controls actually changing, affected scopes, unresolved prerequisites, and a confirmation naming immediate impact. Start with a source-derived dry review; do not claim a live-traffic simulation unless it genuinely exists. Offer staged application or a scheduled maintenance window if justified by user research, keeping a clear restore procedure.
+- **Preserve:** strict first-load defaults, per-control authorization/audit, atomic update semantics and the choice not to enable optimization as a side effect.
+
+### Patterns worth preserving
+
+- `OrgSettingsCard` distinguishes unknown from a strict default, writes only the changed key, explains old/new and relaxation effects, and locks after a write until reloaded.
+- `PatchFormModal.submit` retains the draft and inline error on rejected writes; use it consistently.
+- `SsoPage` provider registration and `GroupMappingsPage` correctly use `withStepUp`; SCIM's rendered status links to group mappings and no longer says that mapping is unbuilt.
+- `ContentTrustPage` separates source tiers, effective write floor and counts-only evidence. A convenient tuning UI must not silently bypass this policy.
+
+### Coverage ledger
+
+**Routes/sections inspected in this batch:** `/admin/external-scorers` (registration, list actions, edit callback, removal confirmation, disclosure); `/admin/guardrails` (default policy, effective-policy matrix, overrides, sample, trained panel linkage, decision-list structure); `/admin/credentials` (inventory metadata, filters, monitoring threshold/alerts); `/admin/enforcement-posture` (matrix, observed environment controls, harden action); `/admin/organization` (status, generic settings cards, network lockout handling); `/admin/sso` (provider registration, enable/disable callback, sign-in status); `/admin/provisioning` (token issue/rotate/revoke/status, as source checks only); `/admin/group-mappings` (creation and mapping explanation). Route names checked against App.tsx. These are not claims that every state of every route was exercised.
+
+**Functions traced completely or at the cited control:** `OrgSettingsCard`, `SettingRow`, `SettingControl`, `ExternalScorersPage`, `EditExternalScorerButton`, `PatchFormModal.submit`, `GuardrailsPage` sample/override/effective handlers, `detectionContentUnresolved`, `TrainedDetectorsPanel.open`/eligible selection/edit form, `CredentialsPage`, `credentialColumns`, `AlertingCard`, `EnforcementPosturePage.harden`, `renderValue`, `controlRow`, `OrganizationPage`, `relaxedSettings`, `OrgStatus`, `useSection`, `SectionShell`, `Loaded.saveNet`, `ScimPage.issue`, `StatusCard`, `SignInStatus`, `OidcCard` registration/toggle, SAML registration/toggle, `GroupMappingsPage` creation, `useAction.run`, `installGlobalStepUp`, `withStepUp`, shared `announceStepUp` contract; corresponding scorer, override, sample and SCIM server route guards.
+
+**Not fully audited:** every Organization Loaded subform and every identity/integration/governance page; roles/users detail actions beyond sampled guards; actual data population, all role permutations, keyboard/focus, accessible names, responsive layouts, browser history and drafts across navigation; live third-party services and full scorer inference; latency/contrast. Existing Playwright specs and kit helpers were read as references but were not executed. Root's runtime audit should attach its own results against these recipes before marking findings runtime-confirmed.
+
+### Claude response contract
+
+For each finding: accept / partly accept / reject, with the current SHA and source/runtime counter-evidence. If accepted, record the proposed change, guardrails retained, builder/PR, exact regression and later retest. A rejection needs an explanation of why the described user journey does work; pointing only to a backend route is insufficient for a UI integration finding. Discovery of a safe temporary backend mechanism should lead to reusing it, not another exception engine.
+
+## Deep workspace/end-user review — 2026-11-21
+
+Target: `/workspace/codexreviews`, main `9797d6f42798689d896103b9e9ce04278e01a4ad`. Read-only source review; **no browser or live gateway test was executed by this reviewer**. Findings below are source-confirmed behavior or explicitly labelled recommendations; their browser reproduction recipes still require execution. Root owns the living review document and any UI evidence.
+
+### Key recommendations
+
+Keep strict governance, project attribution, evidence binding and approval eligibility. Remove avoidable recovery friction: preserve failed drafts, distinguish temporary outages from deleted records, show the real reason a decision is unavailable, make active policy understandable, and prevent accidental duplicate actions. Security relaxation is not the remedy for any of UIW-01–08.
+
+### Findings
+
+#### UIW-01 — Failed builder messages disappear from the composer
+
+**Root verification:** A budget refusal in the existing synthetic builder fixture displayed an error and left the composer empty. The typed prompt was not editable for retry. This does not claim server-side history was deleted. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+**Evidence:** `apps/web/src/views/builder/BuilderUi.tsx:647-651` calls a void `onSend` then clears the text synchronously. `BuilderChatPage.tsx:63-72` records an error but clears `pending` on settlement; it neither restores the message nor provides a retry-with-original-content action. `BuilderAgentEditorPage.tsx:38-65` uses the same mutation shape and `:201-206` the same Composer.
+
+**Impact/reason:** A user can spend minutes writing a prompt or setup instruction, receive a temporary network/503 refusal, and lose their editable input. A failed attempt should preserve the user's work; requiring retyping makes policy/network failures feel punitive.
+
+**Score:** F6 × S4 =24. **Confidence:** high, source-confirmed; root mock-browser reproduction recorded below. Applies to builder chat and agent-editor test threads; do not assume all chat paths share this component.
+
+**Reproduction:** Open `/builder`, select a granted agent, type a distinctive multi-paragraph message, make the chat POST return503 before creating a thread, send, wait for the error; the composer is blank and the original prompt has no retry affordance. Repeat within an editor test thread.
+
+**Recommendation:** Keep the draft until send acknowledgement, or retain a failed-message draft with Retry/Edit/Copy. Avoid blindly replaying a mutation that may already have succeeded: use the returned thread/turn identity or existing idempotency contract. Clear only the acknowledged version, so text typed while a send is pending is not overwritten.
+
+**Acceptance:** A rejected or disconnected send leaves the exact original message editable; a successful send clears only the sent draft; retry does not create a second successful turn. All existing model/tool policy checks remain server-enforced.
+
+#### UIW-02 — Enter-to-send ignores IME composition
+
+**Root verification:** A synthetic KeyboardEvent with isComposing=true and Enter produced one chat POST and cleared the input. Native operating-system IME behavior still needs a separate check. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+**Evidence:** `BuilderUi.tsx:665-669` sends on Enter without checking `e.nativeEvent.isComposing` or the browser's composition state.
+
+**Impact/reason:** For users entering Japanese, Chinese or Korean, Enter is used to commit a candidate word. It can send an unfinished message instead. This is a functional international-input problem, not a stylistic preference.
+
+**Score:** F7 × S3 =21 among affected IME users. **Confidence:** high code-path concern; browser/OS behavior must be verified with real composition as well as a synthetic regression.
+
+**Reproduction:** Start composing a candidate in the builder composer and press Enter to accept the candidate. Confirm whether a chat request fires before composition ends. A browser regression should dispatch Enter with `isComposing=true` and assert zero sends; normal Enter after composition ends should send once.
+
+**Recommendation:** Respect composition before the Enter shortcut, keep Shift+Enter for a newline, and document the shortcut. Do not disable paste or composition as a workaround.
+
+#### UIW-03 — Temporary chat-history errors are treated as deleted conversations
+
+**Evidence:** `apps/web/src/views/chat/ChatPage.tsx:242-261`, function `restoreHistory`, catches every exception and clears `convo`, exchanges and loaded identity, returning `gone`. The newest-thread selection effect at `:231-235` can subsequently select a different thread. No error-type/status distinction exists in that catch.
+
+**Impact/reason:** A500 or brief disconnection can make a conversation appear gone, erase the currently displayed transcript and redirect attention to another conversation. This undermines trust in stored work and makes outages harder to understand.
+
+**Score:** F5 × S4 =20. **Confidence:** high, source-confirmed and mock-browser reproduced in iteration3. This is not a claim that server history is deleted.
+
+**Reproduction:** Load conversation A, arrange a subsequent restoration of A to return500, retain another conversation B in the rail, and inspect active selection/transcript. Compare with genuine404/403 behavior.
+
+**Recommendation:** Clear selection only for an authorization/not-found result that policy intentionally treats as absent. Keep the current selection and cached display on transient failures; show a retryable error. On session/account changes, retain existing cache-clearing protections so preservation cannot leak another user's transcript.
+
+#### UIW-04 — Shared-context promotion turns API failures into “Nothing promotable yet”
+
+**Evidence:** `apps/web/src/views/projects/ProjectContextPage.tsx:110-112` converts every workflow-list error into `{instances:[]}`; `:117-135` silently swallows all instance-detail failures. The card at `:389-394` has loading and empty branches, but no error branch or degraded-result notice.
+
+**Impact/reason:** An offline or failing workflow service is presented as absence of eligible artifacts. Users repeat workflow work or ask an administrator to relax access when the real issue is a failed read. This is an accuracy/recovery failure, not evidence that the promotion permission should be weakened.
+
+**Score:** F5 × S3 =15. **Confidence:** high, source-confirmed.
+
+**Reproduction:** Open a project's Context page; fail `/v1/workflows/instances` with503. The card says Nothing promotable yet instead of Couldn't load artifacts. Then allow the list but fail an eligible instance detail, and check for a partial-results notice.
+
+**Recommendation:** Preserve authorization-aware omission for truly inaccessible records, but surface network/server failures with Retry. Report partial results when some detail reads fail. Show the existing eight-workflow source limit or provide an explicit view-more workflow path so a bounded subset is not mistaken for complete absence.
+
+#### UIW-05 — Shared-context editor can discard an unsaved draft or close during a save
+
+**Evidence:** `ProjectContextPage.tsx:768-800` passes `props.onClose` directly to Modal and both Cancel controls, including while `busy`. `apps/web/src/ui/kit.tsx:1321-1337` invokes `onClose` for Escape and backdrop clicks. No dirty-draft guard exists in this editor. Closing unmounts the component holding draft/base/conflict state.
+
+**Impact/reason:** Escape or an outside click can discard a carefully edited shared revision without an explicit discard choice. Closing during a slow save can also leave the user uncertain whether Cancel cancelled anything; the request continues and may commit.
+
+**Score:** F5 × S4 =20. **Confidence:** high source behavior; browser demonstration pending. Do not generalize to every modal without checking its owner.
+
+**Reproduction:** Open Edit shared context, change the text, press Escape or click outside, reopen: the draft is gone. Delay the context POST, click Save then Cancel: observe whether the POST completes after the editor disappears.
+
+**Recommendation:** Track dirty vs loaded content; on dismissal offer Keep editing/Discard. While saving, show Saving and either prevent dismissal or make clear that closing does not cancel an accepted save. Preserve existing revision/conflict semantics; never “fix” friction by overwriting the accepted head.
+
+#### UIW-06 — Inbox Deny looks available when the same required reason blocks it
+
+**Evidence:** `apps/web/src/views/inbox/InboxPage.tsx:180-196` requires a reason for admin overrides/self-review before either decision is submitted. `:228-240` disables Approve for `missingReason` but leaves Deny enabled and says only “Approve unlocks once a reason is entered.”
+
+**Impact/reason:** A person sees an enabled Deny action, clicks it and receives a predictable local error. The page already knows the unmet precondition. Inconsistent availability is needless security friction; the reason requirement itself is valid.
+
+**Score:** F6 × S2 =12 for the affected override/self-review rows. **Confidence:** high, source-confirmed.
+
+**Reproduction:** As an admin, open a non-tool, non-intake approval not assigned or delegated to that admin; leave the required reason blank; compare Approve and Deny, then click Deny. Repeat a self-review row.
+
+**Recommendation:** Make both relevant decision controls reflect the same required precondition, with a persistent explanation naming the exact requirement. Keep normal eligible denials available where no reason is required; do not introduce a universal reason requirement.
+
+#### UIW-07 — Workflow planning copy describes a bypass that the backend now blocks
+
+**Evidence:** `apps/web/src/views/workflows/WorkflowDetailPage.tsx:188-194` states “A call that names no workflow is not constrained by this stage.” Current enforcement is project-wide: `apps/gateway/src/plan-only.ts:308-334`, agent invoke `agents-connectors.ts:4128-4131`, compat `compat-core.ts:636-643`, MCP `mcp-proxy.ts:1298`.
+
+**Impact/reason:** Users are told to understand protection in terms of a supplied instanceId although enforcement can refuse an unattributed-instance mutating call because the project has a planning workflow. A correct refusal then appears contradictory. This is stale explanatory UI, not a recommendation to recreate the historical bypass.
+
+**Score:** F7 × S3 =21 among users running project planning flows. **Confidence:** high, UI/backend source-confirmed.
+
+**Reproduction:** Open a project workflow at a plan-only stage; read the explanation; invoke a mutating mode in the same project without instanceId. The displayed “not constrained” expectation conflicts with the project guard.
+
+**Recommendation:** Explain the active project-wide restriction, plan-safe modes and the authorized action that ends the relevant planning stage. Explain documented engine-work exceptions only where relevant. Link to the blocking workflow/project using authorized data. Keep server enforcement.
+
+#### UIW-08 — Workflow actions have no visible in-flight state or click suppression
+
+**Evidence:** `WorkflowDetailPage.tsx:89-98` helper `act` awaits a mutation but records no pending state. Finish planning `:197-209`, submit artifact `:229-242`, and run stage `:265-274` do not disable themselves while their mutation runs. Reason-only disables on other actions do not address pending state.
+
+**Impact/reason:** On a slow network, the action appears idle and can be clicked repeatedly. The user cannot tell whether work was accepted; redundant requests and repeated errors/toasts follow. This finding does not assert that backend state guards permit duplicate deployments or charges.
+
+**Score:** F6 × S3 =18. **Confidence:** high for missing UI pending state; side-effect deduplication must be assessed separately.
+
+**Reproduction:** Delay an advance/artifact response by two seconds, click its button twice and count requests. Confirm the button offers no Working/Submitting/Finishing indication.
+
+**Recommendation:** Reuse a per-action pending mutation state, disable only conflicting actions, retain entered artifact/reason content on failure and provide a retryable result. Keep server transition/idempotency checks; UI suppression alone is not authorization or exactly-once execution.
+
+### Security-friction options that fit these journeys
+
+- Use authorized project selection and persistent “why blocked / who can resolve / next action” context instead of telling users to turn attribution off. An agent's essential billing project should not be discoverable only under Advanced when missing; an authorized preselection for a sole available project is a possible convenience, subject to explicit visible confirmation.
+- Approval signatures, per-object permission checks and evidence binding stay mandatory for protected decisions. Reduce repeated explanation, input loss and ambiguous pending states first. A short-lived, action/value-bound step-up proof may be reused only according to the existing server contract; never treat a UI toggle as an override.
+- Distinguish display preferences and notification density from policy relaxations. Only the latter need administrator authority, a recorded reason, scope, expiry where supported and a clear effective-policy preview. Do not add an unbounded global “less security” switch.
+- Preserve password-manager autocomplete and OTP paste already present in Login/forced-change forms. No password-manager restriction was found in the inspected forms.
+
+### Coverage actually inspected
+
+This is a deep selected-flow source pass, not complete coverage of every workspace function.
+
+| File | Functions/sections inspected | Coverage limit |
+| --- | --- | --- |
+| `views/auth/LoginPage.tsx` | normalizeOptions, ProviderLink, LoginPage state/options, finish, submitPassword, submitTotp; password/OTP field attributes and account-link help | Login handlers/field semantics only; no external IdP/browser or complete account-link execution |
+| `views/auth/ForcedPasswordChange.tsx` | password inputs, autocomplete and submit/sign-out controls | Form rendering selected; server password policy not audited here |
+| `views/builder/BuilderChatPage.tsx` | complete component: agent selection, useMutation lifecycle, current-thread/error/loading views, new composer, recent threads | No browser fixtures executed |
+| `views/builder/BuilderAgentEditorPage.tsx` | component through conversation/setup/editor controls; mutation lifecycle, no-project banner, Composer integration | Later setup walkthrough/configuration internals not exhaustively read |
+| `views/builder/BuilderUi.tsx` | ChoiceCards, Segmented, Switch, Disclosure, Section, Composer; project selection references | Other large shared helper/dialog/message functions remain outside this pass |
+| `views/builder/AgentConfigure.tsx` | Advanced/project setting placement | Other configure sections unreviewed by this worker |
+| `views/chat/ChatPage.tsx` | restoration effects/ticketing, attachment add/paste/drop, send creation/clearing, HTTP/SSE error handling and stop semantics | Full exchange rendering and every multimodal/provenance branch not audited |
+| `views/inbox/InboxPage.tsx` | query/scoping summary, device-clock notice, focus restoration, instance-evidence reads, decide, itemView/controls, drawer selection | Remaining detailed evidence/intake/MCP dialogs require separate specialized review |
+| `views/projects/ProjectsPage.tsx` | list loading/error/empty branches, create modal, archived chips, card navigation/budget summaries | No populated keyboard/browser pass |
+| `views/projects/ProjectDetailPage.tsx` | settings modal, measured/forecast/budget cards and membership guard references | Full membership form/CSV delivery not audited |
+| `views/projects/ProjectContextPage.tsx` | promotable query, promotion, outcome reporting, context/history controls, ContextEditorModal load/readCurrent/submit/conflict/dismiss logic | Other graph/index pages not read |
+| `views/workflows/WorkflowsPage.tsx` | list columns, intake routing/fields, start mutation, default staging/paths, DataList setup | No server assignment-rule integration test |
+| `views/workflows/WorkflowDetailPage.tsx` | loading/error, state/stages, act, plan/artifact/trigger/check/deploy action controls | No real deployment, complete provider or trigger chain execution |
+| `views/spend/SpendPage.tsx` | self-scope queries, server summaries, savings aggregation and KPI/error/empty sections | Most charts/export/rendering helpers not fully audited |
+| Backend cross-checks | `plan-only.guardProjectPlanOnly`, invoke/compat/MCP call sites; context promotion authorization | Source inspection only |
+| Existing tests read selectively | builder chat/editor mock-test coverage searches; project-context patterns | No test run by this reviewer |
+
+Unreviewed workspace surfaces include: BuilderAgents/Templates/TemplateDetail/Prompts/PromptDetail/Usage/Playground/Integrations/Skills, pipeline builders, ContextGraph/ContextIndex, AnnotationReview, forced-MFA complete flow, complete ReviewPanel/McpActionReview and all run-detail branches. They must remain marked pending rather than counted as reviewed because their names appeared in an inventory.
+
+### Positive behavior to retain
+
+Inbox uses server-scoped queue results and explicitly labels client-clock due summaries; it restores focus after decisions. Shared-context editing distinguishes accepted revisions from retained conflicts and shows both texts. Spend separates measured routing actuals from estimated technique totals. Login supports password-manager and OTP autocomplete. Those features should not be discarded during visual redesign or friction reduction.
+
+## Deep shared UI/UX review — source pass, 2026-11-21
+
+Target: `/workspace/codexreviews`, main `9797d6f42798689d896103b9e9ce04278e01a4ad`. Read-only. These are source-backed findings and proposed browser reproductions, not claims that the browser reproductions or test suites were executed. Root browser observations are recorded in this file; the source contribution itself did not execute them. F is estimated encounter frequency in the affected flow, not measured incidence; S is user impact. No issue below F×S < 5 is proposed for a code change. No public verdict or source edit made.
+
+### Highest-value findings
+
+#### UIS-01 — closed mobile navigation remains keyboard reachable off screen
+
+**Root verification:** At375px, Tab from the skip link reached seven controls in the closed aside with right bounds between−17px and−9px, entirely outside the viewport. The hidden navigation did not become visible. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+- **Evidence:** `apps/web/src/shell/shell.module.css:608–623` hides the mobile rail only with `transform: translateX(-100%)`. `AppShell.tsx:306–343` leaves the aside mounted with focusable nav controls, without `inert` or hidden state. `onRailFocus` at289 sets `focusOpen`, but mobile CSS opens only `.sideOpen`, derived from the separate `sideOpen` state.
+- **User impact/reason:** a keyboard or switch user on a narrow viewport can tab into navigation controls they cannot see. The desktop keyboard auto-opening behavior does not open the mobile rail. This is more than aesthetic overflow: focus visibility and order fail in a primary navigation flow.
+- **F7 × S5 =35. Confidence:** high from DOM/CSS state, root mock-browser reproduction recorded below.
+- **Reproduce:** use375px viewport, load a signed-in page with nav closed, press Tab from the skip link; compare focused element bounds with the viewport. Repeat at960px and961px.
+- **Recommendation:** explicitly remove the closed mobile rail from interaction/accessibility traversal (e.g. `inert` with correct focus handoff), and manage opening/closing/focus-return as one mobile state. Preserve the existing desktop auto-open behavior. Include Escape and route-choice closure; do not globally hide desktop nav.
+- **Acceptance:** no offscreen nav item is a Tab stop while closed; open nav is fully operable; closing returns to its trigger; desktop rail keyboard behavior remains intact.
+
+#### UIS-02 — inline field errors are visible but not associated with the input
+
+- **Evidence:** `ui/kit.tsx:179–194` clones a sole Input/Select/Textarea only to give it an id. The error is an anonymous span with no id, no `aria-describedby`/`aria-errormessage` association and no automatic `aria-invalid`. This occurs in real consumers, e.g. `views/approvals/ReviewPanel.tsx:473,483,545`, `views/admin/compliance/DataSubjectRequestsPage.tsx:103` and builder forms.
+- **User impact/reason:** a screen-reader user returning to a bad field hears its label but may not hear why it failed. A form can look self-explanatory while its correction path is inaccessible.
+- **F8 × S4 =32. Confidence:** high source-level. Existing kit tests cover label/help preservation and busy-state focus, not this association.
+- **Reproduce:** submit an approval condition with an invalid date or another Field-error consumer; inspect accessibility name/description and invalid state on the input, then refocus it with a screen reader.
+- **Recommendation:** the shared Field should attach a stable error id, merge it into existing descriptions, and mark only erroneous inputs invalid. Preserve caller ids/help associations. Group fields need an explicit group pattern rather than putting multiple controls in one label. A page error summary should link to affected fields where several errors exist.
+- **Acceptance:** corrected field clears its invalid association; existing help stays; each error is available when focusing its field; error summary focus does not erase the draft.
+
+#### UIS-03 — global search shortcut conflicts with an already-open native modal
+
+**Root verification:** With a native edit dialog open, Ctrl-K mounted a command palette behind it. Focus remained inside the original dialog. The screenshot was inspected and shows both overlays; this is a functional modal-stack conflict, not only a theoretical CSS concern. See [sanitized observations](evidence/2026-11-21/runtime-probes.json).
+
+- **Evidence:** `shell/AppShell.tsx:160–167` toggles the command palette on Ctrl/⌘-K globally, without considering open dialogs. `ui/kit.tsx:1301` uses native `dialog.showModal()`. `shell/CommandPalette.tsx:216–225` instead renders a styled div with role=dialog; its autofocus at142 tries to focus a background input.
+- **User impact/reason:** when a native dialog is open, the palette div cannot rise above the browser top layer and its background input is inert. The shortcut can create a hidden second UI layer; closing the first dialog can reveal an unexpected search overlay. This is particularly confusing during a step-up or approval confirmation.
+- **F4 × S4 =16. Confidence:** high browser-model/source reasoning; root mock-browser reproduction recorded below.
+- **Reproduce:** open a DataList column picker or another kit Modal; press Ctrl-K; inspect palette visibility/focus, then close the original modal. Repeat with a step-up dialog.
+- **Recommendation:** define one modal stack/shortcut policy. Suppress command-palette activation while a higher-priority modal owns interaction, or use the native dialog stack consistently. Do not reset or dismiss an approval/step-up transaction to satisfy global search.
+- **Acceptance:** shortcut never opens an invisible layer; focus stays predictable; Escape closes only the active layer; original draft/confirmation remains intact.
+
+#### UIS-04 — clickable table rows replace native row semantics with link semantics
+
+- **Evidence:** `ui/kit.tsx:1135–1155` sets `<tr role="link" tabIndex=0>` for every `onRowClick`; its children remain `<td>`. Some callbacks do not navigate at all: `views/admin/identity/RolesPage.tsx:195` selects a grants panel and `UsersPage.tsx:263` opens management in place. Others navigate through JavaScript, e.g. `views/runs/RunsPage.tsx:478`.
+- **User impact/reason:** assistive technology no longer receives an ordinary row/cell table structure. Announcing a link for an in-place selection also gives the wrong action model; a JS row cannot provide genuine link behaviors such as copy/open in a new tab. Empty/error-only audits miss populated-row defects.
+- **F8 × S4 =32. Confidence:** high source-level; run axe/screen-reader checks on populated rows before assigning a specific WCAG violation.
+- **Reproduce:** populate Roles/Users/Runs, inspect the accessibility tree and navigate by table rows/cells; activate the row action using keyboard and try normal link context actions on Runs.
+- **Recommendation:** keep native table/row/cell semantics. Put a real link in a primary cell for navigation, or a named button for in-place disclosure/selection, with explicit expanded/selected state where applicable. Optional whole-row pointer targeting must not steal events from embedded action controls. Preserve existing row labels and keyboard access.
+- **Acceptance:** populated table structure is valid; navigation anchors have real hrefs; selection is announced accurately; inline actions do not also trigger row navigation.
+
+#### UIS-05 — a changed filter can display old matching rows with no clear old-filter warning
+
+- **Evidence:** `ui/DataList.tsx:262–267` sets `placeholderData: keepPreviousData`. Rows at288 and status at369–376 use that previous page while fetching the new filter. The table receives `loading={q.isLoading}` at416, which is false for placeholder data; only the refresh icon carries busy state. `isPlaceholderData` prevents Next at434 but does not label the visible records as belonging to the old filter.
+- **User impact/reason:** after changing status or a role filter, the filter control says one thing while actionable rows still represent another. Keeping useful rows is good; silently making them appear current is not. This is especially risky for operational lists where the user acts quickly on status.
+- **F7 × S3 =21. Confidence:** high source/React Query behavior, network-delay reproduction pending.
+- **Reproduce:** delay a DataList response2s, change a filter from one disjoint result set to another and inspect rows/status/actions before it resolves.
+- **Recommendation:** retain previous rows if useful, but label them explicitly as previous results while the new selection loads, mark the result region busy, and prevent context-sensitive bulk actions from treating them as the current filtered selection. Do not replace honest old data with fabricated empty state.
+- **Acceptance:** delayed queries cannot misrepresent the active result scope; success/error states clear/update the label; navigation does not jump; existing stale-refetch error messaging remains.
+
+#### UIS-06 — drill-down/back loses the list position and sort
+
+- **Evidence:** `ui/DataList.tsx:238–246` initializes sort and page in component state; only page size and column preferences are persisted. No URL/location-state restoration exists in DataList. `views/runs/RunsPage.tsx:478` navigates to a detail route, unmounting this list; returning mounts it at page0/default sort.
+- **User impact/reason:** an investigator working through later pages must repeatedly reconstruct their view after inspecting one record. URLs cannot communicate the same sorted page to a colleague. This costs time and encourages multiple tabs as a workaround.
+- **F8 × S3 =24. Confidence:** high source-level. Some page filters already use search parameters; preserve those instead of inventing another filter state.
+- **Reproduce:** sort a Runs list, advance several pages, open a run and use browser Back; compare sort/page/scroll position.
+- **Recommendation:** make shareable filters/sort and a safe page/cursor restoration part of the existing list contract; restore Back navigation and scroll. Avoid persisting stale authorization-dependent records themselves, and revalidate cursor scope when filters or permissions change.
+- **Acceptance:** Back restores a coherent view and position; deep links are bounded/validated; deleted/expired cursors recover to a labelled nearest valid view rather than silently switching scope.
+
+#### UIS-07 — the two theme stores do not notify each other
+
+- **Evidence:** `ui/useTheme.ts:12–18` subscribes only to its own module's listener Set. `theme/mode.ts:18–27` writes `data-theme` but notifies a different Set. `useThemeMode` observes data-theme at32–35, but useTheme does not. It also does not subscribe to the OS media query when in system mode. AppShell uses useTheme to render its toggle icon and accessible name at483–487.
+- **User impact/reason:** changing appearance through the account/settings selector or OS can change the CSS while the topbar continues to advertise the previous action/icon until an unrelated shell render. A setting appears inconsistent even though the underlying theme changed.
+- **F5 × S2 =10. Confidence:** high source-level; browser-state check pending.
+- **Reproduce:** set Dark/Match my device in Appearance without reloading, or change emulated color scheme in system mode; inspect the topbar label/icon before another shell update.
+- **Recommendation:** share one external theme store, including attribute/media/storage events, rather than add another local state copy. Keep account persistence and local fallback behavior.
+- **Acceptance:** all theme controls and accessible names agree immediately; system-mode changes work live; blocked storage still leaves the tab operable.
+
+#### UIS-08 — custom list error wording discards the HTTP status needed for recovery guidance
+
+- **Evidence:** `ui/DataList.tsx:417` replaces a structured ApiError with `new Error(props.errorMessage)`. `ui/kit.tsx:1189` detects access denial from `.status===403`; that metadata is now gone. Real consumers include `views/admin/identity/WorkloadIdentitiesPage.tsx:264` and `WorkloadIdentitySubpages.tsx:67`. Shared ErrorState also renders Retry whenever onRetry exists, including access errors (`kit.tsx:1528–1535`).
+- **User impact/reason:** a stable authorization refusal looks like a transient load failure and invites repeated retries. This makes security feel arbitrary instead of showing the legitimate route to recovery. Sanitizing the server's detail is appropriate; discarding its classification is unnecessary.
+- **F6 × S3 =18. Confidence:** high source-level.
+- **Reproduce:** return403 from a workload-identity list using errorMessage; compare heading/recovery with an ordinary structured403 list response.
+- **Recommendation:** preserve safe status/code metadata while replacing the display sentence. Distinguish unauthenticated, access denied, not found, rate-limited and transient failure. Offer Back/contact-admin/approved access-request affordances as appropriate; do not suggest disabling authorization or expose hidden resource data.
+- **Acceptance:** custom wording remains safe;403 is accurately described and does not present futile Retry as the only action;500 still retries;429 respects Retry-After.
+
+#### UIS-09 — edit dialogs have no shared dirty/pending-dismiss contract
+
+- **Evidence:** kit Modal always invokes onClose on Escape/backdrop (`ui/kit.tsx:1326–1334`) and knows nothing about draft or pending save. `views/admin/integrations/IntegrationEditDialogs.tsx:47–51` passes unconditional onClose and leaves Cancel enabled while Save is busy. By contrast, `views/admin/PatchFormModal.tsx:49–55` already refuses dismissal and disables Cancel while busy. Neither primitive offers dirty-draft preservation/confirmation.
+- **User impact/reason:** Escape/backdrop can silently discard substantial edits. In the integration dialog, Cancel can close the UI while an already-started save/step-up continues, so the eventual configuration outcome is unclear. Blanket confirmation on every close would create unnecessary friction; the missing distinction between pristine, dirty and pending is the problem.
+- **F5 × S4 =20. Confidence:** high for the code paths; verify pending/save timing through browser with delayed response before treating Cancel as cancellation.
+- **Reproduce:** edit MCP name/URL, dismiss backdrop and reopen; delay Save, press Cancel and observe whether the request still applies.
+- **Recommendation:** define a shared optional dirty/pending dismissal contract. Pristine/read-only dialogs should close immediately; dirty forms should preserve a draft or ask once; pending writes should explain status and use explicit supported cancellation semantics. Reuse PatchFormModal's current busy guard rather than duplicate page-specific rules. Never imply a client abort reverses a server commit.
+- **Acceptance:** no silent draft loss; pending writes have a truthful result/recovery path; simple dialogs gain no unnecessary prompts; step-up and server authorization remain unchanged.
+
+### Existing strengths to preserve
+
+- Native kit Modal already uses the browser top layer, traps boundary Tab presses and returns focus without repeatedly resetting it during edits.
+- DetailDrawer deliberately distinguishes desktop non-modal side panel from mobile modal and defers mode changes while a nested modal is open.
+- Field's normal labels/help controls are correctly separated, and Buttons/Switches support focusable busy states.
+- Table preserves last successful data and visibly reports a failed refetch; this should remain when improving placeholder states.
+- DataList performs server-side filtering/sort/export, warns when export is truncated and keeps status/warning columns mandatory.
+- Error toasts persist until dismissed; RefusalNotice keeps recovery links inline rather than in expiring notifications.
+- Tabs have roving focus and optional TabPanel preserves drafts across tab switches; route error boundaries retain the signed-in shell.
+
+### Coverage and limits
+
+**Inspected source functions/sections:**
+
+- `App.tsx`: Protected/ApplicationRoutes boundaries and route lazy loader; no claim to inspect each page's implementation.
+- `shell/AppShell.tsx`: readPinned/writePinned, rail expansion/hover/focus, shortcut listeners, suite/filter/nav-entry derivation, user menu keyboard behavior, topbar actions, shell content and PageHeader heading/breadcrumb sections.
+- `shell/CommandPalette.tsx`: quiet/useEntityItems, PaletteDialog search/selection/keyboard/focus, custom modal markup.
+- `shell/RouteError.tsx`: isChunkLoadError, RouteErrorPanel, ShellRouteBoundary/RootRouteError.
+- `ui/kit.tsx`: Button/Switch/Field/Fieldset/Input/Select/Textarea; InfoButton; Card containment/fold interactions; Table sort/loading/error/empty/clickable rows; tabTrap/returnFocus/Modal/ConfirmModal; Tabs/TabPanel; ErrorState/RecordError; IdChip and status primitives (selected sections, not every chart/bar renderer).
+- `ui/DataList.tsx`: IconButton, ColumnPicker, DataList state/reset/paging/cursors/infinite rows/sort/export/error/toolbar.
+- `ui/listState.ts`: storage preferences, column resolution/toggling/movement and page-size constants; selected URL/paging helpers.
+- `ui/DetailDrawer.tsx`: overlay store, DrawerActions, subject focus/opener capture, mode-switch deferral, desktop reflow and Escape handling.
+- `ui/ExpandableTable.tsx`: expansion focus and collapse behavior, selected row/render sections.
+- `ui/CardBoundary.tsx`, `ui/toast.tsx`, `ui/RefusalNotice.tsx`, `ui/focus.ts`, `ui/useTheme.ts`, `theme/mode.ts`: entire small components/helpers.
+- Contextual consumers: selected RunsPage, RolesPage, UsersPage, McpServersPage/PrivateRangesCell, McpIdentityPropagation, McpServerAdmission, IntegrationEditDialogs/EditServerDialog, PatchFormModal; error-Field consumers enumerated by rg. These consumer pages were not exhaustively reviewed by this subtask.
+
+**Existing tests cross-read, not run:** kit.test.tsx, DataList.test.tsx and enterprise keyboard/a11y harness definitions. Current DataList tests chiefly exercise SSR markup; they do not prove delayed-query restoration or browser navigation behavior. Enterprise error-state route scans do not substitute for populated-table and nested-dialog tests.
+
+**Not completed here:** visual verification, screen-reader session, all viewport/theme combinations, server-backed role flows, every row-action consumer, every form's dirty-state semantics, all RefusalGuidance paths, full chart canvas accessibility, mobile assistive hardware, all page-specific functions. Findings above are traceable first-pass evidence, not a claim of exhaustive audit completion.
+
+## Deep audit — iteration 2, 2026-11-21
+
+### Recommendations and evidence added this round
+
+Prioritize truthful unknown/error states, recovery without losing work, and record-scoped drafts. Ten new feedback cards below cover account/security tuning and risk/reporting. Seven focused Chromium probes reproduced eight observations: two existing cards (UIW-04/05) and six new cards (ACC-001/003; REV-001/002/004/005). These are mock-browser reproductions, separate from the real-gateway positive controls. F is estimated frequency within the affected workflow, not production incidence; all ten scores exceed the issue-only threshold. No product code was changed.
+
+The full browser rerun passed **7/7 in 8.9 seconds**. Earlier fixture/locator and stopped-preview errors were setup errors, corrected before this final run, not product findings. Safe evidence: [iteration-2 browser observations](evidence/2026-11-21/iteration2-browser.json). The scratch test uses the project's existing Playwright and synthetic contracts; destructive report DELETE was intercepted and refused, and no risk transition or policy toggle was sent.
+
+| Card | Runtime observation | Scope / limitation |
+| --- | --- | --- |
+| UIW-04 | Workflow-list 503 produced “Nothing promotable yet”; no alert was shown. | Populated project/context fixture; does not prove every dependency failure is hidden. |
+| UIW-05 | Escape and reopen lost both key and content of an unsaved context draft. | No save in flight in this probe; pending-save dismissal remains source-only. |
+| CXR-ACC-001 | Failed step-up-options request left “Getting ready…” and only Cancel; no Retry. | Initial options failure, not a failed proof or already-committed mutation. |
+| CXR-ACC-003 | Failed policy read showed “Not enforced” and “Off by default” with the toggle enabled. | An inline error was also present; the defect is the contradictory policy state and guessed mutation baseline. |
+| CXR-REV-001 | `schedulerPresent:true` still showed “Nothing in this deployment fires these.” | Configured state, not measured scheduler health. |
+| CXR-REV-002 | One Delete click immediately sent DELETE with no dialog for a definition with three runs. | Request mocked/refused; no records deleted. Cascades independently established from source. |
+| CXR-REV-004 | Risk A's typed reason remained after expanding risk B. | No transition submitted; no authorization bypass claimed. |
+| CXR-REV-005 | Valid stored workflow-only payload with 17 requested, 12 decided and 5 pending approvals displayed “no summary figures.” | Historical detail reproduced; immediate-result omission remains source-confirmed. |
+
+### Positive controls: preserve useful security rather than switch it off
+
+[Safe role evidence](evidence/2026-11-21/iteration2-roles.json) records an isolated PostgreSQL 17 database and the existing `buildApp` integration seam. Nineteen setup/auth assertions passed: two synthetic accounts changed their initial passwords, enrolled/activated TOTP and completed password-plus-TOTP sign-in; bootstrap authentication after an active administrator returned 401. Authentication requests used Fastify `inject` with real hooks/database, **not browser login forms or a production boot**. Server-issued HttpOnly cookies then seeded separate Chromium contexts for real HTTP gateway operations. No MFA, step-up, grant, role, attribution or audit policy was relaxed. Local database TLS was disabled solely for the isolated fixture.
+
+The admin created a project through the normal UI (201, visible afterward). A project viewer saw the assigned project and populated shared context but no create/edit affordance. Direct project creation and credential inventory returned 403 `admin_only`; direct context writing returned 403 `forbidden`. The admin-page URL explained the missing role clearly. These are positive observations, not additional defects or blanket security approval. They support improving specific broken recovery paths while retaining effective authorization and required MFA. Provider integrations, live IdPs, production startup, browser login accessibility and all other roles remain untested here.
+
+### O-04 counterevidence and research: declared schema contracts matter
+
+[Five pure-function probes](evidence/2026-11-21/iteration2-schema.json) invoked the existing compiled eval scorer and playground validator, with no database/model/customer data. The same pattern, additionalProperties, minItems and oneOf cases scored 1/passed in eval and failed playground validation. Both rejected the supported required-property control. The relevant functions are unchanged at the refreshed main snapshot.
+
+**Counterevidence:** `evalScorerRegistry().json_schema` explicitly says it supports a documented subset and that unsupported keywords are ignored; the eval page exposes the limits. The November-7 finding's behavioral mismatch is real, but its implication of a silently broken full-schema validator is too broad. This review therefore narrows O-04. Do not erase the old finding or silently reinterpret old scores.
+
+Primary-source comparison retrieved November 21 before recommending a compiler change (GitHub repository metadata and the existing package/lockfile were checked; neither candidate was newly benchmarked or admitted):
+
+| Approach | Fit and benefit | Cost / decision |
+| --- | --- | --- |
+| [Ajv](https://github.com/ajv-validator/ajv), MIT; existing gateway pin 8.20.0 plus ajv-formats 3.0.1 | Already integrated in playground; compiled validation, explicit dialect configuration and existing RE2 regex hardening. No new runtime download needed. Repository active, latest inspected push September 6, 2026. | Prefer evaluating reuse of the existing hardened configuration, with shared dependency boundaries checked. Preserve schema/input/regex complexity bounds; a full validator changes historical eval semantics and needs explicit versioning. |
+| [Hyperjump JSON Schema](https://github.com/hyperjump-io/json-schema), MIT | Standards-oriented alternative with dialect/vocabulary support; repository active, latest inspected push November 19, 2026. | A second compiler/dependency is not justified merely by the mismatch. Assess offline reference resolution, bounds, regex behavior, exact pin, tests and THIRD_PARTY coverage before adoption. No dependency was added in this review. |
+
+**Recommendation and reason:** identify the eval dialect prominently and warn or refuse unsupported keywords at configuration time so a valid-looking pasted schema does not imply enforcement of its ignored constraints. If moving to fuller validation, version that scorer/configuration, keep old results attributable to their original semantics and compare both engines over representative fixtures before migration. Reuse a validated compiler with safe regex and offline references instead of independently growing a general validator. F6 × S4 = 24 for users carrying schemas between these two surfaces; production frequency unmeasured. Acceptance: explicit dialect, unsupported-keyword feedback, historical scoring preserved, supported controls consistent, malicious complexity bounded. Claude should challenge whether warning-only versus refusing unsupported new configurations best preserves compatibility. This is a qualified follow-up, not a new claim of a security bypass.
+
+### Account, authentication and tuning — source evidence
+
+#### CXR-ACC-001 — A failed step-up-options request leaves a permanent “Getting ready…” state without Retry
+
+- **Evidence:** `apps/web/src/stepup/StepUpDialog.tsx:75–85` clears options before fetching them and sets only `error` on a non-422 failure. The effect at `:89–93` starts again only for a different prompt ID. The render at `:178–195` displays the error and, while options remain null, still renders `Getting ready…`. The only action available in that branch is Cancel; no options retry exists. Existing passkey/verify failure paths do restart their ceremonies, so the missing path is specifically the initial options read.
+- **Impact and reason:** an admin attempts a legitimate protected operation during a brief backend/network failure. The dialog appears both failed and indefinitely busy, with no way to recover in place. Cancel and repeat can require navigating back and reconstructing the protected change. This is avoidable security friction rather than a reason to disable step-up.
+- **Score:** **F6 × S4 = 24**. Source-confirmed control flow and mock-browser reproduced in iteration 2.
+- **Reproduce:** use an existing working protected-page fixture. Let the initial action return `step_up_required`, then make `POST /v1/auth/step-up/options` return 503. Inspect the error, status text and available buttons after it settles. Verify that no new options request occurs unless the original action is restarted.
+- **Recommendation and tradeoff:** represent options loading, unavailable-method and retryable failure separately. Offer Retry for retryable failures, preserving the non-secret draft and exact pending action; honor rate-limit backoff. A retry obtains a new ceremony, never reuses a spent proof. Do not auto-repeat a protected mutation that may have committed.
+- **Acceptance:** a failed options request does not keep an inaccurate loading status; Retry can recover without losing the caller's draft; Cancel cancels; a successful proof resends the exact action once. Preserve action-bound proof, authorization, CSRF, expiry and audit. Apply BP-03, BP-08 and BP-11.
+- **Claude question:** should this be an explicit state in the existing shared step-up dialog, and which safe API error classes may be retried in place?
+
+#### CXR-ACC-002 — Federated sign-in discards a protected deep link that local sign-in preserves
+
+- **Evidence:** `apps/web/src/App.tsx:190` records the protected pathname and query in login location state. `LoginPage.tsx:115` reads that return target and local sign-in finishes through it at `:152–157`. The broker link at `:373` and enterprise link at `:400` instead hard-code `returnTo=/app`. The backend currently admits only `/app` or `/admin` for OIDC (`apps/gateway/src/auth.ts:2229–2243`) and SAML (`saml.ts:622–640`), so this cannot be fixed by passing the arbitrary pathname from the browser without changing the server contract safely.
+- **Impact and reason:** a reviewer opens a link to a particular task, approval or evidence record, signs in through the organization's required identity provider, then lands at a generic application area. The original task context is lost. This adds navigation and makes SSO feel less usable than the password path.
+- **Score:** **F8 × S3 = 24** among federated deep-link sign-ins. Source-confirmed loss of target; no live identity provider was tested.
+- **Reproduce:** open a protected detail URL with a meaningful query while signed out. Inspect the resulting local return state and federated link. Follow a complete OIDC/SAML sign-in on a sandbox provider and compare final destination with local sign-in.
+- **Recommendation and tradeoff:** retain a validated internal destination in server-owned, expiring OIDC state/SAML correlation, or a comparably bound opaque continuation. Normalize against an explicit same-origin application path policy and recheck access on arrival. Preserve query context where safe. Do not introduce an open redirect, accept external/protocol-relative destinations or weaken nonce/RelayState binding merely to fix navigation.
+- **Acceptance:** local, OIDC and SAML flows return to the same permitted task; expired/invalid continuations use an honest safe fallback; malicious/external destinations are refused. Test a return through forced password/MFA enrollment too. Apply BP-01, BP-04 and BP-10.
+
+#### CXR-ACC-003 — Unread model-rate-limit policy is shown as “Not enforced,” with a live mutation button after failure
+
+- **Evidence:** `apps/web/src/views/admin/governance/ModelRateLimits.tsx:66` sets `enabled` to false when no data exists. The badge and help at `:77–81` then say `Not enforced` and `Off by default`. The toggle at `:85` disables only while loading or mutating; after a failed read it can still propose `enabled: !enabled` from that fabricated baseline (`:91`). The table separately shows its read error. Current storage defaults `modelRateLimitsEnabled` to true (`packages/db/src/schema.ts:5051`), so the off-by-default explanation is also stale for a normally initialized deployment.
+- **Impact and reason:** an admin cannot tell an unavailable policy read from actual relaxed enforcement. They may try to “turn on” something already on, misunderstand whether limits are protecting calls, or interpret an outage as insecure posture. A warning elsewhere in the card does not make a contradictory policy badge true.
+- **Score:** **F7 × S4 = 28** within failed/delayed policy reads. Source-confirmed; runtime verification supplied separately above.
+- **Reproduce:** make `GET /v1/rules/model-rate-limits` return 503, wait for loading to finish, inspect the badge/help/toggle and attempt to change it. Repeat a delayed initial read and a successful response with enforcement true/false.
+- **Recommendation and tradeoff:** display unknown/unavailable until a valid read arrives; keep policy mutations disabled without a current baseline; retry the read. Reuse the existing `OrgSettingsCard`/`useSettleAfterWrite` approach rather than invent another state cache. Explain actual shipped policy and distinguish an explicit audited relaxation. Do not turn enforcement off or weaken limits to reduce friction.
+- **Acceptance:** unknown is never rendered as off; controls cannot invert a guessed baseline; a recovered read accurately unlocks the correct action; a failed post-save refresh locks further writes truthfully. Preserve server-side step-up and enforcement. Apply BP-01, BP-09 and BP-12.
+
+#### CXR-ACC-004 — “Disable MFA” does not explain that a mandatory-policy account will immediately be forced to enroll again
+
+- **Evidence:** Account `MfaCard` offers Disable MFA at `AccountPage.tsx:456–487`, calls `/auth/totp/disable`, toasts `MFA disabled` and refreshes account state. The backend really does disable after proving password plus current code (`auth.ts:1862–1885`); this is not a claim that the endpoint refuses. `/auth/me` recomputes `mfaSetupRequired` for an unenrolled account under the all-users/admins policy (`auth.ts:1631–1643`). `App.tsx:193` then replaces the product with ForcedMfaEnroll. The account view does not explain this consequence before asking for both factors.
+- **Impact and reason:** a user attempting to reduce friction or replace an authenticator gets a success message followed by another compulsory enrollment journey. The product appears contradictory: it offers “off” but the role policy will not let the user continue that way. Re-enrollment may be appropriate; its meaning should be visible before beginning.
+- **Score:** **F5 × S3 = 15** for users under mandatory MFA attempting factor maintenance. Source-confirmed transition; a real role/session journey still needs execution.
+- **Reproduce:** use an enrolled admin while policy requires admins, disable TOTP with valid factors and observe the refresh. Repeat for an optional-policy member to distinguish legitimate disable from mandatory replacement.
+- **Recommendation and tradeoff:** expose the caller's effective MFA requirement as a safe derived self-service fact; clearly distinguish an allowed optional disable from replacing a required authenticator. Explain the re-enrollment outcome and preserve a route to complete it. Reuse existing proof/enrollment paths and keep the mandatory gate; do not solve this by relaxing the organization policy. Do not expose full administrative settings to members solely to display this fact.
+- **Acceptance:** each role sees the true outcome before starting; factor replacement is recoverable; mandatory accounts cannot continue unenrolled; optional-policy users can perform the permitted disable. Apply BP-01, BP-08 and BP-09.
+
+#### CXR-ACC-005 — Sign-in-method discovery failures silently degrade to password/API-key choices with no retry explanation
+
+- **Evidence:** `LoginPage.normalizeOptions` returns local enabled plus API-key exchange when data is absent (`LoginPage.tsx:66–74`). The page fetches options once with retry false and passes `optionsQ.data` to that normalizer (`:139–145`); neither query failure nor loading is represented in the method chooser. The UI can show “Sign in with email” and key exchange after a 503 while the configured SSO methods are absent. A login refusal can later reveal SSO-only policy, but cannot recover the missing IdP list itself.
+- **Impact and reason:** during a brief sign-in-options outage, an SSO user is directed toward credentials that their deployment may prohibit. This is not an authentication bypass—the server remains authoritative—but it is confusing and can strand the user. The historical compatibility fallback is intentional and remains useful when an older gateway genuinely lacks discovery.
+- **Score:** **F5 × S3 = 15** within sign-in-method discovery failures. Source-confirmed fallback; not a claim that all deployments need an IdP or that fallback password login is inherently unsafe.
+- **Reproduce:** signed out, return 503 or hold `/auth/sign-in-options`; observe the method chooser and absence of discovery Retry. Compare with a valid SSO-only response and an explicitly unsupported endpoint response.
+- **Recommendation and tradeoff:** distinguish temporary discovery failure, loading and proven legacy capability. Offer a clear method-discovery retry and retain the narrow supported legacy path with honest degraded wording. Do not show unverified settings as authoritative or expose a broad public configuration inventory. Preserve uniform credential errors and break-glass restrictions.
+- **Acceptance:** users can recover the IdP list without reloading or attempting the wrong credential path; local-only/legacy deployments still have a usable supported route; server policy remains decisive. Apply BP-01, BP-03 and BP-05.
+
+### Account patterns to preserve
+
+- Login, forced-password change and the main MFA step use password-manager `autocomplete` and paste-compatible input. Login deliberately accepts username or email, uses uniform incorrect-credential errors, and supplies a clear “Back to sign-in” at the TOTP step.
+- Forced password change follows the server's `passwordChangeRequiresCurrent` fact instead of asking a key-origin recovery user for a password they were never given. The account identity is visible before setup.
+- PasskeysCard and SessionsCard already distinguish pending/error reads from zero counts and retain inline errors plus Retry. Do not reintroduce guessed “none” values when copying these patterns.
+- SsoPage SignInStatus correctly treats failed policy/provider reads as unavailable with Retry, rather than asserting zero providers or relaxed policy.
+- OrgSettingsCard already supports per-setting old→new review, consequence explanations, conditional action-bound step-up, partial updates, single-flight writes and locked stale baselines after uncertain refresh. This is the pattern to reuse for policy tuning.
+- Step-up tuning already exposes a per-action checkbox set and a bounded one-use proof lifetime. Raising that lifetime does **not** mean “remember me” or reduce the number of required ceremonies: grants remain single-use and bound to one action. Prefer clear context, accessible passkeys and recoverable proof flows before broader exemptions.
+- AI policy acknowledgement allows “Not now” to reach other work while preserving server refusal of governed calls and a visible outstanding-policy banner; this is a useful example of reducing UI interruption without bypassing the actual control.
+
+### Account source coverage and limits
+
+Source/functions inspected: LoginPage normalizeOptions, submitPassword, submitTotp, submitKey, finish, federated method links and LinkAccount; ForcedPasswordChange submit/render; ForcedMfaEnroll enroll/activate/render; StepUpDialog begin/options/verify/passkey/SSO polling/render; AccountPage anchors, PasswordCard, MfaCard and SessionsCard; PasskeysCard add/revoke/sorting/status; AccountSubpages routing; SsoPage tabs and SignInStatus; ModelRateLimits body builder/read state/toggle/create/delete; OrgSettingsCard save/retry/stale baseline and SettingRow/SettingControl; relevant orgSettingSpecs step-up entries; AcknowledgeGate policy-list/query and interruption contract; backend auth/mfa/current-user/OIDC return-target and SAML start constraints.
+
+Cross-checked server facts are cited above. This source contribution did not perform runtime checks; the separate parent-run reproductions are listed above. No real identity provider, passkey device, OTP authenticator, screen reader, session-expiry race, API-key exchange or live permission transition was executed. Member/admin/optional-MFA/mandatory-MFA cases remain separate runtime acceptance work. Root should record actual reproductions independently and narrow/refute any card contradicted by them.
+
+### Risk, evidence and reporting — source evidence
+
+#### CXR-REV-001 — Report schedules are described as manual even when the gateway reports an enabled scheduler
+
+- **Status/type:** source-confirmed inconsistent status and operational instructions. **F8 × S4 = 32**, Medium.
+- **Evidence:** `apps/web/src/views/admin/cost/ReportsPage.tsx:51–55` models `schedulerPresent`, but its Schedules help and note at `:311–319` always say an operator/external cron is necessary and “Nothing in this deployment fires these.” The successful add message at `:342` repeats that nothing drives it automatically, and never-generated schedules are labelled “never — nothing drives this” at `:390`. In contrast, `apps/gateway/src/reporting.ts:1071` reports `resolveSchedulerConfig().enabled`; `apps/gateway/src/scheduler-jobs.ts:189–200` registers and runs `runDueReportSchedules`. `scheduler.test.ts:1054` contains a wired-generation test (not executed here). The backend's older `/v1/reports/schedules` note at `reporting.ts:756` is also stale.
+- **Why it matters:** an administrator cannot tell whether to wait, repair the scheduler or configure an external driver. Correctly configured automation is presented as absent. The wrong advice creates unnecessary operational work and can lead to redundant external scheduling; this is not a claim that duplicate runs were reproduced.
+- **Reproduction:** populate `/admin/reports` with one definition and enabled schedule, return `schedulerPresent:true` in `/v1/reports/overview`, and inspect the schedule note, new-schedule success message and “never” label. Compare with `false` and with actual last-run information. The interface does not branch on the supplied capability.
+- **Recommendation:** use the server-reported driver state consistently. Say “scheduler enabled” when configured, while showing last success/overdue/unknown health separately—enabled is not proof of health. Keep manual Run due now available where authorized. When the scheduler is off, explain the operator/cron alternative. Reuse the existing scheduler; do not add another timer or weaken leases.
+- **Acceptance:** enabled/off/unavailable/never-run/overdue fixtures produce different truthful explanations; successful schedule creation describes the actual driver. A running scheduler's last generation is visible. Unavailable health never appears healthy merely because the feature is enabled.
+- **Claude countercheck:** determine whether the endpoint should expose configured state plus live sweep health, and whether stale API note strings have additional consumers.
+
+#### CXR-REV-002 — Deleting a report definition immediately deletes its generated history without an upfront consequence review
+
+- **Status/type:** source-confirmed destructive-action usability gap. **F3 × S6 = 18**, Medium; consequence is high even though deletion is less frequent.
+- **Evidence:** `ReportsPage.tsx:284–294` sends DELETE directly on the row button, without confirmation or a disclosure of dependent records. The page already knows `d.runCount` and `d.schedules`. `apps/gateway/src/reporting.ts:699–713` deletes the definition and explicitly says in its audit reason that generated runs cascade. `packages/db/src/schema.ts:7226–7228` cascades schedules; `:7249–7251` cascades generated runs. The underlying usage/audit/approval ledgers remain intact; this does not mean the deleted report IDs, stored payloads and signed outputs can be recovered as the identical historical artifact.
+- **Why it matters:** “Delete” in a definitions table can reasonably be read as stopping/replacing a template. One mistaken click also removes report history and schedules. An operator discovers the full consequence only after the delete, from server/audit knowledge. Recomputing a report later is not the same as retaining the original run and its generation identity.
+- **Reproduction:** use a synthetic definition with existing runs and an enabled schedule. Observe that one Delete click sends the request immediately and no consequence dialog is offered. A browser proof should mock DELETE; this assessor did not delete any database record.
+- **Recommendation:** use the existing confirmation primitive for definitions with stored runs or active schedules, naming the definition, affected counts and retention consequence before final submission. A harmless unused draft need not gain the same ceremony. Separately discuss whether archiving a definition while retaining generated evidence is the appropriate product policy; do not implement a parallel lifecycle or retention bypass from this review.
+- **Acceptance:** consequential deletion cannot happen on the first accidental click; Cancel sends no request; the confirmation's data reflects current authorized server state; simple reads and ordinary generation gain no extra prompts. Existing permission/audit checks remain.
+- **Claude countercheck:** confirm the intended evidence-retention policy before treating template deletion and report-history deletion as inseparable requirements.
+
+#### CXR-REV-003 — The risk register silently stops at the newest 200 risks and offers no way to reach older records
+
+- **Status/type:** source-confirmed bounded-list completeness/discoverability defect. **F7 × S5 = 35**, Medium, conditional on estates exceeding 200 visible risks.
+- **Evidence:** `apps/gateway/src/risks.ts:913–954` accepts status/category/useCaseId filters, orders newest first and applies `.limit(200)` at `:938`, but returns no total, hasMore or continuation. `RisksPage.tsx:134–137` always requests plain `/v1/risks`. `:454–470` renders that array as the entire Register with no pagination, truncated-result warning, status/category filtering or search. A known `?riskId=` can open an out-of-list detail at `:499–507`, but users must already know the missing ID.
+- **Why it matters:** an older unresolved risk can disappear behind 200 newer closed records. The screen looks complete and offers no normal recovery path to the omitted risk. This impairs governance work and can disagree with full-ledger trust totals. The fix is not removing the server bound.
+- **Reproduction:** a valid synthetic dataset containing 200 recent closed risks and one older open risk. List normally as the authorized owner/admin: the old open risk is absent. There is no next page or visible filter to retrieve it, although a direct detail ID still works.
+- **Recommendation:** reuse the existing ADR-0226 bounded list contract with totals/hasMore, paging and server-side status/category filters; keep the authorization predicate and stable ordering. Make truncation or partial results visible until paging exists. Preserve the direct-link detail fallback.
+- **Acceptance:** 201+ visible risks remain reachable through normal browsing/filtering; filtering for open risks reveals the old risk; totals use the same permission/filter scope; unauthorized records never contribute to counts or pages. Keep query/body bounds.
+- **Claude countercheck:** if 200 is a deliberate product ceiling, document/enforce that at creation with a clear user contract; a silent display cap is not that policy.
+
+#### CXR-REV-004 — A transition reason typed for one risk is silently reused when another risk is expanded
+
+- **Status/type:** source-confirmed record-context/draft scoping defect. **F5 × S4 = 20**, Medium.
+- **Evidence:** `RisksPage.tsx:165` has one page-wide `transitionReason`. The expandable row toggle at `:467–470` changes only `openId`. Inputs at `:246–250` read that same draft, and transition requests at `:258–260` send it for the newly selected risk. Only successful transitions clear it (`:262`); changing records does not. `risks.ts:1090–1138` checks the correct risk and requires a reason, so this is not an object authorization bypass.
+- **Why it matters:** a user starts documenting why risk A is mitigated, opens risk B for comparison and sees the same explanation ready to submit for B. Accidentally recording the wrong rationale degrades an audit trail. The request still targets B correctly; this finding is about the user-entered explanation being scoped incorrectly.
+- **Reproduction:** return two open risks. Click `Details: A`, fill “Transition reason — required and audited”, then click `Details: B`. The reason remains and B's transition buttons are enabled. No real transition is needed to observe the problem.
+- **Recommendation:** keep an in-memory authorized draft per risk, or clear/reset with an explicit record-switch policy that preserves the user's work rather than silently discarding it. Bind a pending mutation to its risk identity. Do not add confirmation to every ordinary expand/collapse or relax the server's reason requirement.
+- **Acceptance:** A's draft never becomes B's reason by default; returning to A preserves its intended draft where appropriate; a successful mutation clears only that risk's submitted draft; another row cannot inherit a pending action's explanation.
+- **Claude countercheck:** if repeated reasons are an intended bulk workflow, expose that explicitly as an intentional scoped action rather than accidental state reuse.
+
+#### CXR-REV-005 — Approval-throughput figures are generated and stored, but neither report view renders them
+
+- **Status/type:** source-confirmed missing data presentation. **F6 × S4 = 24**, Medium.
+- **Evidence:** `packages/shared/src/reporting.ts:794–796` includes workflow in the default executive/team sections; `apps/gateway/src/reporting.ts:281–315` computes requested/decided/pending approval counts and median decision minutes. `ReportsPage.tsx:82` types that workflow data, but its fresh result renderer at `:414–494` handles spend, governance and controls only. `ReportsHistory.tsx:32–71` similarly extracts only spend/governance/controls. It can say “This run's stored report carries no summary figures” when a valid payload has only a workflow section. CSV serialization does include workflow (`shared/reporting.ts:694–700`).
+- **Why it matters:** a user generating or reopening an executive report cannot inspect its approval throughput through the page, although the reporting surface promises approval throughput and the server already calculated the figures. Exporting raw data is an alternative, not equivalent to readable report coverage.
+- **Reproduction:** a valid generated/stored payload whose workflow section has distinctive nonzero requested, decided and pending counts plus a median, with other sections absent. Open both the immediate report and run-history detail. The workflow figures are omitted; the stored view can incorrectly claim there are no summary figures.
+- **Recommendation:** share one defensive stored-payload renderer between fresh and historical views and display the existing workflow section with explicit units and time window. Render unavailable medians as unmeasured, never invented zero. Use the frozen payload; do not recompute current values for a historical report.
+- **Acceptance:** workflow-only and normal executive fixtures show the exact recorded counts/median; null median remains unmeasured; exports and on-screen fields agree; current permissions/scoping and audit properties remain server-enforced.
+- **Claude countercheck:** verify whether the omission was intentionally deferred; if so the page must disclose the narrower on-screen view and the accepted follow-up should be explicit.
+
+### Risk/evidence patterns to preserve
+
+- Trust dashboard explicitly distinguishes unmeasured from zero, separates accepted/transferred/avoided risks, and explains evidence coverage is not a compliance or trust score. Its heatmap and radar supply textual accessible names containing their values; do not report a color-only chart defect from a screenshot alone.
+- Trust monitor distinguishes loading, unavailable, not-evaluated and active states; an acknowledged alert remains active rather than turning green.
+- BOM verification explains the deployment trust root, independent offline verification, recorded-key limitations, format and size bounds. Upload changes clear prior verification results; downloads are saved after transport checks. Those are appropriate safeguards, not gratuitous friction.
+- Framework import proposals preview incoming/current text, preserve edited controls by default and make activation a separate action. The user can deliberately select source text; “review waiting” does not claim the pack is active.
+- Pack attestations reset only after `useAction.run` returns true (`PackRecords.tsx:154–163`), preserve drafts on failures and label the result attested rather than satisfied. This is a good pattern for the iteration-1 threshold/draft defects.
+- Report scope is shown explicitly; stored runs use their recorded entitlement scope. No evidence here supports weakening report scope checks.
+
+### Risk/evidence source coverage and limits
+
+Read sections/functions (not a blanket whole-file claim):
+
+- `TrustDashboardPage.tsx`: trustQuery, formatCoverage, reading guide, alerts state, TrustReportView totals/meta/drilldown, CoverageCard modes, Radar geometry/aria and Heatmap accessible text, TrustSnapshotCard.
+- `RisksPage.tsx`: row/detail types, statusTone/kindTone/measuredCells, risk/list/detail/library queries, seedFromLibrary, refreshAll, renderDetail, ordinary transitions, registration form, list and deep-link fallback.
+- `ReportsPage.tsx`: definition/schedule/generated-report contract, overview/history empty-state logic, definition creation/generation/deletion, scheduler card and actions, immediate result renderer, record-dialog navigation/focus handoff.
+- `ReportsHistory.tsx`: defensive obj/num parsing, ReportPayloadView, ReportRunDetail/export links, ReportDefinitionDetail and ReportRunsCard filter/header setup.
+- `BomEvidencePanel.tsx`: Digest/exportUnavailableText, VerifyResult trust/readability, OfflineVerifyNote, BomVerifyPanel file/result/error lifecycle, SnapshotDetail verify/download actions and capability checks (selected portions; not all subject/list hooks).
+- `FrameworkImportsPage.tsx`: sourceState, changedParts, TextSide/TextPair, ProposalDrawer preview/selection/action/error sections (selected portions, not full source list/approval routes).
+- `CompliancePacksPage.tsx`: pack queries, create/seed/activate/evaluate/diff handlers and control buttons (selected sections).
+- `PackRecords.tsx`: PackDetailCard labels and tables; AttestationForm submit/reset path and form controls.
+- Backend cross-checks: reporting overview/delete/generation/scheduler note, schema definition foreign keys, scheduler wired report job/test, risk list/transition routes, shared reporting section defaults/CSV serialization. Existing source/tests were read, not executed.
+
+Not completed by this assessor: browser reproduction, screen-reader use, real integration/provider execution, risk acceptance/treatment subforms in depth, every compliance-profile/privacy/infra ledger page, every dashboard/report format, report-download transport verification, and all role/scale/race paths. Root can promote confidence only after matching runtime evidence; these source observations must not be mislabeled as completed live tests.
+
+## Deep audit — iteration 3, 2026-11-22
+
+### What changed in the assessment
+
+This pass follows main `da16d6bd23109d477102c0ec2a534f81d62a6917`, merged into the review branch without replacing newer work. The assessed application UI source is unchanged from the earlier snapshots; new backend autonomy, ABAC, browser governance and repetitive-ask work is present but **not** claimed as fully reviewed here. Ten new cards cover integration administration and cost/budget/consolidation journeys, bringing the feedback ledger to 46. These are affected operations and proposals, including shared underlying causes, not 46 independent vulnerabilities. Claude has not responded on this PR as of the opening check for this iteration; silence is not acceptance.
+
+**Priorities:** bind credential/entitlement drafts and actions to the selected resource; preserve destinations on token-only rotation; present effective budget approval, not a historical latch; preserve failed mapping drafts. Fix shared unknown/error/success-reset patterns once and link their affected cards. Do not add repeated confirmations to harmless reads or switch off enforcement to compensate for a broken form.
+
+### Additional best-practice research
+
+Retrieved November 22 before finalizing these recommendations:
+
+| Source | Relevant guidance | Application and limit |
+| --- | --- | --- |
+| [OWASP Secrets Management](https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Secrets_Management_Cheat_Sheet.md) | Secret lifecycle includes provisioning, rotation, audit and least privilege; manual rotation is error-prone and needs adequate workflow support. | Bind a credential edit to its intended resource/destination; clear secret drafts on selection boundaries and keep rotation semantics explicit. Hosted cheat-sheet page returned403; official GitHub source retrieved successfully. This is guidance, not a new claim of credential exfiltration. |
+| [MDN date input](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input/date) | A date control carries a calendar-date value, distinct from a fully described instant/timezone. | The UI must state how From/To resolve to the backend's half-open UTC interval. A sound exclusive-end API does not make an unexplained calendar selector understandable. |
+| [GOV.UK check answers](https://design-system.service.gov.uk/patterns/check-answers/) | Let a user review meaningful answers/consequences before committing a consequential transaction and return to change them. | Reuse existing consequence review for globally effective mapping removal or destination changes; keep ordinary reads and unused drafts lightweight. |
+
+No unfamiliar product capability or dependency was implemented. Existing competition patterns and BP-01..12 above remain the comparison basis: control status, exact task context, bounded exceptions, understandable consequence review and recoverable errors. This batch does not need another vendor checklist or live commercial account to establish its specific source/API mismatches.
+
+### Runtime checks and limitations
+
+See [sanitized November 22 observations](evidence/2026-11-22/browser-observations.json). The final rerun passed **9/9 in 9.3 seconds**, including the 404 control (eight defect observations, not nine new findings). Earlier cost fixtures incorrectly returned an incomplete 200 body to an unrelated query and rendered a boundary error; the fixture was corrected to a truthful 503 for unpopulated endpoints before the successful rerun. That setup failure is not recorded as a product defect. The mock-browser probes use the existing project Playwright, Chromium, populated synthetic API contracts and a local preview. They prove the named UI/request behavior, not successful external-provider execution. Secret-looking inputs were noncredential sentinels; evidence records only whether a draft persisted, never the value. All intercepted credential/ownership/mapping writes were refused; no stored credential, owner, mapping or grant was changed. Source traces separately establish what a successful backend write would do.
+
+- **UIW-03:** a selected conversation's503 changed the selection to the newest thread and displayed that thread, with no alert and no DELETE. A404 control followed the same path. This proves the temporary-error conflation, not server history deletion. Genuine denied/deleted history still needs its deliberate non-disclosure behavior.
+- **INT-001:** ownership PUT received a simulated required-proof refusal; no proof-options request or dialog appeared. Same missing-wrapper cause as ADM-001, now established on the ownership consumer. Backend remains fail-closed.
+- **INT-002:** switching credential selection A→B retained A's token and destination drafts. No write was sent in this probe. Draft values must not cross the resource boundary, including private-key document forms.
+- **INT-003:** credential metadata503 displayed “no credential” without an inline metadata error/Retry. Absence and unavailable are different facts.
+- **INT-004:** metadata supplied a saved destination override, but the editable field was blank; token-only rotation sent no baseUrl. The refused POST establishes the UI payload; server upsert-to-null and fallback remain source evidence, not an executed destination change.
+
+- **CST-001:** after two failed rollup reads and settled loading, the card contained only the project title and Download CSV; no alert or Retry. Neighboring query errors do not explain this failed project read.
+- **CST-002:** an over-budget monthly payload with `overageApproved:true` but `overageActive:false` and an older approval period rendered “overage approved” in the admin rollup. The ordinary project-detail consumer was source-inspected, not runtime-tested in this probe.
+- **CST-003:** a refused alias POST cleared both account and reason; no mapping was saved. The parallel domain-rule path remains source-confirmed.
+
+The detailed source cards below state their own scope. Root runtime observations above supersede “source-only” confidence only for the exact matched branch. No claim of complete mobile/screen-reader/race/role coverage follows from these probes.
+
+### Integration source evidence
+
+#### CXR-INT-001 — An ownership change reaches the server's step-up gate without a UI ceremony
+
+- **Evidence / function:** `apps/web/src/views/admin/integrations/IntegrationOwnership.tsx:47–67`, OwnerForm submit, calls plain `api.put` at line63. Both ownership routes pass `ownerChangeGate` (`apps/gateway/src/ownership.ts:262–287`). A real changed owner requires the server's `owner_change` proof after target validation (`ownership.ts:160–171`). The shared client announces a refusal without a retry callback (`apps/web/src/api/client.ts:48–55,305`); `installGlobalStepUp` explicitly ignores requests without that callback (`stepup/stepUp.ts:146–158`). This is the same missing-wrapper class as CXR-ADM-001, on a separate shared integration operation; it is not a second security weakness.
+- **User impact / reason:** assigning an accountable person or repairing an orphaned MCP server/connector looks supported, but an enrolled admin on strict policy receives a refusal rather than a way to prove identity and finish. Governance ownership/SLA routing remains wrong until an API workaround is used. **High, F8 × S5 =40** within changed-owner tasks under required step-up. Nothing demonstrates an authorization bypass; the server gate is working.
+- **Reproduce:** populate two active people and one owned integration; choose a different owner (or Unassigned) and Save owner. Return a realistic403 `step_up_required`/owner_change with methods/action. Check ownership PUT count, options/verify calls, dialog and retained form state. Real-gateway follow-up should prove one exact, action-bound retry.
+- **Recommendation / tradeoff:** reuse `withStepUp` plus its header-capable PUT helper, preserving the fixed pending object/new-owner facts. Keep existing single-flight, owner eligibility and settle-after-write locks. Show the operation's identity-proof expectation before submit. Do not remove owner_change from policy to make the form work.
+- **Acceptance / countercheck:** both MCP and connector owner changes offer the shared proof ceremony; successful proof writes exactly once and refreshes the authoritative owner; cancellation/refusal preserves the intended choice; stale/concurrent ownership changes still fail safely; unchanged-owner submissions remain disabled. OwnerForm already handles inactive/missing/truncated people, unlike several older forms—preserve that protection.
+
+#### CXR-INT-002 — A connector credential draft follows the picker onto another connector
+
+- **Evidence / function:** CredentialCard has one component-wide token, baseUrl and Snowflake document state (`ConnectorsPage.tsx:231–247`). Changing the selected connector only changes connectorId (`:253`). The visible form changes provider shape, but draft state is not keyed/reset; submit writes the current connectorId with the retained token/baseUrl (`:279–295`). This includes switching between two bare-token adapters, or away from and back to a Snowflake draft. No local storage persistence was found; this is same-page memory reuse.
+- **User impact / reason:** an admin stages a credential for connector A, switches to B to compare settings, and can save A's still-filled secret to B. At minimum this breaks B's integration; it can cause use of an unintended service identity on subsequent authorized calls. **High, F5 × S7 =35** within multi-connector credential administration. This is a mis-scoped UI draft, not evidence that the backend discloses an existing secret or bypasses egress.
+- **Reproduce:** provide two synthetic github adapters; select A, type a non-secret sentinel in Token / API key and an allowed-looking synthetic URL; switch the credential-card selector to B. Observe the field values; intercept/refuse POST to B to inspect only whether the sentinel/destination follows. Do not send real tokens or actually overwrite anything.
+- **Recommendation / tradeoff:** treat the selected connector identity as a credential-editing boundary. Clear secrets on switch/unmount, and explicitly warn or require completion/cancel before moving away from a dirty secret form; preserve only suitable non-secret data in a resource-scoped draft. Never solve this with persistent secret drafts. Name the exact connector/provider/destination next to save.
+- **Acceptance / countercheck:** A's token/private key never becomes B's input or POST body; returning to A after leaving does not resurrect a secret; pending responses cannot clear a different resource's newer input. Successful save already clears token/Snowflake state; this finding is the missing selection-boundary clearing, not absent post-success clearing.
+
+#### CXR-INT-003 — A failed/unread credential query is presented as a confirmed absence
+
+- **Evidence / function:** CredentialCard's metadata query is keyed per connector (`ConnectorsPage.tsx:237–241`), but the status rendering only branches on `cred.data?.credential` (`:261–275`) and the submit label does the same (`:367–368`). No metadata loading/error/retry presentation or unknown-baseline lock exists in this card. A missing data value therefore becomes “no credential — governed invokes that need one will fail,” and the form remains enabled. `act.error` below is for writes, not this query.
+- **User impact / reason:** during a slow/failed credential-inventory read, the page tells an admin the connector is unconfigured and invites Save rather than explaining unknown state. They can mistakenly replace an existing credential while trying to restore a healthy connection. The wording is also overbroad for the backend's keyless kinds or enabled token-exchange path (`connector-call.ts:977–997`), so metadata absence is not always “invokes will fail.” **Medium, F7 × S4 =28** within unavailable metadata reads. This is another instance of the unknown-is-empty family, related to ADM-007 and ACC-003; preserve that shared cause in implementation planning.
+- **Reproduce:** choose a connector whose metadata GET is delayed or503; inspect the status, credential button and recovery choices before/after failure. Compare a successful `{credential:null}`, a configured credential, a keyless provider and an enabled exchange configuration.
+- **Recommendation / tradeoff:** model loading/unavailable/configured/absent distinctly, offer metadata Retry and disable replacement/removal until a current baseline exists. Explain the effective authentication source when already exposed safely; avoid fetching plaintext secrets or adding extra ceremonies to reads. Use existing settle-after-write/unknown-state patterns, not another guessed boolean.
+- **Acceptance / countercheck:** GET503/timeout never says confirmed no credential; Retry recovers accurate state; unknown metadata cannot invite a mistaken replacement; keyless/exchange cases have qualified advice. The query key is correctly per-connector and useAction invalidates admin queries after successful writes; neither fixes the first unread/failure rendering.
+
+#### CXR-INT-004 — Credential rotation also clears an existing destination override unless the admin retypes it
+
+- **Evidence / function:** the credential editor initializes baseUrl to empty (`ConnectorsPage.tsx:244`) and never hydrates it from the credential metadata, although it displays the saved URL at `:265–266`. Submit includes baseUrl only when nonempty (`:292–295`). The backend interprets omission as null (`agents-connectors.ts:5500–5513`) and upserts that null over the old credential override. Invoke then falls back to connector.baseUrl (`connector-call.ts:977–989`). The same write disables configured connector token exchange on destination change (`agents-connectors.ts:5530–5536`), an additional consequence deserving clear wording.
+- **User impact / reason:** an admin rotates only the secret and reasonably leaves the optional URL alone. The new secret is saved, but the effective target silently changes to the catalog/provider destination and token-exchange configuration may change. Calls can fail or reach an unintended already-permitted host. **High, F6 × S6 =36** for credential rotations with a saved override. Egress remains independently guarded; this is not an SSRF bypass or proof of exfiltration.
+- **Reproduce:** metadata returns a configured credential with nonnull override; select it and note the displayed saved address but blank editable Base URL. Enter only a new synthetic token, intercept/refuse the POST and confirm baseUrl was omitted. Source-trace the upsert to null and fallback. No actual token replacement needed.
+- **Recommendation / tradeoff:** load the non-secret URL baseline into the resource-scoped form or make rotation preserve it by explicit API semantics. Separate “keep current destination,” “replace” and deliberate “clear override”; display the effective target and any exchange-reset consequence before a destination-changing write. Do not automatically carry a secret to a newly chosen host; retain egress, auditing and exchange-disable safeguards.
+- **Acceptance / countercheck:** token-only rotation preserves the existing override; explicit clear returns to the documented catalog/provider destination and exposes that consequence; host change uses the intended new-host credential and guarded path; unread/stale baselines cannot silently reset routing. The current POST contract does intentionally replace the full credential row; therefore blindly changing omission semantics server-side could break API consumers. Prefer a documented backward-compatible UI repair or versioned/explicit API operation.
+
+#### CXR-INT-005 — Entitlement results and destructive controls remain attached to the previous selected user/server without a subject label
+
+**Iteration 4 verification:** reproduced on the connector page after selector change and failed lookup; the confirmation names the old grant but only “this user.” No deletion was confirmed. See iteration 4 evidence and limits.
+
+- **Evidence / function:** connector EntitlementCard stores a single rows array separately from userId (`ConnectorsPage.tsx:439–458`). Changing the user does not reset rows or mark the loaded subject. A failed new lookup retains old rows. RemoveButton's wording says “from this user” (`:507`), but deletion uses the retained row's grantId (`:521`); its refresh uses the current picker userId (`:525`). MCP's McpEntitlementCard repeats this with userId/serverId/rows (`McpServersPage.tsx:264–305`), retained row deletion (`:350–375`) and `load()` reading the current selection. Server DELETE correctly targets the actual grant ID (`agents-connectors.ts:3866–3872`); this is not wrong server object authorization.
+- **User impact / reason:** an admin loads A's permissions, switches the picker to B or encounters a failed refresh, and still sees A's active grants under B's selected name. They can remove A's access while believing they are editing B's. **High, F5 × S6 =30** for comparative entitlement administration. This resembles UIS-05's stale-filter issue but adds a concrete permission mutation and subject-binding defect; plan a shared fix if appropriate.
+- **Reproduce:** load A's distinctive direct grant; change User to B without clicking View (and repeat with B's GET503). Confirm old grant remains with enabled Remove. Inspect the confirmation and intercepted/refused grant DELETE; do not actually revoke access. Repeat MCP user/server selection. Also delay A's response, change to B, and check how the late result is labelled.
+- **Recommendation / tradeoff:** bind each result snapshot to its loaded subject and show that subject explicitly. When input selectors differ, hide/disable snapshot mutations until a fresh successful load, or keep the old snapshot clearly labelled with actions explicitly tied to that old identity. Bind pending actions/reloads to the exact loaded object; cancel or ignore stale responses. Reuse the existing resource-keyed query/list conventions rather than mutable anonymous arrays.
+- **Acceptance / countercheck:** A's result is never implied to belong to B; no old grant is deleted by an action described as B's; request failure/late responses preserve truthful context; removal refreshes the same subject. The nearby McpVisibleToolsCard already clears rows when either selector changes (`McpServerAdmission.tsx:211–222`), a useful local precedent, although late-response races still need testing. A View button can justify manual loading; it does not justify unlabeled destructive controls attached to a previous subject.
+
+### Integration patterns to preserve
+
+- Shared integration lifecycle explicitly separates reversible Disable (reason), stepped-up Enable and dependent-record-aware Delete; active rows explain “Disable it first.” Scope and audit consequences are present. Do not replace these with blanket removal or a global security-off toggle.
+- EditServerDialog explicitly warns URL moves clear propagation/upstream credentials; Git/PM moves require a new token and explain the old credential never follows to a new host. ReplaceTokenDialog tells the admin to revoke the old token at its issuer. These are task-specific safeguards.
+- Webhook rotation has a grace-period explanation and distinct immediate-rotation consequence when a409 says rotation already in progress. The one-time secret is not written to public evidence. No argument here supports removing replay/signature checks.
+- Admission clear is explicitly a relaxation, reasoned, action-bound, pinned to the scanned manifest; reserved-prefix failures explain the non-overridable boundary. Tool sync reuses governed admission/egress/transport gates and supplies in-context recovery text.
+- Server registration preserves failed non-secret input and gives concrete next steps through admission, egress, inventory and grants. Grants are stepped up and explicit read/write scope is explained. No discovered provider permission is granted by registration alone.
+- Ownership picker distinguishes inactive from not-loaded people and locks stale post-write baselines. MCP tool pricing distinguishes inherited, overridden and unpriced instead of inventing zero cost.
+
+### Integration function coverage and limits
+
+Read functions/sections: McpServersPage/McpServersTab tab/state/lifecycle/registry/edit and selection wiring; McpEntitlementCard load/selection/removal; RegisterServerForm transport/draft/step-up; PrivateRangesCell submit; ToolsCard pricing/status; ToolPriceCell save; RegisterToolCard; ToolGrantForm/ServerGrantForm; McpExecutionCard. ConnectorsPage catalog/lifecycle; credentialJsonTemplate/Hint; CreateConnectorCard submit/reset; CredentialCard query/draft/selector/create/replace/remove; GrantForm; EntitlementCard query/removal. All IntegrationOwnership ownerStatus/canSaveOwner/OwnerForm and truncated/error helpers; EditServerDialog, ReplaceTokenDialog, EditGitDialog, MoveTokenField, RotateSecretDialog, EditPmDialog; McpServerNextSteps, toolSyncRefusal/Summary/SyncToolsButton, admissionReasonProblem/ClearButton, McpVisibleToolsCard; LifecycleActions DisabledBadge/useLifecycle/countsText.
+
+Backend cross-checks: connector credential schema/read/write/upsert/encryption/audit/exchange reset; connector effective-baseURL/credential fallback; owner target/gate/compare-and-set semantics; connector grant deletion; browser API step-up announcement versus actual wrapper. Existing ownership and connector-source tests were inspected, not executed. Not exhaustively audited: MCP registry/bundle imports; connector-piece installation/OAuth consent; SSE/stdio executor transports; identity assertion/token-exchange configuration internals; all Git/PM connection parent-page forms; secrets delivery/copy behavior; real external integrations, race timing, mobile layout, keyboard/screen-reader or populated browser behavior. Root may promote confidence only for actual matched reproductions.
+
+### Cost and budget source evidence
+
+#### CXR-CST-001 — A failed project-cost read leaves the opened cost-rollup card blank
+
+- **Evidence:** `apps/web/src/views/admin/cost/CostDashboardPage.tsx:177–185` fetches `/v1/projects/:id/costs` in `ProjectRollup`. Render `:218–219` has only loading and data branches, and runs to the card end at `:342` without an error/denied/retry branch. With no cached data after a failed GET, the title and CSV action remain, but no rollup, explanation or retry is shown. Parent fleet table handles its own separate projects-list error correctly, so that handler cannot cover this child query.
+- **Impact/reason:** a FinOps admin opens a project to investigate budget pressure and gets an empty expansion after an outage. It is impossible to distinguish missing spend, denied access and a temporary failure. Collapsing/reopening or reloading is guesswork. This is a specific missing failure path, not a request to show fabricated zero values.
+- **Triage:** Medium, **F6 × S4 = 24** within failed project-cost reads. No security bypass claimed.
+- **Reproduce:** serve a populated `/v1/projects` row, fail its first `/v1/projects/:id/costs` GET with 503, open that row and wait for configured retries to settle. Confirm the card has no loading text, metric, error or Retry. Repeat with 403 and a successful recovered response.
+- **Recommendation:** reuse QueryGate/ErrorState for the rollup query, retain the selected project and show a safe Retry for transient failures. Distinguish a permission change from a retryable outage. Keep CSV errors independent; successful export does not prove the failed on-screen read succeeded.
+- **Acceptance:** 503 gives an inline explanation and recoverable Retry; 403 explains denied access; empty success is explicit; successful data remains visibly scoped to its project. Do not relax membership checks in `apps/gateway/src/projects.ts:2610–2629` to fill the card.
+- **Countercheck:** cached data may remain visible during a background error; test that separately and label it stale if needed. This card asserts the uncached failure specifically. BP-01/03/10/12 apply.
+
+#### CXR-CST-002 — Last month's budget-overage approval can be presented as approved for this month
+
+- **Evidence:** `CostDashboardPage.tsx:248–249` chooses the over-budget badge from `b.overageApproved`. Backend `apps/gateway/src/projects.ts:275–278` explicitly expires a monthly approval when `overageApprovedPeriod` differs from the current period; its response exposes both the historical latch and derived `overageActive` at `:2845–2848`. The UI ignores that effective fact. The ordinary project detail repeats the raw-latch badge at `apps/web/src/views/projects/ProjectDetailPage.tsx:223–224`; `apps/web/src/api/types.ts:550` includes the raw flag but omits effective approval state from this projection's type.
+- **Impact/reason:** after a monthly rollover, an over-budget project may show “overage approved” even though enforcement has resumed and another approval is needed. An admin is told to trust an exception that no longer applies, while a user sees calls refused. The server's strict expiry is correct; the display must match it.
+- **Triage:** Medium, **F5 × S5 = 25** for monthly-budget users revisiting an old overage after rollover. Conditional on the new month reaching its budget, not all project visits.
+- **Reproduce:** return a valid cost payload with monthly current `periodKey`, an older `overageApprovedPeriod`, `overageApproved:true`, `overageActive:false` and current-window spend above budget. Open admin cost rollup and project detail: both currently say overage approved. Compare active-this-month and lifetime approvals.
+- **Recommendation:** type and render the server-derived effective approval state, including its applicable window; retain historical approval as history, not current authority. Explain a new request/approver path when expired. Reuse `overageActive`, not a parallel client lifecycle or date calculation.
+- **Acceptance:** current-month active and expired approvals display differently; lifetime approvals still work; a false effective flag never presents as current permission; rollover does not require weakening or extending the server latch. Server gates remain authoritative and audited.
+- **Countercheck:** the payload already carries the necessary effective fact, so no additional policy query or broader authorization is needed. This is the same honest-expiry principle as ADM-004, but a separate project-budget consumer/contract. BP-01/09/10/12 apply.
+
+#### CXR-CST-003 — Failed identity-mapping saves erase the account/domain and audited reason needed for retry
+
+- **Evidence:** alias save in `CostConsolidationPage.tsx:861–877` unconditionally clears account and reason in `.then`, and domain-rule save `:948–965` unconditionally clears source domain, destination domain and reason. `apps/web/src/views/admin/adminKit.tsx:421–458` (`useApiAction.run`) catches API errors and returns `null`; its promise resolves on failure, so both `.then` callbacks run after a refusal or outage. The backend needs these same inputs (`apps/gateway/src/cost-import.ts:938–949`, `:963–991`). The shared helper already provides enough return information to gate reset; it is the caller ignoring that contract.
+- **Impact/reason:** an administrator carefully maps an imported account to a person and explains why, gets a 400/409/503, and must reconstruct the identity and audit rationale. Re-entry risks a different account/person assertion, which changes historical line attribution when eventually saved. The inline outcome is useful but does not restore the lost fields.
+- **Triage:** Medium, **F6 × S4 = 24** within failed mapping saves.
+- **Reproduce:** open Identity mapping, fill `al-account`, `al-user`, `al-reason`, fail POST mappings with 503 and inspect fields after settle. Repeat `dr-from`, `dr-to`, `dr-reason` for domain-rules. No successful write is necessary.
+- **Recommendation:** reset only after a successful non-null response; retain non-secret draft and associate the error with the attempted mapping. In an uncertain commit outcome, refresh current mapping before inviting another write, rather than blindly replaying. Reuse the existing helper/result contract; link this caller fix to ADM-008's shared success/reset principle rather than pretending it needs a new mutation library.
+- **Acceptance:** failures preserve all mapping inputs and audited reason; success clears the submitted draft only; edits made during a pending request are not cleared by an earlier success; double-submit remains suppressed; no secret data is stored persistently.
+- **Countercheck:** inputs are preserved in several other forms in this repo; do not rewrite `useApiAction` to throw globally and break its existing callers merely to repair these two call sites. BP-03/04/11 apply.
+
+#### CXR-CST-004 — Consolidation's “To” date silently excludes that entire calendar day
+
+- **Evidence:** `CostConsolidationPage.tsx:367–374` converts the date-only To value directly to an ISO instant at UTC midnight. Controls at `:1211–1215` label the range only “From” and “To”, without timezone or exclusive-end explanation. `apps/gateway/src/cost-import.ts:340–346` treats this as an instant bound; `:1363–1366` filters usage with `< end`, and `:1390–1400` does the same for imported period starts. The response includes exact `window.from/to` at `:1510`, but the page does not render that window. Choosing the same From and To also gives invalid_window because end must exceed start.
+- **Impact/reason:** a user selecting November 1 through November 21 can reasonably expect November 21's spend; actual data stops at its starting midnight. This makes on-screen and exported figures look unexpectedly low and makes a single-day review impossible through the intuitive same-day selection. The API's half-open interval is sound; the missing calendar-date contract is the UX gap.
+- **Triage:** Medium, **F7 × S4 = 28** among manually selected calendar ranges. No observed financial loss or production incidence is asserted.
+- **Reproduce:** insert/mock a synthetic metered event at noon UTC on the chosen To day. Inspect the request: To is that day's 00:00Z, and the server excludes the event. Choose the same day in both controls and observe a 400. Compare with To set to the next day.
+- **Recommendation:** deliberately choose and explain the UI contract: make To inclusive for a displayed calendar range and convert to the next day's exclusive boundary, or label it “Before (exclusive)” with the timezone and exact resolved window. Reuse backend instant/window validation, not a second ledger aggregator. Validate reversed/empty ranges in the form without crashing the page. Keep CSV and visible range identical.
+- **Acceptance:** the displayed inclusion rule, timezone, request and download agree; single-day review works under the selected contract; month/year boundaries and timezone/DST behavior are tested; no extra data scope is exposed. Backend bounds and authorization remain unchanged.
+- **Countercheck:** if the product intentionally uses UTC-exclusive date controls, clear wording and visible resolved bounds may be enough; do not silently change old saved/export API semantics. BP-01/03/12 apply.
+
+#### CXR-CST-005 — Removing an identity alias/domain rule immediately reattributes all stored lines without an upfront consequence review
+
+- **Evidence:** `CostConsolidationPage.tsx:901–916` and `:985–1000` send mapping/domain-rule DELETE directly from Remove. No confirmation, impact preview or pending record-scoped reason is offered. Backend `apps/gateway/src/cost-import.ts:952–960` and `:994–1002` deletes the mapping then runs `reresolveAll`, returning changed/scanned counts. The UI discards those counts and supplies only a success sentence after the operation. `reresolveAll` at `:847–875` scans stored imported lines and changes their resolved-person/mapping fields when resolution changes; the consolidated view then derives the person/cost-centre grouping from that identity.
+- **Impact/reason:** an accidental click can change past financial attribution across multiple imports; a rule's effect is much wider than deleting one visible table row. The backend audit retains evidence, and the financial line amounts are not deleted, but a future consolidated report can move costs between people or cost centers. Users need to know that consequence before committing, and the actual impact afterward.
+- **Triage:** Medium, **F3 × S5 = 15**. Rare-ish administrative removal, material attribution impact.
+- **Reproduce:** return an alias/domain rule used by populated synthetic imports. Intercept/refuse DELETE and click Remove once; observe immediate request/no confirmation. Independently confirm the backend re-resolution trace above. Do not actually remove any mapping for this review.
+- **Recommendation:** reuse the existing consequential-delete confirmation, naming the specific rule and warning that stored imports will be re-resolved; show authorized affected counts if a bounded preview is feasible, and show actual `reresolved.changed/scanned` after success. Keep a harmless unused mapping lightweight. Do not weaken ambiguity-to-unattributed behavior or rewrite historical monetary amounts to make the removal look harmless.
+- **Acceptance:** Cancel sends no mutation; destructive action names the intended mapping and scoped consequence; stale/changed mapping is handled honestly; success reports actual affected-line counts; audit survives and financial amount/currency fields remain unchanged. No new parallel lifecycle is needed.
+- **Countercheck:** recreating a mapping can restore future attribution, but is not a substitute for preventing an unintended globally consequential click. This shares the consequence-review principle with REV-002 but concerns reattribution, not report-history deletion. BP-01/03/09/12 apply.
+
+### Cost patterns, function coverage and limits
+
+- Consolidation deliberately keeps metered and imported cost in separate columns and never renders a blended total (`BasisPair`, expandable subject rows, backend `buildConsolidated`). Mixed currency shows “no single figure”; unpriced metered events are disclosed instead of valued at zero.
+- Adapter limits, operator assertions, currency assumptions and unresolved identities are explained before/after importing. Refused rows retain line numbers; duplicate exact-byte imports are refused; result counts stay distinct. No evidence here supports weakening scan, deduplication, attribution or parsing bounds.
+- Batch revocation in `CostImportsPages` uses `ReasonModal`, explains that lines are withdrawn while the batch record remains and requires an audited reason. That is an existing pattern for CST-005 to reuse. This assessor did not execute it.
+- Import history and line detail use the shared bounded list/export contract. Detail distinguishes revoked/no-lines and refused batches, and exposes source hash/provenance.
+- Modality bars distinguish provider-unsplit usage; energy estimates preserve unknown values; initiatives explain their reporting-only nature and block deletion while projects still roll up to them. Initiatives create clears its draft only on confirmed success.
+- The cost rollup backend checks project membership for non-admins. The consolidated self route checks that caller matches target; the fleet route is administrative. Do not expose fleet data to solve any UI issue.
+- Spend forecast displays method, interval, insufficient-data explanation, assumptions and limits. That is better than a confidence-free projection. Optimization keeps estimated/measured savings distinct and exposes actual ledger lists; a usage-totals outage has an explicit recovery state.
+
+**Inspected functions/sections:** CostDashboardPage table/tab/rollup selection, ProjectRollup query/render/budget badge/charts/export, modalityBars, UnattributedCard, CreateProjectCard/EditProjectCard composition, InitiativesCard create/list/delete; CostConsolidationPage BasisPair, query keys/date construction, readFile/readRosterFile, submitImport/submitRoster, refreshAll, alias/domain/cost-center forms and removal, subject rendering/staleness/reconciliation status; CostImportsPage revokeBatch/list/filter, CostImportLinesPage query/refusal/list composition, CostImportDetail summary/refusal and list contracts; OptimizationPage cost/usage queries, totals, exports and error states; SpendMonitorPage forecast request/result/status, policy portion; corresponding cost-import resolveWindow/buildConsolidated/mapping/delete/re-resolution, projects overageActive/cost response/membership. Existing tests were searched, not executed.
+
+**Not completed:** full BillingPage/reconciliation/BillingHistory/energy implementation, all spend-monitor transitions, import parsing/roster paths line by line, budgets under concurrent calls, every role/browser/keyboard/mobile/screen-reader state, a real export/download, new-pending-migration boot or external billing source. Do not label these pages fully reviewed from this source contribution. A stale import/forecast result after input change was also noticed, but overlaps existing ADM-005's result-to-input binding principle and is not promoted as a sixth card without runtime/reasoned prioritization.
+
+## Deep audit — iteration 4, 2026-11-22
+
+### Recommendations and evidence
+
+Source remains main `da16d6bd23109d477102c0ec2a534f81d62a6917`. This batch adds **seven** evidence-backed feedback cards (APR-001..003 and WFL-001..004), bringing the ledger to **53**. Claude had not responded on the review PR at the opening check. No agreement, implementation or closure is inferred from that silence.
+
+**Prioritize the completion contract:** show the recorded approval and any downstream failure separately; refresh authoritative queue/quorum state before inviting another decision; give only the caller's permitted workflow actions; preserve authored definitions during metadata refresh. For execution recovery, distinguish running, scheduled retry, exhausted and blocked prerequisites before offering the existing server recovery action. These are concrete usability improvements with existing security/state machinery, not reasons to relax all checks.
+
+The final targeted Chromium rerun passed **6/6 in 6.4 seconds**. One approval test covers two observations, so this is seven matched defect observations: six among the new cards and the older INT-005. Two initial probe selectors were overbroad/case-mismatched and corrected; those harness errors are not product findings. [Sanitized browser evidence](evidence/2026-11-22/iteration4-browser.json) contains no credentials and no successful product mutation. The mocked approval POST returned a durable decided row plus a post-commit execution error; credential/owner/mapping/grant records were not modified. Entitlement Remove was opened for inspection but never confirmed.
+
+| Card | Executed observation | What remains unproven |
+| --- | --- | --- |
+| CXR-APR-001 | A successful ordinary workflow decision left queue reads unchanged (2→2), with its old pending approve control still available. | Signed partial-quorum and intake consumers were source-inspected, not exercised by this probe. |
+| CXR-APR-002 | The same 200 response's `executionError` was absent while “Decision recorded” appeared. | Inbox/intake consumers, snapshot/mirror variants and real post-commit failure were not executed. |
+| CXR-WFL-001 | A visible lastError coexisted with “a nested run or git operation is in flight” and no Retry/Resume control. | Actual executor recovery, retry scheduling and claims/idempotency were not run. LastError alone does not authorize a retry. |
+| CXR-WFL-002 | Nonempty intake description plus empty type enumeration showed “no routable change types” and disabled Start. | The mock does not establish a database rule; schema/matcher probes below and source traces establish the legal non-type route. |
+| CXR-WFL-003 | A non-admin participant, different from the initiator, received an enabled Finish planning control and its mocked 403 refusal. | Server role enforcement is established by source, not a new real-account test; other stage controls remain source-only. |
+| CXR-WFL-004 | Resolving a delayed Git-connection read replaced an edited, valid plan-starter JSON definition without submission. | Other starter/refetch/rename races remain acceptance work. |
+| CXR-INT-005 (existing) | A's grant remained visible/actionable under B's selected identity, both immediately and after B's failed lookup; Remove's confirmation still said “this user.” | MCP parity and delayed-response races remain source-only; no grant DELETE was confirmed or sent. |
+
+[Pure compiled routing probes](evidence/2026-11-22/iteration4-routing.json) supply the missing counterexample: `createAssignmentRuleSchema` accepts a rule with a path predicate and null type; `matchTemplates` matches it. A second case with two same-type/different-target rules selects only the matching target. The metadata builder skips null types and enumerates same-type names without those predicates. This proves the enumeration is not a complete route evaluator; it does not simulate a full compliance-cascade start or a production database.
+
+### Research and comparison applied to this batch
+
+Revisited the [Camunda user-task lifecycle documentation](https://docs.camunda.io/docs/apis-tools/frontend-development/task-applications/user-task-lifecycle/) and [WCAG2.2 status messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html) on November 22; both returned 200. Camunda describes assignment/start/completion/interruption separately, explicitly calls for preserving intermediate form data when users leave, and distinguishes engine lifecycle events from application-specific actions. Compared with regulAIt's existing machinery, the useful lesson is to expose truthful task/attempt state and persist suitable drafts; adopting Camunda's engine or copying a separate lifecycle is unnecessary. The WCAG criterion supports programmatically available status outcomes, while semantic accuracy still requires telling a user “decision recorded; execution failed” rather than collapsing the two facts. This is a public-document comparison, not vendor runtime or screen-reader testing.
+
+A fresh n8n execution-page retrieval returned 403 and two guessed raw documentation paths returned 404; no new claim relies on those pages. The verified earlier error-handling comparison remains dated in the initial research record. No new library/capability was implemented; existing shared queries, outcomes, matcher and lifecycle helpers are the proposed reuse points.
+
+### Security tuning and friction: the precise boundary
+
+The approval signature helper already supports a strict-default passkey mode plus server-configured step-up/off modes as audited policy choices. That is an existing product capability, not a recommendation to silently switch it off. Clearly name the effective mode, affected approval scope and loss of assurance before an administrator deliberately relaxes it; use existing scope/reason/audit controls, and bounded exceptions only where the server actually supports them. Improve passkey cancellation/recovery and remove redundant/stranded ceremonies first. Do not invent a “trusted admin” client bypass.
+
+Distinguish **optional approval-ceremony policy** from verifying the integrity of signed feeds, updates or webhooks. This narrows the earlier general wording about mandatory signatures: a policy-authorized tool-approval mode can differ, but an object that claims to be signed must still be verified under its declared trust contract. Required authorization, principal separation/quorum under the effective policy, replay/expiry checks and the durable decision/audit boundary remain server-enforced. Retrying an already committed approval to recover its executor is never the proposed tuning option.
+
+### Approvals source evidence
+
+#### CXR-APR-001 — Successful decisions in the administrative queue leave the old pending row and controls in place
+
+- **Source/function:** `apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx:112–115` keys the queue under `["approvals", status, objectType, approver]`. Its `decide` function at `:128–138` and `:155–158` runs both tool-call and ordinary decisions through `useAction`. That helper invalidates only the `["admin"]` prefix (`apps/web/src/views/admin/adminKit.tsx:147–150,358–381`). Neither path invalidates the approvals prefix, calls `q.refetch`, nor applies the returned status/quorum to the row. The generic API client does not invalidate queries (`api/client.ts:355`). The application's default also disables window-focus refetch (`App.tsx:171`), so merely refocusing does not repair it.
+- **Task/impact/reason:** an administrator records an approval or denial, sees “Decision recorded,” but still sees the item pending with live approve/deny controls. A successful partial quorum remains at its old count and lacks the new `myDecision`. This looks like an unrecorded decision and invites a duplicate attempt. The server's already-decided/duplicate-approver protections are a useful backstop, but the user should not discover success by receiving a refusal on a second click.
+- **Triage:** High, **F9 × S4 = 36** within successful non-intake decisions through this page. No double-decision persistence or authorization bypass is claimed.
+- **Reproduce:** at `/ui/admin/approvals`, return one ordinary pending approval whose named approver is the current admin. Have POST `/v1/approvals/:id/decide` succeed with the decided row, and change the mock's next GET to an empty pending queue. Click approve. Count queue GETs and inspect the still-pending row/buttons. Repeat a tool-call partial quorum in the audited-relaxation fixture without pretending that fixture is the shipped default. Do not create actual decisions for a read-only review.
+- **Recommendation/reuse:** invalidate the existing `["approvals"]` namespace and settle the queue after a durable decision; reuse the Inbox/ReviewPanel pattern. Lock the decided item's controls while its authoritative status is uncertain. Preserve the exact identity of the submitted row and its reason; a post-save refresh failure must say “decision recorded; queue refresh unavailable,” not imply the decision failed or blindly replay it.
+- **Acceptance:** final decisions leave the pending view; partial quorums show the new count and prevent the same principal deciding again; nav/workbench counts refresh; failed decision preserves reason; failed refresh retains an honest stale/read-only state. No broad permission change, extra security bypass, second lifecycle helper or global query invalidation is needed.
+- **Counterevidence/limits:** intake sign-offs use `ReviewPanel` and explicitly invalidate approvals, with admin `onDecided={() => q.refetch()}` (`ApprovalsAdminPage.tsx:247`), so do not claim every row/path is stale. Inbox's ordinary decisions invalidate the correct prefix (`InboxPage.tsx:199–201`). Route unmount/remount or a filter change can later recover the data; neither is an adequate completion signal. BP-01/03/11/12 apply.
+
+#### CXR-APR-002 — A recorded approval can hide downstream execution or evidence failures behind a success-only message
+
+- **Source/function:** gateway `decideOneApproval` deliberately distinguishes a durable decision from later side effects (`apps/gateway/src/app.ts:5752–5785`). It catches post-commit execution exceptions into `executionError`, propagates structured `executionWarning`, and returns snapshot/mirror outcomes (`aiBomSnapshotWarning`, `pmMirror`) beside the decided row. Inbox's ordinary `decide` awaits POST but discards its body and only toasts Approved/Denied (`apps/web/src/views/inbox/InboxPage.tsx:193–201`). Intake `ReviewPanel.submit` similarly discards it, toasts the decision and closes (`views/approvals/ReviewPanel.tsx:230–240`). Admin's ordinary path passes the object to `useAction`, which discards object content and emits “Decision recorded” (`ApprovalsAdminPage.tsx:155–158`, `adminKit.tsx:369–380`).
+- **Task/impact/reason:** an approver needs to know both that their decision is saved and whether the expected operation progressed. If approval commits but the workflow executor or required evidence snapshot fails, a success-only message can leave them believing work resumed. Retrying the approval is the wrong remedy because it already committed; the user needs the affected execution/evidence record and its permitted recovery route. A mirror-only problem is less severe than execution failure and must be described separately.
+- **Triage:** Medium, **F4 × S6 = 24** within decisions that encounter downstream failures. Source confirms the hidden response contract; no real executor/provider outage was induced. No claim that the approval itself was lost.
+- **Reproduce:** ordinary Inbox approval, POST200 with decided status plus `executionError: "Synthetic executor unavailable"`; refetch removes the pending row. Observe the success toast and absence of a downstream warning/recovery link. Separately provide structured execution/snapshot warnings and a failed mirror result; do not treat every `pmMirror` value as failure. Test the same response in the intake drawer/admin page after the simple branch is proven.
+- **Recommendation/reuse:** use a shared typed decision outcome adapter/presenter to retain the recorded-decision fact while mapping post-commit failures to safe, specific warnings. Link to the authorized workflow/run/evidence record and the existing retry/resume action where available; otherwise name the operator path. Do not display arbitrary raw upstream exception text or recommend re-sending an already-committed decision. Distinguish execution blocked, evidence incomplete and external mirror delayed.
+- **Acceptance:** ordinary success remains concise; a200 with execution/snapshot failure produces a visible persistent or recoverable warning after the row leaves; mirror-only failure says the approval remains valid; no automatic duplicate decision/side effect; security-sensitive details remain redacted/scoped. Existing audit and durable transaction semantics stay intact.
+- **Counterevidence/limits:** “Approved” or “Decision recorded” is technically true—the defect is omitted completion information, not a false persisted approval. Backend execution machinery may separately record failure events; this card concerns the decision surface failing to carry the already-returned warning to its user. Other workflow pages might expose details after navigation; that does not replace a clear next step here. BP-01/03/11/12 apply.
+
+#### CXR-APR-003 — The fleet approval queue cannot reach older pending items once a narrow slice still exceeds 100
+
+- **Source/function:** admin `queueUrl` sends only status/kind/approver (`ApprovalsAdminPage.tsx:103–115`), with no list-contract paging or oldest-first control. The response type ignores `total`/`hasMore`; the only cap message is “100 shown (the cap — narrow further)” (`:197–199`). Table sorting is client-side over those rows. Backend's legacy branch returns the newest100 by default plus true total/hasMore (`apps/gateway/src/app.ts:4867–4888`, `list-queries.ts:11,18–24`), whereas the same route already supports the bounded shared list contract through `parseListPage`/`approvalsReader` (`app.ts:4855–4864,4825–4839`).
+- **Task/impact/reason:** for101+ pending items of the same kind and approver, all three offered filters are already as narrow as possible. An older unresolved item is absent from the admin's fleet view, and “narrow further” is not an available solution. Client-side Requested sorting cannot fetch it. This can starve the longest-waiting decision when a busy queue keeps receiving new requests.
+- **Triage:** Medium, **F7 × S5 = 35**, conditional on heavy slices exceeding100 pending rows. It is a concrete work-queue consumer of the bounded-list principle, related to REV-003 but not another copy of the risk-register API gap: approvals already has the needed paginated contract.
+- **Reproduce:** supply100 returned pending rows with `total:101,hasMore:true`, all one kind/approver. Confirm no next-page or oldest-first control and no accessible101st item through those filters. The backend source establishes newest-first selection. An integration fixture can later verify the actual101-row database boundary; a mock alone cannot prove which row the SQL omitted.
+- **Recommendation/reuse:** adopt the existing shared list contract/DataList and approval visibility predicate, exposing totals/continuation and an operational oldest-first default or explicit ordering. Keep named/delegated/signed decision controls and resource-scoped drafts. An interim honest link to the existing oldest-first Inbox can help an eligible approver, but is not complete fleet browsing. Do not remove the server bound or expand visibility to make the list appear complete.
+- **Acceptance:** all101+ permitted same-kind/same-approver rows are reachable without deciding unrelated items first; old pending work can be found; total and rows have identical visibility/filter scope; sorting/paging is server-backed; forbidden rows cannot leak through counts/export. Signed decisions remain individual and action-bound.
+- **Counterevidence/limits:** the normal Inbox explicitly requests pending oldest-first and exposes capped-scope wording (`api/approvalQueue.ts:29`, `approvalQueuePages.ts:38–42`); recently decided uses the shared list contract. This is specifically the administrative operational queue. Its present cap warning is honest about partial display, so do not claim it falsely says “all101.” The gap is no workable continuation once the filters cannot narrow further. BP-01/10/12 apply.
+
+### Approval patterns to retain
+
+- Inbox keeps reasons/errors keyed by approval ID rather than one anonymous reason; partial quorum results get a distinct waiting message and correct approvals invalidation.
+- Signature handling defaults absent mode to passkey, signs the exact server challenge, maps cancellation/expiry/already-used to understandable retry text and forbids own/duplicate tool decisions server-side. The UI exposes an audited signing-off relaxation honestly; no recommendation here changes the strict default or individual proof binding.
+- McpActionReview displays exact target, scope, expiry and payload/fingerprints, re-evaluates expiry every second while open and blocks approval of expired/unreviewable actions while leaving denial available. The backend remains authoritative.
+- Intake ReviewPanel distinguishes outcomes, preserves failed drafts, validates conditions/risk acceptance, blocks own proposals, shows role membership/delegation and explicitly invalidates approvals/governance after success. Required risk acceptance remains server-checked.
+- Inbox due summaries label the device clock and subset scope. Failed annotation reads are distinct from zero tasks, and genuine403/404 absence remains quiet.
+- Saved views are bookmarks, not permissions; their consequence text says so. Their successful save clears only after a non-null result. Delegation creation/end reuse action-bound step-up and server authorization; ending one has a clear confirmation.
+
+### Approval function coverage and limits
+
+Read ApprovalsAdminPage queue query/filters/decide/table controls; SavedViewsCard describe/save/apply/remove; delegationState/windowText/DelegationsCard creation/end/list. Inbox approvalLabel/approvalTarget, pending/annotation/instance queries, decide/itemView, drawer evidence and decision rendering, summary/cap/decided history, ReasonWarning/ItemBadges/IntakeTier, MergeGateEvidence and ConflictPreview. Shared approvalQueue/approvalQueuePages helpers, McpActionReview open/expiry/focus/payload rendering, QuorumProgress, signedDecision helpers and error mapping, ReviewPanel query/role/draft/submit/evidence/outcome paths, reviewDecision validation/body/error/position helpers and selected metric-condition contract. Cross-checked gateway approval list legacy/shared routing, decided response, condition validation, use-case read eligibility and the signatures module's already-decided guard. Existing tests were searched/read, not run.
+
+Not completed: full workbench assignment/bulk/SLA administration, every signature/provider/device path, native passkey dialog, actual delegated decision, all relation-specific resume/rollback effects, every condition/risk-policy combination, session/role expiry races, mobile/keyboard/screen-reader runtime or new C3 priority/widget branch. No conclusions are drawn about unmerged lanes. ReviewPanel's overview-failure copy and delegation timezone presentation were noticed but not promoted as extra cards without stronger runtime prioritization.
+
+### Workflow source evidence
+
+#### CXR-WFL-001 — A failed, manually retryable execution still looks “in flight” and offers no recovery action
+
+- **Evidence/function:** `apps/web/src/views/workflows/WorkflowDetailPage.tsx:279–306` renders every `awaiting_execution` without pending named checks as “executing — a nested run or git operation is in flight.” It does show `context.lastError`, but provides only an optional “watch the run” link and no Retry/Resume/Advance action in this branch. Server `apps/gateway/src/workflows.ts:1174–1178,1234–1251` deliberately leaves an aborted nested run as a recoverable execution failure. `/advance` at `:4183–4210` specifically re-runs a failed git/deployment/rollback/build/named-check executor, rather than bypassing it. Automatic retry scheduling at `:472–527` is optional and can be exhausted or unavailable; its own audit wording then says it waits for `/advance`. The kernel test at `packages/workflow-kernel/src/index.test.ts:963–970` confirms failed execution remains `awaiting_execution` (read, not executed here).
+- **User impact/reason:** the initiating user sees a red failure reason beside a current-tense claim that work is still running. Once retries are exhausted/unconfigured and prerequisites are fixed, there is no ordinary UI action to continue the workflow. A nested run link is inspection, not the supported retry. This strands legitimate work and can tempt an operator to relax checks or restart the entire workflow unnecessarily.
+- **Triage:** High, **F7 × S5 =35** within recoverable executor failures requiring manual intervention. This is not a claim that every awaiting execution is failed, that all failures are retryable, or that automatic retries never work.
+- **Reproduce:** return an initiator/admin workflow in `awaiting_execution` on a git-operation or nested-build stage, with `context.lastError` describing an aborted/failed attempt and no future retry scheduled. Inspect the status text and recovery controls. Compare genuinely running, automatic-retry scheduled, exhausted, pending-check and signing-key-refused cases. Browser mocking proves presentation; a separate real-gateway probe must prove safe actual retry.
+- **Recommendation/tradeoff:** expose and render authoritative execution/retry state, next permitted action and whether an attempt is running, scheduled, blocked or exhausted. Offer a scoped Retry only when the server permits it, reusing existing `/advance`, execution-claim/idempotency and E29 lifecycle conventions. Explain the failed prerequisite and preserve the workflow/stage identity. Do not equate `lastError` alone with permission to retry, bypass required check results, ignore signing-key refusal or create a second executor/state machine.
+- **Acceptance/countercheck:** an actually running attempt remains visibly running and cannot be duplicated; scheduled retry shows its wait; exhausted/unconfigured retry offers the permitted manual recovery; a proof/prerequisite refusal is actionable and truthful; successful continuation refreshes stage status. Existing server claim/state checks, stale-run guards, audit and authorization stay intact. Automatic retries already exist, so adding another queue is the wrong remedy.
+
+#### CXR-WFL-002 — The intake's “routable types” and definite route preview do not represent the full routing contract
+
+- **Evidence/function:** `apps/gateway/src/workflows.ts:4683–4719` (`intakeRoutes`) reads only assignment-rule `changeType` and `templateId`, skips every null-changeType rule at `:4707`, and groups names by type alone. `WorkflowsPage.tsx:127–141,163–165` interprets an empty type list as “no routable change types — an admin must add an assignment rule” and disables Start. However, `packages/shared/src/index.ts:1676–1700` explicitly accepts null changeType with any other routing condition, and `packages/workflow-kernel/src/index.ts:703–725` (`matchTemplates`) explicitly permits a null changeType condition and ANDs paths, environment, target system, roles and sensitivity. Backend start at `workflows.ts:3962–3987` applies that full matcher then unions compliance-cascade templates, which can start a workflow even without a matching type-specific rule. The frontend's definite “→ runs the … workflow(s)” at `WorkflowsPage.tsx:172–175` depends only on type metadata (`:61–77`), although Target system and Bill to can change actual matching. Intake silently fixes paths to `['src/']` and environment to `staging` (`:87–94`).
+- **User impact/reason:** valid path-only or classified-project routes can exist while the ordinary intake insists there is no route and disables the task. Conversely, a type shared by several rules is presented as definitely running all named templates even when their target/environment/role/sensitivity predicates do not match. A user cannot reliably preview which sign-offs will govern the change or describe an environment/path-dependent change through the current form. The server still enforces the real rules; this is availability and misleading-preview behavior, not a bypass.
+- **Triage:** High, **F6 × S5 =30** for deployments using the advertised multi-dimensional/cascade routing. Conditional on those rule shapes, not every start.
+- **Reproduce:** configure a valid path-only rule with null changeType matching `src/**` and no type-specific rule. A direct start with a suitable change can match, but list metadata has no types and the UI cannot submit. Separately use two same-type rules with different targets/projects: changing Target system/Bill to leaves the definite preview unchanged. No production or actual workflow mutation is necessary for a mock presentation probe; source/pure-function checks establish the matcher distinction.
+- **Recommendation/tradeoff:** define a server-evaluated intake/preview contract for the actual change dimensions and effective project/caller; keep sensitive rule internals and server-derived role/classification facts private. Expose required editable change facts or explicitly disclose fixed scope; represent incomplete/unknown/candidate routing honestly until a valid preview exists. Do not treat an empty type enumeration as proof no valid route exists. Reuse the full matcher/cascade logic rather than invent a parallel client matcher or let callers pick an arbitrary template.
+- **Acceptance/countercheck:** path-only and cascade-only eligible changes remain startable through ordinary UI; displayed effective templates change with relevant input; retired/unmatched routes are explained before submit; backend remains authoritative on submission and rechecks changes since preview. Type-specific simple deployments retain a short form. Existing list metadata intentionally avoids leaking raw rules, and that privacy boundary should remain.
+
+#### CXR-WFL-003 — Read-only approvers are shown workflow-driving controls that the server necessarily refuses
+
+- **Evidence/function:** backend `workflows.ts:4020–4058` allows named approvers (including past signers) and active delegates of a pending approver to read an instance only when `allowParticipant` is requested (the detail GET does so explicitly at `:4598–4601`); comments and all driving-route calls deliberately preserve admin/initiator authority. `/artifacts` at `:4073–4077` and `/advance` at `:4183–4188` call the strict loader. `WorkflowDetailPage.tsx` has no corresponding can-drive/capabilities check: it renders Finish planning at `:204–223`, Submit for sign-off `:228–252`, trigger advancement `:263–277`, mark-passing/recheck `:343–390`, and deployment override `:436–462` solely from workflow status. `me` is used to decide whether an attestation reason is required, not whether the caller may perform the action.
+- **User impact/reason:** an approver legitimately following a workflow link to review/sign off sees apparently available operational controls. Clicking one returns a generic instance access refusal even though the same instance is visibly readable. This blurs the distinction between reviewing and initiating, adds unsuccessful actions and makes the authorization model look inconsistent. Do not remedy it by granting approvers drive permission.
+- **Triage:** Medium, **F7 × S3 =21** for read-only participants visiting a blocked/actionable workflow stage. No authorization bypass; the server is correctly refusing.
+- **Reproduce:** sign in as a named non-admin approver whose ID differs from the initiator. Return a readable `blocked_on_plan` or artifact/check/deploy instance, then inspect/click the displayed drive action and have its route return the actual 403 contract. Compare the same instance for initiator/admin. A mock test alone does not prove server authorization; source trace above establishes intended capability separation.
+- **Recommendation/tradeoff:** expose safe effective action capabilities in detail or consistently derive appropriate UI affordances from the already known authenticated admin/initiator facts, while the server rechecks every mutation. Explain the participant's read/review role and link to the correct inbox decision, without expanding rights or hiding the underlying workflow evidence. Keep per-action stale authority handling.
+- **Acceptance/countercheck:** approver/delegate readers can inspect relevant evidence and reach their authorized approval action; they are not invited to submit artifacts, attest checks or advance execution. Initiators/admins keep permitted controls; permission changes mid-session produce a clear refusal. Avoid claiming these readers lack all access—the GET permission is intentional and useful.
+
+#### CXR-WFL-004 — An asynchronous Git-connection read can overwrite an edited template definition
+
+- **Evidence/function:** `WorkflowTemplatesPage.tsx:441–444` (`AuthorCard`) chooses `connName` from the first loaded connection or `demo-git`. Its `starters` memo depends on that name at `:476`; effect `:482–485` replaces `json` whenever `starters` changes, regardless of whether the author has edited the textarea. A late `/v1/git/connections` response therefore changes the memo and overwrites the current definition. This even affects the default `plan` starter, whose definition contains no Git connection. User edits are stored directly at `:541–545` without a dirty guard. The parent query at `:101–104` is independent and need not settle before editing is allowed.
+- **User impact/reason:** an admin begins authoring a custom stage chain on a slow connection; when an unrelated connection lookup finishes, the page silently restores starter JSON and erases the user's changes. The name remains, so saving can create a starter-shaped template under the intended custom name if the reset goes unnoticed. This is in-place asynchronous draft replacement, separate from generic modal dismissal or an intentional “Start from” change.
+- **Triage:** Medium, **F5 × S5 =25** for editing before a delayed/changed connection read. The race is conditional; no measured production incidence is claimed.
+- **Reproduce:** hold `GET /v1/git/connections`, allow other template-page reads to succeed, wait for the default JSON editor, replace its value with distinctive valid custom content, then resolve connections with a first name different from the fallback. Inspect Definition(JSON): the custom edit is replaced. No template POST is needed. Repeat for a later first-connection rename/refetch and an explicit starter switch.
+- **Recommendation/tradeoff:** initialize the starter once, or only while the draft is pristine; rebuild/reset content only after an intentional user action, with a dirty-change review when warranted. Populate a connection choice explicitly when a Git starter needs it rather than rebuilding every starter after metadata refresh. Preserve authored JSON across query refreshes; never auto-fill secrets into drafts.
+- **Acceptance/countercheck:** late connection data and background refetch cannot change an edited definition; a pristine relevant starter may receive its intended default; deliberate reset/switch has clear consequences and can be cancelled; submitted content is exactly the reviewed draft. Server validation already rejects malformed definitions, but it cannot detect a semantically valid starter replacing the user's intended design.
+
+### Workflow patterns, function coverage and limits
+
+- Workflow detail uses RecordError with Retry and a back link for failed primary reads; named pending checks are described as missing results, not passing. Failed-check self-attestation requires an explanation, sends the current round and labels self-reported results in the recorded check list.
+- Deployment handoff explains that it attests an out-of-band action, distinguishes initiator reason requirements, and keeps dry-run deployment visibly distinct. A new review must not turn the handoff into an ungoverned deployment route.
+- Abort uses a named consequence dialog, says side effects are not undone, keeps inline refusal information and disables its confirm while pending. Terminal states are checked on the server. Existing draft/pending-dismiss shared findings still apply; this pass does not duplicate them as new cards.
+- Template retirement explains snapshots and requires an audited reason. Intake-template creation/retirement uses the existing decision-regression preview; ordinary assignment-rule deletion confirms routing consequences. In-flight definitions are snapshotted rather than silently edited.
+- Intake start has a real busy state and preserves non-secret fields on failure, unlike the already documented detail-action pending gap UIW-08.
+- Server execution retry reuses state/claim checks, stale nested-run protection and the original executor; signing-key/completion guards remain enforced. Optional automatic retries already exist. Recovery UX should expose those facts, not reimplement them.
+
+**Functions/sections inspected:** WorkflowsPage columns/onRows/intake metadata/effective type/start/project and target fields/DataList/Abort composition; workflowAbort canAbort/abortInstance/AbortWorkflowDialog; WorkflowDetailPage query/error/act, stage rail, plan/artifact/approval/trigger/execution/check/deploy/rollback cards, artifact/recorded-check/delivery display and PM/decision-card composition; WorkflowTemplatesPage template list/retirement, conds, useIntakePreview, DeleteRuleButton, GalleryCard creation, AuthorCard starter memo/effect/submit and RuleForm; gateway intakeRoutes/list/start matcher+cascade, loadInstanceFor read participant versus driving routes, advance dispatch, nested completion/failed-run handling, retry scheduling/claims; workflow-kernel matchTemplates and selected retry tests (read, not run).
+
+**Limits:** no real workflow/provider/run/approval/deployment/retry executed. Parent may promote confidence only for actual matched runtime branches. Full editor accessibility/mobile/nativeIMEs, all template-stage variants, late-response/concurrent-authority races, compensation internals and queue execution are not exhaustively reviewed. Existing UIW-07/08 cover stale plan-only wording and generic pending suppression; they remain separate earlier cards. Async template/gallery errors appearing as empty were noticed but overlap the existing unknown/empty family and are not promoted beyond these four prioritized cards.
+
+## Deep audit — iteration 5, 2026-11-22
+
+### Recommendations and tested boundaries
+
+Assessed source remains main `da16d6bd23109d477102c0ec2a534f81d62a6917`. This pass adds **eight** feedback cards: WBK-001..005 and IDM-001..003, bringing the ledger to **61**. They cover the review workbench and user/role/team administration. Several share existing unknown-state, pending-action and missing-proof causes; 61 cards do not mean 61 independent vulnerabilities. At the opening PR check Claude had not replied, so all new dispositions remain reported, awaiting a reasoned response.
+
+**Priorities:** keep the last batch's per-item outcome inspectable; prevent conflicting decisions while a batch is pending; report effective access after direct-role removal; complete the existing conditional step-up; distinguish unknown identity/workload counts from empty or last-admin facts. Existing safeguards often work correctly below an incomplete UI contract.
+
+**Important counterevidence:** the workbench explicitly refreshes its pending queue after claim, sweep and bulk writes (`refreshAll`, lines 144–146 and callers). It is a positive example for APR-001, not an additional stale-cache consumer. The last-admin lock, group-owned role reconciliation and wider-approver-pool proof are intentional server safeguards. Fix the explanation/recovery path rather than removing them.
+
+The final Chromium run passed **9/9 in 8.4 seconds**. Each named probe uses synthetic API fixtures and a local preview. No actual approval, assignment, session, SLA policy or grant was changed/deleted. The mixed-origin DELETE success was a mocked response; other protected/conflicting writes were mocked and refused. Earlier fixture matching accidentally failed a session list as well as its separate counts, and a button selector used the wrong caption; both were corrected before the final run. These setup failures are not product findings. [Sanitized browser evidence](evidence/2026-11-22/iteration5-browser.json) records the observations without credentials, emails or real identities.
+
+| Card | Executed observation | Boundary / countercheck |
+| --- | --- | --- |
+| CXR-WBK-001 | Workload 503 displayed “No open approvals” and “Nothing is waiting on a human,” despite one pending queue item; no workload Retry appeared. | Policies/rules and the pending queue were separate successful reads. |
+| CXR-WBK-002 | Bulk response returned a refused item's reason, then the refreshed queue became empty and that result disappeared; aggregate refusal count remained. | No audit loss asserted; source proves the results table is nested in the nonempty-queue branch. |
+| CXR-WBK-003 | After team→reassign, the browser showed user as the kind while retaining the team target; POST still contained team. | Shared-schema probe rejects that body and accepts a user-kind control. No policy saved. |
+| CXR-WBK-004 | Sweep help categorically said no in-process scheduler exists. | Actual scheduler configuration/health was not measured; source proves the optional shared job exists. |
+| CXR-WBK-005 | While Bulk approve was pending and disabled, Bulk deny stayed enabled and sent a second, opposing request for the same selected item. | Both calls intercepted/refused. Server state/eligibility guards remain the authority; no double persistence is claimed. |
+| CXR-IDM-001 | Mixed direct/group holder removal promised complete loss, then mocked `stillHeldViaGroup:true` produced only “Role unassigned.” | Holder-origin column remains useful; the response-specific continued-access explanation is missing. |
+| CXR-IDM-002 | Conditional-proof DELETE received required-step-up refusal with zero proof-options requests or dialog. | The real server condition is a direct-only removal that widens the signer pool; ordinary removals need not gain ceremony. |
+| CXR-IDM-003 | Failed active-admin count produced a last-admin claim/disabled Demote; failed session counts showed zero beside a visible live session. | Individual Revoke remained enabled. This is count honesty/recovery, not permission to remove safety locks. |
+
+[SLA validation evidence](evidence/2026-11-22/iteration5-sla-validation.json) comes from the existing compiled shared schema, without a database or policy write. The server's user-only reassignment rule is correct; dependent UI state should normalize to it. The nine tests cover eight cards because IDM-003 has two separately tested count consumers. Mock reproductions do not establish actual group sync, real signer-pool takeover, scheduled execution, signature-device behavior or live incident response.
+
+### Research and competition comparison
+
+Retrieved November 22 before final recommendations:
+
+- [Keycloak server administration](https://www.keycloak.org/docs/latest/server_admin/index.html), HTTP 200: users inherit group role mappings; composite roles can also confer effective roles. Compared with regulAIt's existing direct/group provenance, this supports showing the source of effective access and explaining which assignment an operation removes. The existing provenance panel and surviving-group response already provide useful building blocks. This is a documentation comparison, not a live Keycloak test or proposal to replace the identity layer.
+- [SCIM protocol RFC 7644](https://www.rfc-editor.org/rfc/rfc7644.html#section-3.7.3), HTTP 200: bulk responses carry per-operation outcomes and can contain successes alongside errors. That is a useful contract comparison for retaining the workbench's already-returned per-item results independently of its live queue. RegulAIt's approval bulk endpoint is not being declared SCIM-compatible and needs no second decision engine.
+
+These extend the earlier task-lifecycle, WCAG status, error-recovery and consequence-review research. No dependency was added or unfamiliar product capability implemented. The comparison favors reuse of existing provenance, outcome, query and shared-schema primitives over another local policy/state abstraction.
+
+### Security tuning with an understandable effect
+
+Keep SLA timing/action choices explicit: record-only, adding an escalation assignee and reassigning one user are different consequences; none means automatically approve. Show the configured scheduler versus on-demand sweep truthfully. These are legitimate operator tuning choices under the existing policy schema, without reducing decision authorization or quorum.
+
+For access cleanup, direct assignment removal, IdP-group mapping changes, a subtractive per-user revocation and account deactivation have different scopes. Guide the administrator to the narrowest authorized action that achieves the intended result and show remaining access. A read-only revocation scope is an existing audited relaxation from full denial and already uses step-up; present that consequence rather than suggesting blanket role elevation. A removal that widens the approval pool should explain why fresh proof is required and provide it. Unknown counts justify an honest cautious lock with Retry, not a fabricated last-admin label or a disabled revocation control justified by zero sessions.
+
+### Workbench source evidence
+
+#### CXR-WBK-001 — An unavailable workload read is presented as “No open approvals”
+
+- **Evidence/function:** `apps/web/src/views/admin/governance/ReviewWorkbenchPage.tsx:110–113` loads workload independently of the policies, rules and pending queue. The outer QueryGate at `:167–172` guards only policies/rules. Workload rendering at `:229–238` defaults missing data to an empty array and displays “No open approvals — Nothing is waiting on a human right now.” There is no workload loading/error/Retry branch. The pending queue's error handler at `:181–186` belongs to a different query and cannot establish workload completeness. Backend `apps/gateway/src/workbench.ts:748–806` computes separately scoped per-queue aggregates, so a successful pending-list read does not prove the workload query succeeded.
+- **User impact/reason:** an administrator checking overloaded reviewers during a transient outage receives a clean empty-state statement instead of an unavailable workload. This can conceal the need to redistribute or escalate work even while the separate queue badge says approvals are pending. This is another specific unknown-is-empty consumer, related to ACC-003/INT-003; implement the shared status principle once rather than adding separate state libraries.
+- **Triage:** Medium, **F7 × S4 = 28** within failed/delayed workload reads. No claim that any real approval was deleted or its permission changed.
+- **Reproduce:** let policies/rules and pending approvals succeed, but hold or503 `/v1/approvals/workload`. Open Workload and inspect the empty state after the query settles. Compare a genuine successful empty workload and a populated response. No mutation is needed.
+- **Recommendation/reuse:** give the workload query its own QueryGate/ErrorState with retry, distinguish unknown/loading/empty/populated and clearly scope stale cached data. Keep the parent queue's independent status honest. Do not widen workload visibility or fabricate zeros to fill the view.
+- **Acceptance/countercheck:** a503 never claims nothing is waiting; Retry restores the authorized aggregate; an empty200 retains its useful empty explanation; background failures identify stale results when retained. Existing top-level pending status already handles errors explicitly—preserve and reuse that pattern, rather than reporting the whole page as missing error handling.
+
+#### CXR-WBK-002 — Refreshing to an empty queue hides the returned per-item bulk outcome
+
+- **Evidence/function:** both bulk handlers save `r.results` and refetch all queries (`ReviewWorkbenchPage.tsx:608–616,637–648`). However, the results table at `:667–682` is nested inside the `pending.length > 0` branch beginning `:520–523` and closing `:683–684`. Once refresh removes the last pending row, the result table is unmounted and replaced with “Nothing pending,” even though `bulkResults` still exists. Backend `/v1/approvals/bulk` (`apps/gateway/src/workbench.ts:931–1069`) deliberately returns per-item successes/refusals and aggregates; its same-decision guard can refuse an item whose state changed after the page was loaded. A refused already-decided/superseded item need not remain in the refreshed pending queue.
+- **User impact/reason:** a reviewer finishes a batch, or races another reviewer, and loses the item-by-item explanation precisely when the current pending list becomes empty. The toast says how many were decided/refused but not which item or why. The workbench promises per-item outcomes; users should not need a new unrelated pending item or an audit-log search to recover them. No claim is made that the backend lost its audit trail or atomically committed all items.
+- **Triage:** Medium, **F6 × S4 = 24** for batches that empty the displayed queue or contain already-resolved items.
+- **Reproduce:** start with one selected ordinary pending approval and a bulk reason. Intercept the bulk POST with a valid result array and then return an empty pending queue. Inspect whether its returned per-item row/detail remains visible. Include a refused `already_decided` result whose item disappears because another actor has settled it; no real decision is required.
+- **Recommendation/reuse:** render the last batch outcome independently of the live queue's empty/error state, with its submitted scope and per-item detail. Provide a deliberate close/acknowledge action or link to the existing result/evidence record. Preserve the successful decision fact if subsequent refresh fails; do not replay the batch to recover its display. Keep authorization, batch caps, sensitive-project exclusions and individual signature requirements.
+- **Acceptance/countercheck:** full success, mixed success/refusal and all-refused outcomes remain inspectable when the queue becomes empty or temporarily unavailable; next-batch editing does not silently imply the old results belong to it; no extra mutation is needed. The handlers already call `refreshAll`, so this is **not** another APR-001 cache-invalidation defect. The current result table works when unrelated pending rows remain.
+
+#### CXR-WBK-003 — Switching escalation from team addition to user reassignment retains an invalid hidden target kind
+
+- **Evidence/function:** the On breach selector changes only `pAction` (`ReviewWorkbenchPage.tsx:289–294`). Switching to `reassign` removes the team option (`:300–307`), but does not reset `pKind` or `pTarget`. If the user previously selected team, the Target selector continues reading team options (`:311–315`), and the submitted body still contains `escalateToKind: pKind`/that team's ID (`:267–271`). Backend parses with `createApprovalSlaPolicySchema` (`apps/gateway/src/workbench.ts:598–599`), whose refinement at `packages/shared/src/workbench.ts:265–267` correctly requires user-only reassignment. The select's DOM appearance must be checked separately; source establishes the retained state and payload regardless of how a browser displays a value without a matching option.
+- **User impact/reason:** an admin designs an add-team escalation, changes their mind to “reassign to one user,” and receives a refused save because a hidden team kind survives that change. The form can visually offer a user-only action while its Target list/payload remain a team. This is avoidable validation friction, not a reason to allow a team to become the single named approver.
+- **Triage:** Medium, **F6 × S3 = 18** within editing escalation action after selecting a team target.
+- **Reproduce:** SLA policies → enter Name → choose Escalate to team and a synthetic team → change On breach to reassign. Inspect kind/target and intercept/refuse Add policy to capture only action/kind/target metadata. Validate that body with the existing shared schema. No saved policy or real assignment is needed.
+- **Recommendation/reuse:** normalize the dependent draft when action changes: user-only reassignment selects user and clears the incompatible target before submission. Drive available controls/validation from the same existing schema constraints, with explicit missing-target guidance. Preserve unrelated name/timing drafts and the existing `withStepUp` call. Do not invent a separate lifecycle or broaden server policy to accept invalid states.
+- **Acceptance/countercheck:** add-team→reassign never posts a team target; a user must intentionally select an eligible individual; notify-only hides/omits unused targets; switching back has an explicit compatible state; schema refusals remain actionable. Starting directly in the default user kind already works, so this is the dependent-control transition, not all policy creation.
+
+#### CXR-WBK-004 — SLA instructions still assert that no scheduler exists even though the shared job is implemented
+
+- **Evidence/function:** workbench InfoButton at `ReviewWorkbenchPage.tsx:206–210` unconditionally says “Nothing calls this on a timer — there is no in-process scheduler in this deployment.” The policy endpoint's note repeats the manual-only statement (`apps/gateway/src/workbench.ts:589–595`). In the same backend file, the corrected `APPROVAL_SLA_SWEEP_NOTE` at `:525–538` explicitly says ADR-0064's scheduler runs it when configured, preserving lazy read/decide evaluation. `apps/gateway/src/scheduler-jobs.ts:169–184` registers `approval-sla-sweep` and calls the exact same `runApprovalSlaSweep`. This is the SLA consumer of REV-001's stale scheduler-instruction class, not a newly missing scheduler or duplicate control implementation.
+- **User impact/reason:** operators can be told to supply manual/cron work even when this deployment's optional scheduler is configured. The page does not distinguish scheduler-disabled, configured and unhealthy, making timeliness troubleshooting harder. This is not evidence of duplicate execution or a claim that SLA correctness depends on a timer.
+- **Triage:** Medium, **F8 × S3 = 24** for operators consulting these instructions on scheduler-enabled deployments.
+- **Reproduce:** open the sweep information and policy help on an enabled-scheduler fixture, compare with the scheduler job registry/current status and the sweep endpoint's corrected note. Inspect disabled and unknown configuration separately. A UI copy probe plus source trace is sufficient to establish the unconditional statement; real scheduled execution remains separate coverage.
+- **Recommendation/reuse:** reuse the existing accurate conditional sweep explanation; where safe configuration/health data already exists, show configured/off/unavailable and latest successful evaluation distinctly. Keep manual Run SLA sweep as the authorized on-demand path and explain lazy enforcement on read/decide. Do not add another scheduler, remove lease protections or imply configured means healthy.
+- **Acceptance/countercheck:** enabled/off/unknown deployments have truthful instructions; policy help and sweep help agree with the actual shared job; no timer is described as auto-approving, auto-denying or creating authorization. A default-off scheduler can justify conditional manual advice, but not an unconditional claim that the scheduler does not exist.
+
+#### CXR-WBK-005 — Opposing bulk decisions can be submitted while the first batch is still pending
+
+- **Evidence/functions:** `ReviewWorkbenchPage.tsx:628` disables Bulk approve for `act.busy`, while Bulk deny at `:631–635` checks only selection and reason. Its click handler at `:636–650` calls `act.run` without a single-flight guard; the helper at `adminKit.tsx:358–386` sets busy state but does not reject a concurrent invocation. The submit path at `:598–617` likewise has no shared action lock. Source and mock-browser reproduction agree: the deny control remains enabled while an approve request is held.
+- **Impact/reason:** a reviewer can submit approve and deny for the same selected batch before the first response arrives. An accidental second action now races for a durable decision; server refusals can prevent duplicate persistence but cannot make this a clear intentional interaction. Competing results can also overwrite the visible last-batch state. This extends the pending-action principle of UIW-08 to a different consumer; it is not another authorization mechanism or a claim that both opposite decisions persist.
+- **Triage:** Medium, **F6 × S4 =24** within interaction during a pending batch. Production incidence is not measured.
+- **Reproduce:** select one ordinary pending row and enter a reason; hold the first bulk POST; click Bulk approve, then inspect/click Bulk deny. Capture two requests with decisions approved and denied. Refuse both mocks and avoid real decisions. Also check repeated denial and keyboard submit.
+- **Recommendation/reuse:** apply the existing single-flight/pending action pattern to both directions and submission entry points; freeze the submitted IDs/decision/reason as one attempt, disable conflicting mutations while pending and show progress. Preserve the non-secret reason on failure. A timeout with an uncertain outcome requires an authoritative refresh/reconciliation, not blind replay.
+- **Acceptance/counterevidence:** at most one batch mutation is submitted per in-flight attempt; both decision controls and keyboard entry honor the same lock; cancelled/failed/uncertain outcomes remain understandable; selection changes cannot silently change an already-submitted request. Existing per-item server state, permission, signature, quorum, sensitivity, cap and audit checks stay enforced. Bulk approve's current busy state is a useful local pattern; extend it consistently.
+
+### Workbench positive controls, functions and limits
+
+- `refreshAll` explicitly refetches policies, rules, workload **and queue** (`ReviewWorkbenchPage.tsx:144–146`), and sweep/claim/bulk call it after writes. This is a useful positive counterexample to APR-001. Do not extend that stale-query finding to these consumers.
+- Pending queue uses the shared oldest-first query, true total and a capped-scope note. Breach and due counts explicitly name the displayed subset where capped; the failed pending read is not rendered as zero breaches.
+- Every tab stays mounted, so policy/rule/bulk drafts survive a tab switch. Failed API writes retain policy/rule input; successful creates clear only after their awaited write. Policies and routing that hand off authority use `withStepUp`.
+- MCP bulk approval requires a current payload review/digest; high-sensitivity bulk exclusions and item caps are server-enforced, and each item reuses `decideOne` with individual authorization/audit. No recommendation here should weaken signing, quorum, project sensitivity or server eligibility. Intake rows retain their dedicated ReviewPanel.
+- SLA escalation never auto-decides; routing affects queue placement, not independent decide eligibility. Bulk result badges distinguish refused items while the result table is visible.
+
+**Functions/sections inspected:** all ReviewWorkbenchPage query/draft/selection/review state, refreshAll, pending/cap/status calculations, sweep, workload, policy form/list, routing form/list, triage row/claim/payload-review, bulk approve/deny/results and tab persistence. Backend workbench routing/materialization/sweep notes, policy/rule create/delete, workload grouping/scope, claim and bulk decision paths; shared workbench policy validation/cap/sensitivity helpers; scheduler job registration; schema policy references. Existing workbench/shared tests were read/searched, not executed.
+
+**Not completed:** live delegated/role/team claims, real signed/quorum bulk decisions, actual scheduled sweep, every cascade/expiry/routing race, all roster cardinalities, native passkey dialogs, keyboard/mobile/screen-reader runtime, every new C3 priority/widget contract or external notification. Parent may upgrade confidence only for matched runtime probes. Potential consequences of removing SLA policies (set-null references) and summary tables omitting recipient identity/enabled state deserve a later separately evidenced pass; they are not promoted beyond the four prioritized cards. No production actions, product edits or external posts were performed.
+
+### Identity source evidence
+
+#### CXR-IDM-001 — Role unassignment promises complete loss of the bundle even when the user still holds it through a group
+
+- **Evidence/functions:** `apps/web/src/views/admin/identity/RolesPage.tsx:336–357` displays assignment origin but supplies the same `unassign` action for direct and identity-provider-group rows. Confirmation at `:545–558` says “They lose everything this bundle grants the moment you confirm” and sends DELETE by user/role only, ignoring the selected assignment's origin/id. The server deliberately deletes **only the direct row** (`apps/gateway/src/app.ts:3141–3188`); if group access survives, success returns `stillHeldViaGroup:true` at `:3211`. The UI discards this fact through `useAction` and reports “Role unassigned.” A group-only role instead returns 409 `role_group_derived` with guidance (`app.ts:3202–3207`). The existing test at `apps/gateway/src/group-role-mapping.test.ts:685–707` exercises direct removal, surviving group assignment,409 on a second remove and continued effective access (read, not executed here).
+- **User/task/impact:** an admin removing someone's access can receive a success notice and a confirmation promise that the bundle is gone when the same permissions still apply through the IdP. Selecting the group row can remove the user's distinct direct assignment instead. The UI needs to describe which authority it changes; the backend is correctly preserving reconciliation-owned membership. No unauthorized access or bypass is asserted.
+- **Triage:** Medium, **F6 × S5 =30** among administrators managing mixed direct/group assignments; conditional on group-derived roles. The consequence is a mistaken belief about effective access, not loss of audit evidence.
+- **Reproduce:** return a role held by one synthetic user through both `direct` and `group`. Select either holder's unassign, inspect the consequence statement, and have mocked DELETE return `{removed:true,stillHeldViaGroup:true}`. After the authorized refresh returns only the group row, inspect the success wording. Repeat group-only with the real409 contract. No real assignment needs removal.
+- **Recommendation/reuse:** label the operation “Remove direct assignment” and only offer it for that origin. Explain when group-derived access remains; retain and present the returned effective-outcome fact, then refresh the provenance/holder view. For group-managed removal, guide an authorized admin to the actual group mapping or a suitable per-user subtractive revocation, without pretending a direct-row operation controls IdP membership. Reuse the existing `UserRoleProvenancePanel`/mapping semantics and scope checks.
+- **Acceptance/counterevidence:** group-only rows do not offer a falsely effective direct unassign; a mixed-origin removal visibly says direct assignment removed, role still held through group; ordinary direct-only removal explains its actual loss; direct grants remain untouched; audit/reconciliation ownership is preserved. The origin column is already correct and the server already exposes the needed outcome—this is a consumer/presentation defect, not a request to delete group rows. Related principle: APR-002's durable outcome must not be discarded, but this is a different effective-entitlement contract.
+
+#### CXR-IDM-002 — A role unassignment that needs an approver-pool proof has no way to complete the challenge
+
+- **Evidence/functions:** the same unassign callback uses plain `api.del` at `RolesPage.tsx:555–558`. Backend `app.ts:3145–3159` detects whether removing a direct role assignment hands approval matching to an overlapping rule with a wider signer pool, then requires action-bound `settings_relax` step-up. The plain client announces a refusal without a retry callback (`apps/web/src/api/client.ts:48–55,305`), and `installGlobalStepUp` ignores calls without that callback (`stepup/stepUp.ts:146–158`). Role assignment and bundle-grant forms on the same page already use `withStepUp`; unassignment does not.
+- **User/task/impact:** an admin legitimately removing a direct role sees an approval-pool-change refusal and cannot prove identity through the UI. Removal is usually restrictive, but this particular routing change can widen who signs; the server's extra check is intentional. Removing it to simplify the UI would discard that safeguard. **High, F5 × S5 =25** within the specific protected role-removal case. No authorization bypass is claimed; the gate fails closed.
+- **Reproduce:** use a direct-only holder and a role/routing fixture where removal produces `settings_relax`. After confirming Unassign, return the existing `step_up_required` body for DELETE and inspect proof-options/verification calls, dialog and retained intended target. The parent can simulate this failure without an actual role mutation; a real-gateway acceptance run must establish a single exact proof-bound retry.
+- **Recommendation/reuse:** run the fixed user/role DELETE through the existing `withStepUp` plus header-capable delete helper. Keep signer-pool-shift revalidation, role/routing locks and stale-concurrency refusals. Explain the unusual consequence when requesting proof; do not ask for proof for every removal if policy does not require it. Preserve the exact target across cancellation/retry and show inline recovery.
+- **Acceptance/counterevidence:** protected removal opens the normal proof ceremony and succeeds once after valid proof; cancel/refusal leaves the assignment unchanged; concurrent pool changes fail safely; a normal removal that needs no proof stays concise. This is the same missing-wrapper cause as ADM-001/INT-001 on another consumer, so plan a shared coverage/fix pass rather than another security mechanism. It is distinct from IDM-001: an action can have correct origin semantics yet remain unusable when proof is required.
+
+#### CXR-IDM-003 — Unread identity counts become false last-admin or zero-session facts
+
+- **Evidence/functions:** `UsersPage.useActiveAdmins` at `:99–108` separately queries an exact active-admin total; `:142` turns missing data into 0. `UserDetail` at `:390` treats `<=1` as proven last-admin and at `:408,449–469` displays “Last active admin: cannot be demoted or deactivated” and disables both controls. No pending/error explanation or count Retry is rendered. `SessionsPanel` independently repeats this unknown→zero treatment: exact live/recorded count queries at `:625–626` become `live.data ?? 0` and `recorded.data ?? 0` at `:629–639`. It displays “0 live session(s) · 0 recorded” and disables Revoke all, even when the separately queried DataList has a visible live session. Its table error does not cover failures of the two count queries.
+- **User/task/impact:** during count-read failures an admin sees an incorrect reason why an account cannot be demoted/deactivated, or is told there are no sessions to revoke while individual live sessions may be present. This makes outage recovery and incident response confusing. Retaining a cautious disabled action on an unknown safety prerequisite can be appropriate; asserting a fabricated last-admin/zero fact is not. **Medium, F6 × S4 =24** within unavailable/delayed independent count reads. The actual last-admin and session-revoke server gates remain authoritative.
+- **Reproduce:** allow the users list, fail only its `role=admin&status=active&count=exact` request and select an admin row; inspect the false last-admin badge/disabled controls. Then allow a populated live session-list response but fail the `count=exact` session requests; inspect the contradictory count and Revoke-all state. Compare genuine total 1/total 2 and real zero sessions. No mutation is required.
+- **Recommendation/reuse:** represent unknown/loading/unavailable separately from a measured zero or last-admin total. Show the applicable count-read error and Retry; keep actions that require a valid baseline safely locked with an honest explanation, while independent authorized per-session actions retain their own contract. Reuse existing query/unknown-baseline patterns (the Account session/passkey panels and OrgSettingsCard already avoid guessed security state). Never remove the server's last-admin lock or assume a count is fresh after a write.
+- **Acceptance/counterevidence:** a failed admin count never says proven last admin; a failed session count never says zero; recovered total/data enables the correct action; stale post-write counts remain clearly stale until settled; list/count visibility scopes stay consistent. Healthy exact-count queries already avoid counting just the currently displayed page, which is a strength to preserve. This is another affected consumer of ADM-007/ACC-003/INT-003's unknown-state family, not three new independent mechanisms.
+
+### Identity positive controls, function coverage and limits
+
+- Users lifecycle uses action-bound proof for account creation, promotion/reactivation, initial-password/key issue and MFA recovery; deactivation is explicit and never hard-deletes the user. Last-active-admin protection is server-enforced. One-time plaintext reveal is task-specific and not stored in this report.
+- `UserDetail` is keyed by user ID, and previously opened tab panels stay mounted. This prevents cross-user tab draft reuse while preserving non-secret drafts across same-user tab changes. Account state remains above the tabs.
+- UserPasskeysPanel distinguishes loading/error/empty and offers metadata Retry; revoked devices remain on record. UserRoleProvenancePanel distinguishes direct/group/both and unknown origins, explains IdP/SCIM provenance and makes clear that group mappings cannot derive administrator status.
+- Scope narrowing/lifting of subtractive overrides uses existing stepped-up paths; creation remains full. The UI explains read-only versus full effects and preserves the server's default-deny/audit authority. This is a useful existing bounded security-tuning model.
+- Role-holder lists are paginated through the shared list contract and include account status/origin. Connector grants expose read/readwrite and object scope; server grants explicitly mean read-only-all, leaving write tools individually granted. Role/team deletion explains dependencies, confirms, and takes a reason for force deletion.
+- Ordinary role/user/team creation resets non-secret input only after confirmed success. Template, count and origin issues above do not justify weakening query scopes or adding a parallel state helper.
+
+**Functions/sections inspected:** UsersPage roleBadge/statusBadge/signInLabel/USER_COLUMNS; useActiveAdmins; selected-user retention; create/issuePassword/issueKey/promote/demote/deactivate/reactivate/MFA-clear callback wiring; UserDetail tab/state/action guards; RenameForm; sessionLive/sessionColumns/useListTotal/SessionsPanel; RevocationScopeCell/OverridesPanel per-kind forms/list/lift; keyState/ApiKeysCard. RolesPage create/assign/delete/force-delete/rename/role selection; fetchDeleteWithBody; RoleGrantsPanel query/holder origin and unassign, grant forms, bundled grant display/removal. TeamsPage create/classification picker/add-member/list/remove-member/delete/force-delete composition and raw DELETE helper. All UserPasskeysPanel and UserRoleProvenancePanel mapping/status/query/render paths. Backend cross-checks: user legacy list limits, role-assignment direct/group semantics and protected removal, role agent-grant modes/step-up, group reconciliation ownership and representative existing tests. Source/tests were read, not executed.
+
+**Not completed:** full SSO/group-mapping admin page, every user-edit and delegated scenario, real password/key/passkey ceremonies, actual group sync, live role mutation or revocation, concurrent last-admin transactions, all mobile/keyboard/screen-reader states, secret-copy lifecycle, the full Role/Team server implementation and every underlying governance gate. Role-agent grants offer no `allowedModes` selector despite a supported backend field; this was noted but not promoted as a fourth card without further product-requirement/UI-gap prioritization. Legacy user pickers also load a bounded default 1000 list without continuation; its large-directory task coverage remains open rather than inflating this batch with a speculative scale finding. Parent may promote confidence only for matched executed branches.
+
+## Deep audit — iteration 6, 2026-11-22
+
+### Claude response status, then the new recommendations
+
+The owner asked what Claude thinks of the recommendations. At the fresh check, #1184 contained **five Codex handoffs and no Claude assessment**. There is no recorded agreement, disagreement or accepted fix to summarize. A [focused reminder to the master](https://github.com/dhruvmahendrapatel/RegulAIt/pull/935#issuecomment-7075658483) asks for evidence-based responses to selected high-impact IDs. The ledger remains awaiting response; neither silence nor these additional tests counts as Claude approval.
+
+Source remains main `da16d6bd23109d477102c0ec2a534f81d62a6917`. This batch adds **eight** cards (SSO-001..004; CON-001..004), bringing the feedback ledger to **69**. These pages cover federated identity/group/account-link administration and manual Git/PM connection setup. The latter accept supplied tokens; they are **not** OAuth consent/callback UIs, and no such flow was tested here.
+
+**Prioritize deliberate security intent:** do not resend stale MFA/break-glass settings with an unrelated edit; offer only eligible link approvals; finish conditional proof flows; expose existing provider-maintenance APIs safely. For connections, validate provider-specific prerequisites at setup, explain the selected authentication shape and produce correctly encoded webhook addresses. Existing safeguards should remain authoritative.
+
+### Runtime evidence and counterexamples
+
+The final targeted browser run passed **8/8 in 8.0 seconds**. [Sanitized observations](evidence/2026-11-22/iteration6-browser.json) use synthetic mocked API responses and a local Chromium preview. No actual provider, account link, mapping, connection or policy was changed. Some mocks returned success to exercise completion; the policy/mapping/setup failures were intercepted/refused. No credential/reveal value or real identity is published.
+
+| Card | Matched runtime evidence | Limits / countercheck |
+| --- | --- | --- |
+| CXR-SSO-001 | Mapping-removal required-proof refusal produced one DELETE and zero proof-options calls/dialogs. | Protected takeover facts and successful exact retry remain real-gateway acceptance work. |
+| CXR-SSO-002 | Initial MFA admins→refetched all, but unchanged form/PUT still sent admins with an intended password-length 14 edit and all other policy keys. | PUT refused by mock; no real policy reversal or authorization bypass was executed. |
+| CXR-SSO-003 | Source-only: existing-row actions omit maintenance even though PATCH supports it and help promises certificate staging. | No browser certificate rollover or client-secret replacement was completed. |
+| CXR-SSO-004 | After mocked first vote, refreshed count showed 1 of 2 and the same admin's approve stayed enabled. Own-account rows also offered approve. | Two separately executed cases; no real identity link, duplicate persisted vote or self-approval bypass. Unlike APR-001, data did refresh. |
+| CXR-CON-001 | Selected-provider setup help omitted the composite credential shape for the documented Bitbucket app-password/Jira paths. | Adapter auth semantics were source-traced, not exercised against a real provider. Bearer credentials remain supported where documented. |
+| CXR-CON-002 | Azure Git's URL input was not required and POST omitted baseUrl. | Mock refused creation. Compiled create schema accepts that body while provider construction refuses it; with-URL control constructs. |
+| CXR-CON-003 | Mock creation accepted a slash-containing name; one-time note emitted a raw multi-segment webhook path instead of one encoded name segment. | No real webhook delivered; source route consumes one connection-name segment. Reveal sentinel is absent from evidence. |
+| CXR-CON-004 | Jira API version 3 became hidden after selecting Asana but remained in its POST. | Shared schema correctly rejects that body and accepts the non-Jira control without version. |
+
+[Compiled contract probes](evidence/2026-11-22/iteration6-connection-contracts.json) validate the Azure create/resolver mismatch, accepted slash name and non-Jira version restriction. They use existing compiled schemas/provider construction without fetch, database or stored connection. Eight browser tests cover seven cards at this confidence because SSO-004 has two cases; SSO-003 remains source-only. These counts are evidence accounting, not full-page completion.
+
+### Research before final recommendations
+
+Retrieved November 22, all HTTP 200:
+
+| Primary source | Guidance / comparison | How it constrains the recommendation |
+| --- | --- | --- |
+| [OAuth security BCP, RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html) and [OWASP OAuth2 guidance](https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/OAuth2_Cheat_Sheet.md) | Redirect binding, transaction-specific state/nonce and appropriate PKCE protect the identity flow; avoid arbitrary redirect forwarding and credential leakage. | Navigation/recovery improvements must preserve those bindings. These standards guide the federated boundary; this review does not assert a complete callback/PKCE audit or force manual-token Git/PM setup to become OAuth. |
+| [Jira Basic authentication](https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/) | The supported Basic pattern combines account identity and API token. | Explain what this adapter expects before storing a secret, including replacement, instead of discovering the missing identifier in a later workflow failure. |
+| [Bitbucket API-token usage](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/) | Documents supported Basic and Bearer approaches. | Distinguish credential kinds and accepted adapter shapes. A bare access token is not categorically wrong; no app-password retirement date was verified or claimed. |
+
+This is public-document/contract comparison, not live vendor testing. No dependency or unfamiliar product capability was implemented. Raw vendor pages/examples/contact metadata stay outside the repository; only safe conclusions and source links are included. Existing BP-01..12 and the earlier secret-lifecycle/identity comparisons remain the design criteria.
+
+### Reducing friction while preserving the identity boundary
+
+Use the existing local-proof linking route when appropriate instead of asking a person to approve their own account; where administrative linkage requires distinct administrators, show whose participation is still needed without exposing unnecessary signer details. Do not remove the separate-principal rule to hide an eligibility defect. Preserve expiry and the IdP transaction binding when guiding users back to sign-in.
+
+Where an organization's IdP already performs adequate MFA, expose the existing carefully scoped trusted-MFA/ACR configuration with its assurance requirements and audit, rather than recommending globally turning MFA off. JIT provisioning can be a deliberate per-provider choice with domain restrictions and mapped roles, strict off defaults and no implicit administrator grant. Session/lockout tuning should review only intentional changed fields against current policy; repair stale whole-form writes before offering broader changes.
+
+For certificate rollover, overlapping pinned certificates and explicit unchanged/replace secret semantics reduce avoidable outages without ignoring expiry or signatures. Existing-provider maintenance should preserve stable identity and explain issuer/entity changes. Manual Git/PM setup can reduce repeated errors with exact provider-specific fields, minimum scopes and configuration checks that require no surprise credential-bearing network request.
+
+### Federated identity source evidence
+
+#### CXR-SSO-001 — Conditional proof for removing a group mapping has no UI completion path
+
+- **Evidence/functions:** `GroupMappingsPage.tsx:283–294`, mapping-removal confirmation, calls plain `api.del` at line293. Backend `apps/gateway/src/group-role-api.ts:185–204` computes whether removing the mapping moves matching approvals to a wider signer pool; when it does, line191 requires `settings_relax` bound to the mapping/group and takeover facts. Plain API calls lack the retry callback needed by the global proof handler (`apps/web/src/api/client.ts:48–55,305`; `stepup/stepUp.ts:146–158`). Mapping creation on this same page already uses `withStepUp` (`GroupMappingsPage.tsx:95–100`).
+- **Task/impact/reason:** an administrator removing a mapping can receive a fresh-proof refusal without a way to provide that proof and finish. Although the mapping removal is access-reducing for members, it can widen who signs future matching calls; the server's additional control is intentional. The UI should explain that particular consequence, rather than make a legitimate cleanup operation require an API workaround.
+- **Triage:** High, **F5 × S5 =25** within removals that actually cause the protected signer-pool shift. No bypass or weakened server check is asserted. Shared missing-wrapper cause: ADM-001, INT-001 and IDM-002; plan one affected-consumer coverage pass, not a new proof mechanism.
+- **Reproduce:** populate a mapping whose removal has the protected takeover facts; confirm removal and return the existing `step_up_required` contract from DELETE. Inspect options/verify requests, proof dialog and whether the exact pending mapping can resume. Mock/refuse the write; no mapping needs deletion. A later real-gateway acceptance run must establish the actual conditional case and exact successful retry.
+- **Recommendation/reuse:** use existing `withStepUp` plus its header-capable DELETE helper, retaining mapping identity and pending consequence. Preserve takeover-fact revalidation, concurrent-change refusal and audit. Ordinary removals requiring no proof remain concise. Do not remove the conditional server gate or skip reconciliation to avoid friction.
+- **Acceptance/counterevidence:** protected removal offers proof and retries once for the same mapping; cancellation/refusal leaves it unchanged; concurrent pool shifts fail safely; unprotected removals avoid unnecessary ceremonies. The existing consequence dialog correctly explains delayed reconciliation and surviving direct assignments—retain that explanation. This finding does not claim mappings remove roles immediately or that deleting a mapping is itself broken when no proof is required.
+
+#### CXR-SSO-002 — The sign-in policy form can resend stale security fields after newer settings have been read
+
+- **Evidence/functions:** `SsoPage.tsx:771–778` passes refreshed org settings into `SessionsPolicyForm`. The form initializes its entire AUTH_KEYS draft once with `useState` at `:783–788` and its break-glass list once at `:792–794`; no effect/key reconciles a successful new settings snapshot. Submit at `:809–820` sends every policy field and break-glass IDs, including fields the user did not edit. Nearby provider mutations invalidate `["admin"]` via `useAction`, so the shared org-settings query can successfully refetch newer values while the mounted policy draft remains old. The dedicated `OrgSettingsCard` already demonstrates partial per-setting writes, current-value keyed rows, single flight and post-write stale locks (`settings/OrgSettingsCard.tsx:50–61,87–91,205–208`).
+- **Task/impact/reason:** an admin changes one session value after another admin tightened MFA or changed break-glass access. Even if the latest settings have been fetched, Save sign-in policy can submit the older MFA/break-glass values alongside the intended edit. This risks an unintended policy reversal or a confusing proof request for a relaxation the user did not mean to make. The server still validates/audits and can demand proof; this is stale intent/baseline handling, not a demonstrated authorization bypass or insecure initial default.
+- **Triage:** High, **F6 × S6 =36** for concurrent or background-refreshed policy editing. Conditional race, not every save; actual persistence under a real competing admin was not tested here.
+- **Reproduce:** first GET settings has `mfaRequired:admins`; keep the form mounted. A later successful admin action triggers invalidation, and the next GET returns `mfaRequired:all`. Open the session-policy tab, edit only password length or lifetime, intercept/refuse PUT and inspect whether the stale `admins` value is still included. Also test newer break-glass membership and a post-save refresh failure. No policy needs to be changed.
+- **Recommendation/reuse:** use current authoritative baselines and send only intentional changed fields; reuse the existing per-setting consequence review/single-flight/settle-after-write pattern. Preserve dirty non-secret edits while making a conflicting new snapshot explicit, rather than blindly replacing all input or silently keeping obsolete security fields. If the contract needs optimistic concurrency for a whole policy, make the expected baseline/version explicit and server-validated. Retain settings-relax proof and audit.
+- **Acceptance/counterevidence:** unrelated edits never repost an old MFA/SSO/break-glass choice by default; successful refresh is reflected in the reviewed baseline; conflicting dirty changes have a recoverable review path; uncertain writes lock further policy changes until reconciled; a deliberate relaxation still shows old→new consequences and requires the configured proof. Existing `putOrgSettings` already supports conditional step-up, so the remedy is not another auth helper. The form does preserve drafts across tab switches, which remains useful.
+
+#### CXR-SSO-003 — Existing SSO providers cannot be maintained through the page, despite certificate-rollover instructions
+
+- **Evidence/functions:** existing OIDC row actions are only enable/disable/delete (`SsoPage.tsx:350–400`); SAML adds metadata, but still only enable/disable/delete (`:665–736`). The create forms contain configuration and secret/certificate inputs; no existing-provider editor/rotation action is rendered. The SAML help at `:747–749` tells operators to “stage the incoming certificate here before your IdP cuts over.” Backend PATCH supports precisely that maintenance: OIDC fields/client-secret replacement (`auth.ts:2978–3037`; `shared/src/index.ts:2995–3015`), SAML pinned certificate array and other changes (`saml.ts:1248–1308`; `shared/src/index.ts:3122–3141`).
+- **Task/impact/reason:** an IdP certificate rollover, client-secret replacement, domain restriction change or group-claim correction is a routine administrative lifecycle, but the page offers a new provider instead of maintaining the existing one. Its explicit certificate-staging instruction has no matching UI action. Recreating a provider is not an equivalent harmless workaround: provider identity and linked accounts matter, and issuer/entity changes have their own server consequences.
+- **Triage:** Medium, **F6 × S5 =30** within provider maintenance/rollover tasks. This is a concrete missing UI maintenance capability/instruction mismatch, not a claim that the API lacks rollover or that any real certificate expired.
+- **Reproduce:** load a populated OIDC/SAML provider; enumerate existing-row actions and look for edit/secret replacement/certificate staging. Expand SAML explanation and compare its instruction with available controls. Source-trace PATCH/schema support. A browser can prove absence of the page action, not a completed external rollover.
+- **Recommendation/reuse:** expose an explicit existing-provider maintenance flow using the existing PATCH contract and shared dirty/pending/consequence/proof primitives. Hydrate only safe non-secret configuration; leave secret/private-key inputs write-only with clear unchanged/replace semantics. Support overlapping pinned SAML certificates before cutover and deliberate removal afterward. Show issuer/entity change consequences separately; keep egress, JIT-domain, signing-posture, last-provider and account-link protections.
+- **Acceptance/counterevidence:** an admin can stage/retire a certificate and replace a client secret without recreating the provider; unchanged secret values are never blank-overwritten or fetched in plaintext; issuer/entity changes receive the server's intended warning/relink behavior; cancel/failure preserves suitable input; expired/untrusted assertions still fail closed. APIs already support maintenance, so no new SSO implementation or relaxed certificate verification is needed. API-based maintenance remains possible; the claim is the page-level lifecycle gap and misleading instruction.
+
+#### CXR-SSO-004 — Account-link approval controls ignore known self-link and prior-voter eligibility
+
+- **Evidence/functions:** `LinkRequestsPage.tsx:109–126` offers approve for every unexpired pending row without checking the current principal or an already-recorded vote. Its updated count at `:89–93` can correctly show1of2 while the same admin still sees approve. Both legacy list projection (`auth.ts:2768–2785`) and shared list reader (`identity-lists.ts:548–597`) expose approval count, not the caller's prior-vote/canApprove fact. Backend correctly refuses approving one's own account (`auth.ts:2802–2808`) and a repeated vote by the same principal (`:2821–2832`), retaining the distinct-administrator requirement.
+- **Task/impact/reason:** an admin can be invited to approve their own link, or click again after their first successful vote, only to learn from a409 that another administrator must act. The first-vote success notice already explains another admin is needed, but the refreshed row's controls contradict it. This adds avoidable refusal/recovery friction around a sensitive identity operation; removing self-proof or the second principal is the wrong fix.
+- **Triage:** Medium, **F6 × S3 =18** for self-targeted rows or partially approved administrator links viewed by the first voter. No self-link bypass, duplicate persisted approval or stale cache is claimed.
+- **Reproduce:** show a pending row whose userId equals the signed-in admin and inspect approve. Separately, POST first approval returns pending1of2, refetch returns the updated row and count, and the same admin's approve remains enabled. Have a second attempt return the actual `already_approved_by_you` refusal. Mocks suffice for affordance checks; real two-admin linkage remains acceptance work.
+- **Recommendation/reuse:** expose a safe caller-specific `canApprove`/`hasApproved` or equivalent effective action capability, derived server-side without disclosing unnecessary signer details. Compare already-known target userId for the self case, explain the permitted self-proof path, and show “your approval recorded; awaiting another administrator” when appropriate. Keep denial available under its own server policy. Preserve authoritative per-request checks, expiry, distinct principals, existing-account proof and provider ownership.
+- **Acceptance/counterevidence:** own-account requests guide to local proof/another admin rather than inviting own approval; after a partial vote the count refreshes and the same principal is not invited to repeat it; a distinct eligible admin can complete; stale permissions still produce a clear safe refusal. Unlike APR-001, this page uses an admin-keyed DataList and `useAction` invalidates that namespace, so refreshed data can be correct while eligibility remains incomplete. The current success notice and server guards are useful strengths to retain.
+
+### Positive controls, function coverage and limits
+
+- `SignInStatus` counts OIDC and SAML together, distinguishes failed reads from zero/off and offers Retry. Posture tabs expose SAML domain/IdP-initiated warnings and unknown step-up settings. Provider forms remain mounted across tabs, preserving drafts.
+- OIDC/SAML provider creation uses existing proof wrappers and JIT defaults off; server effective-state checks prevent enabling JIT without allowed domains. SAML PATCH preserves a signed assertion/response floor across multi-step updates. Issuer moves recheck guarded egress; certificates remain pinned, expiry/replay/audience/time checks remain fail-closed.
+- Last-provider/sign-in invariant handling exists on the server; the policy page explains the enabled-provider and password-bearing break-glass prerequisites. Do not loosen those to compensate for a stale UI draft.
+- Group mapping creation is explicit and additive; unmapped groups grant nothing and mappings cannot grant platform-admin status. The deletion dialog accurately explains login/sync reconciliation and surviving direct assignments. Asserted-group inventory distinguishes unmapped groups rather than silently assigning a default role.
+- Account-linking never silently merges a password-bearing account by matching email alone. Local proof and admin-review paths are separate; self-approval, same-principal repeat, identity-owned-by-another, expired request and disabled target cases are server-refused. The UI already reports partial administrator-link quorum instead of pretending the first approval completed it.
+
+**Functions/sections inspected:** SsoPage tab/status/posture/list-preview composition; SignInStatus; OidcCard query/create/reset/list/actions/help; SamlCard query/create/reset/certificate fields/metadata/actions/help; SessionsPolicyCard and SessionsPolicyForm initialization, dependent fields, break-glass selection and submit; GroupMappingsPage create/list/asserted-group filtering/remove-confirmation; LinkRequestsPage/Card filters/list/count/actions and SsoArea routing. Cross-checked group-role DELETE takeover/proof/revalidation; OIDC/SAML PATCH fields/effective policy/secret storage; account-link list projections, self/duplicate/expiry/identity guards and partial-vote writes; shared schemas; OrgSettingsCard's partial/single-flight/stale-baseline pattern. Existing tests were inspected selectively, not executed.
+
+**Limits:** no real IdP/broker, SAML/OIDC callback, certificate rollover, group sync, two-administrator link, passkey/SSO proof, live concurrent policy save, full provisioning pipeline, native accessibility/mobile or external integration was executed. The parent must distinguish matched mock-browser evidence from this source contribution. Existing ACC-002/005 cover federated deep-link/discovery failures and remain separate; unknown provider/group helper reads and full directory pagination remain later coverage rather than extra unsupported findings. No tracked/product files or Git state were changed.
+
+### Connection setup source evidence
+
+#### CXR-CON-001 — Credential instructions omit the composite token format the selected adapter actually consumes
+
+- **Evidence/functions:** Git's Bitbucket hint says only “App password (or workspace access token)” (`apps/web/src/views/admin/integrations/GitConnectionsPage.tsx:27`) beside one generic Token input (`:99–108`). It does not explain that the adapter interprets a colon-containing value as Basic and a colonless value as Bearer (`packages/git-provider/src/bitbucket.ts:5–10,90–96`); its documented app-password shape is `username:app_password` (`:41–42`). The actionable shape appears only after an upstream 401 (`:49–51`). PM's Jira form likewise provides a generic Token field (`PmConnectionsPage.tsx:153–162`), while `JiraProvider` expects the composite `email:api-token` and Basic-encodes the entire supplied string (`packages/pm-provider/src/index.ts:455–464,480–485`). No matching Jira credential-format help exists in the parent form or replacement-token dialog.
+- **Impact/reason:** an administrator follows the displayed credential name and pastes the password/token alone. The value is accepted/stored, but the adapter sends an unintended authentication form. The first useful explanation can occur much later inside a workflow or sync failure. The system already knows the selected provider and could explain the required input before the secret is staged. This is setup guidance/validation, not a claim that secrets are returned or authentication is bypassed.
+- **Triage:** Medium, **F8 × S4 =32** within affected Bitbucket app-password/Jira manual setup. Not every supported credential kind fails.
+- **Reproduce:** select Bitbucket in Git setup and Jira in PM setup; inspect the provider help and Token field. With a noncredential sentinel, compare the adapter's request-header scheme/shape for bare versus composite input using its existing injectable fetch. Mock/refuse creation; never send real credentials or print header/token values. An actual provider success remains separate acceptance work.
+- **Recommendation/reuse:** give each selected provider an explicit supported authentication type, input shape, minimum scopes and safe example placeholders, and repeat the relevant guidance during replacement. Prefer separately labelled account identifier and secret fields where practical, composing only in the existing server/provider contract; otherwise explain the composite clearly without saving a draft persistently. Validate what can be validated locally without calling a provider. Link current provider documentation and test supported shapes; do not weaken auth or request broad scopes merely to make a test pass.
+- **Acceptance/counterevidence:** Jira's supported Basic input is unmistakable; Bitbucket's supported Basic/Bearer choices are explicit; errors preserve the intended non-secret scope and permit safe correction; no secret enters logs/URLs/public evidence. Bitbucket source already emits a useful 401 hint and supports Bearer workspace/repository credentials, so this is not “Bitbucket is entirely broken.” Current primary Bitbucket API-token documentation also describes Basic and Bearer; do not claim bare API tokens necessarily fail or assert a retirement date that was not verified.
+
+#### CXR-CON-002 — An Azure Git connection without its required organization URL can be saved but cannot construct its adapter
+
+- **Evidence/functions:** Git's provider metadata marks Azure DevOps with `needsBase` (`GitConnectionsPage.tsx:28`), but that fact changes only the label (`:96`); the Input at `:97` is not required. The create body omits an empty URL (`:70`). `createGitConnectionSchema` permits an absent baseUrl for every kind (`packages/shared/src/index.ts:1910–1915`). The backend create handler checks that the kind is implemented and performs egress validation only if a URL exists (`apps/gateway/src/workflows.ts:3486–3515`), then stores `body.baseUrl ?? null` (`:3523`) without resolving provider-specific requirements. In contrast, `resolveProvider` explicitly refuses Azure without a URL (`packages/git-provider/src/index.ts:364–369`), as does its constructor (`azure-devops.ts:105–110`).
+- **Impact/reason:** an administrator can receive “Git connection added” for a configuration that cannot execute any Azure Git stage. The requirement is discovered during later work instead of at setup, despite the UI already knowing it. A label hint helps but cannot make an invalid persisted configuration executable.
+- **Triage:** High, **F7 × S5 =35** for Azure setup where the URL is omitted. No live workflow outage or production incidence was measured.
+- **Reproduce:** select Azure, fill Name and a synthetic token, leave Base URL blank, and intercept/refuse Add connection. Verify the browser submits without baseUrl. Independently call the compiled create schema and resolver: the former accepts the body, the latter refuses it. Source establishes the accepted route's insert-to-null; do not describe a real database write as tested unless separately run.
+- **Recommendation/reuse:** use the existing provider requirements to enforce required fields both in the form and at create/update validation before a row is written. Reuse the adapter/provider-specific validation rather than checking only enum membership. Preserve egress validation and encrypted storage. For kinds with valid vendor defaults, keep URL optional; do not make every connection require a custom host.
+- **Acceptance/counterevidence:** missing Azure organization URL gives an actionable setup error and no stored connection; a valid-shaped allowed URL proceeds to normal guarded setup; GitHub/GitLab/Bitbucket defaults still work. Creation validates configuration shape, not guaranteed live connectivity; distinguish those facts. PM creation already resolves its provider early (`apps/gateway/src/pm.ts:443–458`), a useful local pattern. Do not add a surprise credential-bearing external call merely to validate a required field.
+
+#### CXR-CON-003 — Accepted connection names can generate a webhook address with the wrong path or query
+
+- **Evidence/functions:** PM creation accepts any nonempty name (`packages/shared/src/index.ts:2041`) and stores it verbatim (`apps/gateway/src/pm.ts:485`). The one-time reveal constructs `${origin}/v1/pm/webhooks/${created.name}` without encoding the path segment (`PmConnectionsPage.tsx:98–102`); the connection table repeats the raw interpolation (`:203–205`). A valid name such as `synthetic/connection` therefore creates an extra path segment; `?` or `#` changes URL semantics. The actual webhook route consumes exactly one `:connectionName` segment (`apps/gateway/src/pm.ts:1267–1274`). Existing edit/delete/token operations correctly use `encodeURIComponent(c.name)` elsewhere on these pages.
+- **Impact/reason:** a setup can succeed but supply a copyable webhook address that targets a different route/name, preventing inbound updates. The one-time secret makes a failed setup especially awkward: users must diagnose a URL-format problem while carefully handling a secret. This is availability and inaccurate setup output, not an authorization bypass or proof of secret disclosure.
+- **Triage:** Medium, **F5 × S4 =20**, conditional on otherwise-permitted names containing URL delimiters. Ordinary simple names are unaffected.
+- **Reproduce:** verify the create schema accepts a synthetic slash-containing name. Mock creation returning that name and a disposable noncredential reveal sentinel; inspect only the generated URL's path/encoding, never publish the sentinel. Compare the raw address with an encoded single-segment address and the route contract. No actual webhook/connection write is needed for the UI proof; real delivery remains separate.
+- **Recommendation/reuse:** consistently encode a connection name as one path segment when producing webhook addresses, or deliberately constrain new machine names to a documented URL-safe format while preserving existing names. Reuse the existing encoded-route convention and standard URL construction; do not substitute a second webhook handler. Keep provider-specific authentication placement separate from path encoding.
+- **Acceptance/counterevidence:** every accepted name produces an address that identifies the intended stored connection, including delimiter/Unicode cases under the chosen contract; unsupported names fail before creation with clear guidance; existing simple-name URLs and webhook signature/replay checks remain. Provider-native secret placement is already described in the form's secrets-handling help (`PmConnectionsPage.tsx:74–77`), so this card does not claim all webhook authentication instructions are missing.
+
+#### CXR-CON-004 — Switching away from Jira retains a hidden API-version field that the server refuses
+
+- **Evidence/functions:** PM form state has one apiVersion value and its generic setter changes only the selected property (`PmConnectionsPage.tsx:56–57`). Provider selection at `:125` therefore leaves apiVersion intact. The API-version control exists only for Jira (`:144–152`), but submit includes any nonempty value regardless of provider (`:95`). `createPmConnectionSchema` correctly refuses apiVersion on non-Jira providers (`packages/shared/src/index.ts:2061–2066`).
+- **Impact/reason:** an administrator selects Jira v3, switches the form to a different provider and cannot see or clear the stale field, yet Add connection sends it and receives a validation refusal. Recovering requires knowing to return to Jira and reset the now-hidden field or reload/reconstruct the form. This is the dependent-state class seen in WBK-003, on a separate provider configuration consumer.
+- **Triage:** Medium, **F6 × S3 =18** within provider changes after choosing a Jira-specific version.
+- **Reproduce:** choose Jira → API version 3 → switch to Asana (or another non-Jira provider) → fill the remaining required fields → intercept/refuse submit and inspect only provider/apiVersion. Validate that body against the existing shared schema; compare a control with apiVersion omitted. Do not store a real connection or send a credential.
+- **Recommendation/reuse:** normalize incompatible provider-specific draft fields on provider change and construct a provider-valid request body, while preserving unrelated non-secret inputs intentionally. Omit apiVersion unless Jira; make any deliberate reset clear. Reuse the shared schema's provider constraints, and treat secret drafts as an authentication boundary rather than persisting/carrying them casually between providers.
+- **Acceptance/counterevidence:** Jira→non-Jira never posts an incompatible hidden version; returning to Jira has a clear default or explicit retained compatible draft; the normal direct non-Jira path remains concise; server validation still rejects crafted invalid bodies. Success already resets the whole form, and failed writes retain input—neither fixes the stale hidden field before submission.
+
+### Connection research and comparison limits
+
+On November 22 the official [Bitbucket API-token usage](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/) and [Jira Basic-auth guidance](https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/) returned 200. Jira explicitly combines the account email and API token for Basic authentication. Bitbucket documents supported Basic and Bearer approaches, while its API-token overview calls API tokens the long-term replacement for app passwords. Those are current-document comparisons, not live-provider tests or a verified app-password end-of-life date. Local retrieval metadata is under `/workspace/.setup/reviews/connections-iteration6-research.json`; do not publish raw provider examples/contact metadata from those pages.
+
+Existing BP-01/03/04/09/10/12 and the parent's OAuth/secret-lifecycle research apply. No new library or unfamiliar product capability was implemented. These manual-token pages should not be described as having exercised an OAuth consent/callback journey.
+
+### Positive controls, function coverage and limits
+
+- Both parent tables distinguish loading/error/empty and offer Retry. Failed creates preserve input; successful creates clear secret fields. Parent row actions lock during the shared pending mutation.
+- Name immutability is explained in Git/PM edit dialogs because workflow/PM references use that name. Destination moves require a new token; the old secret does not silently follow a new host. Provider kind is read-only on existing connections.
+- Token replacement explains issuer-side revocation. Write-only encrypted storage remains the server contract; public evidence must contain no token values.
+- PM webhook creation returns the secret once; rotation explicitly exposes a grace window and handles an in-progress rotation with a separate immediate-rotation consequence. The parent shows a currently valid previous-secret deadline. Existing native signature/query/basic verification is not to be removed to make setup easier.
+- Connection deletion uses a named consequence dialog; PM deletion explains loss of links/history/alert-ticket configuration and re-registration of the inbound secret. These consequences are useful, not gratuitous friction.
+- PM create resolves mapping/provider shape before storage and both connection families perform guarded egress write checks when a custom host is supplied. Per-call checks remain independent.
+
+**Functions/sections inspected:** all GitConnectionsPage state/provider hints/create/reset/list/error/edit/replace/delete composition; all PmConnectionsPage provider-dependent form, needsBase, create/reveal/reset/list/grace badge/webhook URL/rotation/edit/replace/delete composition; selected ReplaceTokenDialog, EditGitDialog, MoveTokenField, RotateSecretDialog and EditPmDialog interactions previously inspected in the integration pass; compiled-contract source for create schemas; Git create/URL-store path; Git resolver/Bitbucket auth/Azure requirements; PM create/mapping/provider validation and webhook route; Jira auth and inbound-provider verification comments. Existing tests were searched/read, not run.
+
+**Not completed:** actual Git/PM provider connectivity, complete OAuth consent/device/callback flows elsewhere, all auth scopes or vendor credential kinds, actual secret rotation/delivery, external webhook retries, real URL-delimiter routing, full deletion transactions, complete PM sync/drift/import/remote state semantics, provider permission changes, native keyboard/mobile/screen-reader behavior and all concurrent edit/refusal races. Root may promote confidence only for matched runtime probes. The generic webhook reveal's limited provider-specific setup detail was considered but not promoted as a missing-documentation defect because the form already explains native mechanisms.
+
+## Deep audit — iteration 7, 2026-11-22: Claude reconciliation and a UI/UX improvement plan
+
+### What will improve the user experience most
+
+**Yes, the UI and UX can improve through consistent task completion rather than a replacement visual system.** Keep the existing brand, tokens, suite navigation and shared controls. Prioritise truthful status and recoverable outcomes, visible resource/authority context, scoped change review, stable lists/drafts, and then a task-led Home. The six UXP proposals below make that direction concrete with existing components, tradeoffs and acceptance journeys.
+
+The current record contains **70 numbered feedback cards** after one new Home defect, plus **six separately labelled design proposals**. The proposals are not six additional reproduced bugs. Product source is now main `267e12e4951d14c3f71531f3eeba9ffb4eb63022`, merged without losing newer builder work. New main capabilities were preserved; a build and selected feature checks do not mean every new backend function was independently audited.
+
+### Claude's response is received and reconciled
+
+Claude [responded on #1184](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7075781679), with full per-card reasoning in [codexreviews-response.md](codexreviews-response.md), merged by the master in #1186. Its declared assessed source is `da16d6bd23109d477102c0ec2a534f81d62a6917`. It covers **46 numbered cards plus RUN-001 and 39 historical rows**. The 23 cards from iterations 4–6 still need Claude's response; the new Home card and UXP proposals are additional feedback. Do not infer acceptance from a shared root cause alone.
+
+The response's 86-row summary is 53 planned fixes (including 8 narrowed), 13 earlier remedies described as fixed, 3 stale/superseded/false-positive rows, 6 triage/owner deferrals, 4 lane handoffs, 4 rejected historical/process recommendations, 2 process/docs items and 1 owner-approved archive. Its 47 card rows split into 41 ACCEPT-build, 3 triage-low and 3 delegated; these totals include RUN-001 and are not counts of distinct implementation PRs. The main discussion ledger now carries the actual response/score/slice/issue for each addressed card rather than leaving every row “awaiting response.” Source agreement, owner approval, a plan or green CI does not close a card.
+
+Our reasoned reconciliation below preserves disagreements and the owner's later resolved decisions. In particular, a response rejecting an old remediation does not erase the historical event. The 13 earlier remedy claims remain **independent current-head verification pending**. #1194 is still open at `d32d2896c6c7859785557ad41dc697999ef6a0dd`, with passing completed CI checks; this round is not its independent code/security review or an assertion that it merged.
+
+### Codex agreements, narrowing and remaining disagreement
+
+| Topic | Codex reconciliation | Decisive evidence / consequence |
+| --- | --- | --- |
+| ADM-003 temporary relaxation | **Agree with Claude's correction of control intent.** The existing assurance window is a red-team/demo mechanism, not an ordinary admin exception API to surface unchanged. The owner's desired administrative tuning is nevertheless now explicitly approved as a new feature. Preserve both facts. | ADR-0181 `strict-defaults.md:164–171,231–240` describes the red-team purpose, at-most60-minute window, preserved admin overrides and copied org modes. `guardrails.ts:556–562,794` supplies that contract. DecisionLog D-2026-11-22-01 requires a **new row kind**, bounded required expiry, step-up, audited grant/expiry and automatic reversion; existing window kinds/CHECKs remain untouched. Update card disposition to **narrowed; owner-approved new feature / fix proposed**, slice 15, not an already-existing missing-field repair. |
+| O-04 eval/playground schemas | **Both claims are true and should be kept together.** Our behavioral qualification remains correct: the scorer discloses its subset, so disagreement alone does not prove it violates a hidden full-schema promise. Claude is right that this does **not** settle the repository-policy obligation. | ADR-0176:84 explicitly says eval output schemas move to already-pinned Ajv instead of the handwritten subset. Agree the migration is required under that decision. Reuse hardened Ajv/RE2/bounds/offline-reference configuration, test parity, attribute historical results to their original scorer semantics and avoid rewriting stored evidence. Do not present warning-only as a substitute for the decided replacement or add another general validator. This does not require claiming the disclosed subset was a secret contract violation. |
+| S-08 hashing | **Accept stronger security classification.** Earlier wording as only a sensible follow-up understated the checklist/ADR obligation. | `auth.ts:454–501` still has N=16384/r8/p1 and `scryptSync`; ADR-0176:88 already requires async scrypt. The response identifies misleading “per OWASP” wording. D-2026-11-22-01 chooses N=2^17, async, rehash-on-login; D-2026-11-22-03 permits up to4 concurrent derivations per replica, configurable. Treat as a blocking checklist gap until independently verified at a fixing head; do not assert that this source-only pass benchmarked it or that #1194 has merged. |
+| S-10 defaults/SQL | **Agree with the checklist distinction and narrow exploit language.** An absent caller flag granting admin authority is an insecure fallback; validated UUIDs do not waive the explicit parameterization rule. | `reporting.ts:577` still uses `opts.isAdmin ?? true`; `compliance-packs.ts:179` / `copilot.ts:441` construct raw arrays from UUID-checked values. No injection payload is demonstrated here. Require explicit scheduler authority and fail-closed omission, plus bound array parameters. Keep constant-only SQL/CSP observations out of the vulnerability claim. |
+| C-02 file sizes | **Accept no size-only defect/generic splitting task.** Keep the maintainability risk as context, not a blocker or automatic rewrite. | Response:244 correctly treats size as an indicator; an import-cycle ratchet exists. A future split needs a concrete coupling/testability/change-risk problem, not an arbitrary line threshold. |
+| R-04 assertion-count gate | **Agree that the proposed metric is weak; do not rewrite history as refuted.** | Response:258 says M-111 records the guard loss. That acknowledges the incident, rather than refuting it. Counting assertions would not prove semantic preservation; use actual guard/regression behavior and conflict review. Mark **recommendation narrowed/rejected; event retained**, process follow-up only unless current code shows a new gap. |
+| R-05 scope creep | **Accept avoiding another mechanism by default, but a rule's existence alone does not prove compliance.** | Response:259 cites one-PR-per-batch. The original historical event and current status can remain accurate. Keep exact-head/scope delta review as the concrete enforcement practice; no speculative new checker or automatic PR title changes. Mark **process recommendation narrowed**, not “scope creep could not happen.” |
+| R-08 coordination/cap | **Partly dispute the stated rebuttal as current policy.** Do not use November20 suspension to override newer instructions. | Response:262 cites D-2026-11-20-01, but DecisionLog D-2026-11-21-08 reinstates at most10 worker sessions; D-2026-11-22-01 specifically allows CX as an11th until another builder ends. Mark historical broad proposal **partly superseded; current policy clarified**, not a blanket refutation based on an expired suspension. This source reconciliation does not inspect actual live session count or blame a current builder. |
+| F/S estimates | **Retain both estimates with rationale; do not silently replace history.** Owner-directed triage controls the build disposition. | ADM-004=3→#1187; ACC-004=4→#1188; ACC-002→#1192 is an explicit owner deferral despite Claude's15 score. Scores are task-conditional estimates, not measured incidence. No new issues or fixes are created here. |
+
+### Resolved owner decisions control UI/UX acceptance
+
+The response's “Owner questions” section still contains defaults/open wording, despite its summary saying all answered. **Use DecisionLog D-2026-11-22-03 (`DecisionLog.md:18`) as the newer resolved record** rather than treating those defaults as unanswered:
+
+- CST-005: deleting a cost alias/domain rule requires a server-audited reason.
+- CST-004: To includes the whole calendar day; show the resolved window.
+- UIS-09/UIW-05: ask before discarding unsaved dialog changes; retain the pending-save guard too.
+- UIS-04: real links or buttons replace row link roles; meaningful table semantics remain.
+- S-08: up to4 concurrent derivations per replica, configurable; do not retain the earlier default2 as the owner's final answer.
+- C-07: archive138 review/spike files, delete nothing. Do not manufacture a deletion approval.
+- O-01: rebuild THIRD_PARTY against current manifests and add CI verification.
+- C-01/P-07: the contract and compat ADR work is assigned to CX in DecisionLog D-2026-11-22-03. Those proposed decisions are not presented as built; Codex is not assigned their numbers or implementation.
+
+Also D-2026-11-22-01 controls REV-002: archive the definition, keep signed runs/evidence; this is stronger than merely adding a deletion confirmation. A UI acceptance test must verify retention, not only the modal.
+
+### How the ledger is reconciled
+
+- **41 card rows** have ACCEPT-build (including CXR-RUN-001 and owner-approved ADM-003); **3** are triage-low and **3** are handed to E35/E50:47 response cards total. The builder and lane handoffs overlap for UIW-02, as noted below.
+- **Agreed / fix proposed**: all `ACCEPT-build` card rows. Preserve source-specific narrowing and slice references. ADM-003 should say **owner-approved new capability**; REV-002 **archive/retention**, not cascade+confirmation.
+- **Deferred / issue, no code**: ADM-004→#1187; ACC-004→#1188; ACC-002→#1192 (owner). Do not close by reducing the score.
+- **Agreed / delegated, awaiting implementation/retest**: UIW-03→E35; UIW-04/05→E50. UIW-02 has builder work plus ChatPage handoff, so it is not globally closed or solely delegated.
+- **Narrowed before fix/retest**: RUN-001 model-read alert exists; missing datasets/sources alerts remain. ADM-009 already warns immediate effect; add consequence review, not a speculative dry-run endpoint. UIW-07 must branch for project-less instances. UIS-03 is a modal+shortcut conflict. UIS-09 now includes the owner-approved dirty prompt, not only the busy guard. ACC-003 cannot weaken enforcement from the fabricated false baseline, but its “off” claim/live control still misrepresents unknown state. REV-002 now follows archival policy.
+- **Latest 23 numbered cards** remained awaiting response at iteration 7; the later reply is reconciled in iteration 8 below.
+
+#### Historical remedy claims need independent verification
+
+Claude lists13: **S-01..S-06, P-01, P-02, P-04, C-03, R-02, R-03, R-06**. Their existing implementation can be acknowledged as agreeing with the earlier source reassessment, but this source reconciliation did not rerun their security/integration/process acceptance tests. Keep **remedy present / independent current-head verification pending**, not a claim that all13 are newly retested or all69 feedback cards are fixed.
+
+The original C-05 fixture false positive and stale/superseded historical rows should remain visibly explained rather than quietly removed. Refuting a proposed remediation is not proof that its historical event never occurred.
+
+### Additional UI/UX acceptance refinements
+
+These are acceptance refinements of existing cards, not new defect counts:
+
+1. **Future temporary-exception usability must include expiry truth.** ADM-004 was triaged low because today's windows are demo-only, short-lived and cleaned in finally/sweep. Once slice 15 adds ordinary admin exceptions, that frequency assumption changes. Before exposing the new row kind, require current/effective/expired distinction, scope, remaining duration, reason, audit and automatic reversion; reassess ADM-004 rather than carrying its demo-only deferral across the new feature without review.
+2. **Bind drafts by record without destroying good non-secret work.** “Key the form on id” fixes cross-resource leakage, but secret drafts should clear at the boundary while suitable non-secret drafts can be preserved deliberately per resource. Test A→B→A, late success/failure and stale reads. Do not turn the fix into a new accidental draft-loss path.
+3. **Failure retry does not replay a durable mutation.** ACC-001 options Retry starts a new proof ceremony; APR/WBK outcome recovery refreshes a committed decision/result. Keep these user actions distinct in labels and code.
+4. **Retained report runs must remain findable.** REV-002 archive should explain what changes, where historical runs remain and how existing links behave; a hidden template that makes retained evidence unreachable does not meet the usability purpose.
+5. **Success is not proof the interface is usable.** Require observed keyboard/mobile/role completion for affected shared primitives in addition to source agreement, while keeping native screen-reader/IME/provider coverage honestly open. This contribution performed none of those tests.
+
+### Closure evidence still required
+
+For every accepted card: fixing full SHA/PR, merged status, exact old reproduction, authorized role/state fixtures, successful path plus failure/cancel/refetch, and independent retest at the final source. A source-based agreement, planned slice, owner approval, passing generic ratchet or builder “fixed” assertion is not that evidence. Do not edit Claude's response file or any master-owned ledger to manufacture agreement; append Codex's reasoned position and link the newer decision record in the review file.
+
+### New runtime-backed Home feedback
+
+#### CXR-HME-001 — The first admin overview presents failed reads as zero pending decisions and zero calls
+
+- **Source/role/function:** admin Home, `OrientationCard`/`pendingCountOf`, `apps/web/src/views/home/HomePage.tsx:95–114,147–156` at main 267e12e4951d14c3f71531f3eeba9ffb4eb63022. Missing approvals become `queueTotal(undefined,0)` and missing usage becomes an empty totals object; the rendered counts fall back to 0 with no per-query loading/error/Retry branch inside this card. An undismissed card is “Start here”; dismissing orientation retains the same headline numbers.
+- **User impact/reason:** the first screen can tell an admin that no human decision is waiting during an outage, exactly when it cannot know that. This undermines task priority and trust. The neighbouring cards may report their own failures; they cannot make the headline 0 true. This is another concrete consumer of the shared unknown-is-zero family, not a new security mechanism or proof that pending records were lost.
+- **Triage:** Medium, **F7 × S4 =28** within cold/failed admin overview reads. The frequency is a task-conditional estimate, not production incidence.
+- **Runtime:** at 375px and 1440px, mocked 503 approval and usage reads produced headline values `0`, `0`, `—`; no alert or Retry existed inside the overview. Success controls at both widths showed 12 pending, 75 metered calls and $4.5 from their supplied fixture. Four checks passed; no mutation or customer data. The fixtures populate only these headline queries; other panels deliberately remain unavailable.
+- **Recommendation/reuse:** retain distinct loading/unavailable/measured-zero states for each metric, scope/time window and a safe Retry. Keep a valid current-principal cached figure only with explicit stale context; clear it appropriately on session/authority changes. Reuse the query/error patterns already working in `SignInStatus`, trust and the workbench pending summary. Do not fabricate zeros or add another dashboard cache.
+- **Acceptance/counterevidence:**503 cannot say 0; a genuine successful empty result can. A partial failure affects only its metric and explains recovery; keyboard/status announcements expose the same state. Spend already uses `fmtUsd(undefined)`→`—`, and both tested widths had no horizontal page overflow—preserve those strengths. Root inspected the card captures; native screen-reader/repeated permission-change coverage is open. Scope this with the existing status-honesty fix, not a new standalone framework.
+
+The figures show the **current product**, not a proposed redesign; both are isolated card captures at 375px with synthetic data, without names or secrets:
+
+| Failed approval/usage reads | Successful headline control |
+| --- | --- |
+| ![Current Home card incorrectly shows zero after failed reads](evidence/2026-11-22/home-unknown-375.png) | ![Current Home card shows supplied pending and usage totals](evidence/2026-11-22/home-populated-375.png) |
+
+### Validation and coverage for this round
+
+[Home evidence](evidence/2026-11-22/iteration7-home.json): four final browser checks passed in 9.1 seconds at 375/1440; source and visual inspection distinguish the unmeasured-zero defect from layout. An initial expected currency string assumed two decimals; the probe was corrected to the existing formatter's $4.5 output. That assertion mistake is not a product bug.
+
+The preserved new connector-catalogue and evidence-ingest mock suites passed **12/12 in 45.6 seconds**, covering populated setup, search/paging, retry, proof/cancel, reason requirements, air-gap affordances and token handling; some tests include axe assertions. These are existing feature tests, not a new real-provider/native-device or all-route guarantee.
+
+**Required-check limitation:** ADR-index is 7/8: its missing-reference case fails on two assigned but not yet created ADRs in the master decision log. [Exact-main verification](evidence/2026-11-22/iteration7-base-adr-check.json) confirms the cited file is unchanged from main 267e12e4951d14c3f71531f3eeba9ffb4eb63022 and the files are absent there too. This review adds no missing ADR reference and changes no guard or master-owned record. The failure is reported to Claude; no all-green/READY claim is made.
+
+Current AST route census is **151**; the original whole-route harness run covered 150 at its earlier snapshot. The new `/admin/connectors/catalogue` has feature-specific coverage above; its generic all-route layout/theme matrix has not been rerun here. The route ledger marks that difference. The 36,791-node function inventory remains dated to its initial snapshot rather than pretending to include every new main function.
+
+### UI/UX proposals for builder design review
+
+The six proposals are grouped delivery guidance, with proposed user-test targets rather than measured improvement claims. Preserve existing rules and reuse existing primitives. No product UI implementation is authored in this review lane.
+
+### Recommended delivery order and reuse
+
+Finish security-checklist work first, as Claude's build plan requires. Within the UI work, prioritise truthful state and preserved work (UXP-003/004), then record/action clarity and list continuity (002/005), then task discovery and broader usability validation (001/006). A corrected shared component should close multiple affected consumers; do not build six new frameworks or six parallel state helpers.
+
+The current product already has a coherent visual foundation: one suite/navigation model, native controls, scoped search, a token-based kit, foldable tables, record drawers, step-up, per-setting consequence review, and source-backed error/empty patterns. The useful change is to apply those primitives consistently to complete user tasks. Retain the repository's one-accent/one-primary-action, British-English, role-scoped data and air-gap rules. This programme does not request a new design system or a large navigation rewrite.
+
+#### CXR-UXP-001 — Make Home and search answer “what should I do next?”
+
+- **Task / role:** a new administrator needs to configure an integration; a returning reviewer needs to find their next decision; a member needs to resume a project or workflow.
+- **Source facts:** `HomePage.tsx:45–64` already gives admins orientation, suite launcher, setup and trust/alert cards, while members get approvals/spend and recent work. `:162–176` contains useful action-worded start links. `AppShell.tsx:214–248` deliberately keeps navigation suite-scoped but searches all visible destinations. `suites.tsx:1–16,36–49` is the shared destination model. `CommandPalette.tsx:43–75,77–100` already loads authorised entities on demand. `GettingStartedPage.tsx:172–203` has task-specific next links and completion/blocked state.
+- **Proposal / why:** add a small, role-appropriate “Needs your attention” or “Continue work” region using existing counts and authorised recent-record links, ahead of secondary overview detail. It should answer who needs to act, on what and why now; choose one primary next task and keep other destinations secondary. Keep suite tiles for exploration and the cross-suite filter for escape. Match user vocabulary in labels/help aliases so someone thinking “connect a repository” can find Git connections without learning the suite taxonomy first.
+- **Visual / interaction direction:** concise action label, one-line resource context, a truthful state and a direct link. Example task labels: “Review the next pending request”, “Continue project setup”, “Resume the failed workflow”. Reuse `PageHeader`, existing Home cards/launcher, `ListPreview`, nav model and command-palette items; do not create another route registry or add a fetch per decorative tile.
+- **Priority / tradeoff / security:** UI priority 2 after state-correctness work. A task region can become a noisy dashboard or duplicate counts, so limit it to actionable scoped records and keep the existing dismissal convenience. Never infer permission from a link; the server still checks access. Mandatory incidents/warnings cannot be dismissed as optional orientation. Do not show another tenant's workload or customer telemetry to produce a recommendation.
+- **Acceptance / validation target:** in a small moderated synthetic-data check, at least 4 of 5 participants in each exercised role find the requested task without being told a suite name or using browser search. Measure first successful click, wrong destinations and task time before/after; report raw counts, not a statistically supported uplift claim. A member never receives an admin destination. Keyboard users can reach the same tasks. Loading/failing attention data reads “unavailable”, not “nothing to do”. Existing suite/filter/bookmark routes continue to work.
+- **Related feedback and caveat:** unknown-state cards and list continuity are prerequisites, not cosmetic polish. A source spot-check found `OrientationCard` still renders `pendingCountOf(undefined)` and `totals.events ?? 0` at `HomePage.tsx:109,149–155` without per-query error branches in `:97–180`; this is an additional consumer for the truthful-status audit, not evidence that all Home figures or tile states are wrong. This is now separately reproduced as CXR-HME-001 above; it shares the status-honesty implementation scope.
+
+#### CXR-UXP-002 — Standardise the record context and the meaning of its primary action
+
+- **Task / role:** an approver decides an exact action; an admin changes a credential, ownership or policy; a viewer inspects an object they cannot drive.
+- **Source facts:** `PageHeader` already separates breadcrumb, title, one-line subtitle and optional help (`AppShell.tsx:576–607`). `DetailDrawer.tsx:24–35,38–53` supplies pinned action rows, record-change focus and responsive modality. Inbox already distinguishes own calls, prior decisions and named/delegated reviewers (`InboxPage.tsx:249–255`), and groups the decision controls/reason (`:233–247`). Existing findings INT-002/005, REV-004, WFL-003, SSO-004 and IDM-001 show the cost of losing resource, principal or effective-access context.
+- **Proposal / why:** use one repeatable context block on decision/edit detail: **object + scope**, **current effective state**, **your role/eligibility**, **next permitted action**. Put an action's concrete consequence next to the action, especially when “remove”, “rotate” or “approve” has a surprising effect. Distinguish viewing a workflow from driving it, removing one assignment from eliminating all effective access, and saving a decision from completing execution.
+- **Visual / interaction direction:** give the action a verb and object (“Remove direct assignment”, “Retry build stage”, “Replace credential”), with one primary action and deliberate secondary/destructive placement. Keep frequently needed scope/prerequisite/consequence visible; use `InfoButton` for explanation, not the only disclosure of authority or target. Put protected decision controls in existing `DrawerActions` where a drawer is used. Reuse the shared context/status vocabulary rather than hand-coding another banner per page.
+- **Priority / tradeoff / security:** UI priority 1 after prerequisite fixes. More context can overcrowd a small drawer, so show four concise facts and expandable technical evidence. Safe capabilities must be server-derived or based on existing reliable auth facts, then rechecked on mutation; no “trusted admin” bypass or client-only permission implementation. Do not expose every group's membership merely to explain one user's eligibility.
+- **Acceptance:** before confirming, a participant can identify the intended record, changed scope and their authority from visible text; after switching records none of those facts or drafts follows incorrectly. Own/ineligible requests show the next permitted route rather than an enticing failing button. An action-bound proof names the same object/operation as the reviewed form. Compare admin, named approver/delegate and read-only participant. These are proposed acceptance checks, not completed role tests.
+
+#### CXR-UXP-003 — Make progress, refusal and completion one coherent recovery journey
+
+- **Task / role:** a reviewer records a decision; an operator handles a failed execution or bulk batch; a user encounters a temporary API outage.
+- **Source facts:** `Stepper.tsx:18–39` already represents current/completed sections with accessible status; it is not an executor. `RefusalNotice.tsx:12–20` provides a persistent inline reason and next-step link. `WorkflowDetailPage.tsx:279–306` currently mixes in-flight wording and a visible last error (WFL-001). `ReviewWorkbenchPage.tsx:667–684` ties batch outcomes to the nonempty queue (WBK-002), and APR-002 documents discarded post-commit outcome warnings. `OrgSettingsCard.tsx:53–69` already says a save happened even if reloading current values failed.
+- **Proposal / why:** display a compact progress/result summary answering **what committed**, **what is still running/blocked**, **who can act next**, and **what retry actually does**. Keep last-attempt and per-item batch outcomes visible even after the live list changes. A successful approval with an executor failure should say “Decision saved. Execution needs attention.” and link to the existing authorised failed step; it must not invite another approval POST.
+- **Visual / interaction direction:** put a concise persistent outcome near the affected record/form; use toast for supplementary transient success only. Use the existing stepper/status badges when stages are meaningful, plain text for an unknown state, and one permitted next action. Reserve a strong success treatment for what actually succeeded; name partial success with text. Use the same region for pending, confirmed, refused and uncertain outcomes without shifting focus unpredictably.
+- **Priority / tradeoff / security:** UI priority 1. Avoid redundant progress bars or a second lifecycle: project the existing server transition/attempt facts and E29 pattern. Recovery may require a refresh, a new proof, operator attention or a permitted executor retry, not universal retry. Do not retain another account's cached evidence across session changes. Redact upstream exceptions while keeping safe actionable information.
+- **Acceptance:** exercise success, pre-commit refusal, post-commit warning, read-refresh failure and uncertain timeout; each explains the persisted state and permitted next step. No duplicate mutation is needed to discover whether the first succeeded. A batch's per-item refusal remains inspectable when pending becomes empty. In a five-person synthetic task check, 4 of 5 users recover the allowed path without re-entering non-secret work or attempting an already-recorded decision; report limits of this small sample.
+
+#### CXR-UXP-004 — Turn security settings into reviewed, scoped changes rather than dense form submission
+
+- **Task / role:** an admin tunes session/friction policy, maintains an IdP or grants an approved time-boxed guardrail exception.
+- **Source facts:** `OrgSettingsCard.tsx:50–61,87–93` has a current baseline, single-flight gate, keyed per-setting rows and post-save locks. `:168–175,192–232` renders current/default values, review, old→new consequences and the configured proof expectation. The dedicated SSO form instead sends all its old fields (SSO-002). Claude's response, Owner answers, classifies ADM-003 as a **new** bounded exception feature; the assurance-window row is not a generic troubleshooting control.
+- **Proposal / why:** progressively expose advanced settings while keeping effective policy, scope and consequences visible. For each intentional change show current effective value/source, proposed value, who/resources are affected, expiry when supported, what remains required, and the reason/proof step. “Current → proposed” should describe the actual change, never a hidden stale payload. Prefer task-specific maintenance actions (replace secret, stage certificate) to editing a large undifferentiated policy object.
+- **Visual / interaction direction:** default view: concise effective-state summary plus “Review change”. Expand task-specific fields only when selected; preserve required warnings outside collapsed help. Use existing row/modal primitives and tokens. A relaxation can be visibly distinct without using a universal “security level” slider. Do not create a new settings framework.
+- **Priority / tradeoff / security:** UI priority 1 for stale-baseline/intent handling, priority 2 for gradual disclosure. More review steps can cause fatigue, so reserve consequence review/proof for the effective change required by policy; harmless reads and unchanged settings need no ceremony. Follow the recorded owner decision for the new guardrail relaxation: distinct row kind, bounded required expiry, proof, grant/expiry audit and automatic reversion. Do not repurpose red-team assurance windows. Existing local-proof account linking and appropriately verified IdP MFA can reduce friction without weakening identity/linkage integrity.
+- **Acceptance:** editing one field does not repost unedited old MFA/SSO/break-glass values; a concurrently changed baseline is explained before a new write. A permitted temporary exception shows its exact resource, expiry and remaining floor; expiry returns to the baseline with an auditable result. A normal user can see a safe explanation/request path without acquiring admin rights. Failure/cancel preserves suitable non-secret work. The same task must be comprehensible at phone width and by keyboard. A prototype/test target is fewer repeated inputs and failed attempts, not a promised latency reduction or an automatic relaxation of mandatory controls.
+
+#### CXR-UXP-005 — Keep lists useful as work queues while preserving place and subject
+
+- **Task / role:** a reviewer works through many approvals; an admin compares permissions across people; an analyst drills from a filtered list into detail and back.
+- **Source facts:** `DataList.tsx:244–276` already has server-backed page/cursor/query keys and deliberately retained previous data during a new read; `:342–365` supplies server sorting and same-filter export with truncation feedback. `DetailDrawer.tsx:38–53` is designed for same-page inspection and retargeting. `fold.tsx:13–29,36–49` moves values into folded hosts according to available width. UIS-05/06/08, INT-005, APR-003 and REV-003 identify specific truth/continuation/return gaps; the workbench's oldest-first shared query is a useful positive pattern.
+- **Proposal / why:** standardise a stable queue/list header containing active filter scope, exact-versus-estimated total, stale/loading state and refresh. Preserve server sort/filter/page/scroll on detail-return. Bind selection, results and mutations to the loaded subject and make that subject explicit; a newly selected user must not make old grants look like theirs. Let users work oldest/highest-priority permitted items where the existing API supports it, without fetching everything into the browser.
+- **Visual / interaction direction:** compact primary cells answer “what / state / next action”; fold secondary metadata into labelled values rather than hiding warnings. Use one row's explicit detail link/button, consistent fixed action slots and the existing drawer, not a full-screen route for every quick inspection. Larger deep-linked records can keep their page route. Show retained previous-filter data as stale and prevent ambiguous destructive actions until scope is settled.
+- **Priority / tradeoff / security:** UI priority 1 for subject/visibility truth and reachability, priority 2 for comfort. Dense tables are useful to expert reviewers; do not replace them all with large cards or remove exported fields. Counts, pages and exports must share the same server permission/filter scope. Drafts may be retained only for their authorised subject; no browser-wide secret draft storage.
+- **Acceptance:** a 201+ record same-filter fixture remains reachable through bounded normal controls; old unresolved items are discoverable. Open the seventh filtered row, inspect/change another authorised row, return/back and retain the intended place/sort/filter. Slow/error reads never attach old mutations to a new subject. At 375/768/1440 px, scope/state/consequence/action remain readable and keyboard reachable, without sideways page scroll or lost data. A small user task comparison measures repeated navigation and wrong-record attempts; no savings claim is made without results.
+
+#### CXR-UXP-006 — Use real task accessibility and visual hierarchy as the release check
+
+- **Task / role:** a first-time user completes sign-in/setup/approval/recovery using keyboard, touch, magnification or a screen reader; experienced users scan dense operational pages.
+- **Source facts:** DESIGN_GUIDELINES already requires one primary action, consistent row slots, status/error semantics, 24px targets, token-based contrast and keyboard journeys. `Field` supports explicit labels/help (`kit.tsx:137–145`); existing UIS-02 records error association work. `DetailDrawer.tsx:38–53` supplies focus return, nested modal behaviour and phone modality. `PageHeader` deliberately moves long introductory prose behind optional help (`AppShell.tsx:584–592`), and the suite/filter model provides keyboard destinations.
+- **Proposal / why:** keep the existing typography, spacing and colour system; improve scanning by placing task title/context first, one primary action second, current state/prerequisites next, with advanced evidence progressively disclosed. Pair the initial automated 150-route checks, with the newer route census tracked separately with populated end-to-end tasks that include errors and recovery. An empty/error fixture passing axe is not assurance that a real person can complete a workflow.
+- **Visual / interaction direction:** clear section headings, sentence-case action labels, units/time windows beside numbers, text alongside state colour, linked inline field errors plus a focused error summary when multiple errors block submission. Busy controls must preserve a meaningful focus location and guard repeat activation. At narrow widths use the existing drawer/modal and fold behaviour; do not simply shrink text or hide policy consequences. Keep current versus historical/effective versus requested values named explicitly.
+- **Priority / tradeoff / security:** UI priority 1 for existing task-blocking accessibility defects; priority 2 for further layout polish. Avoid a new overlay/tour/tooltip layer, which adds focus work and can obscure warnings. Apply the resolved owner instruction: ask before discarding dirty edits and block dismissal during a pending save (DecisionLog D-2026-11-22-03). Screen-reader output should explain the same decision scope as visual content, without exposing restricted evidence.
+- **Acceptance / proposed test set:** four populated journeys—sign-in and required setup; intake→plan/sign-off; approval including proof/cancel; settings change including refusal/recovery—at 375/768/1440 px in both themes, 200%/400% zoom where applicable, keyboard-only, reduced motion and at least one real screen reader. Verify focus order, return, status announcements, labels/errors, no off-screen reachable controls, no clipped decision rows and no duplicate action. Keep automated serious/critical axe checks, but report manual/native-IME/provider/device coverage separately. Before/after usability measures are task completion, wrong-record/duplicate-action count, recovery success and user confidence in what persisted—not aesthetic preference alone.
+
+### Proposed task validation and delivery slices
+
+1. **Home → find one actionable approval → approve/prove → inspect partial execution outcome.** Use synthetic populated member and admin fixtures plus a post-commit warning. Compare the current information order, visible next step and keyboard focus; do not claim a real IdP/passkey ceremony from a mock.
+2. **Open SSO policy → change only one value → load a newer policy → review/cancel/save safely.** Inspect old→new/source/scope at desktop and phone widths. Keep the server proof/last-provider protections intact; the existing stale-form reproduction supplies a concrete before state.
+3. **Select a connector/person → inspect detail → switch subject → return to the same queue position.** At narrow width inspect the drawer and fixed actions, with a delayed/failing second-subject query. Do not send actual deletions or credential writes.
+
+Delivery should be small, reviewable slices after the security prerequisites: shared status/outcome contract; record/action context and proof completion; list/subject continuity; security-policy review integration; Home discovery; populated usability/accessibility verification. Keep one builder PR in review at a time under the master's plan. A design prototype can be reviewed on synthetic fixtures before changing product code; it is not evidence that the production backend already supplies every proposed capability.
+
+**Coverage limits:** this assessor inspected selected shell/Home/kit/settings/Inbox/workflow/list primitives and existing card/reply evidence. It did not manually review every page or function, run browser/native accessibility checks, interview users, benchmark vendors, test real integrations, or confirm a fix. These are concrete proposals for the builders and reviewer to challenge, not permission to merge, deploy, create a parallel lifecycle or declare UX completion.
+
+## UI handoff — iteration 8, 2026-11-22: Markdown mockups for Claude
+
+The owner asked for usable UI recommendations and Markdown mockups Claude can pick up. The
+[pickup index](mockups/README.md) now contains **eight task-focused desktop/phone wireframes**, based on main
+`6d81348a543cf923dbd6fb9e45e8f70206c95ce4`. Each includes the intended task, rationale, proposed wording,
+loading/empty/error/refusal/pending/partial/uncertain states, component reuse, backend dependencies and acceptance checks.
+This adds concrete designs to the existing 70 feedback cards and six UI/UX proposals; it adds no new bug claim.
+
+### Proposed screens and the reason for each change
+
+| Mockup | Recommendation and reason |
+| --- | --- |
+| [Home and navigation](mockups/01-home-and-navigation.md) | Put immediate work above the suite launcher. People should find a decision or resume a record without first learning internal suite names. Unknown counts must not look like no work. |
+| [Approvals and task detail](mockups/02-approvals-and-task-detail.md) | Keep scope, authority, exact consequences and the decision together; retain the recorded outcome when execution or refresh fails. This reduces wrong-request decisions and accidental repeat approval. |
+| [Workflow progress and recovery](mockups/03-workflow-progress-and-recovery.md) | Explain the current stage, blocker, responsible role and permitted next action. A failure needs recovery through the existing executor rather than an indefinite “executing” label. |
+| [Security settings and exceptions](mockups/04-security-settings-and-exceptions.md) | Review the selected old→new value against current policy. Keep supported relaxation narrow, explained, audited and expiring so friction can be tuned without accidental broad weakening. |
+| [Connections and credentials](mockups/05-connections-and-credentials.md) | Separate setup, destination editing and secret replacement. State the required credential shape and actual verification status so saved configuration is not mistaken for working provider access. |
+| [Lists and record context](mockups/06-lists-and-record-context.md) | Keep filters, place and loaded subject explicit. People must reach older work and return from detail without losing context or applying account A’s result to account B. |
+| [Sign-in and account linking](mockups/07-sign-in-and-account-linking.md) | Show available methods, support paste/password managers, finish required setup and explain independent approval. Reduce repeated entry and dead ends while preserving proof and linkage integrity. |
+| [Reports and costs](mockups/08-reports-and-costs.md) | Keep period, scope, provenance and retained run evidence visible. Users should distinguish list-price estimates from imported reported costs and understand archive or attribution consequences before acting. |
+
+### Claude’s current position and the feedback loop
+
+The [new response to iterations 4–6](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347)
+accepts **20 cards for implementation**, reports **IDM-002 and SSO-001 fixed by merged #1205**, and moves
+**CON-004 to triage-low #1212**. None is refuted. The response assessed short main `813b32769`; these mockups
+use the newer full baseline above. The discussion ledger now records every disposition and Claude’s scores.
+Reported fixes remain open for independent retest; this design pass does not establish closure.
+
+Preserve the narrowed scope: WFL-002's full server-preview contract is not in the assigned fix; WFL-003 is
+presentation because the server already refuses; SSO-004 is caller-specific eligibility presentation, with
+self/repeat-vote protection already enforced. CON-004 and ACC-002 remain owner-deferred issues. Where a mockup
+illustrates future contract work, label it as a dependency rather than silently expanding the implementation slice.
+
+The pack's [reply format](mockups/README.md#reply-format-for-claude) asks Claude to agree/narrow/disagree with
+source reasoning, name the assigned slice and missing contracts, provide state/accessibility evidence, then request
+an independent retest. Keep master-owned files untouched. An accepted design, merged PR or passing build alone
+cannot prove a user task is usable. HME-001 and the six design proposals still need a direct response.
+
+### Research, checks and limits
+
+The mockups apply the earlier primary-source best-practice/competition comparison and the current design guidelines.
+They reuse the existing kit, proof wrappers and E29 lifecycle pattern. No library, copied vendor UI, new state engine,
+product implementation, cloud write or external provider test was added. Existing current-main fixes are dependencies,
+not requests to duplicate them. All prototype values are synthetic.
+
+Required checks on the refreshed branch: whole workspace build passed; migration watermark guard passed;
+ADR-index tests **8/8 passed** (the upstream issue noted in iteration 7 is resolved on this baseline); all web bundle
+budgets passed. Gzip sizes: entry JS **40.59 kB**, entry CSS **6.01 kB**, first-load JS **134.97 kB**,
+first-paint JS **179.10 kB**. All nine mockup Markdown files passed relative-link, balanced-fence and pickup-completeness checks; `git diff --check` passed.
+Exact bundle bytes and check scope are recorded in the [iteration 8 validation record](evidence/2026-11-22/iteration8-mockups-validation.json).
+No new product tests were added for these static design documents.
+
+The route inventory now contains **154 routes**. This pass does not claim new whole-route browser coverage,
+complete page/function review, an implemented redesign, native assistive-technology validation or measured usability gains.
+Each mockup states what must be exercised on populated fixtures and what requires real user/device checks.
+
+## Deep audit — iteration 9, 2026-11-23: current-contract mockups and proof retests
+
+Source baseline: main `b5f88e79e4a8d25432f4ec70bc0ad811751e492c`, merged into this lane with a merge commit.
+No new Claude response to the eight-mockup handoff was present at this session's check. The earlier reasoned
+responses remain the discussion baseline; absence of a new reply is not agreement with a design.
+
+### A ninth concrete mockup: project work and conversations
+
+[Mockup 09](mockups/09-project-work-and-chat.md) adds desktop/phone layouts for project orientation and agent chat.
+It keeps the actual three project tabs, loaded thread/agent identity, safe project attribution, draft preservation,
+tool confirmation versus independent approval, refusal/recovery, IME input and accessible status. It names existing
+routes/components and gates missing facts. In generic chat, stopping a client stream must not claim server execution
+or metering stopped. This is a proposed label/consequence improvement, not a new cancellation API or independently
+reproduced server-cancellation bug. UIW-03's transient-history issue remains assigned to E35; context work stays E50.
+Current Composer acknowledgement-aware clearing and IME guards are reused, not requested again.
+
+### Correct the design when implementation advances
+
+Mockups [06](mockups/06-lists-and-record-context.md) and [08](mockups/08-reports-and-costs.md) now explicitly reuse
+foundations that landed after their original baseline:
+
+| Current source evidence | Implication for Claude |
+| --- | --- |
+| `reporting.ts:745–810`; `ReportsPage.tsx:487–519` | Archive now stops schedules transactionally, retains runs and audits the result; legacy DELETE also archives. Replace the old cascading-delete/undefined-consequence warning with the implemented behaviour. Retest retention and authorised findability independently. |
+| `ReportsHistory.tsx:35–70`; `ReportsPage.tsx:466` | Fresh and historical views already share `ReportPayloadView`, including workflow metrics, null medians and the stored estimate disclaimer. Refine/validate it rather than add another renderer. |
+| `risks.ts:915–978`; `RisksPage.tsx:175–178,477–486` | Risk paging/count/export and per-risk reasons now exist. Do not build another list/reason store. The illustrated free-text search still needs its own supported contract; current API filters and caller wiring are distinct. |
+| `CostConsolidationPage.tsx:320–326,400–410,426–437`; `cost-import.ts:955–964,1000–1009` | Inclusive final-day conversion, audited reason-required removals, refused-draft retention and returned impact counts now exist. The remaining pending interaction is recorded below. |
+| Current consolidation grouping and report-history filtering | Costs group by person/cost centre, not project; mockup example corrected. Report history currently filters by definition, so proposed project/period filters remain a contract dependency. |
+
+This is source reconciliation, not runtime closure of all REV/CST cards. The earlier layouts remain proposals;
+current expandable tables/modal detail are not falsely described as an already implemented unified drawer.
+The [pickup index](mockups/README.md) now links nine mockups and preserves the owner-deferred work.
+
+### Independent retest of IDM-002 and SSO-001
+
+Merged #1205 (head `44545af0d016dc591e45bd0f09cb117083c7c4ce`, merge
+`2e87ee28ffd7b6d7b8f55c80b72a6e17ee462af7`) is confirmed on main. The current call sites use the shared proof wrapper
+at `RolesPage.tsx:539` and `GroupMappingsPage.tsx:293`.
+
+**Eight Chromium checks passed in 17.4 seconds:** role unassignment and group-mapping removal, each at 375/1440 px,
+with confirmation and cancellation variants. Server-shaped takeover facts were supplied by the mock. Confirmation
+echoed those exact facts to proof options and retried the original DELETE once with a grant; the original body stayed
+unchanged and exactly one mocked write succeeded. Cancellation produced no proof verification or second write.
+No page-wide overflow was detected in these views.
+
+[Sanitised evidence](evidence/2026-11-23/proof-consumer-retest.json) records only the outcomes, not credentials,
+account details or grant values. This independently verifies the previously missing **browser completion path**.
+It does not establish a fresh real-gateway takeover condition, native authenticator/passkey behaviour or a security
+verdict. The ledger records scoped retest success without declaring whole-feature assurance.
+
+#### CXR-CST-006 — Removal can be submitted repeatedly or dismissed while its outcome is pending
+
+- **Evidence and state:** current `CostConsolidationPage.tsx:426–437,1055–1076` calls `removeRule` from a `ReasonModal`
+  without pending exclusion. `adminKit.tsx:421–459` sets busy state but does not exclude another `run`; its
+  `ReasonModal` at `:724–765` exposes active confirm/cancel and unconditional dismissal without the current shared
+  modal's busy contract. In a delayed-response Chromium reproduction, clicking Remove twice sent **two identical
+  DELETE requests** before either response. Cancel then closed the dialog while both were unresolved.
+- **User task and impact:** an admin removing an account mapping may repeat a slow action, lose the visible reason/
+  target context and be unsure whether removal happened. The new audited-reason fix is useful; this finding concerns
+  its pending UX. No unauthorised mutation, duplicate durable deletion or server data corruption is claimed.
+- **Triage:** Medium, **F5 × S3 =15**. Frequency is an estimate conditional on slow removal and repeat/dismiss behaviour;
+  production incidence is not measured. This is an additional consumer of UIS-09/UIW-08's pending-action family,
+  not another independent security mechanism.
+- **Reproduce:** open `/admin/cost-consolidation?tab=mapping` with one synthetic alias; open its named removal dialog,
+  enter a reason, hold the DELETE response, activate Remove twice, then Cancel. Both requests and dismissal are
+  observed before releasing the mock barrier. The corrected probe passed in **3.2 seconds**; all writes were intercepted.
+  [Evidence and harness limits](evidence/2026-11-23/cost-removal-pending.json).
+- **Recommendation and reason:** integrate the existing single-flight guard with the shared modal busy contract;
+  freeze the target/reason as one submitted attempt and prevent opposing/repeated submit or dismissal while pending.
+  Retain focus with the existing guarded busy-control pattern. Separate recorded success, failed refresh and uncertain
+  timeout; read authoritative state before a new attempt. Do not build another mutation engine or weaken server
+  authorisation, required reasons, audit or re-attribution.
+- **Acceptance:** hold the response and attempt mouse/keyboard repeats plus Cancel, Escape and backdrop dismissal:
+  one request only and visible in-progress context. A refused result retains its reason; a confirmed success shows
+  returned counts; an uncertain result offers safe status reconciliation. Verify both alias/domain paths and phone/
+  keyboard behaviour. Only the alias/desktop double-submit and Cancel case was reproduced in this pass; other cases
+  are acceptance work, not claimed test results.
+
+### Validation and limits
+
+Full workspace build, migration watermark guard and ADR-index **8/8** passed. All bundle budgets passed; exact bytes
+and ten-document link/fence/acceptance checks are recorded in the [iteration 9 validation evidence](evidence/2026-11-23/iteration9-validation.json). This pass contains
+**71 numbered cards**, six design proposals and nine mockups. Current route inventory: **157**; no fresh whole-route
+browser run or all-functions completion is claimed. Native accessibility/device/provider checks and measured user
+studies remain separate. No product implementation, real deletion, migration or production/cloud write was made.
+
+## Continuing review — iteration 10, 2026-11-24: Claude response and prioritised next steps
+
+Source: main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`, preserved by merge. This round replies to
+[Claude's assessment](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112),
+the [owner answers](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102576169) and
+[Claude's requested brainstorm](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102813308).
+It adds **18 discussion topics**, not 18 reproduced bugs. The existing **71-card** defect ledger is unchanged.
+Only SEC-01 restates a confirmed, already assigned security gap; its impact score is an estimate, not measured incidence.
+For source-scoped design/test recommendations, priority is stated instead of manufacturing a bug F×S score.
+
+### What Claude thinks, and where Codex agrees or narrows
+
+Claude agrees with UXP-003 (durable outcomes) and narrows UXP-001/002/004/005/006 to actual task slices and available
+contracts. Mockups 02 and 08 are agreed; 01/03/04/05/06/07 are narrowed, principally to avoid invented capability,
+health, ranking, conflict-detection and retry facts. That is a useful implementation boundary, not a rejection of the
+user tasks. Slices 19–27 are assigned in the reply. The design-proposal ledger now records those dispositions.
+
+Codex agrees: build the four-fact context per task before extracting a shared component; preserve exact decision
+outcomes; reuse merged list/row/proof fixes; omit exception forms until their approved row kind exists. Two refinements:
+initiator/admin-derived workflow presentation is sufficient only for the existing supported cases, with the server
+still authoritative; and a policy re-read can refresh a baseline but cannot promise an atomic compare-and-set.
+Both remain explicit gates in the mockups. Independent browser tests from iteration 9 address the reported IDM/SSO
+proof-consumer failures; they do not certify native proof devices.
+
+The owner resolved Home order: **attention first, launcher below**, while eligible-for-me counts/ranking remain gated.
+User studies are deferred; participant targets remain unmet and no usability gain is claimed. Native screen reader,
+IME, password-manager, IdP and passkey checks remain untested unless separately recorded. Do not ask those questions
+again from stale prose. D-2026-11-23-01 is now present in the master's DecisionLog; this lane does not edit it.
+
+[Mockup 10](mockups/10-denial-explanations-and-recovery.md) supplies role-scoped refusal/recovery layouts.
+[Mockup 11](mockups/11-first-run-and-navigation.md) supplies first-run orientation and ranked cut/merge/keep navigation.
+There are now **eleven mockups**. “Cut” below means remove from default first-run presentation, never delete a route,
+file, stored record or capability. “Merge” means task entry points while preserving distinct backend contracts.
+
+### Recommended order and score discipline
+
+1. **Security implementation first:** L1's already assigned inherited-policy runtime gap (SEC-01), with explicit field
+   enforcement ownership, version/commit checks and tests. Do not duplicate E38's storage work or change its precedence.
+2. **Security validation next:** authority/budget propagation, content trust, credential intent, isolation and release-check
+   coverage (SEC-02..06). These are bounded test recommendations with counterevidence, not allegations that controls are absent.
+3. **Complete accepted task fixes:** approvals/outcomes, pending-action integration including CST-006, workflow recovery,
+   policy intent and loaded-subject continuity. Keep the master's existing slices and GX overlap references.
+4. **Task discovery and explanations:** first-run entry/aliases, safe denial guidance, readable policy preview and mobile/cost
+   focus (UX-01..07), followed by scoped PM/run/savings/deployment/cascade improvements (PRD-01..05).
+
+### Security and policy feedback
+
+#### Discussion CXR-BRN-SEC-01 — Enforce inherited restrictions through the existing decision core
+
+**Disposition:** confirmed, already acknowledged security-checklist gap; do not count as a new independent finding. **Provisional F7 × S8 =56**: calls under a configured inherited restriction currently bypass that additional restriction; incidence depends on configured layers, which is not measured. Checklist blocking status does not depend on score. **Owner lane is L1**, governed-core next slice after 4c, under D-2026-11-23-02 (`internal/process/orchestration/DecisionLog.md:19`); E38 supplied storage/resolution.
+
+**Evidence/shared cause:** `governance-policy.ts:113–130` explicitly reports `enforced:false` and says no call path reads the resolved layers. The effective endpoint preserves that disclosure (`:424–431`). `governed-evaluate.ts:467–475` reads current decision policy epoch/entitlements but does not call the inherited-policy resolver. This is not a claim that current entitlement/ABAC enforcement is missing.
+
+**Smallest acceptable fix:** wire the existing typed rule fold into the existing model/connector/MCP/A2A decision paths before dispatch. Retain `POLICY_RULES`/`mergeRule` (`packages/shared/src/governance-policy.ts:24–37,69–93`), rather than introduce a generic priority or another policy engine. ADR-0357 §4 (`:130–152`) already chooses intersection for allow lists, union for deny lists, minimum ceilings, maximum floors, OR for requirements and strictest ordered values. **Reject nearest-wins and child exceptions:** the ADR explicitly refuses widening; a new exception needs its own owner decision and contract. A parent change must not be overridden by a formerly looser stored child.
+
+Define each field's existing enforcement owner: `maxBudgetUsd` describes the maximum configured project budget (`shared/governance-policy.ts:29`), not automatically a per-call spend limit; `auditRetentionDays` is a retention floor, not a caller permission. Do not pretend every field is enforced by adding one call-time deny check. Map workflow/sign-off/retention facts into their existing authoritative gates and disclose any incomplete rule coverage.
+
+**Required tests:** same prohibited action across all four surfaces; parent/child disjoint allow lists; deny union; zero call/budget ceilings; every floor/flag/order rule; parent tightening, project BU move and use-case reassignment between evaluation/commit; stale cached decisions/approval replays; resolver/database/schema failures and unknown subject fail before dispatch; simultaneous calls cannot exceed existing atomic limits/budgets. A valid chain with no stored rule uses declared strict product defaults (`EffectiveRule.value:null`, `:130`); distinguish that from an unreadable/invalid chain. Do not turn missing configuration into permissive success or label every unset rule a resolver failure.
+
+Reuse the existing decision-epoch commit recheck (`governed-evaluate.ts:397–406`); explicitly test that hierarchy/layer changes invalidate the evaluated snapshot—existing policy writes have their own hierarchy lock (`governance-policy.ts:52–53`), which alone does not prove dispatch consistency.
+
+**Audit contract:** surface, caller/actor-chain identities, resource/project/use-case, outcome, safe reason code, hierarchy snapshot/version/digest, applied rule names and contributing levels. `setBy` is only the last tightening level; unions/intersections can have multiple contributors (`EffectiveRule.setAt`, `:133–135`). Current resolver drops row versions (`governance-policy.ts:103–107`), so snapshot/version evidence needs explicit DTO work. Keep full details in authorised audit views; ordinary callers get only safe reason/recovery and a support reference, not hidden rule text, membership or another subject's policy.
+
+#### Discussion CXR-BRN-UX-04 — Preview specific policy impact before save
+
+**Proposal, not a new bug:** no F/S incidence claimed. Start with effective old→new values and inherited source, then bounded scenario comparisons; do not promise an exhaustive “who gains access” census.
+
+Existing `/v1/abac/simulate` assembles authoritative project context and returns ABAC attributes/verdict, explicitly noting ABAC never grants (`abac.ts:1140–1176`). Governance config plan/apply already binds review to a plan hash and re-plans under lock (`governance-config-apply.ts:116–129`). Neither is a complete hypothetical-layer evaluator for all four call surfaces.
+
+**Smallest contract:** an authorised read-only preview accepts one candidate layer, its `expectedVersion`, subject and bounded permitted scenarios; returns baseline/candidate effective-rule deltas, tighten/refused-widen flags, applicable provenance, per-scenario old→new decision and “not evaluated” limits. Derive membership, project, environment and actor facts on the server. Bind preview to hierarchy/version plus candidate digest; stale save returns conflict and requires review. Preview must not dispatch tools, consume budgets, mint approvals or persist simulated allow rows. Full population estimates require their own bounded/paginated visibility model; an incomplete sample never gets an exact affected-user total.
+
+Acceptance: known tightening/refused widening, unrelated actor denied, tampered subject/environment, stale hierarchy, partial unavailable scenario, and preview followed by real-call equivalence at the same snapshot. UI says “configuration stored; runtime enforcement unavailable” until SEC-01 coverage is actually delivered.
+
+#### Research comparison
+
+Fetched official guidance 2026-11-24: [Cedar authorization](https://docs.cedarpolicy.com/auth/authorization.html) documents forbid-overrides/default-deny and diagnostics; [OPA policy testing](https://www.openpolicyagent.org/docs/policy-testing) documents explicit policy tests and coverage. Reuse existing Cedar plus the product's tested merge table; borrow differential/scenario testing, not a new Rego engine. A Cedar permit/diagnostic is not proof the whole gateway permits or that a policy had no evaluation errors. No library/assets added. Scope remains policy design; A2A token, memory trust and tenant-table assurance require separate traces.
+
+
+**CXR-BRN-SEC-02 — Delegation must retain the initiating authority.** Existing counterevidence matters: `delegation.ts:5–30,309,499,523,1043–1095` checks actor/sponsor/parent/lead scope, caps children against parent remaining, uses fresh stored live chains and transactionally allocates/settles budgets. `orchestration.ts:757–784` rechecks the current worker owner under the initiating user and lead ceiling immediately before dispatch. `a2a.ts:459–460` explicitly has no delegated path: an A2A user call is not evidence that external delegated A2A is implemented. Shared cause to challenge is attribution/context propagation across handoffs, not an absent grant engine. Smallest slice: reuse these checks and existing `jose` sender-bound token implementation (`delegated-token.ts:172–227,505–541,668`) in a focused cross-path contract suite. Acceptance: revoke parent/actor/sponsor rights after planning; change environment/project/audience/binding; race child allocations; retry a charged usage row; tool output asks for broader access. Every case refuses or remains within the original envelope, without a cached allow, duplicate reservation or authority inferred from text. No additional auth framework recommended; existing maintained `jose` and Vitest/Postgres suffice. No new defect F×S assigned without reproduction.
+
+**CXR-BRN-SEC-03 — Separate scanner result, source trust and authority.** `memory-write-gate.ts:2–18,81–120` already reuses the write floor and verifies causal-context ownership; `memory-governance.ts:89–147` scans writes, with block/log modes and text-free audit. `content-trust-routes.ts:5–16` starts sources untrusted and write floor trusted, with audited step-up relaxation. Shared cause is a misleading “clean means trusted” interpretation, not proof these checks are missing. Smallest fix: show scan result and source tier separately in the existing evidence/refusal UI; add contract tests to current scanner/floor suites rather than a second scanner. Acceptance: clean untrusted tool output cannot drive a protected write; a malicious description/output/retrieval/memory revision cannot acquire system-instruction authority; copied context retains provenance; unknown/different-owner causal context cannot borrow a clean record. Test context omitted on agent-generated writes against the actual producer contract before claiming a bypass. Detector false negatives remain a disclosed limit. Raw prompts/payloads must not enter generic denial audit.
+
+**CXR-BRN-SEC-04 — Credential maintenance tests should bind intent to one resource.** Existing INT-002..005 and mockup 05 already own draft scoping, metadata errors, token-only replacement and entitlement subjects; #1229 must not receive duplicate slices. Smallest acceptable test matrix: connection A→B, provider switch, metadata failure, token-only rotation retaining destination, explicit destination clear/change, cancellation during proof, committed write with failed refresh, uncertain timeout, old credential revoked, and no plaintext read-back. Verify effective host through existing guarded fetch and encryption/store rules; a saved credential is not provider health. Any provider-contact test needs a separately authorised backend contract. Retest #1229 at its final merged head rather than reviewing a moving draft as completed.
+
+**CXR-BRN-SEC-05 — Sample isolation by principal and route contract.** `internal/ARCHITECTURE.md:263` describes one organisation per deployment; do not misreport every table without an org column as a cross-tenant vulnerability. Existing RLS tests (`zz-adr0234-rls-*.test.ts`, `testing/rls-slice1-migration-scan.ts`) are the starting point. Smallest slice: stratify newly added tables/routes into owner/project/admin/public/system, choose one positive and one denied principal for list/count/export/detail/mutation, and run the same fixtures with normal RLS credentials, not a superuser. Acceptance: another principal's rows cannot appear in totals/exports/cursors, direct IDs do not disclose existence, and transaction/session scope is cleared when pooled connections are reused. A sample yields named evidence only; it cannot certify every new table.
+
+**CXR-BRN-SEC-06 — Validate the required-check plan, not just green labels.** `.github/workflows/ci.yml:153–169` now documents PR/main coverage and the #1227 skipped-journey incident. Reuse `.github/actions/ci-scope` and `scripts/ci-plan.mjs`; do not add another scope classifier. Smallest slice: executable fixture comparisons for relevant path sets and workflow events, with intentional skip reasons. Acceptance: row/kit/shared UI changes request journey coverage on the released PR head; required jobs absent, cancelled or unexpectedly skipped cannot count as success; docs-only exemptions remain explicit; pinned action SHAs and assign-at-merge journal integrity remain intact. This is validation of the already assigned #1230 fix, not a second incident card or claim of workflow compromise.
+
+
+### UI/UX feedback beyond the policy preview
+
+**CXR-BRN-UX-01 — Information architecture (design priority 1).** The ranked table in
+[mockup 11](mockups/11-first-run-and-navigation.md#ranked-cut-merge-keep--navigation-only) keeps security, Inbox and current work
+reachable; joins setup/decision/sign-in/model task entry points; and moves specialist training/tracing/simulation
+out of the default first-run presentation. Shared cause: people must learn suite taxonomy before finding a task.
+Smallest fix: aliases/orientation links in the existing permission-filtered suite registry (`suites.tsx:578–596`),
+not a second navigation database. Acceptance: an admin can reach setup and an approval from task wording; a member
+cannot reveal admin-only destinations via aliases or typed URLs; all existing routes remain reachable in their scope.
+
+**CXR-BRN-UX-02 — First run (design priority 1).** The mutable resumable wizard already exists
+(`FirstRunPage.tsx:94–139`); readiness is intentionally read-only (`GettingStartedPage.tsx:139–231`). A Home card
+should say Continue setup versus Review current readiness, keeping recorded progress, current satisfaction and drift
+distinct. Starter roles grant nothing and a credential is not health. Reuse the six-step lifecycle; connector setup
+is conditional on the intended task, not a new mandatory step. Acceptance in mockup 11 covers new/resumed/drift,
+failed independent reads, applicable air-gap/self-hosted skips and a deliberate governed first call. “First ten
+minutes” is an orientation sequence, not a guaranteed setup duration or completed study.
+
+**CXR-BRN-UX-03 — Why was this denied? (design priority 1).** [Mockup 10](mockups/10-denial-explanations-and-recovery.md)
+uses the existing refusal mapping and inline notice. Show a safe reason, known outcome and supported next step;
+caller, assigned approver and administrator get different authorised detail. Unknown code is not raw upstream text;
+a timeout is not proof of denial/no side effects. Recovery URLs are trusted local destinations. Acceptance spans
+model/connector/MCP/A2A, proof/cancel, hidden resources, partial execution and unconfirmed outcome. Existing guidance
+is positive counterevidence: this proposal does not claim all refusals lack useful copy or leak policy.
+
+**CXR-BRN-UX-05 — Phone approvals (design priority 1; existing mockup 02).** Keep request identity, exact operation/scope,
+expiry, caller role and consequences above one reachable decision row. A payload diff is useful only when the actual
+canonical before/after facts exist; otherwise show the current exact request and say no comparison is available.
+Never trim essential arguments or authorisation context to fit a phone. “One-tap deny with a reason” cannot bypass a
+required reason or make denial the default; offer a labelled reason field when the actual rule requires it and a
+deliberate action. Reuse signed/quorum/proof paths. Acceptance: 375 px plus zoom/software keyboard; long payload,
+individual signature, partial quorum, caller-own request, proof cancel and one in-flight decision. Native device
+results remain untested. No additional approval lifecycle or mobile-only decision endpoint is needed.
+
+**New consumer evidence for the existing pending-action cause:** four controlled Inbox probes passed at 375/768 px,
+light/dark (**6.5 s**). The heading received focus, the Deny action was within the viewport, there was no page-wide
+horizontal overflow, keyboard submission sent one request, and both decision buttons locked. However, Escape closed
+the drawer before the held response arrived. `InboxPage.tsx:78` unconditionally clears the open ID; its
+`DetailDrawer` call at `:368–375` supplies no pending close guard. This is a further UIS-09/UIW-08/CST-006-family
+consumer, not an extra numbered defect. **Impact estimate F5 × S3 =15**, conditional on dismissal during a slow
+operation; no real incidence, lost persisted reason, double decision or server corruption is claimed. Reuse the
+existing pending guard and outcome treatment across the assigned approvals slice. Acceptance must include Escape,
+close control/backdrop and uncertain response, not merely disabled Approve/Deny. All writes were mocked and refused;
+[probe evidence](evidence/2026-11-24/phone-approval-pending.json) is separate from a successful acceptance test.
+
+**CXR-BRN-UX-06 — Cost dashboards (design priority 1 for meaning, 2 for layout).** The default Spend tab already keeps
+budget warnings visible (`CostDashboardPage.tsx:42–43`); keep that strength. Lead a selected project's summary with
+current period, spent/limit, server-effective overage, forecast basis and one permitted review action, then let users
+expand contributor detail. Remove duplicate explanatory prose/advanced setup from the initial summary, not warnings,
+units or provenance. Savings remain a separate estimate and imported figures stay distinct from governed usage.
+Smallest fix is information order in the current rollup, not another aggregation service. Acceptance uses below/over
+budget, prior-period approval, unknown/failed rollup, unpriced work and same-window export. “Answer within ten seconds”
+is a future task target; it is not measured and the deferred study cannot be marked passed.
+
+**CXR-BRN-UX-07 — Empty/error/partial states (correctness priority 1).** Reuse existing HME-001, WBK-001, IDM-003 and
+INT-003 rather than open one slice per label. A sample of `?? 0` source expressions alone is insufficient: establish
+whether a successful enclosing payload guarantees a number before calling it an unknown-state bug. Extend per-task
+fixtures for missing/error/partial/current/stale facts, then use the existing query/state helper in the relevant
+slice. Acceptance: read failure cannot become zero/healthy/connected, successful zero remains zero, and independent
+panels and permissions stay usable. This round does not assert another reproduced screen defect from a text scan.
+
+### Product and feature feedback
+
+**CXR-BRN-PRD-01 — PM disagreement:** keep both statuses, source ownership, last confirmed sync and safe failure next step together. `pm.ts:1621–1660` checks run/workflow visibility; `:1674–1690` already computes drift, recognising an explicitly adopted state. Reuse that projection. Never label drift “sync failed” automatically or silently overwrite a field whose source of truth differs. Acceptance: delayed webhook, failed outbound mirror, explicit adoption and later external edit remain distinguishable; no new precedence invented in the browser.
+
+**CXR-BRN-PRD-02 — Non-engineer run progress:** retain the existing graph but lead with “completed / working / waiting / needs attention”, the named blocker and one permitted next action. `RunDetailPage.tsx:2–16,52–58` already distinguishes estimated/measured caps, pass limits and in-progress elsewhere; `orchestration.ts:294–419` supplies run/node budget reasons. Show measured spend and reserved/estimated amounts separately; never fabricate per-worker remaining budget if absent. Acceptance: blocked node, independent review, unpriced work, concurrent dispatch and measured cap breach show the correct responsible role and action.
+
+**CXR-BRN-PRD-03 — Honest savings:** `OptimizationPage.tsx:2,60,85–96` already says estimated savings; do not open a relabelling slice claiming it says realised. P-06 remains the shared counterfactual/accounting issue (`optimization.ts:77–78`). Keep measured usage beside estimated avoided spend, with technique, basis/window and unavailable state. No unsupported “would have spent” percentage or estimated savings added to a billed total. Acceptance compares the same scope/window and distinguishes a technique event from a proven causal saving.
+
+**CXR-BRN-PRD-04 — Deployment boundary:** architecture `:259–268` and `docs/deployment/DATA_BOUNDARY.md` disclose planes and modes; organisation settings already explain that air-gapped strictness cannot be loosened (`OrganizationPage.tsx:839`). Reuse the current effective mode/posture in a concise deployment summary: what remains local, what egress is possible and who operates it. Gate live guarantees on actual configuration, not a selected label. Acceptance covers hosted/BYOC/air-gapped, unavailable posture, strict floor and any declared metadata transfer.
+
+**CXR-BRN-PRD-05 — Compliance consequence review:** `ComplianceProfilesPage.tsx:468–530` already previews classifications, pending reclassification and strictest-per-dimension composition. Bring that existing preview beside the project tag-change confirmation rather than invent a cascade engine. Show required stages, PII mode, retention and pending review; distinguish current effective from proposed. Acceptance uses conflicting profiles, version changes between preview/commit, unavailable preview and unauthorised scope. Atomic version checks need actual server support; a stale browser preview is never a guarantee.
+
+Limits: focused source reading, not complete call-graph, UI, RLS or security-checklist coverage. No native devices, integrations or customer data used. All proposed validations must report their actual scope; no new security bug is asserted by this brainstorm.
+
+
+### Independent checks completed this round
+
+- **Report archive/retention:** **25 checks passed** against compiled `buildApp` and a fresh local PostgreSQL database.
+  Archive refused a member, retained the definition/two runs/schedule rows, disabled the schedule, hid the active-list
+  entry, exposed it through include-archived, retained history and admin reads, refused another member's run reads,
+  and refused further generation/re-archive. No rows were deleted; scratch records remain local. Test connection was
+  corrected from TCP to the existing Unix socket before assertions ran. This is application-authorisation coverage
+  with a privileged database login, **not an RLS or production-boot test**.
+  [Sanitised runtime evidence](evidence/2026-11-24/report-retention-runtime.json).
+- **Merged UI fixes:** **21/21 checks passed, no skips/flakes**, in reports/risks, cost recovery and DataList suites
+  (**29.5 s**). These use mocked gateway responses at desktop width; they establish no new native/provider/mobile
+  assurance. [Evidence](evidence/2026-11-24/merged-ui-retests.json).
+- **Inherited-policy merge foundation:** the shared policy suite passed (**34 reported Vitest tests/results across two
+  runtime/typecheck results, no type errors; 11.68 s**). Six additional compiled-helper edge probes passed for zero
+  ceilings, disjoint allow lists, absent layers, deny union and contributor provenance. This validates the fold's
+  named examples, not runtime wiring: the gateway still explicitly reports inherited enforcement unavailable.
+  [Evidence](evidence/2026-11-24/policy-merge-retest.json).
+- **S-08:** **11/11 tests passed** across hashing and real-database rehash-on-login suites (**31.96 s**), including
+  current cost, legacy verification/upgrade, malformed bounds, concurrency and event-loop behaviour. S-10 is not
+  covered by those two suites. [Evidence](evidence/2026-11-24/password-security-retest.json).
+- Whole workspace build, migration guard, ADR-index **8/8**, bundle budgets and mockup integrity are verified before
+  publication. The [iteration 10 validation record](evidence/2026-11-24/iteration10-validation.json) gives exact scope
+  and bundle bytes. No product code, master-owned record, migration or production/cloud write was authored here.
+
+These checks strengthen the named card/task evidence without certifying every related feature. REV-002's core
+retention/findability now has independent real-database evidence, alongside the mocked confirmation test. Scheduler
+sweep re-enable races, signed download verification, native accessibility and every-role/browser combinations remain
+outside this new runtime probe. The current inventory is still 157 routes; no new whole-route/function review is claimed.
+
+### Research and continuity
+
+Policy proposals compare official Cedar authorisation and OPA testing guidance, then choose the existing Cedar/merge
+pattern. Refusal design compares the current typed-error mapping with RFC 9457 at the HTTP boundary; the current
+mapping is the smallest compatible step. RFC 9457 was fetched successfully on 2026-11-24; a fresh OWASP error-handling
+page fetch was blocked, so only earlier retrieved OWASP material is relied on. No library or vendor code was added.
+
+The owner requested a four-hour wake-up schedule. Available tools and Cloud runtime capabilities expose **no persistent
+assistant scheduler**; no cron or automation was created and no unattended continuation is claimed. Preserve this
+file, the PR and local session handoff for resume. Continue prioritising named security and user-task evidence; do not
+let the feedback loop become repeated broad suggestions without retests or source reasoning.
+
+## Deep audit — iteration 11, 2026-11-24: inspect the full tool change before approval
+
+Source remains main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`. This continues the active session after the iteration 10
+checkpoint. [Mockup 12](mockups/12-tool-admission-and-permissions.md) separates registration, release age, admission,
+definition pinning, effective grants and discovery from actual call eligibility. It uses existing routes, strict block
+mode and digest/proof checks; clean scan text never becomes trusted instruction. Source/health facts absent from the
+response remain gated. There are now **twelve mockups**.
+
+#### CXR-MCP-001 — The definition-review UI hides the only changed text while allowing re-approval
+
+- **Evidence:** `apps/web/src/views/admin/integrations/mcpPinningModel.ts:65–69` crops every JSON-rendered value to
+  400 characters; `describeDiff` uses it for old/new values at `:108–109`. `McpDefinitionPins.tsx:194–201` renders
+  only those strings with no expand/full-value control. The current server response already includes complete approved
+  definitions and RFC 6902 values (`mcp-definition-pins.ts:370–372`). No new API is needed for the reproduced case.
+- **User task and impact:** an admin reviewing a long description can see apparently identical cropped old/new values,
+  with the actual change hidden beyond the cutoff, and still enable Re-approve by choosing the item and entering a
+  reason. The source/digest is bound correctly, but the person cannot inspect the full content they are asked to accept.
+  Long descriptions/schema values are ordinary review inputs; the cutoff must be a summary, not the only evidence.
+- **Triage:** High, **F6 × S5 =30**, conditional on a changed value longer than the UI bound; real incidence is not
+  measured. This is security-sensitive review usability/correctness, not a demonstrated permission bypass, hidden HTML
+  execution or a claim that the gateway accepts an incorrect digest. The separate security reviewer should assess its
+  implication for human review; this lane posts no security approval.
+- **Reproduction:** provide a changed tool whose old/new descriptions share a 550+ character prefix and differ only in
+  a final marker. At 375 and 1440 px, neither changed marker appears; both values end in ellipses; there is no full-value
+  control. After selection/reason, Re-approve is enabled. **Two controlled probes passed in 3.3 seconds**; zero write
+  requests were sent. [Sanitised evidence](evidence/2026-11-24/definition-diff-truncation.json).
+- **Smallest fix and reason:** retain bounded summary text, visibly label truncation, and add deliberate plain-text
+  expansion/comparison of the existing authorised old/new operation values. Use current disclosure/code-region/kit
+  patterns and pinned RFC 6902 representation; do not add a diff engine or fetch raw upstream data. Keep long values
+  readable with contained scrolling/wrapping at phone width. Server-side object checks, exact-digest stale rejection,
+  reason/proof and no default selection remain intact. Instruction-like text must never run or become agent authority.
+- **Acceptance:** tail-only description change, nested schema/array replacement, new/removed definition and long multiline
+  text are inspectable in full. Required review information is keyboard and screen-reader reachable; collapsed/expanded
+  state and item identity are explicit. A definition changed during review still refuses with stale digest. Compare
+  old/new values as actual text, preserve selection/reason on refusal, and never silently substitute a newer digest.
+  Existing small-value markup-as-text tests are positive counterevidence; extend them rather than replace them.
+
+### Protected-write and tool-sync retests
+
+The current merged `codex-step-up-journeys` and `mcp-tool-sync` suites passed **13/13 browser checks, no skips/flakes,
+34.1 seconds**. They cover scorer enable/edit, MCP owner change, role/team/group-mapping protected operations, proof-options
+read failure and retry, a relaxing ABAC activation, guarded tool sync, release cooldown, unreachable-server wording and
+registration next-step guidance. They verify known exact-request retry flows against mocks; all provider/proof/writes
+are intercepted. They do not perform real deletion, validate a native passkey/IdP or certify pin re-approval.
+[Scoped evidence](evidence/2026-11-24/protected-ui-retests.json).
+
+ADM-001, INT-001 and ACC-001 now have this independent consumer retest evidence. That is progress on the named symptoms,
+not a blanket closure of every protected-write, bootstrap, signed-action or authorisation path.
+
+### Checkpoint and remaining work
+
+Before this push: whole workspace build, migration guard, ADR-index 8/8, bundle budgets, thirteen-document links/fences,
+JSON and 72-card/six-UXP/18-BRN integrity pass. Exact bytes/scope are in the
+[iteration 11 validation](evidence/2026-11-24/iteration11-validation.json). No product implementation or production/cloud
+write was authored. Current route inventory remains 157; no new whole-route or all-function claim is made.
+
+Claude's next useful response should name the slice for MCP-001/full-value inspection, assess mockups 09–12 and the
+18 brainstorm topics, and link pending-action integration for CST-006/the Inbox drawer. The already assigned inherited
+runtime-policy gap remains the first security priority. Native-device checks are untested, user studies deferred, and
+no four-hour assistant wake-up scheduler is available or created. Resume from this checkpoint rather than rerunning
+already successful checks without a new change or concern.
+
+## Continuing review — iteration 12, 2026-11-24: run context and accepted-fix verification
+
+Source remains main `2d57877b82fbb4c7d9969ffd88ee7ce7805f132e`; no new Claude reply or main changes were present at
+this session's check. This round adds [mockup 13](mockups/13-run-progress-and-budget.md) and independently verifies
+another group of accepted fixes. The count stays **72 numbered defect cards**, six UXP proposals and 18 BRN discussion
+topics. There are now **thirteen mockups**, not thirteen implemented screens.
+
+### Make run progress understandable without inventing execution facts
+
+The task is to find a blocked node, understand its responsibility and budget context, and choose a permitted recovery.
+The desktop/phone mockup puts the current blocker and next action before the detailed graph, while retaining the graph's
+existing ordered-list alternative. It reuses current run/node state, command and audit contracts. It does not calculate
+an ETA, imply a stopped automatic pass is a terminal run, or manufacture reservations/per-worker funds from unrelated
+figures. Counts over the returned graph are not a percentage of real work completed.
+
+Source trace and smallest integration:
+
+| Current source fact | Recommendation / reason |
+| --- | --- |
+| `RunDetailPage.tsx:133–144,495–550,600–605` exposes manual event commands; `/auto` has a separate busy path | Present Retry, Reassign, Escalate and Accept as distinct existing commands with target/consequence. Apply the existing pending/outcome guard at the manual caller boundary; no second command engine. The missing exclusion in `postEvent` is source-only integration evidence here, not another reproduced numbered bug or proof duplicate server transitions persist. |
+| Detail GET admits a named pending approver, but driving endpoints remain initiator/admin-only (`orchestration.ts:2439–2460,3033–3065`) | Show a read-only reviewer context and existing Inbox route where applicable. Derive the currently supported presentation from existing identity facts, with server checks retained; broader capability projection is gated. A readable graph does not grant execution authority. |
+| `RunDetailPage.tsx:95,180–184,400–410` currently sends a visible auto-accept-reviews choice initially true | Preserve and explain that input when simplifying automatic-pass controls. Worker-output acceptance is distinct from protected approval/signature requirements. Do not quietly make a generic Continue accept outputs or claim the current option bypasses mandatory independent approval. |
+| Server `RunBudget` stores estimates/unpriced coverage, but the web DTO exposes less; no reservation total is established | Expose existing safe estimate fields through the assigned DTO before showing them. Label cap, recorded usage and estimates separately; do not pretend there is a complete reserved/remaining projection. |
+| `orchestration.ts:790,1819,3014` defines absent legacy measured spend as zero | This specific fallback is not evidence of failed-read-as-zero. Preserve explicit server semantics while treating a failed run query as a real error. The earlier unknown-state recommendation requires contract reasoning, not a regex-only defect scan. |
+
+Mockup acceptance covers actor roles; planned/running/blocked/review/completed/aborted states; exact retry/reassign/escalate
+intent; pending/uncertain outcomes; buffered versus streaming output; long labels; phone/keyboard/zoom; and safe
+instruction drafts. These are proposed checks, not a claim this source/design pass dispatched, approved or aborted a run.
+
+### Independent verification: guardrail wording, drafts and shared UI behaviour
+
+**18/18 checks passed**, no skipped/flaky cases, **41.3 seconds**, in `codex-guardrail-honesty.mock.spec.ts` and
+`codex-kit-a11y.mock.spec.ts`. [Sanitised evidence](evidence/2026-11-24/guardrail-kit-retests.json).
+
+The named cases confirm scorer usage wording; local-rule phase and stale sample display; inline failures; no fabricated
+inventory count; retained threshold draft after refusal; reviewed bulk hardening; playground dataset/prompt read recovery;
+phone/desktop navigation focus; linked ARIA field errors; palette/modal handling; shared theme updates; and shared Modal
+pending/dirty-discard behaviour. All API mutations are mocked. Native assistive technology, live scorers/providers and
+production authentication were not tested.
+
+This advances the evidence for ADM-002/005/006/007/008/009, RUN-001 and UIS-01/02/03/07/09. **The shared primitive passing
+is not closure of all callers:** the already reproduced Inbox pending drawer and cost ReasonModal need their own
+integration; run manual events are a source-only candidate in the same family. No extra defect count is added for each
+screen and no new parallel lifecycle/helper is proposed.
+
+### Validation and next reasoning loop
+
+A fresh whole workspace build passed before publication. Migration guard, ADR-index, bundle budgets, fourteen-document
+links/fences/content and the existing card/proposal counts are checked in the
+[iteration 12 validation](evidence/2026-11-24/iteration12-validation.json). No product source, migration, master-owned
+ledger or production/cloud write was authored. Current route inventory remains 157; no new whole-route/function claim.
+
+Claude's useful next response remains: assess MCP-001's full-value review fix, mockups 09–13 and the 18 BRN topics;
+link accepted pending/outcome integration to the existing slices; and request named post-merge retests. L1's acknowledged
+inherited-policy runtime gap retains security priority. Studies are deferred and native-device checks remain untested.
+The requested four-hour wake is recorded but no persistent assistant scheduler is available or created.
+
+## Claude/Codex discussion ledger
+
+Claude’s initial response is reconciled for 46 numbered cards plus RUN-001. The [later response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) now addresses the next 23 cards: 20 accepted for implementation (including narrowed scope), two reported fixed in #1205 and one deferred to #1212. HME-001 and all six design proposals now have the [iteration 7/8 response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112), reconciled in iteration 10. No card is closed without fixing/retest evidence. Claude should add new source-based responses in the review PR or its response file; Codex folds the reasoned outcome into this ledger. A source disagreement stays visible. Fixing a shared primitive should link all affected cards; do not count one underlying fix as many unrelated releases.
+
+| ID | Evidence at publication | Claude response / reason | Agreed disposition / fix / retest |
+| --- | --- | --- | --- |
+| CXR-ADM-001 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
+| CXR-ADM-002 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-003 | source; see confidence/design qualification | ACCEPT-build (owner); Claude F3×S3=9; [reasoning](codexreviews-response.md) | Narrowed; owner-approved new capability, slice 15; retest open |
+| CXR-ADM-004 | source; see confidence/design qualification | ACCEPT-triage-low; Claude F1×S3=3; [reasoning](codexreviews-response.md) | Deferred; #1187; no code planned; not closed |
+| CXR-ADM-005 | mock-browser + source | ACCEPT-build; Claude F6×S4=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-006 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-007 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-008 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S2=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| CXR-ADM-009 | source; see confidence/design qualification | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 3; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIW-01 | mock-browser + source | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-02 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8 / E35; independent retest open |
+| UIW-03 | mock-browser + source (iteration3;503/404 distinction) | handed to E35; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed/delegated to E35; implementation/retest open |
+| UIW-04 | mock-browser + source (iteration 2; qualified scope above) | handed to E50; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed/delegated to E50; implementation/retest open |
+| UIW-05 | mock-browser + source (iteration 2; qualified scope above) | handed to E50; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed/delegated to E50; implementation/retest open |
+| UIW-06 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-07 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIW-08 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 8; independent retest open |
+| UIS-01 | mock-browser + source | ACCEPT-build; Claude F6×S6=36; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-02 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S4=28; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-03 | mock-browser + source | ACCEPT-build; Claude F2×S4=8; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-04 | source; see confidence/design qualification | ACCEPT-build; Claude F7×S3=21; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 10; independent retest open |
+| UIS-05 | source; see confidence/design qualification | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| UIS-06 | source; see confidence/design qualification | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| UIS-07 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S2=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 4; merged consumer browser retest passed in iteration 12; wider runtime/native scope unverified |
+| UIS-08 | source; see confidence/design qualification | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 5; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| UIS-09 | source; see confidence/design qualification | ACCEPT-build; Claude F4×S4=16; [reasoning](codexreviews-response.md) | Shared Modal pending/dirty consumer tests passed in iteration 12; Inbox/cost callers still need integration; not globally closed |
+
+| CXR-ACC-001 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
+| CXR-ACC-002 | source; runtime acceptance open | ACCEPT-triage-low (owner); Claude F5×S3=15; [reasoning](codexreviews-response.md) | Deferred; #1192; no code planned; not closed |
+| CXR-ACC-003 | mock-browser + source | ACCEPT-build; Claude F3×S3=9; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
+| CXR-ACC-004 | source; runtime acceptance open | ACCEPT-triage-low; Claude F2×S2=4; [reasoning](codexreviews-response.md) | Deferred; #1188; no code planned; not closed |
+| CXR-ACC-005 | source; runtime acceptance open | ACCEPT-build; Claude F2×S3=6; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 9; independent retest open |
+| CXR-REV-001 | mock-browser + source | ACCEPT-build; Claude F6×S3=18; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-002 | source + independent real-DB and mocked UI retest | ACCEPT-build; Claude F2×S6=12; [reasoning](codexreviews-response.md) | Merged slice 6; core retention/findability/authorisation passed 25 runtime checks; signed-export/scheduler-race scope remains unverified |
+| CXR-REV-003 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-004 | mock-browser + source | ACCEPT-build; Claude F3×S4=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-REV-005 | mock-browser + source | ACCEPT-build; Claude F4×S3=12; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 6; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+
+| CXR-INT-001 | mock-browser + source | ACCEPT-build; Claude F6×S5=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 2; independent protected-UI consumer retest passed in iteration 11; gateway/native scope unverified |
+| CXR-INT-002 | mock-browser + source | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-003 | mock-browser + source | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-004 | mock-browser + source | ACCEPT-build; Claude F5×S6=30; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-INT-005 | mock-browser + source (iteration 4; connector branch only) | ACCEPT-build; Claude F4×S6=24; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 11; independent retest open |
+| CXR-CST-001 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-002 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F4×S5=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-003 | mock-browser + source (qualified consumer scope above) | ACCEPT-build; Claude F5×S4=20; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-004 | source; runtime acceptance open | ACCEPT-build; Claude F5×S3=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+| CXR-CST-005 | source; runtime acceptance open | ACCEPT-build; Claude F3×S5=15; [reasoning](codexreviews-response.md) | Agreed; fix proposed, slice 7; merged feature browser retest passed in iteration 10; wider runtime/native matrix unverified |
+
+| CXR-APR-001 | mock-browser + source; consumer limits above | Agreed; Claude F×S=32; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; queue invalidation; independent retest open |
+| CXR-APR-002 | mock-browser + source; consumer limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: approvals slice; shared durable outcome without replay; independent retest open |
+| CXR-APR-003 | source; paging/scale runtime open | Agreed, lowest priority; Claude F×S=8; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: later DataList paging slice; independent retest open |
+| CXR-WFL-001 | mock-browser + source; consumer limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow slice; failed state and existing /advance recovery; independent retest open |
+| CXR-WFL-002 | mock-browser + source; consumer limits above | Narrowed; Claude F×S=15; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: enable Start and provisional preview; full server preview out of scope; independent retest open |
+| CXR-WFL-003 | mock-browser + source; consumer limits above | Agreed, UX only; Claude F×S=9; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow slice; canDrive presentation, server already refuses; independent retest open |
+| CXR-WFL-004 | mock-browser + source; consumer limits above | Agreed; Claude F×S=10; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workflow template dirty flag; corrected admin/governance source path; independent retest open |
+
+| CXR-WBK-001 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; truthful workload read state; independent retest open |
+| CXR-WBK-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=15; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; batch result outside empty-queue branch; independent retest open |
+| CXR-WBK-003 | mock-browser + source; branch limits above | Agreed; Claude F×S=9; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; reassign principal kind; independent retest open |
+| CXR-WBK-004 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; scheduler copy only; independent retest open |
+| CXR-WBK-005 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: workbench slice; guard opposing bulk action; independent retest open |
+| CXR-IDM-001 | mock-browser + source; branch limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; direct/group membership and returned outcome; independent retest open |
+| CXR-IDM-002 | mock-browser + source; branch limits above | Agreed; Claude F×S=10; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Merged #1205; independent browser confirm/cancel retest passed at 375/1440; real gateway/device scope remains unverified |
+| CXR-IDM-003 | mock-browser + source; branch limits above | Agreed; Claude F×S=12; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: identity slice; unknown counts and Retry; independent retest open |
+
+| CXR-SSO-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=25; reported fixed by merged #1205; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Merged #1205; independent browser exact-facts/retry/cancel retest passed at 375/1440; real gateway/device scope remains unverified |
+| CXR-SSO-002 | mock-browser + source; contract limits above | Agreed, security fields; Claude F×S=18; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; intentional changed-key writes and fresh baseline; independent retest open |
+| CXR-SSO-003 | source; maintenance runtime open | Agreed; Claude F×S=21; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; existing edit forms/PATCH/proof, no new screen; independent retest open |
+| CXR-SSO-004 | mock-browser + source; contract limits above | Narrowed; Claude F×S=6; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: SSO slice; hide own approval and add caller vote projection; server protection already exists; independent retest open |
+| CXR-CON-001 | mock-browser + source; contract limits above | Agreed; Claude F×S=24; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; method-specific credential copy; independent retest open |
+| CXR-CON-002 | mock-browser + source; contract limits above | Agreed; Claude F×S=20; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; required organisation URL in schema and UI; independent retest open |
+| CXR-CON-003 | mock-browser + source; contract limits above | Agreed; Claude F×S=6; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Agreed; fix proposed: connections slice; encode webhook path segment; independent retest open |
+| CXR-CON-004 | mock-browser + source; contract limits above | Agreed, triage-low; Claude F×S=4; [later Claude response](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7083558347) | Deferred to [#1212](https://github.com/dhruvmahendrapatel/RegulAIt/issues/1212); no standalone code fix |
+
+| CXR-RUN-001 (observation) | source + earlier generic harness; narrowed error scope | Claude partial agreement; F3×S2=6; model-read alert exists, datasets/sources follow-up; [reasoning](codexreviews-response.md) | Fix proposed, slice 3; independent retest open |
+| CXR-HME-001 | source + mock-browser at 375/1440; card captures inspected | Claude agrees; F7×S4=28; [UX reply](https://github.com/dhruvmahendrapatel/RegulAIt/pull/1184#issuecomment-7102099112) | Agreed; slice 19; independent post-fix retest open |
+| CXR-CST-006 | Source + delayed-response mocked browser; alias/desktop scope | Awaiting response; F5×S3=15 | Reported; shared pending-action integration gap; no server corruption claimed |
+| CXR-MCP-001 | Source + read-only mocked browser at 375/1440 | Awaiting response; F6×S5=30 | Reported; full diff values exist but UI crops the only changed text; no approval sent |
+
+### Design proposal discussion
+
+| Proposal | Intended outcome | Claude / builder response |
+| --- | --- | --- |
+| CXR-UXP-001 | Task-led Home and understandable cross-suite discovery | Claude narrowed; slice 27 after 19; owner approved attention-first; eligible/ranking APIs gated; studies deferred |
+| CXR-UXP-002 | Resource, effective state, eligibility and clear next action | Claude narrowed; per-task slices 20/22/23/24; server capabilities gated; extract shared block only after real reuse |
+| CXR-UXP-003 | Truthful progress, partial completion and safe recovery | Claude agrees; slices 20/21/22; current-attempt/schedule facts gated; no new lifecycle |
+| CXR-UXP-004 | Scoped, reviewed policy changes against current baseline | Claude narrowed; slice 23 current policy, 15 exceptions; atomic version/new-row contracts gated |
+| CXR-UXP-005 | Reachable queues, loaded subject and stable list position | Claude narrowed; merged foundations, slice 26 approvals paging/remaining retest; 21 relevant UI checks rerun this round |
+| CXR-UXP-006 | Populated mobile/keyboard/native accessibility release tasks | Claude narrowed; per-slice acceptance, no separate framework; studies deferred, native checks untested |
+
+### Coverage — every page and function is a tracked goal, not a blanket completion claim
+
+The [150-route ledger](evidence/2026-11-21/route-coverage.md) lists every screen's automatic checks and named deeper feedback. The detailed contributions above list exactly which files, sections and functions were inspected and what was not. A shared shell check is useful across pages, but it does not inspect each page's business behavior.
+
+A compiler-AST [function inventory](evidence/2026-11-21/function-inventory.json) records **36,791 executable function-like nodes across 1,335 TS/JS files**, including callbacks. This is inventory only; it is not a claim that all 36,791 bodies were read or verified. Other languages are not counted. Use file/function/line to select bounded review batches and attach their evidence here; do not load the whole inventory as a substitute for code reasoning.
+
+**Still requiring deeper work:** additional populated success/error/denied workflows beyond the specifically tested admin/viewer cases; forms and sub-tabs not covered in these source passes; exports, import recovery and undo semantics; screen-reader use; real IME input; all phone layouts; charts/canvas accessibility; permission changes mid-session; save/timeout/retry races; actual gateway/integration journeys; and Go/Python/other-language functions. Browser mock checks do not prove those properties. The next feedback iteration must close named coverage items and record actual observations, rather than repeat broad recommendations.
+
+
+## Reassessment of the November 7 findings
+
+The following initial reassessment uses product snapshot `9797d6f42798689d896103b9e9ce04278e01a4ad`. Later main changes were preserved, but these 39 rows have not all been independently re-audited at each newer snapshot. Dated iterations above supply specific updates and counterevidence. Tests mentioned as present were not rerun by the source assessors; the historical report remains a separate dated record.
+
+## Whole-build review security reassessment — 2026-11-21
+
+Target: `9797d6f42798689d896103b9e9ce04278e01a4ad` (`origin/main`). Source report: `internal/reviews/2026-11-07-whole-build-review.md`, S-01 through S-10. Read-only source assessment; no test suite rerun, product change, security approval or external post.
+
+The high-impact security diagnoses make sense for the November7 snapshot, but the report is substantially stale as a current vulnerability list. S-01's principal/runtime-login gap and S-02 through S-06 have specific implemented remedies. Three smaller observations persist. S-10 bundles distinct hardening choices and should not be read as four demonstrated exploits.
+
+| ID | Historical reasoning | Current status and evidence | Recommendation assessment |
+| --- | --- | --- | --- |
+| S-01 | Sound: RLS policies do not protect requests that run unscoped or under a bypass-capable runtime role. The fraction of *all* tables is a poor independent coverage metric: deployment-wide and actor-stamped tables do not all require user-row filters. | Core defects addressed. `apps/gateway/src/app.ts:1566` installs resolved principal/system scopes. `packages/db/src/index.ts:456` applies scoped pool behavior; `packages/db/src/rls.ts:287` explains per-statement/transaction enforcement. `apps/gateway/src/boot.ts:184` checks runtime login. `apps/gateway/src/runtime-login.ts:178` refuses an unfit login unless the explicit development exception applies; deployment signals disallow that exception. ADR0234 has as-built batches7a/7b and later table work. There are now84 literal ENABLE-RLS statements across migrations, but that is not an audited current protected-table count. | Prioritizing runtime-role plus principal-context fixes was correct. Do not repeat “4 of338, none at runtime.” Do not infer every current table is protected: a fresh classified inventory is needed for that separate claim. |
+| S-02 | Sound: relying on operator-supplied deployment flags to reject public default secrets is fail-open. Automatic bootstrap retirement and guarding other-user key minting address real authority paths. | Addressed by `apps/gateway/src/dev-secrets.ts:75` (HTTPS/deploy signals), `:138` (nonloopback exposure), `:151` (dev override cannot override deployment signal). `auth.ts:260` refuses retired bootstrap; `app.ts:2024` requires identity_manage for another user's key unless the explicit bootstrap-after-admin test/dev relaxation applies. | Correct direction. Existing deliberate development exceptions need clear boundaries; their mere existence is not proof that deployed defaults remain insecure. |
+| S-03 | Sound: authenticated webhook delivery can still be replayed; effectful reprocessing requires an independent delivery/timestamp guard. | Addressed structurally. `apps/gateway/src/pm.ts:1287` removes the hash/static-header fallback and requires decryptable credentials. `:1353` records a delivery once with conflict refusal before effects. `packages/pm-provider/src/inbound.ts:124` checks signed timestamps; `:635` defines timestamp-bound generic HMAC and rejects legacy static header/body-only forms. Provider delivery-key/freshness logic is at `:770` and unsigned-provider age bounds at `:680`. | Do not require a provider timestamp signature a provider cannot supply; provider-specific delivery authentication plus dedup/age bounds must be evaluated on their actual contract. “No replay protection on any provider” is no longer true. |
+| S-04 | Sound: granting access is a security relaxation even when the caller is an admin; an API-key compromise should not bypass fresh proof. | Addressed. `apps/gateway/src/step-up.ts:707` returns a value-bound settings_relax/grant_mint request. The eight original routes call it at `app.ts:2822,2857,2924,2946,2969,2990` and `agents-connectors.ts:3873,5576`. Role assignment paths are covered too (`app.ts:3107`). | Good recommendation. Reuse settings_relax rather than introducing a duplicate ceremony; that is what the current implementation does. |
+| S-05 | Core concern sound: A2A must honor the execution posture/literacy gate. Lack of a direct import alone would not prove a bypass if a shared helper applied it transitively. | Addressed explicitly. `apps/gateway/src/a2a.ts:89` imports evaluateA2a; `:428-450` evaluates the kernel and calls governedEvaluateResource. This covers execution posture and shared restrictions before dispatch. | Correct integration goal. Validate actual call flow rather than using an import-name check as the test. Default-off mitigates exposure but does not excuse a missing gate once enabled. |
+| S-06 | Sound: absent attribution should not silently bypass a mandatory project budget boundary. | Addressed. `packages/db/src/schema.ts:5182,5184` default connector/A2A attribution requirements true. `apps/gateway/src/governed-core.ts:240,266` loads them fail-closed when settings absent, and `:283-296` composes the mandate into the decision. A2A calls that core at `a2a.ts:450`; connectors import/use it from `connector-call.ts:62`. | Correct, with distinction between attributable calls and an explicitly audited policy relaxation. Null-return behavior of a lower-level project helper alone does not establish a bypass once its callers enforce attribution first. |
+| S-07 | Ordering claim is valid, but availability severity was explicitly unmeasured in the original report. Body-size/rate bounds and expensive parser behavior affect actual DoS impact. | Still present for ordinary protected routes: principal authentication is `preHandler` (`app.ts:1328`); existing `onRequest` interception and rate hooks are not a universal authenticated-body gate. | Useful follow-up, especially raised-bodyLimit imports. Benchmark and regression-test route-specific early authentication. Do not move every auth operation globally without respecting login, webhook-signature and RLS setup semantics. |
+| S-08 | Accurate parameter/event-loop observation. N=2^14,r=8,p=1 is below modern conservative recommendations; that does not by itself demonstrate a practical password compromise. Synchronous hashing can consume event-loop time. | Still present: `apps/gateway/src/auth.ts:458-465`, `verifyPassword` at `:474-497`. | Async KDF and benchmarked stronger parameters/rehash-on-login are sensible. A module migration is not required solely because a different library exists; node:crypto is a validated primitive. |
+| S-09 | Accurate, limited claim: a fake bearer prefix buys the bearer-carrying *per-IP pre-auth* envelope, not authenticated access or a valid credential quota. | Still present: `apps/gateway/src/rate-limit.ts:237-251`, `:285`; apiKeyMax defaults6000 at`:111`. | Sensible low-severity abuse-hardening follow-up. Keep a common pre-auth IP ceiling and a higher verified post-auth tier, rather than claiming the API-key limit itself is bypassed. No load/DoS test was run here. |
+| S-10 | Mixed hardening observations, not a coherent demonstrated vulnerability. Explicit caller checks matter. | `reporting.ts:577` still defaults missing isAdmin to true (latent while callers supply it). `security-headers.ts:93` intentionally keeps style unsafe-inline. UUID-validated raw ARRAY SQL still exists (`compliance-packs.ts:179`, `copilot.ts:441`), so this is not demonstrated injection. `shared/chatops.ts:158` still reports no signature replay window for Teams; however approval interactions already check idempotency at `apps/gateway/src/chatops.ts:1721`, and Teams messages have freshness plus activity-id dedup at`:1910`. | Require explicit isAdmin and parameterized SQL as hygiene. Do not present unsafe-inline styles as an XSS exploit without an injection path. The blanket “deduplicate Teams activity IDs” recommendation misses existing guards; separate message freshness from delayed-first interaction replay and establish a concrete path before a vulnerability claim. |
+
+Important limits: no deployment was exercised, no runtime database role census was performed, and none of these statuses is a blanket security sign-off. “Addressed” means the original missing control is now implemented in the inspected current call flow, not that every adversarial case has been retested.
+
+### Security controls and product friction
+
+Keep secure defaults and make legitimate tuning precise, rather than adding a global “disable security” control. Existing policies already distinguish behavior that can be tuned (guardrail modes, rate/budget thresholds, attribution settings) from proofs that make an identity or payload trustworthy.
+
+- Prefer per-project/resource/environment policy choices with a visible explanation of what is blocked, why, and the smallest permitted change. Show measured limit usage and the exact next action; avoid turning unknown enforcement state into a green status.
+- A permitted relaxation should be admin-only, value-bound step-up, versioned and audited, with explicit scope and expiry where feasible. Honor any compliance floor and refuse a weaker override that would contradict it. Preview the effect before committing, using existing policy-preview mechanisms.
+- Keep identity validation, object authorization, webhook signatures, anti-replay, secret confidentiality and transaction/receipt integrity mandatory. Product mode selections should not silently bypass these invariants.
+- Treat developer/test exceptions as explicit environment-bound exceptions. The current published-secret and privileged-runtime-login opt-ins correctly distinguish development from a declared deployment; do not expose these as ordinary production UI switches.
+- Authentication before a large import body and async password verification can reduce resource cost without weakening protection or adding user ceremony. These are higher-value friction/performance improvements than raising anonymous request limits.
+
+These are recommendations for a future authorized design/build slice, not implemented configuration changes or an approval to relax any existing security control.
+
+## Whole-build review reassessment: pillars and readiness
+
+Target: main `9797d6f42798689d896103b9e9ce04278e01a4ad`, read with `git show`, rather than the older C3 checkout. Source report: `internal/reviews/2026-11-07-whole-build-review.md` (November7 snapshot `6a06dc1`). This is source inspection only: no suite, cloud resource, external API, live integration or deployment was exercised.
+
+The report's concerns generally follow from the evidence it cites for its historical snapshot. It is unsuitable as a current open-defect list: several major implementation gaps have since been closed. Its recommendations require policy and authorization boundaries rather than literal implementation in every case.
+
+| ID | Assessment at current main | Evidence and qualification |
+| --- | --- | --- |
+| P-01 | Substantially addressed; old categorical claim stale | `apps/gateway/src/governed-core.ts:184` loads resource ABAC, approval/rate rules and required attribution; `:333` describes model consent. Connector invokes use the shared resource core at `connector-call.ts:550`, A2A at `a2a.ts:450`. `internal/ARCHITECTURE.md:123` now expressly documents MCP's `governedEvaluate` and the model/connector/A2A restriction layer. One literal function for every different resource shape is unnecessary; consistent enforced semantics is the real requirement. This inspection is not a proof of every execution/caching branch. |
+| P-02 | Addressed for named surfaces in the original finding | `plan-only.ts:308` adds the project-scoped gate; invokes/runs/compat call it, and `mcp-proxy.ts:1298` does too. The original omit-instance bypass is no longer the declared design. The broad proposal “any planning workflow blocks every project mutation” is a product policy with overblocking implications; current code has a documented engine-instance exception. New surfaces still need a coverage inventory rather than assuming a helper protects every route automatically. |
+| P-03 | “BYOC is compose only” is stale; real-cloud proof still unverified | `infra/modules/byoc-aws/`, `infra/environments/byoc-aws/`, `deploy/helm/regulait/`, `deploy/operator/` and `docs/deployment/BYOC_AWS_INSTALL.md` now exist. The Helm chart documents multi-replica support and protected signed migration hooks. Infra adapters intentionally remain off unless explicitly live-enabled and wired (`packages/infra-provider/src/index.ts:410`). Packaging is not proof of a successful customer-cloud rehearsal. An unauthorized live sandbox run is not a permissible shortcut to validating this recommendation. |
+| P-04 | Mixed: importer claim fixed, live-proof and semantics need qualification | ADR-0289's importer is implemented at `pm-import.ts:336` with preview digest, bounded listing and transactional apply. It deliberately retains linkage instead of copying provider-owned descriptions/priority, and `/v1/pm/links?live=true` reads authoritative fields through at `pm.ts:1615`. Inbound fields still enter event payload at `pm.ts:1110`; state drift handling does not blindly mutate the internal state machine. “Adopt inbound fields” must not become an unreviewed overwrite of approved requirements or duplicate source of truth. Tests against real tenants remain unverified here. |
+| P-05 | Still supported by current source | `orchestration.ts:2800` iterates the ready wave, then awaits `dispatchRunNode` before proceeding to the next member (`:2840`). Deferring submissions until the end makes recorded lifecycle states overlap, but provider execution remains serial in this path. The recommended bounded concurrency is reasonable only while preserving atomic estimates, measured-budget gates, cancellation and deterministic state transitions. |
+| P-06 | Real presentation/accounting issue, but “counted as realised” overstates literal API labels | `orchestration.ts:2737` explicitly says batching is estimate-only and not performed; `:2778` nevertheless writes its hypothetical token reduction into the common savings ledger. The aggregate at `optimization.ts:70` includes all techniques. However `SpendPage.tsx:337` and `:343` explicitly separate measured routing actuals from estimated all-technique savings. Label this “unperformed opportunity mixed with estimates of applied techniques”, not fabricated measured spend. Separating opportunity from applied savings is sensible. |
+| P-07 | Still supported in this inspection | Compat code applies routing and exact-match semantic caching (`compat-core.ts:1035`), but does not invoke the native conversation-compaction/dedup pipeline. Native compaction is in `agents-connectors.ts:4677` under its conversation-invoke branch, not in generic `executeGovernedDispatch`. Apply missing optimizations only where their semantics fit provider-shaped conversations, or document the narrower coverage. |
+| P-08 | Still supported in this inspection | `projectContextItems` retrieval appears in orchestration (`orchestration.ts:535`), not ordinary invokes or compat. Blindly injecting every project item is not a safe fix: preserve provenance, membership, context approval, prompt-injection and token-budget boundaries; project attribution alone does not make arbitrary retained text trusted instructions. |
+| P-09 | Documentation drift still demonstrable; live-provider assertion unverified | `packages/workflow-kernel/src/index.ts:10` still says deployment/rollback are rejected although they are executable. `internal/product/PENDING.md:81` still says no LLM provider is connected despite later additions. The existence of `docs/deployment/LIVE_TESTS.md` and gated live harness does not prove which providers actually passed. Current test status and tenant evidence must be requested, not inferred. |
+
+### Product-readiness conclusions
+
+1. **Deployment:** the report's absence-of-packaging and HA statements are outdated. AWS Terraform, Helm/operator and multi-replica/failover paths are implemented. That does not establish a production-grade deployment, and the owner's production sign-off remains a release boundary, not an implementation defect.
+2. **The three security-default blockers:** another assessment covers S-01/S-02/S-03; do not carry the old summary forward without checking those fixes.
+3. **Governance:** P-01/P-02 implementations now contradict the report's categorical old claims. This requires a current path/coverage audit, rather than repeating that only MCP is governed.
+4. **Integration lifecycle:** now has server/connector enable and delete routes (`integration-lifecycle.ts:123,164,216,258`), connector credentials (`agents-connectors.ts:5422`), and PM webhook-secret rotation (`pm.ts:695`). The report's categorical absence claim is stale; implementation presence is not exhaustive end-to-end revocation proof.
+5. **Release keys:** still a genuine operational prerequisite. `infra/release-keys/README.md:20` lists only the dev key and explains no retained private half; the November15 ADR-0324 ceremony tooling is prepared, and `PENDING.md:96` still requires the owner to execute it. Never solve this by putting a private key in the public repo.
+6. **Live integration proof:** still unverified in this reassessment. Manual/credential-gated tests exist; empty-credential skips cannot establish live success. Request actual successful run evidence before claiming validation.
+7. **Buyer docs:** mixed. `ARCHITECTURE.md` has corrected governance coverage and deployment guides exist, while PENDING/ROADMAP still contain contradictory old rows. “There is no admin guide” was not independently established here; a deployment guide alone does not prove an adequate role-based administration guide.
+
+No product change, external post, formal review verdict or release/merge action was made.
+
+## Whole-build report: engineering/OSS reassessment
+
+Target: main `9797d6f42798689d896103b9e9ce04278e01a4ad`. Original: `internal/reviews/2026-11-07-whole-build-review.md` at `6a06dc1`. Read-only source/history inspection; no build or test suite executed. Current checkout was not used as the target. Historical count claims are not treated as current measurements.
+
+| ID | Assessment | Current evidence and qualification |
+|---|---|---|
+| C-01 | Valid; largely still open | `apps/web/package.json:16` still has neither shared nor api-client dependency. Handwritten `api/types.ts` and `api/adminTypes.ts` are now 1,296 and 975 lines. Reusing a browser-safe contract makes sense. OpenAPI generation alone is insufficient unless its schemas cover the internal APIs used by the web app; public-only SDK generation cannot magically type them. |
+| C-02 | Valid maintenance concern; counts stale | Current schema.ts 20,185 lines, app.ts 7,029, shared/index.ts 5,147. Gateway import baseline still has 74 data edges (`scripts/import-cycles-gateway.baseline.txt`). Domain extraction and ratcheting help, but size is a risk indicator rather than proof of a functional/security defect. Do scoped refactoring with behavior parity, not a wholesale layer rewrite for its own sake. |
+| C-03 | Main guard failures addressed; parity caveat remains unverified | `scripts/migration-watermark-guard.mjs:47–80` compares all merged journal fields, freezes merged SQL hashes, and enforces SQL/journal 1:1. Lines83–112 validate pending files and exact assign-at-merge output. `packages/db/package.json:17` no longer exposes generate. Missing historical numbers do not themselves imply missing/unapplied migrations; monotonic journal and byte invariants matter. A schema-introspection parity check remains a separate concern, not proven absent by this assessment. |
+| C-04 | Historical hot spot valid; prescribed fix superseded | Tests no longer pin MACHINE_ONLY/SUPERSEDED/INDIRECT sizes. More importantly, owner Nov19 removed the hand-maintained max-gap ceiling too; `scripts/preflight-ui-route-census.test.mjs:340–365` explicitly tests fragment counting and rejection of undocumented no-UI routes. Restoring report's `KNOWN_UI_GAPS_MAX=0` would contradict the later approved design and break approved API-only lanes. Preserve per-entry ownership/tracking and stale/no-UI checks. |
+| C-05 | Isolation concern valid; placeholder assertion claim is false | The cited `scripts/preflight-egress-allow-cleanup.test.mjs:88` is **inside a source-string fixture**, both at original6a06dc1 and current main. The actual test assertion at92 checks that the scanner detects missing cleanup. Do not replace that fixture as a bogus passing test. Serial files do not prove singleton isolation, so shared fixtures/scratch databases still make sense. `zz-` names are not a gateway ordering guarantee. |
+| C-06 | Mostly still open; some wording/recommendation needs care | `garak-real.test.ts:36,72` is opt-in, and no `.github` file references its controlling REGULAIT_GARAK_PYTHON variable. `zz-adr0188-s5-token-endpoint.test.ts:1032` still uses150ms deadline versus600ms delayed commit. This establishes coverage/timing sensitivity, not a measured current flake rate. Fake timers across real HTTP/DB I/O can change the property under test; injected deterministic barriers/deadlines may be safer. The #605 rescan point was explicitly unverified in this report. |
+| C-07 | Unchecked is supported; dead/deletion is not established | Web tsconfig includes src and vite.config.ts, not review. There are138 files across apps/web/review and spikes today. These are research/probe artifacts outside runtime compilation, not necessarily dead product code. Archive or add an explicit check only after checking actual use; deletion requires owner approval. |
+| O-01 | Valid and partially still open; original counts and pin wording need update | Exact-name scan of current dependency manifests versus THIRD_PARTY text finds18 gateway names absent (AWS/Azure/Google cloud SDKs, @fastify/rate-limit, node-saml) and web @tanstack/react-query/react-dom absent. This is a textual spot check, not an SPDX/parser-complete audit. Some originally missing rows (e.g. zod/Ajv) were added. No dedicated manifest-to-THIRD_PARTY completeness preflight was found. The db doc's phrase exact devDependency versus manifest caret is misleading, but frozen pnpm-lock exact resolution is a valid pin; a caret alone is not evidence builds float. |
+| O-02 | Replacement debt remains; one factual premise now false | `ADR-0176:226–228` still lists all three open; retry engine remains handwritten, `shared/tracing.ts:836` builds trace OTLP JSON manually, scheduler.ts still owns leases and says it is not a distributed queue. But current gateway manifest **does contain** @opentelemetry/otlp-transformer0.223.0 and pg-boss12.38.2. They serve metrics-otlp.ts and workflows-queue.ts, respectively; their presence does not mean trace encoding/scheduler migration is done. No cockatiel manifest entry found. Reassess fit and retain retry/governance/lease semantics rather than assuming mere installation completes replacement. |
+| O-03 | Valid duplication; partly improved; replacement must preserve formats | Shared onboarding.ts:610 and reporting.ts:737 still implement separate parsers. Shared billing.ts:494–501 still writes CSV manually (the report's gateway billing path is stale/wrong for that writer). config-versions.ts:987 still has stableStringify. Several cited gateway copies are no longer present. Reuse csv-parse/stringify where compatible; do not blindly replace persisted evidence/hash serialization with JCS—prove byte compatibility or version/migrate the format. |
+| O-04 | **Narrowed in iteration 2: real divergence, disclosed subset contract** | Pure-function probes confirm eval passes/playground rejects four unsupported-keyword cases. However, the scorer registry explicitly documents the subset and ignored keywords, and the UI displays its limits. This is not proof of a hidden full-schema guarantee or a violation of the declared eval contract. See iteration 2 for the comparison, versioning risk and qualified recommendation. |
+| O-05 | Sound documentation conflict; not proof of illegal shipment | ADR0176 still has no GCC-runtime/libquadmath carve-out; ADR0187:1285–1287 and2531 explicitly record the owner's accepted runtime exceptions. Clarify policy precedence/exception scope rather than treating Boost BSL1.0 as Business Source License or declaring the whole distribution noncompliant. This assessment is not legal advice or a fresh licence admission. |
+
+Most useful still-current engineering actions: unify JSON Schema validation (O04); close third-party inventory coverage (O01); scope the three known replacement debts (O02); reduce contract duplication (C01). Remove already-fixed migration/census work from the current backlog. Correct C05's fixture false positive before using report totals.
+
+### Process findings R-01 through R-08
+
+| ID | Current assessment and reason | Recommended disposition |
+| --- | --- | --- |
+| R-01 | The identity/provenance concern is valid. Current protocol still uses SHA-bound prose verdicts; `scripts/master/merge-loop.sh:8–18,65–84` additionally checks an explicit released SHA, draft/hold state, mergeability and completed checks. That improves release control but is not an independently authenticated native GitHub approval. | Keep separate reviewer identities and enforceable native reviews as a process proposal. Do not call every current release unreviewed merely because the review is a comment. App/account configuration is an owner/master action. |
+| R-02 | The old #605 miss is historical, not an open code defect today. #605 merged November 14; `mcp-admission-rescan.ts:284` excludes disabled servers and a regression checks the filter. REVIEW_CHECKLISTS §6 preserves finding numbers and fixing commits. | Retain the lesson and test. Do not reopen the one-line fix. |
+| R-03 | Pending migrations and merge-time assignment now exist (ADR-0252, CONTRIBUTING_PARALLEL_SESSIONS §4.1 and `assign-at-merge.mjs`). Branches leave the numbered journal alone. The November 20 STATE snapshot still reports an unmerged assignment/fragment-fold backlog while the merge queue awaits an owner decision. | Separate implemented branch-conflict prevention from the still-unfinished operational queue/fold process. Verify account support, required merge-group checks and rollback before enabling a queue; do not treat it as a one-click fix. |
+| R-04 | The deleted assertion incident is recorded as M-111. The recommendation to count assertions is a weak proxy: trivial or duplicate assertions can raise a count without protecting behavior. A blanket ban on scripts would also forbid safe structured tooling. | Review guard behavior and add targeted regression/mutation checks. Prefer syntax-aware conflict handling, explicit diffs and tests; do not gate quality on assertion totals. |
+| R-05 | Small coherent PRs and keeping their declared surface accurate remain sensible. A cross-cutting dependency should normally land separately and reach dependents through main; a large diff alone does not prove unrelated work. | Apply scope review to the actual goal and acceptance list. Our standing instructions still prohibit Codex from changing another PR's title, draft state or hold. |
+| R-06 | Combined-tree regression is a real integration risk. The original 55-byte breach was explicitly unverified in the report and was not reproduced here. Current workflows support merge-group/full checks; current per-route budgets also change the old all-JS constraint. | Test the final combined tree, retain the entry budget and validate actual queue support/configuration. Do not report the old byte count as today's build result. |
+| R-07 | Partly addressed. STATE has a November 20 snapshot; fragments, `fold-docs.mjs`, generated-index checks and hand-over files now exist. The top PENDING status still says August 3 and the session pointer remains October 25. M-110 through M-112 now explicitly record the three previously missing mistakes. | Keep improving the fold/hand-over process and truthful metadata. Do not repeat that the mistake ledger still stops at M-108, or manually edit protected ledgers from this review lane. |
+| R-08 | Queue pressure and overcentralized decisions remain useful operational concerns; historical counts are not current telemetry. PR status now lives on PRs, there are multiple reviewer pairs and orchestration hand-over files. The owner suspended the global worker cap on November 20. | Measure queue age, review latency and rework before selecting a cap/batch policy. Preserve this lane's five-open-PR limit; do not reinstate a global cap contrary to the newer owner decision. |
+
+## Coverage interpretation
+
+See the deep-audit ledger above. Automatic mock-admin checks do not establish member permissions, successful saves, real integrations or task completion; source inspection and targeted workflow reproductions are recorded separately.
+
+## Historical baseline — 2026-11-07
+
+This section is retained as the original dated evidence and recommendations. Its source counts, findings and “next actions” must be read with the current reassessment above; they are not instructions to undo newer owner decisions or repeat completed work.
+
+### Whole-build review: `main` at 6a06dc1 (2026-11-07)
+
+**Scope.** This is an independent review of the whole product as it stands on `main` at merge commit 6a06dc1 (PR #628). It is not a PR review. The reviewer reports and does not fix. The review changed no code, made no comments on other PRs, and wrote nothing to any cloud account.
+
+**Method.**
+- Four parallel read-only passes:
+  - pillar fit;
+  - the ADR-0200 security checklist;
+  - code health, migrations and the open-source-first rule;
+  - process and product readiness.
+- Then an adversarial pass: one skeptic per top-eight finding cluster, each told to refute the finding against the code. Where a skeptic corrected a claim, the corrected wording is used below.
+- History counts cover 2026-10-17 to 11-07, from a deepened clone.
+- No test suite was run.
+- **UNVERIFIED** marks any claim not re-read in code at 6a06dc1.
+
+**Not a compliance statement.** Nothing here is a claim of compliance or certification against any standard.
+
+---
+
+#### Executive summary
+
+1. **The build is broad, and in places it is narrower than the docs say.**
+   - Every pillar has routes, tables, UI and tests.
+   - Pillars 2 (workflow), 4 (shared context), 5 (cost) and 7 (orchestration) are substantially built.
+   - Pillars 1, 3, 6 and 8 are partial against what CLAUDE.md claims (P-01 to P-04).
+2. **Governance is uniform only for MCP calls.**
+   - Approval rules, kernel rate limits and Cedar ABAC reach MCP tool calls only.
+   - Model calls get allow or deny, and model rate limits are off by default.
+   - Connectors have no governance rate limit.
+   - A2A calls never call the policy kernel.
+   - ARCHITECTURE.md's "one decision core" diagram is inaccurate for model, connector and A2A calls (P-01, S-05).
+3. **The "forced" plan-only gate is opt-in.**
+   - An invoke that omits `instanceId` runs `execute` while its project's instance is in planning.
+   - A test pins this behaviour.
+   - IDE (compat) and MCP calls never meet the gate (P-02).
+4. **RLS covers 4 of 338 tables and is enforced on none at runtime.**
+   - The gateway never calls `withPrincipal`.
+   - The shipped login is a superuser.
+   - No boot check refuses a superuser login.
+   - CLAUDE.md treats this as a blocking bug (S-01).
+5. **The published dev secrets are accepted on the public compose profiles.**
+   - The refusal signal (`REGULAIT_HSTS`) is never forwarded to the gateway container.
+   - So `tls`, `hosted` and `tunnel` boot with a known full-admin bootstrap token and a known data key (S-02).
+6. **PM inbound webhooks have no replay protection on any provider.**
+   - No timestamp window and no delivery-id dedup.
+   - Jira and monday rely on static URL tokens.
+   - The generic adapter accepts a static header (S-03).
+7. **Process cost is now the main drag on throughput.**
+   - Over 3 weeks: 699 merge commits against 885 content commits.
+   - The migration journal took 115 commits and 37 recorded conflicts, with 20 renumber commits.
+   - A review finding on #605 was missed across three rounds because findings have no tracked state (R-01 to R-03).
+8. **Open source first is behind its own deadline.**
+   - Three ADR-0176 "Replace" items are still open after 11-03.
+   - `apps/gateway/THIRD_PARTY.md` lacks rows for 25 production deps; `apps/web` lacks 3.
+   - No check compares the rows to `package.json` (O-01, O-02).
+9. **Code health is acceptable but concentrated.**
+   - `schema.ts` (15,630 lines) and `app.ts` (6,445 lines, 72 routes, no service layer) are the churn hot spots.
+   - The web app hand-copies about 2,150 lines of gateway types (C-01, C-02).
+   - Tests do check behaviour: real routes and DB, no snapshots.
+10. **For an enterprise pilot**, the top blockers, in order:
+    - no production-grade or BYOC deployment path;
+    - the three security defaults above;
+    - governance coverage beyond MCP;
+    - integration lifecycle (disable, rotate);
+    - release signing.
+
+---
+
+#### Findings
+
+Severity follows the CLAUDE.md convention: a confirmed security-checklist gap is a blocking bug under ADR-0180.
+
+##### Security (ADR-0200 checklist and ADR-0180 secure by default)
+
+| ID | Sev | Finding | Evidence | Recommended action |
+|---|---|---|---|---|
+| S-01 | **high** | **RLS covers 4 of 338 tables and is enforced on none at runtime.**<br>• Only migration 0272 enables RLS, with ENABLE + FORCE and policies on users, auth_mfa_pending, approvals and audit_log.<br>• ADR-0234 is still Proposed, and batches 2–7 are not built.<br>• Non-test gateway code never calls `withPrincipal` or `withSystemContext`.<br>• One `pg.Pool` built from `DATABASE_URL` serves both migrations and requests. The shipped login is the image superuser, which bypasses FORCE.<br>• No boot check refuses a `rolsuper` or `rolbypassrls` login. | `packages/db/migrations/0272_rls_foundation_slice1.sql:134,136,169,171,192,194,308,310` (ENABLE/FORCE)<br>`internal/decisions/0234-postgres-row-level-security.md:3,13-15,190-196`<br>`packages/db/src/rls.ts:19-21,120-160`<br>`apps/gateway/src/main.ts:11-38`<br>`packages/db/src/index.ts:347-357`<br>`docker-compose.yml:116,341`<br>`scripts/install.sh:916`<br>`boot.ts`: no role check | Do batch 7 (a non-owner runtime login and a boot refusal of superuser or BYPASSRLS) together with batch 2 (wrap request handling in `withPrincipal`) as the next security batch. Then roll out table batches in order: user-owned, then credentials, then project. Track every remaining batch as a blocking bug. Update the ADR-0234 inventory: it says 329 tables, and there are now 338. |
+| S-02 | **high** | **Published dev secrets are accepted unless the operator sets a deploy signal, and the public profiles never set one.**<br>• `assessDevSecrets` refuses the published bootstrap token or data key only when `REGULAIT_DEPLOY_MODE` or `REGULAIT_HSTS` is set.<br>• Compose falls back to the published values, and `DEPLOY_MODE` defaults to empty.<br>• The base compose never forwards `REGULAIT_HSTS` to the gateway (only install.sh's override adds it), so `--profile tls`, `hosted` and `tunnel` boot with both published values.<br>• The bootstrap credential is a full admin with no expiry. It skips MFA and the IP envelope, and keeps working after a real admin exists.<br>• Step-up actions are refused once an admin has a step-up method, but the bootstrap credential can still mint an API key for any user, including a TOTP-enrolled admin, without step-up.<br>• Mitigation: the no-profile stack publishes the gateway on loopback only. | `apps/gateway/src/dev-secrets.ts:35-36,60-66,97-103`<br>`apps/gateway/src/boot.ts:197-205,430-441`<br>`docker-compose.yml:351-352,411`<br>`apps/gateway/src/auth.ts:248-249`<br>contrast `metrics.ts:420-447` (strict refusal) | Refuse published values unless the bind is loopback or an explicit dev opt-in is set. Treat an `https` non-loopback `REGULAIT_PUBLIC_URL` as a deploy signal. Forward `REGULAIT_HSTS` in the base compose. Retire the bootstrap credential automatically once an active admin exists. Make API-key minting for another user a step-up action. |
+| S-03 | **high** | **PM inbound webhooks have no replay protection on any provider path.**<br>• No parser checks a timestamp. `pm_sync_events` is a plain append with no unique key, so a replayed delivery is fully re-processed: it can re-orphan links, re-flag drift and re-trigger `prefer_regulait` pushes.<br>• Jira and monday authenticate with a static `?token=`. Azure DevOps uses a static basic-auth password and ignores the username.<br>• The generic adapter falls back to a static `x-regulait-webhook-secret` when no signature header is sent.<br>• `pm.ts` falls back to a legacy hash compare whenever `dataKey` is unset.<br>• Even the HMAC paths (Linear, Asana) sign only the body.<br>• No ADR records an exception. Contrast: Slack ChatOps enforces 300 s. | `packages/pm-provider/src/inbound.ts:72-93,160-161,240,328,395-396,501-511,596-610`<br>`apps/gateway/src/pm.ts:862-872,1060-1073`<br>contrast `packages/shared/src/chatops.ts` (Slack window) | Add a `pm_webhook_deliveries` table with a unique key on (integration, delivery id), or on a body hash where the provider gives no id. Enforce Linear's signed timestamp within a window. Remove the generic static-header path and the legacy hash fallback: ADR-0180 forbids grandfathering. Document URL-token rotation for Jira and monday. |
+| S-04 | medium | **Grant-minting routes have no step-up, while smaller relaxations do.**<br>• Eight routes widen default-deny with only the SoD check and `admin_only`: person and role grants of tools, servers, agents and connectors.<br>• Adding an egress host, lifting a revocation and replacing a workload-identity grant set do need step-up.<br>• Admin API keys can never step up, so a leaked admin key can widen anyone's access. | `apps/gateway/src/app.ts:2581,2612,2675,2696,2718,2737`<br>`apps/gateway/src/agents-connectors.ts:3757,5327`<br>contrast `custom-providers.ts:309-361`, `app.ts:3120,3184,3236`, `workload-identity-admin.ts:649`, `step-up.ts:35-38` | Add a `grant_mint` step-up kind, or reuse `settings_relax`, on all eight routes. The DELETE routes correctly need none. |
+| S-05 | medium | **A2A calls bypass the policy kernel entirely.** `a2a.ts` imports nothing from `policy-kernel`, so the kill switch (`executionGate`), the read-only and halted modes and the AI-literacy gate do not apply. Mitigation: `a2aEnabled` is off by default. | `apps/gateway/src/a2a.ts` (no kernel import)<br>`packages/policy-kernel/src/index.ts:1541-1546` (gate on other paths) | Route A2A through the same kernel evaluation, or at minimum through `executionGate`, before A2A can be switched on in any pilot. |
+| S-06 | medium | **Connector and A2A calls with no project run unattributed and skip the budget gate.** This is a loose default under ADR-0180. MCP and compat each require attribution by default; agent dispatch has `dispatchAttributionRequired`; connector and A2A have neither. | `apps/gateway/src/connector-call.ts:365,406`<br>`apps/gateway/src/projects.ts:796` (`preDispatchProjectGate` returns ok on a null project)<br>`use-case-gate.ts:111-119` (called only from `agents-connectors.ts:1530`)<br>`a2a.ts:307` | Extend the attribution mandate to connector and A2A calls, default on. |
+| S-07 | medium | **Authentication runs after body parsing.** The auth hook is a `preHandler`, so unauthenticated callers get bodies of up to about 11 MiB parsed on raised-`bodyLimit` routes. Only the supplier upload checks the credential first. CPU cost was not measured (UNVERIFIED). | `apps/gateway/src/app.ts:1178`<br>`bom-routes.ts:376`, `decision-receipts.ts:387`, `cost-import.ts:383`, `endpoint-import-routes.ts:149`, `shadow-ai.ts:667`<br>contrast `supplier-portal.ts:1108-1118` | Add an `onRequest` credential pre-check, at least on every route with a raised `bodyLimit`. |
+| S-08 | low | Password hashing uses scrypt N=2^14, r=8 (16 MiB), below the commonly cited N≥2^17. `scryptSync` blocks the event loop on every login. | `apps/gateway/src/auth.ts:445-448,452,468,484` | Raise the parameters with rehash-on-login, or move to a maintained Argon2id module. Use async scrypt. |
+| S-09 | low | Any `Authorization: Bearer x` header moves pre-auth traffic from the 1,200/min tier to the 6,000/min tier per IP. | `apps/gateway/src/rate-limit.ts:237-251,285` | Apply the higher tier only after the credential has been verified. |
+| S-10 | low | Hardening items:<br>• `isAdmin = opts.isAdmin ?? true` (latent, since both callers pass it);<br>• CSP keeps `style-src 'unsafe-inline'`;<br>• the Teams interaction path has `replayWindowEnforced: false`;<br>• `sql.raw` builds `ARRAY[...]` literals, safe today only because of `assertUuid`. | `reporting.ts:575`<br>`security-headers.ts` (`documentCsp`)<br>`packages/shared/src/chatops.ts:155-158`<br>`reporting.ts:257`, `compliance-packs.ts:169`, `copilot.ts:439` | Make `isAdmin` required. Use style hashes or nonces. Deduplicate Teams activity IDs. Use `inArray` or `= ANY($1)`. |
+
+**What's solid.**
+- Route authorization is default-deny from one source (`route-classes.ts`). A scan of 156 non-admin parameterised routes found no missing object-level check.
+- MFA is required for admins, step-up is strict by default, and CSRF requires both SameSite=Strict and a custom header.
+- The DNS-pinned guarded fetch covers about 23 outbound sites, with no stray raw fetch to user-supplied URLs found.
+- `jose` pins the JWT algorithm and audience.
+- The web app keeps no tokens in browser storage, ships no source maps and has no `dangerouslySetInnerHTML`.
+- Pino redacts sensitive fields.
+- `pnpm audit --prod` reported 0 advisories across 576 production dependencies.
+
+##### Pillar fit
+
+| ID | Sev | Finding | Evidence | Recommended action |
+|---|---|---|---|---|
+| P-01 | **high** | **Pillar 1 is uniform only for MCP.**<br>• Kernel approval rules, rate limits and ABAC are fields on the tool `EvaluationInput` only.<br>• For agent and connector calls, ABAC is "never supplied on this path today", and the model decision is allow or deny only (the dial's `require_approval` maps to deny).<br>• Model rate limits exist but are off by default.<br>• Connectors have no governance rate limit, only the generic HTTP limiter, which does not cover in-process builder-tool calls.<br>• Connector writes get an approval hold only under the execution dial, with no approval rules.<br>• ARCHITECTURE.md:118-148 says all call types go through `governedEvaluate`. That function is called only from the MCP surfaces and the simulation and evaluate callers. | `packages/policy-kernel/src/index.ts:586-587,631,1503,1514-1519,1541-1546,1780`<br>`internal/ARCHITECTURE.md:61,118-148`<br>`apps/gateway/src/governed-evaluate.ts:283-305`<br>`schema.ts:1908-1933,4386`<br>ADR-0040 §7.1, ADR-0212 | Write an ADR that brings model, connector and A2A calls under one `governedEvaluate` core, covering approval rules, rate windows and ABAC per resource type. Until it lands, correct ARCHITECTURE.md and every buyer-facing claim of "approvals and rate limits on every call". |
+| P-02 | **high** | **The plan-only gate is opt-in.**<br>• On `/v1/agents/:id/invoke` the gate runs only inside `if (body.instanceId)`.<br>• A regression test pins that `execute` with `dispatch:true` and no `instanceId` returns 200 while the instance is in planning.<br>• The compat shims hard-code `COMPAT_MODE = "execute"` and the MCP proxy has no instance join point, so both ignore planning entirely.<br>• `/v1/runs` follows the same opt-in pattern.<br>• ADR-0079 discloses this as a limit, but it conflicts with ADR-0180 and with the "forced Plan-only" pillar text. | `apps/gateway/src/agents-connectors.ts:4001-4016`<br>`apps/gateway/src/plan-only.ts:136-220`<br>`apps/gateway/src/plan-only.test.ts:305-320`<br>`apps/gateway/src/compat-core.ts:129`<br>`packages/shared/src/index.ts:1326-1339`<br>ADR-0079 (Honest limits) | Enforce at project level: refuse non-plan-safe modes on every surface while any instance of the target project or repo sits in a planning stage. Make instance attribution mandatory where a project has active instances. ADR-0079 line 168 is also out of date: conversation turns do pass the gate when they name an instance. |
+| P-03 | medium | **In pillar 3, "BYOC" means one compose stack on the customer's host.**<br>• `infra/modules` holds nothing for deploying into a customer's own AWS, Azure or GCP account.<br>• The infra and deploy adapters answer 501 unless a live flag is set, and ROADMAP records them as never run against a real cloud.<br>• The compliance cascade and the air-gap egress posture are real and enforced. | `internal/ARCHITECTURE.md:228-236`<br>`packages/infra-provider/src/index.ts:410-472`<br>`apps/gateway/src/infra.ts:310-372`<br>`internal/product/ROADMAP.md:200-206`<br>`projects.ts:368-400`<br>`deploy-posture.ts:88-136` | Run one live sandbox check per cloud for the infra and deploy adapters. Add reference BYOC packaging (Terraform or Helm) to `infra/modules`. Disclose the difference in buyer docs until then. Whether packaging exists outside this repo is UNVERIFIED. |
+| P-04 | medium | **Pillar 8 adapters are real HTTP clients, proven only against fake servers.**<br>• Covered: Azure DevOps, Jira, Linear, Asana, monday and a generic adapter.<br>• The ADR-0054 work-item importer is not built.<br>• Inbound description, priority and acceptance-criteria fields are only stored in the event payload. Only state changes and deletes affect RegulAIt, so the PM tool is not yet the source of truth that the pillar promises. | `packages/pm-provider/src/index.ts:330,453,584,746,873,1079`<br>`apps/gateway/src/pm.ts:862-872,912-1000`<br>`internal/product/PENDING.md` ("Blocked on a live instrument")<br>ADR-0054 | Do a live sandbox pass for Jira and Azure DevOps first. Build the importer and adopt inbound fields. |
+| P-05 | medium | **Orchestration "parallel" waves run one after another.** Auto-advance awaits each wave node in turn, so pillar 7's "run independent subtasks in parallel" holds only in the recorded state. | `apps/gateway/src/orchestration.ts:2607-2614,2771-2820` | Dispatch each wave concurrently with a bound, using the existing atomic `chargeRunEstimate`, or state plainly that execution is sequential. |
+| P-06 | medium | **Batching savings are estimates, but they are counted as realised.** Batching writes tokens-saved rows that the savings totals include, and the UI says batching "works on your behalf". | `orchestration.ts:2710-2760`<br>`optimization.ts:40-46`<br>`projects.ts:2586-2594`<br>`apps/web/.../SpendPage.tsx:561`, `OptimizationPage.tsx:119` | Exclude batching estimates from realised savings and show them as "opportunity". |
+| P-07 | low | **Pillar 6 is thin on the IDE path.** Compat calls get only routing and the semantic cache, and the cache is off by default. | `apps/gateway/src/compat-core.ts:62,860`<br>`schema.ts:4148-4159,4175` | Apply compaction and dedup to compat calls, or document the gap. |
+| P-08 | low | **Pillar 4: shared context reaches only orchestration run nodes.** Plain agent invokes and IDE calls never see it. | `apps/gateway/src/orchestration.ts:526-549` | Inject project context on governed invoke when a `projectId` is attributed. |
+| P-09 | low | **Several docs contradict the code or each other.**<br>• The `workflow-kernel` header comment says deployment and rollback stages are rejected; they are supported.<br>• PENDING §1 says "No LLM provider is connected", against its own addendum.<br>• Only the Google model adapter has been checked live (August). | `packages/workflow-kernel/src/index.ts:10-13`<br>`internal/product/PENDING.md` §1 | Fix the comment and PENDING §1. Add live smoke checks for the other model providers. |
+
+##### Architecture, code health, tests and migrations
+
+| ID | Sev | Finding | Evidence | Recommended action |
+|---|---|---|---|---|
+| C-01 | medium | **The web app hand-copies the gateway contract.**<br>• `apps/web` depends on neither `@regulait/shared` nor `@regulait/api-client`.<br>• `api/types.ts` (1,199 lines) and `adminTypes.ts` (948 lines) are written by hand.<br>• "mirrors …" comments mark copied rules: `git grep mirrors -- apps/web/src` returns 62 lines across 47 files.<br>• About 36 tests read gateway source text to catch drift. | `apps/web/src/api/types.ts`, `adminTypes.ts`<br>e.g. `apps/web/src/api/step-up-refusal.test.ts:109` | Generate web types from the gateway OpenAPI (`openapi-client-gen.ts` already exists), or export a browser-safe slice of `shared`. |
+| C-02 | medium | **A few god files take most of the churn.**<br>• `packages/db/src/schema.ts`: 15,630 lines, 256 commits.<br>• `apps/gateway/src/app.ts`: 6,445 lines, 72 routes, 57 direct DB calls, no service layer, 253 commits.<br>• `packages/shared/src/index.ts`: 4,869 lines, 213 exports, 239 commits.<br>• 18 non-test gateway files are over 2,000 lines.<br>• The gateway import-cycle baseline (74 edges) has not shrunk since 10-16. org-settings and mcp-proxy are each on 8 edges.<br>• Package boundaries are clean: no package cycles and no `@regulait/*/src` deep imports. | `wc -l`<br>`git log --oneline -- <file> \| wc -l`<br>`scripts/import-cycles-gateway.baseline.txt` | After the freeze, split `schema.ts` and `app.ts` by domain. This also removes most merge conflicts on them. Ratchet the cycle baseline down. |
+| C-03 | medium | **The migration guard leaves gaps.**<br>• `migration-watermark-guard.mjs` reads only the journal and skips tags already on base. It cannot see edits to a merged migration's SQL, removal of a merged entry, or `idx` and breakpoint changes. It has no journal-to-`.sql` 1:1 check (both are 230 today).<br>• It does catch a broken `when` order and a renamed merged tag.<br>• 51 numbers are missing across 14 gaps.<br>• A `drizzle-kit generate` script is still exposed, against a stale `0000_snapshot.json`.<br>• No schema-to-SQL parity test was found (UNVERIFIED that none exists). | `scripts/migration-watermark-guard.mjs:13,18-29,39-40`<br>`scripts/migration-watermark-guard.test.mjs:18-20`<br>`.github/workflows/ci.yml:285-294`<br>`packages/db/package.json` (`generate`) | Extend the guard: merged entries and their `.sql` bytes are unchanged, and the file set equals the journal. Remove the `generate` script. Add a parity test (fresh migrate compared with schema introspection). See R-03 for the structural fix. |
+| C-04 | medium | **The route-census test pins set sizes**: `MACHINE_ONLY` 46, `SUPERSEDED` 16, `INDIRECT_UI_CALLS` 55 and `KNOWN_UI_GAPS_MAX` 0. Every new route edits the same lines, so this is a merge hot spot rather than a flaky test: 27 commits in 3 weeks, 13 of them merges of main, and at least 7 conflicts on open PRs on the night of 11-06. | `scripts/preflight-ui-route-census.test.mjs:355-363` | Drop the three count pins (the owner approved dropping `INDIRECT`). The per-entry reason and stale-entry checks already enforce intent. Keep `KNOWN_UI_GAPS_MAX = 0`. |
+| C-05 | low | **Test isolation has gaps.**<br>• The gateway suite runs files serially per CI shard, each shard on a fresh Postgres.<br>• The 177 `zz-` file prefixes do nothing for gateway order: vitest orders by size and cache, and CI by SHA-1 of path. The prefixes are a leftover of the Playwright rule M-018.<br>• Hidden cross-file state dependencies (for example on the `org_settings` singleton) are masked rather than prevented.<br>• 390 of 522 files repeat the migrate and `DATABASE_URL` bootstrap.<br>• There is one placeholder `expect(1).toBe(1)`. | `apps/gateway/vitest.config.ts:5-7`<br>`vitest.run-last.config.ts:6-14`<br>`ci.yml:352-362`<br>e.g. `zz-adr0180-assurance-foundation.test.ts:87`<br>`scripts/preflight-egress-allow-cleanup.test.mjs:88` | Use a shared bootstrap helper. Give files that touch singletons a scratch schema (`testing/scratch-db.ts` exists). Stop adding `zz-` prefixes to gateway tests, and replace the placeholder assertion. |
+| C-06 | low | **Flaky-test hot spots.**<br>• The real garak suite never runs in CI: it is skipped unless `REGULAIT_GARAK_PYTHON` is set, and no workflow sets it.<br>• The token-endpoint timeout test races a 150 ms timer against a 600 ms hook and polls for 5 s, so it depends on wall-clock timing.<br>• The intermittent "work is BOUNDED" rescan failure on #605 traces to the open finding in R-02, not to the test. This applies to the #605 branch, not `main` (UNVERIFIED here). | `packages/engine-garak/src/garak-real.test.ts:72`<br>`apps/gateway/src/zz-adr0188-s5-token-endpoint.test.ts:1028` | Run the real garak suite nightly. Use fake timers in the timeout test. |
+| C-07 | low | **Dead or unchecked code.** `apps/web/review/` (21 files, 2,576 lines) imports `packages/*/dist` and sits outside the web tsconfig, so nothing type-checks it. `spikes/` holds 106 files (about 23k lines). | `apps/web/review/`<br>`spikes/` | Move both under `internal/` or delete them. |
+
+##### Open source first (ADR-0176)
+
+| ID | Sev | Finding | Evidence | Recommended action |
+|---|---|---|---|---|
+| O-01 | medium | **`THIRD_PARTY.md` is incomplete.**<br>• `apps/gateway/THIRD_PARTY.md` has rows for 23 of 48 non-workspace production deps. The 25 missing:<br>  – `@aws-sdk/client-{acm,backup,ecs,s3,ssm,sts}`;<br>  – `@azure/{arm-compute,arm-recoveryservicesbackup,arm-resourcegraph,arm-resources,identity,keyvault-certificates}`;<br>  – `@fastify/rate-limit`;<br>  – `@google-cloud/{backupdr,certificate-manager,config,os-config}`;<br>  – `@kubernetes/client-node`, `@modelcontextprotocol/sdk`, `@node-saml/node-saml`;<br>  – `ajv`, `ajv-formats`, `fastify`, `openid-client`, `zod`.<br>• `apps/web/THIRD_PARTY.md` lacks `react`, `react-dom` and `@tanstack/react-query`.<br>• `xml-crypto` is an exact-pinned gateway devDependency (tests only), and transitive through node-saml in the shipped closure.<br>• `packages/db/THIRD_PARTY.md:12` says drizzle-kit is exact 0.31.11; `package.json` has `^0.31.4`.<br>• No preflight compares rows to `package.json`. The licence gate does cover the whole `--prod` closure. | `apps/gateway/package.json:30-95,104`<br>`apps/gateway/THIRD_PARTY.md:7-32`<br>`apps/web/package.json:16-28`<br>`apps/web/THIRD_PARTY.md:7-16`<br>`pnpm-lock.yaml:248-250,5279-5290` | Add the rows. Add a preflight that fails when a production dep in any workspace has no row, and when a row's stated pin does not match the manifest. |
+| O-02 | medium | **Three ADR-0176 "Replace" decisions are open past the 11-03 deadline:**<br>• `upstream-retry.ts` (429 lines; cockatiel planned);<br>• `shared/tracing.ts` OTLP encoder (960 lines; `@opentelemetry/otlp-transformer` planned);<br>• `scheduler.ts` (924 lines; pg-boss or graphile-worker planned).<br>None of the target libraries is in any manifest. | `internal/decisions/0176-open-source-first.md:226-229` | Schedule one replacement batch per item, keeping the existing tests. |
+| O-03 | medium | **Hand-written CSV and canonical-JSON code exists next to the libraries.**<br>• Two CSV parsers: `onboarding.ts:610`, whose comment claims there is "exactly ONE CSV parser", and `reporting.ts:737`.<br>• A CSV writer: `billing.ts:494`.<br>• Meanwhile `csv-parse` and `csv-stringify` are already dependencies.<br>• `stableStringify` copies remain, while `canonicalize` is a shared dependency. | `packages/shared/src/onboarding.ts:610`, `reporting.ts:737`<br>`apps/gateway/src/billing.ts:494`, `fairness.ts:45`, `reporting.ts:36`<br>`config-versions.ts:987`, `mcp-admission.ts:431` | Switch to `csv-parse` (its `info` option gives line numbers), `csv-stringify` and `canonicalize`. |
+| O-04 | medium | **Two JSON-Schema validators can disagree.** The eval scorer uses a hand-written subset validator; the playground uses full Ajv. The same schema can pass in an eval and fail in the playground. | `packages/shared/src/evals.ts:589,723`<br>`apps/gateway/src/playground.ts:100-125` | Use the shared Ajv + re2js instance in evals. |
+| O-05 | low | **The licence rule's wording conflicts with an accepted exception.** The engine images ship libgfortran (GPL-3.0 with the GCC runtime exception) and libquadmath (LGPL-2.1), which the owner accepted under ADR-0187. On its face, the CLAUDE.md rule "no GPL … in shipped code" forbids this. Note: the torch entry's "BSL-1.0" is the Boost licence, not the Business Source Licence. | ADR-0187 (decisions 106, 193)<br>CLAUDE.md "open source first" §3 | Write the runtime-exception carve-out into ADR-0176 so the rule and the practice agree. |
+
+##### Process
+
+| ID | Sev | Finding | Evidence | Recommended action |
+|---|---|---|---|---|
+| R-01 | **high** | **A review is a prose comment, not a GitHub review.** Every session posts as the owner account, so there is no review state, no thread resolution and nothing branch protection can enforce. | PR #605: `get_reviews` returns `[]`; all 14 comments have association OWNER | Run reviewer sessions under a separate GitHub App identity that submits real reviews with inline threads. Turn on "require conversation resolution" and "dismiss stale approvals". The merge loop refuses a head with any unresolved thread. |
+| R-02 | **high** | **#605: a verified one-line fix was missed across three review rounds.**<br>• The fix: the rescan query lacks `isNull(mcpServers.disabledAt)`, so disabled servers use up capped batch slots.<br>• Raised at ee3d71b6, and still open at 3c30ced9 and at 78414e79.<br>• Every push after round 2 reacted to `main` moving (journal merges, renumbers, an entry-trim merge).<br>• The lane's status posts on #453 at 00:13, 00:48, 03:00 and 03:24 never list the finding.<br>• `READY` meant "CI green", not "findings closed", and the security verdict said APPROVE while the code verdict said REQUEST CHANGES. | PR #605 review comments (11-06 22:05 and later)<br>#453 comment 6702033079 | Number every finding. A `READY` post lists each open finding with the commit that fixes it, or "deferred, accepted by". Every delta review opens with the previous round's open findings. Reviewers post one-line fixes as GitHub suggestion blocks. |
+| R-03 | **high** | **The migration journal serialises unrelated PRs.**<br>• In 3 weeks the journal took 115 commits (66 of them merges of main), with 37 recorded conflicts and 20 renumber or re-stamp commits.<br>• #605's migration was renumbered three times (0219→0262→0277→0285), and #628's three times.<br>• Each landing forces the next PR to merge main and re-run CI, for example #683 waiting on #605. | `git log -- packages/db/migrations/meta/_journal.json`<br>#453 comments 6697259161, 6701062213 | Structural fix: lanes write a placeholder migration (`pending_<branch>.sql`) and no journal entry. A merge-queue step assigns the next number and `when`, then appends the journal entry on the merge-group ref. Or use a migrator that tracks which migrations have run, not a watermark, and fails loudly on any unapplied migration below the highest one applied. Either way, nobody edits the journal on a branch. |
+| R-04 | medium | **A script that resolved census-test conflicts silently deleted a guard assertion** on four PRs (`expect(SUPERSEDED.size)` on #639, #640, #681 and #692). It was restored later. | #453 designer comment, 11-07 03:00 | Never resolve test files by script. Add a CI check that each guard-test file's assertion count is not below the base branch's. C-04 removes the main source of these conflicts. |
+| R-05 | medium | **Unrelated commits get folded into approved PRs.**<br>• The entry-trim commit aae03518 was merged into #605, #622, #654, #681, #690 and #691.<br>• #605 grew from a UI prototype into 39 files and 3,187 lines, with migrations and an ADR, while still titled "HOLD proto… needs API". | #453 master comment, 11-07 00:56<br>PR #605 file list | A cross-cutting fix gets its own PR, and others merge `main` once it lands. Re-review any PR whose diff leaves its declared surface, and refresh its title and body. |
+| R-06 | medium | **Each PR passed the size limit alone, and the combined tree did not.** `main` itself was over the entry-JS limit at 6a06dc1 (139,555 B against 139,500 B). This repeats M-104. | #453, 11-07 03:24 (not re-run here: UNVERIFIED) | Use GitHub merge queue, running size-limit and the full gate on the merge-group ref. Log the repeat in `mistakes.md`. |
+| R-07 | medium | **The memory files have drifted.**<br>• STATE.md is 495 KB and 5,828 lines; its recap and `last_updated` say 10-29.<br>• The last session file is from 10-25, and there is no record of the demo's outcome.<br>• The PENDING header says "current as of 2026-08-03".<br>• `mistakes.md` stops at M-108 (10-31), with no entries for the #605 miss, the census-guard deletion or the M-104 repeat.<br>• The ADR index (448 KB) took 165 commits and 34 conflicts in 3 weeks. | `internal/memory/STATE.md:1-9`<br>`internal/memory/sessions/`<br>`internal/product/PENDING.md` header<br>`internal/decisions/README.md` | Generate the ADR index from ADR front matter in CI, and stop editing it by hand. Write STATE.md's recap as per-session fragment files compiled by a script (a towncrier-style pattern). Set `merge=union` in `.gitattributes` only for line-append logs, never for the journal JSON. Log the three missed mistakes. |
+| R-08 | medium | **Coordination is too centralised.**<br>• Everything runs through one issue (#453, over 360 comments), and master's broadcasts mix many PRs per comment.<br>• One lane holds about 20 PRs and 3 background builders.<br>• About 70 CI runs were queued at once (11-06 21:47), and reviews were done at heads with CI still queued.<br>• Over 3 weeks, `main` took 699 merges against 885 content commits: about 2 merges of main per PR. | #453<br>`git log origin/main --merges` | Cap open PRs per lane (for example, 5 or fewer). Keep each PR's status in that PR as a checklist a script updates, and use #453 only for decisions. A merge queue batches merges, which cuts both the merge-main loop and the CI backlog. |
+
+---
+
+#### Product readiness: what blocks an enterprise pilot (ranked)
+
+1. **There is no production-grade or customer-cloud deployment path.**
+   - The original AWS Organization is gone (ADR-0203).
+   - Hosting is a single hardened instance (ADR-0228), and high availability is deferred (PENDING P2).
+   - "BYOC" is one compose stack (P-03).
+   - Nothing holds a production designation, which needs the owner's explicit sign-off under the standing guardrail.
+2. **Three security defaults would fail a buyer's security review on day one:** S-01 (RLS), S-02 (published secrets on the public profiles) and S-03 (webhook replay). All three are blocking bugs under CLAUDE.md.
+3. **Governance coverage is weaker than the pitch.** Approvals, rate limits and ABAC cover MCP calls only, and the plan gate is opt-in (P-01, P-02, S-05, S-06). This is the core value proposition, and buyers will test it first.
+4. **Integration lifecycle basics are missing on `main`.**
+   - There is no per-server or per-connector disable or delete route. `updateServerSchema` has no disable field, and no DELETE route exists for servers or connectors.
+   - There is no webhook-secret rotation route.
+   - Git-token replacement is held in #604 and #605.
+   - So an admin cannot cleanly cut off one MCP server they suspect is compromised. Whether grant revocation or the org kill switch covers every caller is UNVERIFIED.
+5. **There is no real release keypair.** The update-bundle and licence verifiers pin a dev public key whose private half was not kept (PENDING S3, `infra/release-keys/`). Customers cannot verify updates or licences.
+6. **Integrations are not live-proven.** Only the Google model adapter was checked live. The PM adapters have run against fake servers only, and the infra and deploy adapters have never run live (P-03, P-04, P-09).
+7. **The docs are not buyer-ready.** STATE, PENDING and ROADMAP are stale (R-07), there is no admin guide, and ARCHITECTURE.md overstates the decision core (P-01).
+
+---
+
+#### Top 10 next actions (prioritised)
+
+1. **S-02 (small, high leverage).** Refuse published dev secrets unless the bind is loopback or an explicit dev opt-in is set. Treat an https `PUBLIC_URL` as a deploy signal and forward `REGULAIT_HSTS`. Retire the bootstrap credential once a real admin exists.
+2. **S-03.** Add a webhook delivery dedup table and timestamp windows, and remove the static-header and legacy-hash fallbacks.
+3. **S-01.** Run ADR-0234 batches 7 and 2 together: a non-owner runtime role, a boot refusal of superuser or BYPASSRLS, and `withPrincipal` around requests. Then roll out the table batches as blocking work.
+4. **R-03 and C-04 (structural conflict fixes, one small PR).**
+   - Drop the census count pins.
+   - Move migration numbering and journal append to a merge-queue step, and turn on GitHub merge queue (which also fixes R-06 and part of R-08).
+   - Extend the watermark guard (C-03).
+5. **R-01 and R-02.**
+   - Reviewer sessions post real reviews under a separate App identity.
+   - Require conversation resolution.
+   - Number every finding.
+   - `READY` lists each finding with its fixing commit.
+6. **P-02.** Enforce plan-only at project level on every surface: invoke, runs, compat and MCP.
+7. **P-01, S-05 and S-06.** Write an ADR for one `governedEvaluate` core covering model, connector and A2A calls, with the attribution mandate on by default. Correct ARCHITECTURE.md now.
+8. **S-04.** Make the eight grant-mint routes a step-up action.
+9. **Readiness item 4.** Merge per-server and per-connector disable, credential and webhook-secret rotation, and git-token replacement as one small "integration lifecycle" batch, split out of #604 and #605.
+10. **O-01, then O-02 and O-03.** Add the missing THIRD_PARTY rows plus a preflight that keeps them complete, then schedule the three overdue ADR-0176 replacements.
+
+After those: generate the ADR index and compile STATE from per-session fragments (R-07). Run live sandbox passes for Jira and Azure DevOps and for one cloud's infra adapter (P-03, P-04). Run the key ceremony for a real release keypair (readiness item 5).
+
+---
+
+*Evidence line numbers are at 6a06dc1. Process counts come from git history between 2026-10-17 and 2026-11-07, and from issue #453 and PR #605 as read on 2026-11-07. Items marked UNVERIFIED were reported by a review pass but not independently re-read in code.*

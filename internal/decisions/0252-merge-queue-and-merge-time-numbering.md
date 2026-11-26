@@ -3,7 +3,7 @@
 - **Status**: Accepted (owner decision of 2026-11-07: enable the GitHub merge queue on main and assign migration numbers at merge time; builder `builder/merge-queue-readiness`)
 - **Date**: 2026-11-07
 - **Index**: Merge queue on main; migration numbers, ADR index rows and STATE/PENDING appends written at merge time
-- **Review findings**: R-03, R-06, R-07, R-08, C-03, C-04 in [the 2026-11-07 whole-build review](../reviews/2026-11-07-whole-build-review.md)
+- **Review findings**: R-03, R-06, R-07, R-08, C-03, C-04 in [the 2026-11-07 whole-build review](../reviews/codexreviews.md)
 - **Migration**: none
 
 ## Context

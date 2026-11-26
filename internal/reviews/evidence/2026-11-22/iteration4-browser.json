@@ -1,0 +1,55 @@
+{
+  "sourceCommit": "da16d6bd23109d477102c0ec2a534f81d62a6917",
+  "mode": "Local Chromium synthetic mock API contracts; no external providers or successful real mutations",
+  "testsPassed": 6,
+  "seconds": 6.4,
+  "matchedDefectObservations": 7,
+  "observations": {
+    "approval-result": {
+      "queueReadsBefore": 2,
+      "queueReadsAfter": 2,
+      "decisionPosts": 1,
+      "oldPendingApproveControlVisible": true,
+      "downstreamWarningVisible": false,
+      "successfulDecisionNoticeVisible": true,
+      "postMocked": true
+    },
+    "entitlements": {
+      "selectedSubject": "B",
+      "loadedSubject": "A",
+      "oldGrantVisibleAfterSwitch": true,
+      "oldGrantVisibleAfterFailedLookup": true,
+      "failedReads": 1,
+      "removeEnabled": true,
+      "confirmationText": "Remove Synthetic grant unique to A from this user?\n\nThe direct grant is deleted, so the next call this user makes through Synthetic grant unique to A is refused by default-deny. Nothing already audited changes, and the removal is itself audited.\n\nCancel\nRemove",
+      "deleteConfirmed": false
+    },
+    "workflow-recovery": {
+      "errorShown": true,
+      "inFlightExplanationVisible": true,
+      "retryOrResumeButtons": 2,
+      "mutationSent": false
+    },
+    "template-draft": {
+      "selectedStarter": "plan",
+      "draftReplacedAfterUnrelatedConnectionRead": true,
+      "submitted": false,
+      "replacementContainsSyntheticEdit": false
+    },
+    "workflow-participant": {
+      "role": "nonadmin participant, not initiator",
+      "finishPlanningEnabled": true,
+      "posts": 1,
+      "mockedStatus": 403,
+      "mutationCommitted": false
+    },
+    "workflow-intake": {
+      "metadataChangeTypes": [],
+      "nonemptyDescription": true,
+      "startDisabled": true,
+      "noRoutableMessage": true,
+      "actualPathRuleEligibility": "separate pure-function/source evidence",
+      "mutationSent": false
+    }
+  }
+}

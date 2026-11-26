@@ -1,0 +1,75 @@
+{
+  "recorded_at": "2026-11-22T23:38:57.248964+00:00",
+  "baseline_main": "6d81348a543cf923dbd6fb9e45e8f70206c95ce4",
+  "authored_scope": "Markdown design recommendations and response reconciliation only",
+  "mockups": 8,
+  "index_files": 1,
+  "documents": [
+    "internal/reviews/mockups/01-home-and-navigation.md",
+    "internal/reviews/mockups/02-approvals-and-task-detail.md",
+    "internal/reviews/mockups/03-workflow-progress-and-recovery.md",
+    "internal/reviews/mockups/04-security-settings-and-exceptions.md",
+    "internal/reviews/mockups/05-connections-and-credentials.md",
+    "internal/reviews/mockups/06-lists-and-record-context.md",
+    "internal/reviews/mockups/07-sign-in-and-account-linking.md",
+    "internal/reviews/mockups/08-reports-and-costs.md",
+    "internal/reviews/mockups/README.md"
+  ],
+  "relative_links": "pass",
+  "code_fences": "balanced",
+  "each_mockup_desktop_phone_acceptance": "pass",
+  "feedback_cards": 70,
+  "design_proposals": 6,
+  "current_route_inventory": 154,
+  "new_browser_route_run": false,
+  "full_workspace_build": {
+    "command": "pnpm -r --workspace-concurrency=2 build",
+    "node_options": "--max-old-space-size=6144",
+    "exit_code": 0
+  },
+  "migration_guard": {
+    "command": "node scripts/migration-watermark-guard.mjs origin/main",
+    "exit_code": 0
+  },
+  "adr_index": {
+    "command": "pnpm exec vitest run --dir scripts adr-index",
+    "passed": 8,
+    "failed": 0
+  },
+  "bundle_budgets": {
+    "all_passed": true,
+    "budget_count": 112,
+    "gzip_bytes": [
+      {
+        "name": "entry JS (index)",
+        "passed": true,
+        "size": 40586,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "entry CSS (index)",
+        "passed": true,
+        "size": 6013,
+        "sizeLimit": 10700
+      },
+      {
+        "name": "first-load JS",
+        "passed": true,
+        "size": 134969,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "first-paint JS",
+        "passed": true,
+        "size": 179098,
+        "sizeLimit": 182000
+      }
+    ]
+  },
+  "limits": [
+    "No product UI implemented",
+    "No newly measured usability gains",
+    "No native accessibility/device/provider tests in this documentation pass",
+    "No independently retested fix closure"
+  ]
+}

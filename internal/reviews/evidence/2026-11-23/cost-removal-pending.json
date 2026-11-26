@@ -1,0 +1,18 @@
+{
+  "pendingIdenticalDeleteRequests": 2,
+  "dialogDismissedBeforeResponse": true,
+  "allWritesMocked": true,
+  "realDeletion": false,
+  "serverDataCorruptionAsserted": false,
+  "baseline_main": "b5f88e79e4a8d25432f4ec70bc0ad811751e492c",
+  "finding": "CXR-CST-006",
+  "duration_seconds": 3.2,
+  "procedure": [
+    "Open /ui/admin/cost-consolidation?tab=mapping with one synthetic alias",
+    "Open its named removal dialog and enter a reason",
+    "Hold the DELETE response, activate Remove twice, observe two requests",
+    "Activate Cancel while both responses remain held; dialog closes",
+    "Release mocked responses only; no real data changed"
+  ],
+  "harness_limits": "Initial harness attempts used an incorrect page path/control label and were corrected from current App.tsx and existing feature selectors. Only the corrected test supports this finding."
+}

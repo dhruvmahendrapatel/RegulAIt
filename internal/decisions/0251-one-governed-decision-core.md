@@ -3,7 +3,7 @@
 - **Status**: Proposed (builder lane `builder/gov-core-unify`; owner decision "Yes, ADR then build", 2026-11-07, #453)
 - **Date**: 2026-11-07
 - **Closes**: whole-build review findings P-01 (high), S-05 and S-06
-  ([2026-11-07-whole-build-review.md](../reviews/2026-11-07-whole-build-review.md))
+  ([codexreviews.md](../reviews/codexreviews.md))
 - **Builds on**: [ADR-0014](0014-role-bundled-agent-connector-grants.md) (grants),
   [ADR-0040](0040-abac-policy-as-code.md) (Cedar ABAC), [ADR-0104](0104-approval-payload-binding.md) and
   [ADR-0105](0105-consent-context-binding-and-expiry.md) (consent binding), [ADR-0124](0124-kill-switch-and-safe-modes.md)

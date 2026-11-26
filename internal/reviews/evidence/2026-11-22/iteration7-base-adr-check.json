@@ -1,0 +1,16 @@
+{
+  "baseCommit": "267e12e4951d14c3f71531f3eeba9ffb4eb63022",
+  "check": "ADR reference integrity",
+  "source": "internal/process/orchestration/DecisionLog.md",
+  "sourceUnchangedFromBase": true,
+  "pendingNumbersWithoutFiles": [
+    "0380",
+    "0381"
+  ],
+  "result": "Baseline failure reproduced by reading the exact main tree;no review-authored missing reference",
+  "localTestResult": {
+    "passed": 7,
+    "failed": 1
+  },
+  "guardChanged": false
+}

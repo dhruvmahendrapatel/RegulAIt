@@ -1,0 +1,71 @@
+{
+  "baseline_main": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "kind": "Controlled probes verifying current behaviour, including an existing shared-cause defect",
+  "checks": [
+    {
+      "width": 375,
+      "theme": "dark",
+      "initialHeadingFocused": true,
+      "denyReachableInViewport": true,
+      "horizontalOverflow": false,
+      "bothActionsLockedWhilePending": true,
+      "keyboardSubmissionWrites": 1,
+      "escapeDismissedWhileUnresolved": true,
+      "allWritesMocked": true,
+      "realDecisionRecorded": false,
+      "nativeScreenReaderOrSoftKeyboardTest": false
+    },
+    {
+      "width": 375,
+      "theme": "light",
+      "initialHeadingFocused": true,
+      "denyReachableInViewport": true,
+      "horizontalOverflow": false,
+      "bothActionsLockedWhilePending": true,
+      "keyboardSubmissionWrites": 1,
+      "escapeDismissedWhileUnresolved": true,
+      "allWritesMocked": true,
+      "realDecisionRecorded": false,
+      "nativeScreenReaderOrSoftKeyboardTest": false
+    },
+    {
+      "width": 768,
+      "theme": "dark",
+      "initialHeadingFocused": true,
+      "denyReachableInViewport": true,
+      "horizontalOverflow": false,
+      "bothActionsLockedWhilePending": true,
+      "keyboardSubmissionWrites": 1,
+      "escapeDismissedWhileUnresolved": true,
+      "allWritesMocked": true,
+      "realDecisionRecorded": false,
+      "nativeScreenReaderOrSoftKeyboardTest": false
+    },
+    {
+      "width": 768,
+      "theme": "light",
+      "initialHeadingFocused": true,
+      "denyReachableInViewport": true,
+      "horizontalOverflow": false,
+      "bothActionsLockedWhilePending": true,
+      "keyboardSubmissionWrites": 1,
+      "escapeDismissedWhileUnresolved": true,
+      "allWritesMocked": true,
+      "realDecisionRecorded": false,
+      "nativeScreenReaderOrSoftKeyboardTest": false
+    }
+  ],
+  "probes_passed": 4,
+  "duration_seconds": 6.5,
+  "new_numbered_card": false,
+  "existing_family": [
+    "UIS-09",
+    "UIW-08",
+    "CXR-CST-006"
+  ],
+  "limits": [
+    "All writes mocked/refused",
+    "No native soft keyboard or assistive technology",
+    "No persisted decision or real incidence claim"
+  ]
+}

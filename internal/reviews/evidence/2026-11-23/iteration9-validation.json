@@ -1,0 +1,65 @@
+{
+  "date": "2026-11-23T13:06:49.644043+00:00",
+  "baseline_main": "b5f88e79e4a8d25432f4ec70bc0ad811751e492c",
+  "authored_scope": "Review/mockup/evidence documents only",
+  "workspace_build": "pass",
+  "migration_guard": "pass",
+  "adr_index": {
+    "passed": 8,
+    "failed": 0
+  },
+  "proof_browser_checks": {
+    "passed": 8,
+    "duration_seconds": 17.4
+  },
+  "cost_pending_probe": {
+    "passed": 1,
+    "duration_seconds": 3.2,
+    "meaning": "confirmed reported duplicate-request/pending-dismissal behaviour, not a successful product acceptance check"
+  },
+  "harness_setup": "Earlier cost probe setup used incorrect route/selector; corrected using current source and existing feature selectors. No earlier attempt counted as product evidence.",
+  "bundle_budgets": {
+    "passed": 115,
+    "failed": 0,
+    "gzip_bytes": [
+      {
+        "name": "entry JS (index)",
+        "passed": true,
+        "size": 40757,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "entry CSS (index)",
+        "passed": true,
+        "size": 6013,
+        "sizeLimit": 10700
+      },
+      {
+        "name": "first-load JS",
+        "passed": true,
+        "size": 135333,
+        "sizeLimit": 139500
+      },
+      {
+        "name": "first-paint JS",
+        "passed": true,
+        "size": 179675,
+        "sizeLimit": 182000
+      }
+    ]
+  },
+  "mockup_documents": 10,
+  "wireframes": 9,
+  "relative_file_links": "pass",
+  "fences": "balanced",
+  "desktop_phone_acceptance_in_each": "pass",
+  "feedback_cards": 71,
+  "design_proposals": 6,
+  "route_inventory_only": 157,
+  "limits": [
+    "All new writes mocked",
+    "No product code or real deletion",
+    "No fresh real-gateway/native-device test",
+    "No completed user study or whole-route retest"
+  ]
+}

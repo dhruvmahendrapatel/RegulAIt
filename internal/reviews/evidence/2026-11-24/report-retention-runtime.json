@@ -1,0 +1,129 @@
+{
+  "baselineMain": "2d57877b82fbb4c7d9969ffd88ee7ce7805f132e",
+  "seam": "real PostgreSQL + compiled buildApp + HTTP injection",
+  "freshDatabase": true,
+  "bootstrapAndMemberApiKey": true,
+  "browserOrProductionBoot": false,
+  "recordsDeleted": false,
+  "checks": [
+    {
+      "case": "POST /v1/reports/definitions",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/generate",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/generate",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/schedules",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/users",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/users/:id/keys",
+      "expected": 201,
+      "status": 201
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/archive",
+      "expected": 403,
+      "status": 403
+    },
+    {
+      "case": "Unauthorised archive leaves active definition",
+      "passed": true
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/archive",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "Archive response keeps two runs and disables one schedule",
+      "passed": true
+    },
+    {
+      "case": "Definition row retained and archived",
+      "passed": true
+    },
+    {
+      "case": "Schedule row retained but disabled",
+      "passed": true
+    },
+    {
+      "case": "Both original run rows retained",
+      "passed": true
+    },
+    {
+      "case": "GET /v1/reports/overview",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "Default list hides archived definition",
+      "passed": true
+    },
+    {
+      "case": "GET /v1/reports/overview?include=archived",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "Archived list finds retained definition",
+      "passed": true
+    },
+    {
+      "case": "GET /v1/reports/runs?definitionId=:id&limit=10",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "Run history retains both runs",
+      "passed": true
+    },
+    {
+      "case": "GET /v1/reports/runs/:id",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "GET /v1/reports/runs/:id",
+      "expected": 403,
+      "status": 403
+    },
+    {
+      "case": "GET /v1/reports/runs/:id",
+      "expected": 200,
+      "status": 200
+    },
+    {
+      "case": "GET /v1/reports/runs/:id",
+      "expected": 403,
+      "status": 403
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/generate",
+      "expected": 409,
+      "status": 409
+    },
+    {
+      "case": "POST /v1/reports/definitions/:id/archive",
+      "expected": 409,
+      "status": 409
+    }
+  ],
+  "database_scope": "Fresh local disposable database, privileged test login; application object-authorisation checks, not an RLS enforcement test.",
+  "harness_setup": "Initial TCP connection required a password; corrected to the existing local Unix socket. No assertion ran in the failed connection attempt."
+}
