@@ -1391,6 +1391,18 @@ export {
   type NormalizedInboundEvent,
 } from "./inbound.js";
 export { signGenericWebhook } from "./generic-signature.js";
+// ADR-0356 PR 3: Atlassian Rovo-agent and MCP audit events (read-only evidence)
+export {
+  ATLASSIAN_AUDIT_DEFAULT_BASE,
+  ATLASSIAN_AUDIT_DEFAULT_FILTERS,
+  ATLASSIAN_AUDIT_PAGE_SIZE,
+  AtlassianAuditPageError,
+  atlassianAuditFiltersSchema,
+  matchesAuditFilters,
+  parseAtlassianAuditPage,
+  type AtlassianAuditEvent,
+  type AtlassianAuditPage,
+} from "./atlassian-audit.js";
 // ADR-0356: work assigned from the PM tool (trigger signals, settings, the lifecycle table)
 export {
   canPmTriggerTransition,

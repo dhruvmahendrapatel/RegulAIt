@@ -565,6 +565,9 @@ describe("6. the covered / NOT-covered inventory", () => {
     "a2a_agent_revocations.reason",
     // ADR-0327 addendum — a decision-table version's proposal reason
     "decision_table_versions.reason",
+    // ADR-0340 slice 3 — why an admin asked to migrate a running instance, and why a canary ended
+    "workflow_instance_migrations.reason",
+    "workflow_template_canaries.end_reason",
     // ADR-0207: why an admin disabled a connector or an MCP server
     "connectors.disabled_reason",
     "copilot_proposals.rationale",

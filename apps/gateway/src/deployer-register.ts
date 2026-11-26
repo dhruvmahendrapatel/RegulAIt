@@ -36,7 +36,7 @@ import {
   eq,
   type Db,
 } from "@regulait/db";
-import { auditCompliancePack, COMPLIANCE_PACK_RULE_IDS, evaluatePack, recordPackAttestation } from "./compliance-packs.js";
+import { ATTESTATION_NEEDS_A_PERSON, auditCompliancePack, COMPLIANCE_PACK_RULE_IDS, evaluatePack, recordPackAttestation } from "./compliance-packs.js";
 
 export const DEPLOYER_REGISTER_RULE_IDS = {
   attestRefused: "deployer-register-attest-refused",
@@ -188,6 +188,8 @@ export function registerDeployerRegisterRoutes(app: FastifyInstance, db: Db): vo
       .from(compliancePackControls)
       .where(and(eq(compliancePackControls.packId, pack.id), eq(compliancePackControls.controlRef, b.data.controlRef)));
     if (!control) return reply.status(404).send({ error: "unknown_register_item" });
+    // an attestation is a named person's statement (ADR-0180): the bootstrap token has no identity and cannot attest
+    if (!actor) return refuse(403, ATTESTATION_NEEDS_A_PERSON, "an attestation must be made by a named person; the bootstrap token cannot attest");
 
     const now = new Date();
     const review = new Date(b.data.reviewDate);

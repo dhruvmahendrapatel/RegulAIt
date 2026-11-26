@@ -28,7 +28,10 @@
  * endpoint is called with the guarded fetch directly. GitHub's billing usage report is one unpaginated GET per day:
  * `@octokit/request` (MIT) was compared and not added, because it would be a new dependency whose fetch must be
  * replaced by the guarded one anyway, for a single GET. Cursor publishes no SDK for its Admin API (slice 3,
- * 2026-11-19).
+ * 2026-11-19). The ChatGPT Enterprise Daily Usage endpoint (slice 4b, 2026-11-20) is on a different host and is not in
+ * the `openai` SDK (checked at 6.49.0); a client generated from the vendor's OpenAPI document (for example with
+ * `openapi-fetch`, MIT) was compared and not added, because it would vendor a 700 KB document and a new dependency for
+ * one paginated GET whose fetch must still be the guarded one. The vendor's own sample code calls it with plain fetch.
  */
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -61,6 +64,7 @@ import {
   awsCurFacts,
   awsCurManifestSchema,
   awsCurPeriodBounds,
+  chatGptDailyUsagePageSchema,
   cursorUsageEventsSchema,
   FEDERATION_AUDIENCES,
   normalizeAwsCurCsv,
@@ -70,6 +74,7 @@ import {
   githubBillingUsageSchema,
   normalizeAccountKey,
   normalizeAnthropicCostReport,
+  normalizeChatGptDailyUsage,
   normalizeCursorUsageEvents,
   normalizeGithubCopilotUsage,
   normalizeOpenAiCosts,
@@ -86,8 +91,10 @@ import {
   vendorUsagePublicConfigSchemas,
   VendorUsageResponseError,
   type AwsCurPublicConfig,
+  type ChatGptDailyUsageRow,
   type CursorUsageEvent,
   type GithubCopilotPublicConfig,
+  type OpenAiCodexPublicConfig,
   type VendorUsageFact,
   type VendorUsagePublicConfig,
   type VendorUsagePullVendor,
@@ -436,6 +443,54 @@ interface Fetched {
   facts: VendorUsageFact[];
   pages: number;
   replacePeriods?: string[];
+  /** daily rows with credit-priced usage and no vendor estimate, so no credit line (slice 4b, owner decision 1) */
+  creditRowsWithoutEstimate?: number;
+}
+
+/** rows asked for a page: well inside the vendor's 30,000 cap and the 4 MB response bound */
+const CHATGPT_USAGE_PAGE_ROWS = 2000;
+
+/**
+ * ChatGPT Enterprise Daily Usage for the window, per user and UTC day, following `next_page` (slice 4b). Both bounds
+ * are UTC midnights in Unix seconds, `start_time` inclusive and `end_time` exclusive, as the vendor documents.
+ */
+async function fetchChatGptUsage(
+  key: string,
+  window: { start: Date; end: Date },
+  fetcher: typeof fetch,
+  config: OpenAiCodexPublicConfig,
+): Promise<Fetched> {
+  const rows: ChatGptDailyUsageRow[] = [];
+  const cursors = new Set<string>();
+  let page: string | null = null;
+  for (let n = 1; n <= VENDOR_USAGE_MAX_PAGES; n++) {
+    const url = new URL(`https://${VENDOR_USAGE_CATALOGUE.openai_codex.host}/v1/analytics/workspaces/${encodeURIComponent(config.workspaceId)}/usage`);
+    url.searchParams.set("start_time", String(window.start.getTime() / 1000));
+    url.searchParams.set("end_time", String(window.end.getTime() / 1000));
+    url.searchParams.set("limit", String(CHATGPT_USAGE_PAGE_ROWS));
+    if (page) url.searchParams.set("page", page);
+    const body = await fetchJson(fetcher, url.toString(), { method: "GET", headers: { authorization: `Bearer ${key}`, accept: "application/json" } }, n);
+    let parsed;
+    try {
+      parsed = chatGptDailyUsagePageSchema.parse(body);
+    } catch (err) {
+      throw classifyError(err, n);
+    }
+    rows.push(...parsed.data);
+    if (!parsed.has_more) {
+      try {
+        const { facts, creditRowsWithoutEstimate } = normalizeChatGptDailyUsage(rows, { workspaceId: config.workspaceId, window });
+        return { facts, pages: n, creditRowsWithoutEstimate };
+      } catch (err) {
+        throw classifyError(err, n);
+      }
+    }
+    if (!parsed.next_page) throw new PullError("bad_response", `the vendor said more pages follow page ${n} but gave no cursor; nothing was written`);
+    if (cursors.has(parsed.next_page)) throw repeatedCursor(n);
+    cursors.add(parsed.next_page);
+    page = parsed.next_page;
+  }
+  throw new PullError("page_limit", `the vendor still had more pages after ${VENDOR_USAGE_MAX_PAGES}; nothing was written`);
 }
 
 /** what the AWS fetch needs beyond the key: the federation minter's inputs and a guarded fetch sized for CUR files */
@@ -531,6 +586,8 @@ function fetchVendor(
       return fetchCursor(key, window, fetcher);
     case "aws_cur":
       return fetchAwsCur(key, config as AwsCurPublicConfig, aws);
+    case "openai_codex":
+      return fetchChatGptUsage(key, window, fetcher, config as OpenAiCodexPublicConfig);
   }
 }
 
@@ -885,6 +942,7 @@ export async function runVendorUsagePull(
           newLines,
           restatedLines: lines.length - newLines,
           ...(fetched.replacePeriods ? { replacedPeriods: fetched.replacePeriods, withdrawnLines } : {}),
+          ...(fetched.creditRowsWithoutEstimate !== undefined ? { creditRowsWithoutEstimate: fetched.creditRowsWithoutEstimate } : {}),
         },
       })
       .where(eq(costImportBatches.id, batch!.id));
@@ -1102,7 +1160,7 @@ export function registerVendorUsagePullRoutes(
       connectors: connectors.map((c) => {
         const cfg = isPullVendor(c.vendor) ? parseConfig(c.vendor, c.publicConfig) : null;
         const declared = cfg ? declaredGatewayIds(cfg) : 0;
-        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor" || c.vendor === "aws_cur";
+        const unmetered = c.vendor === "github_copilot" || c.vendor === "cursor" || c.vendor === "aws_cur" || c.vendor === "openai_codex";
         return {
           ...connectorView(c, credBy.get(c.id) ?? null),
           meteredOverlap: unmetered

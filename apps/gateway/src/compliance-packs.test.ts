@@ -80,6 +80,7 @@ function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
 
 const { buildApp } = await import("./app.js");
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -106,6 +107,10 @@ let leadA: string;
 let leadAKey: string;
 
 let packId: string;
+/** a NAMED admin: an attestation is a person's statement, so the bootstrap token cannot make one */
+let attesterId: string;
+let attesterAuth: { authorization: string };
+let restoreIdentity: (() => Promise<void>) | null = null;
 
 const post = (url: string, payload: unknown, headers = ADMIN) =>
   app.inject({ method: "POST", url, headers, payload: payload as object });
@@ -246,9 +251,17 @@ beforeAll(async () => {
   packId = created.json().pack.id;
   const activated = await post(`/v1/compliance/packs/${packId}/activate`, {});
   expect(activated.statusCode).toBe(200);
+
+  restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  const attester = await post("/v1/users", { email: `${PREFIX}-attester@${PREFIX}.example`, displayName: "attester", isAdmin: true });
+  expect(attester.statusCode, attester.body).toBe(201);
+  attesterId = attester.json().id as string;
+  const attesterKey = await post(`/v1/users/${attesterId}/keys`, { name: "cpack-attester" });
+  attesterAuth = { authorization: `Bearer ${attesterKey.json().token}` };
 });
 
 afterAll(async () => {
+  await restoreIdentity?.();
   const packIds = (
     await db
       .select({ id: compliancePacks.id })
@@ -335,12 +348,40 @@ describe("ADR-0058 — an organisational control is never auto-satisfied", () =>
     await db.delete(auditLog).where(eq(auditLog.ruleId, `${PREFIX}-evidence`));
   });
 
-  it("becomes 'attested' — a status distinct from 'satisfied' — once a named human attests", async () => {
-    const att = await post(`/v1/compliance/packs/${packId}/attestations`, {
+  it("REFUSES an attestation with no named person behind it (the bootstrap token), audited, and writes nothing", async () => {
+    const res = await post(`/v1/compliance/packs/${packId}/attestations`, {
       controlRef: "acme:9.9-staff-are-trained",
-      statement: "All operators completed the 2026 AI-use training; records in the LMS.",
+      statement: "nobody in particular says so",
     });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toBe("attestation_needs_a_person");
+    const rows = await db.select().from(compliancePackAttestations).where(eq(compliancePackAttestations.packId, packId));
+    expect(rows).toHaveLength(0);
+    const denies = await db
+      .select()
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.ruleId, COMPLIANCE_PACK_RULE_IDS.attestationRecorded),
+          eq(auditLog.effect, "deny"),
+          sql`${auditLog.detail} ->> 'error' = 'attestation_needs_a_person'`,
+        ),
+      );
+    expect(denies.length).toBeGreaterThan(0);
+  });
+
+  it("becomes 'attested' — a status distinct from 'satisfied' — once a named human attests", async () => {
+    const att = await post(
+      `/v1/compliance/packs/${packId}/attestations`,
+      {
+        controlRef: "acme:9.9-staff-are-trained",
+        statement: "All operators completed the 2026 AI-use training; records in the LMS.",
+      },
+      attesterAuth,
+    );
     expect(att.statusCode).toBe(201);
+    // the attestation names the person who made it, and so does its audit row
+    expect(att.json().attestation.attestedByUserId).toBe(attesterId);
 
     const res = await evaluate(packId, { scopeKind: "org", entitlementScope: "org" });
     const sc = res.json().scorecard;
