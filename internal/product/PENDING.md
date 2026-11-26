@@ -331,12 +331,9 @@ gate and settings route use the new `fairness_gate_tier_*` settings and `fairnes
 
 | **E23** | **Process analytics and human-task SLAs (owner, 2026-11-16, Camunda gap analysis rows 5 and 9).** Slice 1 built by [ADR-0342](../decisions/0342-process-analytics-and-human-task-slas.md): replayed read model, four scoped analytics reads, projector job and refresh. | Remaining: slice 2 (approval priority and explicit due date over the ADR-0046 SLA sweep; the contract with lane E21's stage timers, one escalation mechanism); slice 3 (value view joined to cost per outcome, #848, metered only); the analytics dashboard (#453, closes five KNOWN_UI_GAPS entries); a per-instance sequence on `workflow_events` so replay ordering is exact (engine owner). |
 
-**E22 / ADR-0341 — visual pipeline builder, remaining slices.** (2) the canvas editing UI at `/builder/pipelines`
-(lazy chunk sharing the RunGraphCanvas split, its own size-limit entry; palette, canvas, property sheet, Outline view
-as the keyboard, screen-reader and phone path; skeletons). (3) diff view, version history and the publish flow
-(relaxation acceptance, step-up). Later: publishing an `ai-use-case-intake` template through the decision-regression
-gate (refused by the builder today); owner questions on a second approver for publish, non-admin draft editing and a
-dedicated step-up kind.
+**E22 / ADR-0341 — visual pipeline builder, follow-ups.** Usability testing of the editor with people in the target
+roles. Later: publishing an `ai-use-case-intake` template through the decision-regression gate (refused by the builder
+today); owner questions on a second approver for publish, non-admin draft editing and a dedicated step-up kind.
 
 **E21 — compensation follow-ups (ADR-0340, 2026-11-16).** (1) A compensation undoes only the current round's records: an earlier round's branch or pull request (moved to `effects:history` by a re-open) is not closed or deleted; decide whether a cancel should also close earlier rounds' unmerged pull requests. (2) The template editor (`WorkflowTemplatesPage`) does not offer `compensates`, `delete_branch` or `close_pr` yet (screens are tracked on #453); templates are authored through the API. (3) The PM-tool mirror (pillar 8) shows a compensating instance by its status only (`awaiting_execution`), not as "compensating".
 

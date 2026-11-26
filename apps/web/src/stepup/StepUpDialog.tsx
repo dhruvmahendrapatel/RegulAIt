@@ -18,7 +18,7 @@ import v from "../views/views.module.css";
 import {
   api,
   installGlobalStepUp,
-  STEP_UP_ACTION_COPY,
+  stepUpActionText,
   subscribeStepUpPrompt,
   type StepUpPrompt,
 } from "./stepUp";
@@ -124,7 +124,7 @@ export default function StepUpDialog() {
   }, [waitingSso, opts?.stepUpId, prompt?.id]);
 
   if (!prompt) return null;
-  const what = STEP_UP_ACTION_COPY[prompt.actionKind] ?? "this action";
+  const what = stepUpActionText(prompt.action, prompt.actionKind);
 
   const verify = async (body: Record<string, unknown>) => {
     if (!opts) return;

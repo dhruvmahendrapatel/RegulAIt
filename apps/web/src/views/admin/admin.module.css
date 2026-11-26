@@ -382,3 +382,8 @@
   block-size: var(--s3);
   margin: 0;
 }
+
+/* ADR-0363 — a child sensitivity label, one step in from its parent */
+.childRow {
+  padding-inline-start: var(--s3);
+}
