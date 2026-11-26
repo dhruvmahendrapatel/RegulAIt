@@ -871,6 +871,10 @@ describe("every sweep is registered", () => {
         // ADR-0338 slice 1c (lane E19): expires delegated control sign-ins and destroys what they held; driven in
         // zz-adr0338-1c-delegated.test.ts
         VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME,
+        // ADR-0365 slice 2 (lane E46): the context graph's hourly incremental and daily full sync; driven end to end in
+        // zz-adr0365-context-graph-sync.test.ts (with no source bound it does nothing)
+        SCHEDULER_JOB_NAMES.contextGraphSync,
+        SCHEDULER_JOB_NAMES.contextGraphFullSync,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

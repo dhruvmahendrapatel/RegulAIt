@@ -1,11 +1,13 @@
 # ADR-0365: A live synced context graph, filtered by the reader's own entitlements
 
-- **Status**: Accepted (lane E46 brief, owner choice 2026-11-20; slice 1 built)
+- **Status**: Accepted (lane E46 brief, owner choice 2026-11-20; slice 1 built). Amended 2026-11-21 (owner-approved
+  backlog slice): slice 2, the scheduled sync and the work-item-to-run edges
 - **Date**: 2026-11-20
 - **Index**: **Live context graph (pillar 4, PENDING P2), slice 1: node, edge and node-scope tables in Postgres (3NF, forced row-level security), an incremental sync from PM work items an admin binds to one project (a `settings_relax` step-up, audited), and a query API that returns only nodes whose every scope the caller can read; a hidden node is a 404. Graph-in-Postgres chosen over Apache AGE, graphology and a separate graph database. Boundary with ADR-0316: the graph indexes source-system objects and stores no content; distillation writes text into the context store and never into the graph.**
 - **Backlog item**: PENDING P2 ("a live, synced context graph")
 - **Built in**: lane E46, branch `builder/e46-context-graph` (slice 1)
-- **Migration**: `pending/shared_context_graph.sql`, numbered at merge (ADR-0252)
+- **Migration**: `0394_shared_context_graph.sql` (slice 1) and `pending/shared_context_graph_runs.sql` (slice 2,
+  numbered at merge, ADR-0252)
 - **Related**: ADR-0011 (Shared Projects and the context store), ADR-0054 and ADR-0289 (PM work-item importer),
   ADR-0234 (row-level security), ADR-0316 (session distillation), ADR-0337 (SaaS entitlement graph, a different
   graph: agents' vendor grants), ADR-0176 (open source first), ADR-0180 (secure by default), ADR-0200 (3NF, security
@@ -150,3 +152,35 @@ connection's work-item linkage, which only admins see today. Binding, rebinding 
 - **Known limit:** an import that commits more than 10 minutes after its own `first_seen_at` timestamp, behind a
   cursor that has already moved past it, is picked up only by a full pass. Imports are single transactions of
   seconds, so the window is generous; the scheduled job will run a full pass daily.
+
+## Slice 2 (2026-11-21): the scheduled sync and the work-item-to-run edges
+
+Owner-approved backlog slice (master, 2026-11-21), from the slice 1 follow-ups.
+
+1. **Scheduled sync.** Two scheduler jobs run the slice 1 sync over every bound source, each source in its own
+   transaction, least recently synced first, at most 200 sources a pass:
+   - `context-graph-sync` every hour, incremental;
+   - `context-graph-full-sync` every day, full, which also removes stale run edges.
+
+   With no source bound (the default) both do nothing. Both run under the scheduler's `system_task` scope and write
+   each source's audit row in the scheduler's name. A failing source fails the run, with the source named, and never
+   blocks the others. The new policies admit `system_task` on the graph tables and, for SELECT only, on
+   `pm_imported_work_items`. `pm_links` already admitted it (ADR-0234 PM batch).
+2. **Edges from work items to runs.** A live `pm_links` row of kind `run`, or `run_node` of that run, whose external id
+   is a bound work item becomes:
+   - one `orchestration_run` node per source and run (a foreign key to the run, cascading);
+   - one `tracks` edge from the work item.
+
+   Incremental passes read links created since `links_synced_at`, minus the same 10-minute overlap, plus every link of
+   a work-item node the pass created, because a link can predate the item's import. The full pass reads all links,
+   and removes edges whose link is gone or orphaned and run nodes left with no edge.
+3. **A second access scope, by user.** A run is visible to its initiator and admins only (`loadRunFor`). A project
+   scope alone would show it to every project member, so a run node also gets a row in
+   `context_graph_node_user_scopes` naming the run's initiator.
+   - When a node has user scopes, the reader must be one of them, on top of every project scope.
+   - The readable function still reads only the scope tables, so the node policy cannot recurse.
+   - A pending approver of the run does not see it in the graph. The graph's read is stricter than the run screen's
+     read-only widening.
+4. **Boundary with ADR-0234 PM follow-on (#1144).** The sync reads `pm_links` under `system_task`. #1144 narrows
+   `pm_sync`, not `system_task`, so the two compose. The graph does not reuse #1144's object-visibility helper: its
+   own scope rows decide, and its rule for a run (initiator only) is no wider than that helper's write rule.

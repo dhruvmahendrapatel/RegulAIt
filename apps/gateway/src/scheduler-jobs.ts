@@ -169,6 +169,9 @@ export const SCHEDULER_JOB_NAMES = {
   aiSaasMonitorSweep: "ai-saas-monitor-sweep",
   // ADR-0361: deletes AI SaaS interaction evidence past the cascade floor (ai-saas-monitor.ts)
   aiSaasEvidenceRetentionSweep: "ai-saas-evidence-retention-sweep",
+  // ADR-0365 slice 2 (lane E46): the context graph's scheduled sync (context-graph.ts); with no source bound it does nothing
+  contextGraphSync: "context-graph-sync",
+  contextGraphFullSync: "context-graph-full-sync",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -917,6 +920,7 @@ import { cmdbSyncJobDefinitions } from "./cmdb-sync.js";
 import { robotRunJobDefinitions } from "./robot-runs.js";
 import { vendorControlDelegatedJobDefinitions } from "./vendor-agent-control-delegated.js";
 import { aiSaasMonitorJobDefinitions } from "./ai-saas-monitor.js";
+import { contextGraphJobDefinitions } from "./context-graph.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -954,6 +958,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...robotRunJobDefinitions(), // ADR-0364 S3: robot-run-stale-sweep
     ...aiSaasMonitorJobDefinitions({ dataKey: opts.dataKey }), // ADR-0361: ai-saas-monitor-sweep, ai-saas-evidence-retention-sweep
     ...vendorControlDelegatedJobDefinitions(), // ADR-0338 slice 1c: vendor-control-delegated-expiry-sweep
+    ...contextGraphJobDefinitions(), // ADR-0365 slice 2: context-graph-sync, context-graph-full-sync
   ];
 }
 // ===== end ADR-0182 block ====================================================
