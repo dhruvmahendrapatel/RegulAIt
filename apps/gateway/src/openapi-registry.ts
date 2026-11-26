@@ -1592,6 +1592,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/workflows/builder/templates/:templateId/publish": "internal",
   "GET /v1/workflows/builder/templates/:templateId/versions": "internal",
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": "internal",
+  // ADR-0340 slice 3: canary over new instances and governed migration of a running instance
+  "GET /v1/workflows/builder/templates/:templateId/canary": "internal",
+  "POST /v1/workflows/builder/templates/:templateId/canary/end": "internal",
+  "POST /v1/workflows/instances/:instanceId/migrations": "internal",
+  "GET /v1/workflows/instances/:instanceId/migrations": "internal",
 
   // ===== ADR-0180 (D3) — continuous assurance. Internal: admin console and
   // governance surfaces whose shapes are still moving. Append-only per owner.
@@ -3232,6 +3237,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/workflows/builder/templates/:templateId/publish": "workflows",
   "GET /v1/workflows/builder/templates/:templateId/versions": "workflows",
   "GET /v1/workflows/builder/templates/:templateId/versions/:version": "workflows",
+  "GET /v1/workflows/builder/templates/:templateId/canary": "workflows",
+  "POST /v1/workflows/builder/templates/:templateId/canary/end": "workflows",
+  "POST /v1/workflows/instances/:instanceId/migrations": "workflows",
+  "GET /v1/workflows/instances/:instanceId/migrations": "workflows",
 
   // ===== ADR-0180 (D3) — continuous assurance. Append-only per owner.
   // --- P0

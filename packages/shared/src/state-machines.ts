@@ -19,6 +19,7 @@ import { VENDOR_ACTION_MACHINE, VENDOR_CONTROL_DELEGATED_MACHINE } from "./vendo
 import { FAIRNESS_BREACH_REVIEW_STATUSES, FAIRNESS_EVALUATION_STATUSES } from "./fairness-evaluation.js";
 import { CONTAINMENT_MACHINE } from "./rogue-containment.js";
 import { APPROVAL_SLA_MACHINE } from "./workbench.js";
+import { WORKFLOW_MIGRATION_MACHINE, WORKFLOW_TEMPLATE_CANARY_MACHINE } from "./workflow-template-versions.js";
 import { PM_WORK_TRIGGER_MACHINE } from "./pm-trigger-machine.js";
 
 /** `training_jobs.status` (ADR-0065). Same values as `TRAINING_JOB_STATUSES` in @regulait/db. */
@@ -1274,6 +1275,9 @@ export const STATE_MACHINES: Readonly<Record<string, StateMachine<string, string
   [CONTAINMENT_MACHINE.def.id]: CONTAINMENT_MACHINE,
   // ADR-0342 slice 2: a human task's SLA clock in the approvals queue (ADR-0046 sweep; re-armed by a reschedule)
   [APPROVAL_SLA_MACHINE.def.id]: APPROVAL_SLA_MACHINE,
+  // ADR-0340 slice 3: a governed migration of a running workflow instance, and a canary over new instances
+  [WORKFLOW_MIGRATION_MACHINE.def.id]: WORKFLOW_MIGRATION_MACHINE,
+  [WORKFLOW_TEMPLATE_CANARY_MACHINE.def.id]: WORKFLOW_TEMPLATE_CANARY_MACHINE,
   // ADR-0349 slice 4 (lane E30): one fire time of a workflow schedule
   [WORKFLOW_SCHEDULE_RUN_MACHINE.def.id]: WORKFLOW_SCHEDULE_RUN_MACHINE,
   // ADR-0346 (lane E27): fairness breach reviews and evaluations
