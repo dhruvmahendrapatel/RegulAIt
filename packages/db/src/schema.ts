@@ -22115,3 +22115,155 @@ export const workflowScheduleRuns = pgTable(
 );
 export type WorkflowScheduleRunRow = typeof workflowScheduleRuns.$inferSelect;
 // ===== end ADR-0349 slice 4 =====
+
+// ===== ADR-0358 (lane E39): CMDB sync (ServiceNow first, vendor-neutral adapter) =====
+/**
+ * One CMDB the AI asset inventory is exported to. Created DISABLED (ADR-0180): enabling needs a live credential, a
+ * step-up and a reason, and is refused under REGULAIT_DEPLOY_MODE=air_gapped. Export only by default:
+ * `read_back_ownership` is off until an admin turns it on (a relaxation, step-up). `instance_url` is an https origin;
+ * its host must also be on the egress allow-list (the guarded fetch enforces that at send time).
+ * `ci_classes` is a schema-validated configuration document (ADR-0200 3NF exception): the CI class per asset kind.
+ * Row-level security: an admin principal, `system_task` and `migration` only.
+ */
+export const CMDB_KINDS = ["servicenow"] as const;
+export const CMDB_ASSET_KINDS = ["agent", "mcp_server", "model", "endpoint"] as const;
+export const CMDB_SYNC_RUN_STATUSES = ["running", "succeeded", "failed", "refused"] as const;
+export const CMDB_SYNC_ERROR_CODES = [
+  "in_progress",
+  "disabled",
+  "air_gapped",
+  "no_credential",
+  "no_data_key",
+  "secret_unreadable",
+  "egress_blocked",
+  "unauthorized",
+  "http_error",
+  "rate_limited",
+  "bad_response",
+  "network",
+  "timeout",
+  "stale",
+  "internal",
+] as const;
+export const cmdbConnectors = pgTable(
+  "cmdb_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: CMDB_KINDS }).notNull(),
+    instanceUrl: text("instance_url").notNull(),
+    /** the IRE data source (a `discovery_source` choice the admin registered on cmdb_ci) */
+    sourceName: text("source_name").notNull(),
+    ciClasses: jsonb("ci_classes").$type<Record<(typeof CMDB_ASSET_KINDS)[number], string>>().notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    readBackOwnership: boolean("read_back_ownership").notNull().default(false),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cmdb_connectors_name_uq").on(sql`lower(${t.name})`),
+    check("cmdb_connectors_kind_check", sql`${t.kind} IN ('servicenow')`),
+    check("cmdb_connectors_url_check", sql`${t.instanceUrl} ~ '^https://[^/?#@]+$'`),
+    check("cmdb_connectors_ci_classes_check", sql`jsonb_typeof(${t.ciClasses}) = 'object'`),
+  ],
+);
+export type CmdbConnectorRow = typeof cmdbConnectors.$inferSelect;
+
+/**
+ * The connector's credential: a data-key envelope (CIPHERTEXT_COLUMNS), never returned or logged, destroyed (NULL)
+ * on revoke or replacement. At most one live credential per connector. `username` is the integration user's name (not
+ * a secret, shown so the admin can see which account is in use).
+ */
+export const cmdbCredentials = pgTable(
+  "cmdb_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => cmdbConnectors.id, { onDelete: "cascade" }),
+    username: text("username").notNull(),
+    secretCiphertext: text("secret_ciphertext"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    uniqueIndex("cmdb_credentials_live_uq").on(t.connectorId).where(sql`${t.revokedAt} IS NULL`),
+    check("cmdb_credentials_live_secret_check", sql`(${t.revokedAt} IS NULL) = (${t.secretCiphertext} IS NOT NULL)`),
+  ],
+);
+
+/**
+ * One sync pass, open-first like `scheduler_runs`: a run opens `running` and ends in exactly one terminal state
+ * (CMDB_SYNC_RUN_TRANSITIONS in @regulait/shared). At most one `running` run per connector (partial unique index); a
+ * second pass is written already `refused` (`in_progress`). `error_code` is a fixed vocabulary, never vendor text.
+ */
+export const cmdbSyncRuns = pgTable(
+  "cmdb_sync_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => cmdbConnectors.id, { onDelete: "cascade" }),
+    trigger: text("trigger", { enum: ["manual", "schedule"] }).notNull(),
+    status: text("status", { enum: CMDB_SYNC_RUN_STATUSES }).notNull(),
+    initiatedBy: uuid("initiated_by").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    itemsExamined: integer("items_examined").notNull().default(0),
+    itemsPushed: integer("items_pushed").notNull().default(0),
+    itemsUnchanged: integer("items_unchanged").notNull().default(0),
+    itemsFailed: integer("items_failed").notNull().default(0),
+    ownershipRead: integer("ownership_read").notNull().default(0),
+    errorCode: text("error_code", { enum: CMDB_SYNC_ERROR_CODES }),
+  },
+  (t) => [
+    index("cmdb_sync_runs_connector_idx").on(t.connectorId, t.startedAt),
+    uniqueIndex("cmdb_sync_runs_running_uq").on(t.connectorId).where(sql`${t.status} = 'running'`),
+    check("cmdb_sync_runs_trigger_check", sql`${t.trigger} IN ('manual', 'schedule')`),
+    check("cmdb_sync_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed', 'refused')`),
+    check("cmdb_sync_runs_finished_check", sql`(${t.status} = 'running') = (${t.finishedAt} IS NULL)`),
+    check(
+      "cmdb_sync_runs_error_check",
+      sql`(${t.status} = 'failed' OR ${t.status} = 'refused') = (${t.errorCode} IS NOT NULL)`,
+    ),
+  ],
+);
+export type CmdbSyncRunRow = typeof cmdbSyncRuns.$inferSelect;
+
+/**
+ * The idempotency ledger: one row per (connector, exported asset). `source_key` is the stable key sent as IRE's
+ * `source_native_key` (`regulait:<kind>:<id>`); `payload_sha256` is the hash of the last payload the CMDB accepted, so
+ * an unchanged asset is not re-sent. The ownership read-back is RECORDED here (the email the CMDB reported, and the
+ * RegulAIt user it matched by email, joined at write time); it never changes RegulAIt's own owner fields.
+ * `cmdb_owner_email` is a verbatim external value (ADR-0200 exception): what the CMDB said, kept as evidence.
+ */
+export const cmdbCiLinks = pgTable(
+  "cmdb_ci_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => cmdbConnectors.id, { onDelete: "cascade" }),
+    assetKind: text("asset_kind", { enum: CMDB_ASSET_KINDS }).notNull(),
+    sourceKey: text("source_key").notNull(),
+    ciClass: text("ci_class").notNull(),
+    ciSysId: text("ci_sys_id").notNull(),
+    payloadSha256: text("payload_sha256").notNull(),
+    lastPushedAt: timestamp("last_pushed_at", { withTimezone: true }).notNull().defaultNow(),
+    lastRunId: uuid("last_run_id").references(() => cmdbSyncRuns.id, { onDelete: "set null" }),
+    cmdbOwnerEmail: text("cmdb_owner_email"),
+    cmdbOwnerUserId: uuid("cmdb_owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    ownershipReadAt: timestamp("ownership_read_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("cmdb_ci_links_connector_key_uq").on(t.connectorId, t.sourceKey),
+    check("cmdb_ci_links_asset_kind_check", sql`${t.assetKind} IN ('agent', 'mcp_server', 'model', 'endpoint')`),
+    check("cmdb_ci_links_sha_check", sql`${t.payloadSha256} ~ '^[0-9a-f]{64}$'`),
+    check("cmdb_ci_links_sys_id_check", sql`${t.ciSysId} ~ '^[0-9a-f]{32}$'`),
+  ],
+);
+export type CmdbCiLinkRow = typeof cmdbCiLinks.$inferSelect;
+// ===== end ADR-0358 (lane E39) CMDB sync =====
