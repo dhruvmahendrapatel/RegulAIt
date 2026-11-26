@@ -1,0 +1,102 @@
+{
+  "fixture": 1,
+  "name": "deploy-blocked-then-override",
+  "note": "a deploy parks at a manual handoff and is overridden; verify passes",
+  "definition": {
+    "workflow": "governed-deploy",
+    "costSensitivity": "quality-sensitive",
+    "stages": [
+      {
+        "id": "intake",
+        "type": "trigger"
+      },
+      {
+        "id": "requirements",
+        "type": "artifact_generation",
+        "output": "requirements"
+      },
+      {
+        "id": "signoff",
+        "type": "human_approval",
+        "approvers": [
+          "requesting_user"
+        ]
+      },
+      {
+        "id": "deploy",
+        "type": "deployment",
+        "connection": "prod-target",
+        "environment": "staging",
+        "condition": {
+          "field": "environment",
+          "equals": "staging"
+        }
+      },
+      {
+        "id": "verify",
+        "type": "automated_check",
+        "checks": [
+          "smoke"
+        ],
+        "onFailure": "rollback",
+        "rollbackStageId": "rollback"
+      },
+      {
+        "id": "rollback",
+        "type": "rollback",
+        "connection": "prod-target"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "start"
+    },
+    {
+      "kind": "artifact_submitted",
+      "stageId": "requirements"
+    },
+    {
+      "kind": "approval_granted",
+      "stageId": "signoff"
+    },
+    {
+      "kind": "deploy_blocked",
+      "stageId": "deploy",
+      "reason": "no target"
+    },
+    {
+      "kind": "deploy_override",
+      "stageId": "deploy"
+    },
+    {
+      "kind": "execution_succeeded",
+      "stageId": "verify"
+    }
+  ],
+  "expected": {
+    "state": {
+      "status": "completed",
+      "currentStageIndex": 6,
+      "stageStatuses": [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "pending"
+      ],
+      "artifactVersions": {
+        "requirements": 1
+      }
+    },
+    "statuses": [
+      "blocked_on_artifact",
+      "blocked_on_approval",
+      "awaiting_execution",
+      "blocked_on_deploy",
+      "awaiting_execution",
+      "completed"
+    ]
+  }
+}

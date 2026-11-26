@@ -34,13 +34,22 @@ import { createHash } from "node:crypto";
 import { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 import { KEY_FRAGMENT_KEPT, normalizeEvidenceHost } from "./shadow-ai.js";
 import {
+  SHADOW_AI_CATALOG_V2_VERSION,
   matchCatalogV2AssistantConfig,
   matchCatalogV2Endpoint,
   matchCatalogV2Extension,
   matchCatalogV2Package,
   type ShadowCatalogV2Entry,
 } from "./shadow-catalog-v2.js";
-import { SHADOW_AI_CATALOG_V3 } from "./shadow-catalog-v3.js";
+import { SHADOW_AI_CATALOG_V3, SHADOW_AI_CATALOG_V3_VERSION } from "./shadow-catalog-v3.js";
+
+/**
+ * ADR-0083 §2: the compiled catalogue versions a `repo_scan` observation may
+ * name. Evidence records which one the analyser ran with, so "matched X" from a
+ * repo scan tells a v2 match from a v3 match. A new frozen catalogue adds its
+ * version here; the discovery worker refuses any other value.
+ */
+export const REPO_SCAN_CATALOG_VERSIONS: readonly number[] = Object.freeze([SHADOW_AI_CATALOG_V2_VERSION, SHADOW_AI_CATALOG_V3_VERSION]);
 import { manifestKindForPath, readManifest, type RepoEcosystem } from "./repo-manifests.js";
 import { envNamePresenceInText } from "./discovery/presence-signatures.js";
 
@@ -143,6 +152,8 @@ export interface RepoAnalysisStats {
 export interface RepoAnalysisResult {
   repo: string;
   commitSha: string;
+  /** ADR-0083 §2: the version of the compiled catalogue this analysis matched against */
+  catalogVersion: number;
   observations: RepoObservation[];
   stats: RepoAnalysisStats;
   /** SHA-256 over (path NUL content NUL) of every file read, in read order */
@@ -169,7 +180,11 @@ export interface RepoAnalysisInput {
   /** keep observations the compiled catalogue does not know (the admin catalogue's own rows) */
   alsoKeep?: (o: { kind: RepoObservationKind; value: string }) => boolean;
   limits?: Partial<RepoAnalysisLimits>;
-  catalog?: ReadonlyArray<ShadowCatalogV2Entry>;
+  /**
+   * the compiled catalogue to match against, with its version (ADR-0083 §2: the
+   * version is stamped on every observation). Default: catalogue v3.
+   */
+  catalog?: { entries: ReadonlyArray<ShadowCatalogV2Entry>; version: number };
 }
 
 // ===========================================================================
@@ -460,7 +475,11 @@ const MCP_CONFIG_IDS = new Set(["cfg-mcp-json", "cfg-vscode-mcp-json", "cfg-gemi
 
 export async function analyseRepo(input: RepoAnalysisInput): Promise<RepoAnalysisResult> {
   const limits: RepoAnalysisLimits = { ...REPO_ANALYSIS_DEFAULTS, ...(input.limits ?? {}) };
-  const catalog = input.catalog ?? SHADOW_AI_CATALOG_V3;
+  const catalog = input.catalog?.entries ?? SHADOW_AI_CATALOG_V3;
+  const catalogVersion = input.catalog ? input.catalog.version : SHADOW_AI_CATALOG_V3_VERSION;
+  if (!REPO_SCAN_CATALOG_VERSIONS.includes(catalogVersion)) {
+    throw new Error(`catalogue version ${String(catalogVersion).slice(0, 20)} is not a compiled catalogue version`);
+  }
   const keep = input.alsoKeep ?? (() => false);
   const commitSha = input.commitSha;
   const observations: RepoObservation[] = [];
@@ -661,6 +680,7 @@ export async function analyseRepo(input: RepoAnalysisInput): Promise<RepoAnalysi
   return {
     repo: input.repo,
     commitSha,
+    catalogVersion,
     observations,
     stats,
     contentDigest: digest.digest("hex"),

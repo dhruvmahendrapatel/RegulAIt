@@ -1,7 +1,8 @@
 /**
  * ADR-0242 — the admission-scan engines' pure half. The fixtures under fixtures/admission-scan are REAL reports:
  * each was written by the engine image as built (engines/<id>/Dockerfile) running the driver with
- * `--network=none` on the engine's own fixture (engines/<id>/fixtures), on 2026-11-07. `crash` is a malformed
+ * `--network=none` on the engine's own fixture (engines/<id>/fixtures), on 2026-11-07, and re-recorded on 2026-11-17
+ * from the images with the runner stage and the driver's `inputs` echo (identical apart from `inputs`). `crash` is a malformed
  * manifest (mcpscanner) and a directory with no SKILL.md (skillscanner); `cloudkey` is the driver refusing to
  * start with a cloud analyzer key in its environment.
  */
@@ -12,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ENGINE_IDS, ENGINE_KINDS } from "./contract.js";
+import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { ENGINE_MANIFEST } from "./manifest.js";
 import {
   ADMISSION_SCAN_ENGINES,
@@ -23,8 +25,8 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../../../..");
 // #843 security review: the gateway records a verdict only when the report names exactly the one file it placed. The
-// recorded reports predate the driver's `inputs` echo, so a completed one gets the file it scanned added here; the
-// driver's own echo is tested below on the engines' fixture directories.
+// recorded reports carry the driver's real `inputs` echo (the engine's own fixture file; checked below). The
+// interpretation cases here pin the expected input to a fixed value, so a completed report's `inputs` is set to it.
 const IN = {
   mcpscanner: { path: "tools.json", sha256: "1".repeat(64) },
   skillscanner: { path: "SKILL.md", sha256: "2".repeat(64) },
@@ -32,7 +34,7 @@ const IN = {
 const fixture = (name: string): unknown => {
   const r = JSON.parse(readFileSync(path.join(here, "fixtures/admission-scan", `${name}.json`), "utf8")) as Record<string, unknown>;
   const engine = r.engine as keyof typeof IN;
-  return r.status === "completed" && !("inputs" in r) ? { ...r, inputs: [IN[engine]] } : r;
+  return r.status === "completed" ? { ...r, inputs: [IN[engine]] } : r;
 };
 
 describe("ADR-0242 admission-scan reports (recorded from the built images)", () => {
@@ -133,6 +135,19 @@ describe("ADR-0242 admission-scan reports (recorded from the built images)", () 
     }
   });
 
+  it("the recorded reports echo the engine's own fixture file, by path and real sha256", () => {
+    const raw = (name: string) => JSON.parse(readFileSync(path.join(here, "fixtures/admission-scan", `${name}.json`), "utf8")) as { inputs?: unknown };
+    for (const [name, file] of [
+      ["mcpscanner-bad", "engines/mcpscanner/fixtures/bad/tools.json"],
+      ["mcpscanner-clean", "engines/mcpscanner/fixtures/clean/tools.json"],
+      ["skillscanner-bad", "engines/skillscanner/fixtures/bad/SKILL.md"],
+      ["skillscanner-clean", "engines/skillscanner/fixtures/clean/SKILL.md"],
+    ] as const) {
+      const sha = createHash("sha256").update(readFileSync(path.join(root, file))).digest("hex");
+      expect(raw(name).inputs).toEqual([{ path: path.basename(file), sha256: sha }]);
+    }
+  });
+
   it("#843 security review: each driver echoes every file it was given, by relative path and sha256, sorted", () => {
     for (const [id, dir] of [
       ["mcpscanner", "engines/mcpscanner/fixtures/bad"],
@@ -179,12 +194,16 @@ describe("ADR-0242 the gate's decision (fail closed)", () => {
 });
 
 describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
-  it("both engines are registered, off-able and unpublished (no digest, so they cannot be enabled)", () => {
+  it("both engines are registered, off-able and publishable: their digests are the lock's (null until CI publishes, so they cannot be enabled)", () => {
     expect(ENGINE_KINDS).toContain("admission_scan");
     for (const id of ["mcpscanner", "skillscanner"] as const) {
       expect(ENGINE_IDS).toContain(id);
       const m = ENGINE_MANIFEST[id];
-      expect(m).toMatchObject({ kind: "admission_scan", imageDigest: null, taskImage: null, needsModelAccess: false, licence: "Apache-2.0" });
+      // ADR-0242 L4.5: read from the lock, as spikee's
+      const lock = ENGINE_IMAGES_LOCK[id];
+      expect(m).toMatchObject({ kind: "admission_scan", imageDigest: lock.manifestDigest, taskImage: lock.imageId, needsModelAccess: false, licence: "Apache-2.0" });
+      expect(m.generation).toBe(1 + lock.publishGeneration);
+      if (lock.manifestDigest === null) expect(m.imageDigest).toBeNull();
       expect(m.version).toBe(ADMISSION_SCAN_ENGINES[id].version);
     }
     expect(admissionScanEngineFor("mcp_server")).toBe("mcpscanner");
@@ -219,7 +238,7 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     expect(readFileSync(path.join(root, "engines/mcpscanner/requirements-sdist.txt"), "utf8")).toMatch(/^yara-python==4\.5\.4 \\\n    --hash=sha256:[0-9a-f]{64}$/m);
   });
 
-  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.3", () => {
+  it("the published advisories stay fixed: litellm and filelock overridden, the CEL helper rebuilt with Go 1.27.4", () => {
     for (const id of ["mcpscanner", "skillscanner"]) {
       const req = readFileSync(path.join(root, "engines", id, "requirements.txt"), "utf8");
       expect(req).toMatch(/^litellm==1\.108\.2 \\$/m);
@@ -227,8 +246,8 @@ describe("ADR-0242 the manifest, the images and the lockfiles agree", () => {
     }
     const docker = readFileSync(path.join(root, "engines/skillscanner/Dockerfile"), "utf8");
     expect(docker).toMatch(/^FROM --platform=linux\/amd64 golang:1\.27-trixie@sha256:[0-9a-f]{64} AS cel$/m);
-    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.3"');
-    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.3");
+    expect(docker).toContain('test "$(go env GOVERSION)" = "go1.27.4"');
+    expect(docker).toContain("cel-helper.py \"$SP\" /build/cel/skill-scanner-cel-go-linux-amd64 go1.27.4");
   });
 
   it("#727 review: the skill driver fails closed on analyzers_failed, a failed or missing rule contract, an unexpected analyzer set and no to_dict (its own self-test, also run in the image build)", () => {

@@ -36,7 +36,13 @@ import {
   users,
   type Db,
 } from "@regulait/db";
-import { FAIRNESS_DEFAULT_THRESHOLDS, FAIRNESS_EVALUATION_DEFAULT_SETTINGS, FAIRNESS_RUN_EVIDENCE_VERSION } from "@regulait/shared";
+import {
+  FAIRNESS_BREACH_REVIEW_MACHINE,
+  FAIRNESS_DEFAULT_THRESHOLDS,
+  FAIRNESS_EVALUATION_DEFAULT_SETTINGS,
+  FAIRNESS_EVALUATION_MACHINE,
+  FAIRNESS_RUN_EVIDENCE_VERSION,
+} from "@regulait/shared";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -285,6 +291,16 @@ describe("ADR-0346 schema", () => {
       sql`SELECT column_default FROM information_schema.columns WHERE table_name = 'org_settings' AND column_name = 'fairness_promotion_gate'`,
     );
     expect(col.rows[0]?.column_default).toBe("false");
+    // owner 2026-11-21: the high-risk tiers force the gate by default; the column defaults are the shared defaults
+    const tiers = await db.execute<{ column_name: string; column_default: string | null }>(
+      sql`SELECT column_name, column_default FROM information_schema.columns WHERE table_name = 'org_settings' AND column_name LIKE 'fairness_gate_tier_%' ORDER BY column_name`,
+    );
+    expect(tiers.rows).toEqual([
+      { column_name: "fairness_gate_tier_high", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierHigh) },
+      { column_name: "fairness_gate_tier_limited", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierLimited) },
+      { column_name: "fairness_gate_tier_minimal", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierMinimal) },
+      { column_name: "fairness_gate_tier_prohibited", column_default: String(FAIRNESS_EVALUATION_DEFAULT_SETTINGS.fairnessGateTierProhibited) },
+    ]);
 
     const rls = await db.execute<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(sql`
       SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class
@@ -292,5 +308,17 @@ describe("ADR-0346 schema", () => {
                         'fairness_evaluation_thresholds','fairness_run_evidence','fairness_breach_reviews')`);
     expect(rls.rows).toHaveLength(6);
     for (const r of rls.rows) expect([r.relname, r.relrowsecurity, r.relforcerowsecurity]).toEqual([r.relname, true, true]);
+  });
+
+  it("7. each ADR-0348 machine's states equal its column's CHECK", async () => {
+    for (const [constraint, machine] of [
+      ["fairness_breach_reviews_status_check", FAIRNESS_BREACH_REVIEW_MACHINE],
+      ["fairness_evaluations_status_check", FAIRNESS_EVALUATION_MACHINE],
+    ] as const) {
+      const r = await db.execute<{ def: string }>(sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = ${constraint}`);
+      const def = r.rows[0]?.def ?? "";
+      const values = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
+      expect(values, constraint).toEqual([...machine.def.states].sort());
+    }
   });
 });

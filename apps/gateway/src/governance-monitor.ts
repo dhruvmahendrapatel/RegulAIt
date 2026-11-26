@@ -50,6 +50,8 @@ import {
 } from "@regulait/db";
 import {
   ACCOUNTABILITY_MONITOR_RULE_IDS,
+  SPEND_MONITOR_RULE_IDS,
+  type SpendMonitorRuleId,
   ASSURANCE_MONITOR_RULE_IDS,
   DETECTION_MONITOR_RULE_IDS,
   MONITOR_RULES,
@@ -73,6 +75,7 @@ import {
   type MonitorVendorInput,
   type OffStackServing,
 } from "@regulait/shared";
+import { spendBudgetMonitorInput } from "./budget-alerts.js";
 import { computeDependencyGraph } from "./dependency-graph.js";
 import {
   filterParams,
@@ -107,6 +110,7 @@ import { afterAlertsRaised, alertOwnershipAtRaise, alertOwnershipViews } from ".
 import { detectionMonitorInput } from "./monitor-detection-rules.js";
 import { errMessage } from "./err-serializer.js";
 import { modelDriftMonitorInput } from "./classical-drift-monitor.js";
+import { CONTAINMENT_RULE_IDS, containOpenSignals } from "./rogue-containment.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -156,6 +160,8 @@ export interface MonitorOptionalInputs {
   detection: DetectionLoader;
   /** ADR-0223 — classical-model drift (classical-drift-monitor.ts) */
   modelDrift: (db: Db, now: Date) => Promise<MonitorAssuranceInput>;
+  /** ADR-0312 (pilot addendum) — project and person spend budgets (budget-alerts.ts) */
+  spend: (db: Db, now: Date) => Promise<Partial<Record<SpendMonitorRuleId, MonitorAssuranceInput>>>;
 }
 type DetectionLoader = (db: Db, now: Date) => Promise<Partial<Record<DetectionMonitorRuleId, MonitorAssuranceInput>>>;
 type AssuranceLoader = (db: Db, now: Date) => Promise<Partial<Record<AssuranceMonitorRuleId, MonitorAssuranceInput>>>;
@@ -179,6 +185,7 @@ const OPTIONAL_INPUT_RULES: Record<keyof MonitorOptionalInputs, readonly Monitor
   literacy: ["literacy_coverage_gap"],
   detection: [...DETECTION_MONITOR_RULE_IDS],
   modelDrift: [MODEL_DRIFT_MONITOR_RULE_ID],
+  spend: [...SPEND_MONITOR_RULE_IDS],
 };
 const ASSURANCE_INPUTS = ["conditionMetrics", "requiredTests", "autonomy", "residualRisks"] as const;
 const ACCOUNTABILITY_INPUTS = ["incidents", "feedback", "literacy"] as const;
@@ -217,6 +224,7 @@ export async function runGovernanceMonitor(
     literacy: literacyMonitorInput,
     detection: detectionMonitorInput,
     modelDrift: modelDriftMonitorInput,
+    spend: spendBudgetMonitorInput,
     ...opts.optionalInputs,
   };
   const failedInputs: Array<{ input: keyof MonitorOptionalInputs; ruleId: MonitorRuleId; error: string }> = [];
@@ -373,6 +381,10 @@ export async function runGovernanceMonitor(
   const modelDrift = await optional("modelDrift");
   for (const k of modelDrift?.heldSubjectKeys ?? []) heldSubjects.add(`${MODEL_DRIFT_MONITOR_RULE_ID}|${k}`);
 
+  // ADR-0312 (pilot addendum) — the spend-budget rules, the same way
+  const spend: Partial<Record<SpendMonitorRuleId, MonitorAssuranceInput>> = (await optional("spend")) ?? {};
+  const unreportedSpendRules = SPEND_MONITOR_RULE_IDS.filter((r) => spend[r] === undefined);
+
   const findings = evaluateMonitorRules({
     useCases,
     agents: agentMap,
@@ -390,6 +402,7 @@ export async function runGovernanceMonitor(
     assurance,
     accountability,
     detection,
+    spend,
     ...(modelDrift ? { modelDrift } : {}),
   });
   const notEvaluated = new Set<string>([
@@ -397,6 +410,7 @@ export async function runGovernanceMonitor(
     ...unreportedAssuranceRules,
     ...unreportedAccountabilityRules,
     ...unreportedDetectionRules,
+    ...unreportedSpendRules,
   ]);
   for (const f of failedInputs) {
     await db.insert(auditLog).values({
@@ -411,13 +425,86 @@ export async function runGovernanceMonitor(
     });
   }
 
-  // -- reconcile -------------------------------------------------------------
+  return applyMonitorFindings(db, {
+    findings,
+    evaluatedRuleIds: new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))),
+    heldSubjects,
+    now,
+    actor,
+    actorUserId: opts.actorUserId ?? null,
+    notEvaluated,
+    afterPlan: opts.afterPlan,
+  });
+}
+
+/**
+ * ADR-0312 (pilot addendum) — the spend pass. Evaluates ONLY the spend-budget rules, every few minutes, through the
+ * same alert-write path as the full monitor (episodes, ownership, chat, tickets, audit), so a budget alert fires
+ * within minutes of the spend that crossed it instead of at the next hourly pass. Every other rule's episodes are
+ * untouched (they are not in the evaluated set). A failed loader evaluates nothing and is audited.
+ */
+export async function runSpendBudgetPass(db: Db, opts: { now?: Date; actorUserId?: string | null } = {}): Promise<MonitorRunResult> {
+  const now = opts.now ?? new Date();
+  const actor = opts.actorUserId ?? NO_IDENTITY;
+  let spend: Partial<Record<SpendMonitorRuleId, MonitorAssuranceInput>>;
+  try {
+    spend = await spendBudgetMonitorInput(db, now);
+  } catch (err) {
+    await db.insert(auditLog).values({
+      userId: actor,
+      objectType: "governance_monitor",
+      objectId: null,
+      detail: { input: "spend", pass: "spend", error: errMessage(err).slice(0, 500) },
+      effect: "deny",
+      ruleId: MONITOR_AUDIT_RULE_IDS.inputFailed,
+      ruleChain: [],
+      reason: "governance monitor spend pass: the budget rules were NOT evaluated — their input failed",
+    });
+    return { evaluatedAt: now.toISOString(), notified: { posted: 0, failed: 0 }, raised: 0, refreshed: 0, resolved: 0, active: 0, notEvaluated: [...SPEND_MONITOR_RULE_IDS] };
+  }
+  const evaluated = SPEND_MONITOR_RULE_IDS.filter((r) => spend[r] !== undefined);
+  const findings = evaluateMonitorRules({ useCases: [], agents: new Map(), vendors: new Map(), risks: [], dimensions: [], spend })
+    .filter((f) => (SPEND_MONITOR_RULE_IDS as readonly string[]).includes(f.ruleId));
+  return applyMonitorFindings(db, {
+    findings,
+    evaluatedRuleIds: new Set<MonitorRuleId>(evaluated),
+    heldSubjects: new Set(),
+    now,
+    actor,
+    actorUserId: opts.actorUserId ?? null,
+    notEvaluated: new Set(SPEND_MONITOR_RULE_IDS.filter((r) => spend[r] === undefined)),
+    quietWhenUnchanged: true,
+    passLabel: "spend",
+  });
+}
+
+/**
+ * The one alert-write path: reconcile findings against the active episodes for the rules a pass evaluated (raise,
+ * refresh, resolve, each audited), then notify chat and file tickets for newly raised episodes. Shared by the full
+ * monitor pass and ADR-0312's spend pass, which evaluates only the spend rules and leaves every other episode alone.
+ */
+export async function applyMonitorFindings(
+  db: Db,
+  args: {
+    findings: ReturnType<typeof evaluateMonitorRules>;
+    evaluatedRuleIds: Set<MonitorRuleId>;
+    heldSubjects: Set<string>;
+    now: Date;
+    actor: string;
+    actorUserId: string | null;
+    notEvaluated: Set<string>;
+    afterPlan?: ((plan: ReturnType<typeof reconcileAlerts>) => Promise<void>) | undefined;
+    quietWhenUnchanged?: boolean;
+    passLabel?: string;
+  },
+): Promise<MonitorRunResult> {
+  const { findings, evaluatedRuleIds, heldSubjects, now, actor, notEvaluated } = args;
   const active = await db
     .select({ id: governanceAlerts.id, ruleId: governanceAlerts.ruleId, subjectKey: governanceAlerts.subjectKey, title: governanceAlerts.title })
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"));
-  const plan = reconcileAlerts(active, findings, new Set(MONITOR_RULE_IDS.filter((r) => !notEvaluated.has(r))), heldSubjects);
-  if (opts.afterPlan) await opts.afterPlan(plan);
+  const plan = reconcileAlerts(active, findings, evaluatedRuleIds, heldSubjects);
+  if (args.afterPlan) await args.afterPlan(plan);
 
   const raisedIds: string[] = [];
   for (const f of plan.raise) {
@@ -494,23 +581,45 @@ export async function runGovernanceMonitor(
     .from(governanceAlerts)
     .where(ne(governanceAlerts.status, "resolved"))) as [{ n: number }];
 
-  await db.insert(auditLog).values({
+  // a narrow pass (the ADR-0312 spend pass, every few minutes) audits only a pass that changed something
+  if (!args.quietWhenUnchanged || raisedIds.length > 0 || resolvedCount > 0) await db.insert(auditLog).values({
     userId: actor,
     objectType: "governance_monitor",
     objectId: null,
-    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n, notEvaluated: [...notEvaluated] },
+    detail: { raised: raisedIds.length, refreshed: refreshedCount, resolved: resolvedCount, active: n, notEvaluated: [...notEvaluated], ...(args.passLabel ? { pass: args.passLabel } : {}) },
     effect: "allow",
     ruleId: MONITOR_AUDIT_RULE_IDS.evaluated,
     ruleChain: [],
     reason: `governance monitor evaluated: ${n} active alert(s)`,
   });
 
+  // ADR-0366 — rogue-agent containment for every OPEN episode that means "acting outside its declared role" and has
+  // no containment yet: a proposal in the Approvals Queue, or an automatic halt at or above the org's threshold. Runs
+  // on every pass, before the notifications, so a critical agent is halted first and a failed attempt is retried on
+  // the next pass (fail-closed, owner decision 2026-11-21). A failure never fails the monitor pass, and it is audited.
+  {
+    try {
+      await containOpenSignals(db, now);
+    } catch (err) {
+      await db.insert(auditLog).values({
+        userId: actor,
+        objectType: "governance_monitor",
+        objectId: null,
+        detail: { raised: raisedIds.length, error: errMessage(err).slice(0, 500), retry: "next monitor pass" },
+        effect: "deny",
+        ruleId: CONTAINMENT_RULE_IDS.failed,
+        ruleChain: [],
+        reason: "rogue-agent containment pass failed; the alerts still notify, and every unfiled signal is retried on the next pass",
+      }).catch(() => undefined);
+    }
+  }
+
   // ADR-0162 — newly RAISED alerts go to opted-in chat workspaces. Best
   // effort: a chat outage must never fail a monitor pass (each failure is
   // audited by the courier).
   let notified = { posted: 0, failed: 0 };
   try {
-    notified = await notifyGovernanceAlerts(db, raisedIds, opts.actorUserId ?? null);
+    notified = await notifyGovernanceAlerts(db, raisedIds, args.actorUserId);
   } catch {
     /* audited inside the courier where it can be; never fatal here */
   }
@@ -519,7 +628,7 @@ export async function runGovernanceMonitor(
   // Best effort, like the chat courier: never fatal to the pass.
   if (raisedIds.length > 0) {
     try {
-      await afterAlertsRaised(db, raisedIds, opts.actorUserId ?? null);
+      await afterAlertsRaised(db, raisedIds, args.actorUserId);
     } catch {
       /* the hook audits its own failures */
     }

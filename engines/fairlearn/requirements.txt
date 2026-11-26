@@ -1,0 +1,30 @@
+# ADR-0346 — the fairlearn image's Python closure, pinned by version AND sha256 (our lockfile).
+# Resolved 2026-11-17 with `pip download --only-binary :all:` (pip 24.0) from the single input `fairlearn==0.15.0`
+# (no extras), for CPython 3.12 on x86_64 manylinux_2_28 (the python:3.12-slim-trixie base pinned by digest in the
+# Dockerfile, glibc 2.41): one sha256 per package, the exact file pip installs there. Every pin is the resolver's;
+# fairlearn 0.15.0 declares narwhals>=1.14, numpy>=1.24.4, pandas>=2.0.3, scikit-learn>=1.6, scipy>=1.9.3.
+# Installed with: pip install --require-hashes --no-deps --only-binary :all: -r requirements.txt
+# Only fairlearn.metrics (MetricFrame and the four group metrics) is imported at run time; scikit-learn supplies the
+# per-group confusion matrices it uses. No network: nothing in this closure downloads at import or call time.
+cloudpickle==3.1.2 \
+    --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
+fairlearn==0.15.0 \
+    --hash=sha256:4f4656c25af384fc3369db719231680c4e83beb2e6e075e5dc3c2b27d06455c9
+joblib==1.6.0 \
+    --hash=sha256:3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba
+narwhals==2.28.0 \
+    --hash=sha256:1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f
+numpy==2.5.5 \
+    --hash=sha256:704d819265e5d1064d932968e9ee85fff2103ccc78c05b878c06943ba27b8507
+pandas==3.1.1 \
+    --hash=sha256:028490c8ac2e03e18c9b08b7f3612e149b03570209bcf741d23833a7a5377ab2
+python-dateutil==4.0.0 \
+    --hash=sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c
+scikit-learn==1.9.1 \
+    --hash=sha256:e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e
+scipy==1.18.1 \
+    --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218
+threadpoolctl==3.8.0 \
+    --hash=sha256:f1b49c82704d50f13ffae019c727b0fa4f6791a58f48f06a09c45face1be66da
+tzdata==2026.6 \
+    --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec

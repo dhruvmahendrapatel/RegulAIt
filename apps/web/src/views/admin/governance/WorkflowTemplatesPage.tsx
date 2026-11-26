@@ -119,7 +119,12 @@ export default function WorkflowTemplatesPage() {
       <PageHeader
         title="Workflow templates"
         info={<p>Stage chains and how changes route to them. Retired templates start no new instances; in-flight ones keep their snapshotted definition.</p>}
-        actions={<Link to="/admin/workflow-templates/sub-processes">Sub-process catalogue</Link>}
+        actions={
+          <>
+            <Link to="/admin/workflow-templates/sub-processes">Sub-process catalogue</Link>
+            <Link to="/admin/process-analytics">Process analytics</Link>
+          </>
+        }
       />
       <div className={v.stack}>
         <Card title="Templates">
@@ -161,6 +166,13 @@ export default function WorkflowTemplatesPage() {
                         : "no assignment rule routes here — reachable only via compliance cascade or an admin's explicit pick"}
                   </div>
                 </div>
+                {!tpl.retiredAt && !isIntakeName(tpl.name) && (
+                  // ADR-0341: the visual builder edits a draft of this template; intake templates change through
+                  // the decision-regression gate, so the builder does not offer them
+                  <Link to={`/admin/workflow-templates/${encodeURIComponent(tpl.id)}/builder`} aria-label={`Edit in builder: ${tpl.name}`}>
+                    Edit in builder
+                  </Link>
+                )}
                 {!tpl.retiredAt && (
                   <Button size="sm" onClick={() => setRetire(tpl)}>
                     retire

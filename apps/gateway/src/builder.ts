@@ -20,6 +20,7 @@
  *    content digest and version. A held skill cannot be attached; widening a
  *    skill's visibility beyond private waits for an admin.
  */
+import { expiresAtSql, governMemoryWrite } from "./memory-governance.js";
 import { ensureIdentityFor } from "./in-process-delegation.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -108,6 +109,7 @@ import {
   modelAllowed,
   skillVisible,
   toolboxOptionsFor,
+  unavailableRobotToolIds,
   type Viewer,
 } from "./builder-access.js";
 import { BUILDER_INTEGRATION_GROUPS, BUILDER_TEMPLATES, CONNECT_HREF, findTemplate } from "./builder-catalog.js";
@@ -144,6 +146,7 @@ import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
 import { databaseNow } from "./db-clock.js";
+import { memoryTrustFloor } from "./memory-write-gate.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
@@ -373,6 +376,7 @@ async function toolViews(db: Db, agentId: string, viewer: Viewer) {
 
 async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
   const [summary] = await summaries(db, [agent], viewer);
+  const detailNow = await databaseNow(db);
   const [shares, tools, subs, skills, memory, schedules, channels, project, owner] = await Promise.all([
     db.select({ userId: builderAgentShares.userId }).from(builderAgentShares).where(eq(builderAgentShares.agentId, agent.id)),
     toolViews(db, agent.id, viewer),
@@ -497,6 +501,9 @@ async function agentDetail(db: Db, agent: BuilderAgentRow, viewer: Viewer) {
       content: m.content,
       createdByName: m.createdByUserId ? (names.get(m.createdByUserId) ?? null) : null,
       createdAt: m.createdAt.toISOString(),
+      // ADR-0347: when the runtime stops reading it, and whether it already has (#905 security review [2])
+      expiresAt: m.expiresAt.toISOString(),
+      expired: m.expiresAt <= detailNow,
     })),
     schedules: schedules.map((x) => scheduleView(x, agent.ownerUserId, names)),
     channels: channels.map((c) => {
@@ -944,6 +951,19 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         });
       }
     }
+    // ADR-0364: a retired (or halted) robot version cannot be added to a toolbox
+    const retiredRobotTools = await unavailableRobotToolIds(db, toolIds);
+    for (const m of mcpRows) {
+      if (!retiredRobotTools.has(m.id)) continue;
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-robot-version-retired",
+        `refused adding robot tool '${m.name}' to '${agent.name}': the robot version is not approved or is retired`,
+        { kind: "mcp_tool", refId: m.id }, "deny");
+      return reply.status(409).send({
+        error: "robot-version-retired",
+        tool: { kind: "mcp_tool", refId: m.id, name: `${m.serverName}/${m.name}` },
+        detail: `the robot version '${m.name}' is not approved or has been retired, so it cannot be given to an agent`,
+      });
+    }
     const seen = new Set<string>();
     const rows = body.tools.filter((t) => {
       const k = `${t.kind}:${t.refId}`;
@@ -1140,7 +1160,12 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (await agentEvidenceHoldRefused(db, req, reply, agent.id, "memory (add)")) return reply;
     // a ceiling, refused by name: memory is append-only, so nothing is ever
     // pruned behind the owner's back — they choose what to remove
-    const [held] = await db.select({ n: count() }).from(builderAgentMemory).where(eq(builderAgentMemory.agentId, agent.id));
+    // ADR-0347 (#905 code review [6]): only LIVE items count against the cap. An expired item is never read again,
+    // so it must not block a new one; the slice-2 sweep deletes it, which keeps storage bounded.
+    const [held] = await db
+      .select({ n: count() })
+      .from(builderAgentMemory)
+      .where(and(eq(builderAgentMemory.agentId, agent.id), sql`${builderAgentMemory.expiresAt} > now()`));
     if (Number(held?.n ?? 0) >= BUILDER_LIMITS.memoryPerAgent) {
       return reply.status(422).send({
         error: "memory_limit_reached",
@@ -1148,12 +1173,38 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
         limit: BUILDER_LIMITS.memoryPerAgent,
       });
     }
+    // ADR-0193 addendum (E50, ASI06): a memory drawn from a causal context is held to the content-trust floor. The
+    // context must be the caller's own run or thread (checked, never asserted); the floor is categorical, so it runs
+    // before the ADR-0347 scan below.
+    const trust = await memoryTrustFloor(db, {
+      userId: viewer.userId,
+      isAdmin: viewer.isAdmin,
+      contextId: body.contextId ?? null,
+      target: { kind: "agent_memory", agentId: agent.id, projectId: agent.projectId ?? null },
+    });
+    if (!trust.ok) return reply.status(trust.status).send(trust.body);
+    // ADR-0347: the memory scan and the mandatory expiry, before anything is stored
+    const memoryGate = await governMemoryWrite(db, {
+      store: "builder_agent_memory",
+      text: body.content,
+      classificationTtlHours: null,
+      requestedHours: body.expiresInHours,
+      userId: viewer.userId,
+      objectType: "builder_agent",
+      objectId: agent.id,
+    });
+    if (!memoryGate.ok) return reply.status(memoryGate.status).send(memoryGate.body);
     const row = await withAgentEvidenceHold(db, req, reply, agent.id, "memory (add)", async (db) => {
       const [row] = await db
         .insert(builderAgentMemory)
-        .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId })
+        .values({ agentId: agent.id, content: body.content, createdByUserId: viewer.userId, expiresAt: expiresAtSql(memoryGate.ttlHours) })
         .returning();
-      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, { memoryId: row!.id });
+      await audit(db, viewer.userId, "builder_agent", agent.id, "builder-agent-memory-added", `memory added to '${agent.name}'`, {
+        memoryId: row!.id,
+        ttlHours: memoryGate.ttlHours,
+        expiresAt: row!.expiresAt,
+        ...(memoryGate.hits.length ? { memoryScanHits: memoryGate.hits } : {}),
+      });
       return row!;
     });
     if (row === EVIDENCE_HOLD_REFUSED) return reply;
@@ -1163,6 +1214,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
       content: row.content,
       createdByName: names.get(viewer.userId) ?? null,
       createdAt: row.createdAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
     });
   });
 

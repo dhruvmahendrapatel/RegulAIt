@@ -72,6 +72,16 @@ run "secure_defaults" {
     condition     = module.lb_controller_pod_identity.iam_role_name == "regulait-test-lb-controller" && module.lb_controller_pod_identity.iam_policy_name == "regulait-test-lb-controller"
     error_message = "The Load Balancer Controller role and its upstream-maintained policy are on by default and named inside the stack prefix."
   }
+
+  assert {
+    condition     = var.operator_backups && module.backup_pod_identity.iam_role_name == "regulait-test-operator-backup" && module.backup_target[0].bucket == "regulait-test-backups-111111111111"
+    error_message = "Operator backups are on by default, with a write-only role and a bucket named inside the stack prefix."
+  }
+
+  assert {
+    condition     = module.backup_target[0].prefix == "pg" && module.backup_target[0].alarm_name == null
+    error_message = "Backups land under pg/, and no always-red heartbeat alarm is created for a Job that publishes none."
+  }
 }
 
 run "egress_none_has_no_internet_path" {
@@ -130,5 +140,18 @@ run "no_ingress_controller_no_role" {
   assert {
     condition     = module.lb_controller_pod_identity.iam_role_name == null
     error_message = "No Load Balancer Controller role when ingress_controller is off."
+  }
+}
+
+run "backups_off_creates_no_bucket_or_role" {
+  command = plan
+
+  variables {
+    operator_backups = false
+  }
+
+  assert {
+    condition     = length(module.backup_target) == 0 && module.backup_pod_identity.iam_role_name == null && output.backup_spec == null
+    error_message = "With operator_backups = false there is no backup bucket, role or spec."
   }
 }

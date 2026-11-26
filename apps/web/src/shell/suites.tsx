@@ -209,6 +209,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // point: what is in the payload vs. where the call may go vs. who may
       // make it under which attributes.
       { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0363 — the same content question asked of a file's own label: allow, redact or block what the tenant marked
+      { label: "Sensitivity labels", to: "/admin/sensitivity-labels" },
       // ADR-0193 (I4) — what turns the guardrails' injection DETECTION into a defense: which sources' content
       // may drive a write (trust tiers, untrusted by default), and the provenance evidence of every result.
       { label: "Content trust", to: "/admin/content-trust" },
@@ -263,6 +265,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // credential (keys, tokens, provider and integration secrets) with its
       // owner, age, use and flags, read-only, linking to where each is managed.
       { label: "Credentials", to: "/admin/credentials" },
+      // ADR-0315 G7 — the receivers outside RegulAIt that accept an agent's portable credential, beside the inventory
+      { label: "Agent credentials", to: "/admin/agent-credentials" },
       // ADR-0188 S6: each agent principal's own identity, stewards, public
       // credentials and own grants, and a run's delegation tree. Beside the
       // credential inventory, in this group (ADR-0177 §3: no new group).
@@ -300,6 +304,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // deployment and to where, under the same egress guard as the endpoints
       // above, with the delivery log as the evidence.
       { label: "Webhooks", to: "/admin/webhooks" },
+      // ADR-0303 — the audit chain, signed and acknowledged, to the customer's SIEM
+      { label: "SIEM delivery", to: "/admin/siem" },
       // ADR-0187 — the sidecar engines (red-teaming, model scanning): whether
       // each may run at all, its runners and its self-test. Runs start on the
       // Red-teaming, Evaluations and Admission review pages.

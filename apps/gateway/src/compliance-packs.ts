@@ -49,12 +49,14 @@
  * attestation-required. Everything else — a new framework, a new control, a
  * revised mapping, a customer's own internal control set — is rows, no deploy.
  */
+import { fairnessCardMeasuredSql } from "./fairness-evidence-sql.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { wantsListContract, type ListSpec } from "./list-contract.js";
 import { answerListExport, answerListPage, regenerableBy, type ContractList } from "./list-contract-route.js";
 import {
   abacPolicies,
+  agentRiskProofResults,
   aiIncidents,
   aiPolicyAcknowledgements,
   aiUseCases,
@@ -92,6 +94,7 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  agentRiskProofs,
   COMPLIANCE_PACK_DISCLAIMER,
   COMPLIANCE_PACK_UPDATE_POLICY,
   DEFAULT_COMPLIANCE_PACKS,
@@ -110,10 +113,12 @@ import {
   type PackScorecard,
   type PackVersionSnapshot,
 } from "@regulait/shared";
+import { checkAgentRiskProofEvidence, countsAsEvidence } from "./agent-risk-proof-evidence.js";
 import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 import { countTestedEvaluators } from "./eval-catalog.js";
 import { overrideInForce } from "./guardrails.js";
+import { runEndpointBenchmarkCheck } from "./endpoint-benchmark-checks.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -142,6 +147,10 @@ export const COMPLIANCE_PACK_RULE_IDS = {
 // THE EVIDENCE COLLECTORS — every one a real SELECT
 // ---------------------------------------------------------------------------
 
+/** ADR-0345: a pack evaluation reads at most this many proof results per control and period (a daily proof over
+ * a year is 365; the cap keeps a misconfigured interval from making one control read unbounded) */
+const AGENT_RISK_PROOF_COLLECTOR_MAX_ROWS = 5_000;
+
 export interface CollectorContext {
   periodStart: Date;
   periodEnd: Date;
@@ -164,12 +173,12 @@ const safeIds = (ids: string[]) => (ids.length ? ids : [ZERO_UUID]);
 /**
  * The jsonb project predicate for `audit_log`, which carries no project column
  * — attribution rides `detail.projectId`, the key every governed path writes.
- * Built by interpolation, so every id is re-validated as a uuid on the way in:
- * a non-uuid here would be an injection primitive, and it throws instead.
+ * Every id is a bound parameter (security checklist: parameterised queries
+ * only, Codex review S-10) and is still validated as a uuid on the way in.
  */
 function auditProjectPredicate(projectIds: string[]) {
-  const ids = safeIds(projectIds).map((p) => `'${assertUuid(p)}'`).join(",");
-  return sql`${auditLogTable.detail} ->> 'projectId' = ANY(${sql.raw(`ARRAY[${ids}]::text[]`)})`;
+  const ids = safeIds(projectIds).map((p) => sql`${assertUuid(p)}`);
+  return sql`${auditLogTable.detail} ->> 'projectId' = ANY(ARRAY[${sql.join(ids, sql`, `)}]::text[])`;
 }
 
 function assertUuid(v: string): string {
@@ -253,10 +262,13 @@ export async function runCollector(
       // least one completed (`assessed`) bias/fairness assessment. The
       // platform does not compute or grade fairness; it counts that the
       // examination was documented and where its result lives.
+      // ADR-0346 decision 7: OR when it holds MEASURED evidence: its latest
+      // fairness run passed, on the card's current model version, and that
+      // run's evidence is signed (fairnessCardMeasuredSql).
       const [row] = await db
         .select({ n: count() })
         .from(modelCards)
-        .where(sql`jsonb_path_exists(${modelCards.biasFairness}, '$[*] ? (@.status == "assessed")')`);
+        .where(sql`(jsonb_path_exists(${modelCards.biasFairness}, '$[*] ? (@.status == "assessed")') OR ${fairnessCardMeasuredSql()})`);
       return row?.n ?? 0;
     }
 
@@ -461,6 +473,39 @@ export async function runCollector(
           ),
         );
       return row?.n ?? 0;
+    }
+
+    case "endpoint_benchmark_check": {
+      // ADR-0351 slice 3: one fleet-wide endpoint check, 1 = pass. Endpoint rows carry no project, so only an
+      // org-scoped report counts it (fail closed, as `isolation_placements`). The schema requires `endpointCheck`.
+      if (projectIds !== null) return 0;
+      if (!params.endpointCheck) throw new Error("endpoint_benchmark_check needs collectorParams.endpointCheck");
+      return runEndpointBenchmarkCheck(db, params.endpointCheck);
+    }
+
+    case "agent_risk_proofs": {
+      // ADR-0345: passing proof results in the period whose evidence still holds, for the proofs whose risk cites
+      // this control. A result row carries no project, so only an org-scoped report counts it (fail closed, as
+      // `isolation_placements`). Without a control there is nothing to scope to, so nothing counts.
+      if (projectIds !== null || !ctx.controlRef) return 0;
+      const keys = agentRiskProofs()
+        .filter(({ risk }) => risk.owaspRefs.includes(ctx.controlRef!))
+        .map(({ proof }) => proof.key);
+      if (keys.length === 0) return 0;
+      const rows = await db
+        .select()
+        .from(agentRiskProofResults)
+        .where(
+          and(
+            inArray(agentRiskProofResults.proofKey, keys),
+            eq(agentRiskProofResults.outcome, "pass"),
+            gte(agentRiskProofResults.finishedAt, periodStart),
+            lt(agentRiskProofResults.finishedAt, periodEnd),
+          ),
+        )
+        .limit(AGENT_RISK_PROOF_COLLECTOR_MAX_ROWS);
+      const checks = await checkAgentRiskProofEvidence(db, rows);
+      return rows.filter((r) => countsAsEvidence(r.outcome, checks.get(r.id)!)).length;
     }
 
     default: {
@@ -839,26 +884,95 @@ export async function ensureCascadeProfile(
 // Routes
 // ---------------------------------------------------------------------------
 
+/** one audit row about a compliance pack (module scope so the ADR-0351 deployer register writes the same rows) */
+export async function auditCompliancePack(
+  db: Db,
+  actor: string | null,
+  objectId: string | null,
+  ruleId: string,
+  reason: string,
+  detail: Record<string, unknown>,
+  effect: "allow" | "deny" = "allow",
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: actor ?? NO_IDENTITY,
+    objectType: "compliance_pack",
+    objectId,
+    detail,
+    effect,
+    ruleId,
+    ruleChain: [],
+    reason,
+  });
+}
+
+/** an attestation is a named person's statement: one with no user identity behind it (the bootstrap token) is refused */
+export const ATTESTATION_NEEDS_A_PERSON = "attestation_needs_a_person";
+
+/**
+ * Record a person's attestation on an attestation-required control, and audit it. The ONE write path for pack
+ * attestations: the pack route and the ADR-0351 deployer register both call it, after their own checks (each refuses
+ * a caller with no user identity, audited, before calling). The row and its audit row are written in one
+ * transaction, so an attestation is never left unaudited.
+ */
+export async function recordPackAttestation(
+  db: Db,
+  args: {
+    /** the named person attesting; never null (ADR-0180: an unattributed attestation is not evidence) */
+    actor: string;
+    pack: Pick<CompliancePackRow, "id" | "framework" | "version">;
+    controlRef: string;
+    statement: string;
+    evidenceRef: string | null;
+    validUntil: Date | null;
+    /** extra audit detail (the register adds its lifecycle transition) */
+    detail?: Record<string, unknown>;
+  },
+) {
+  if (!args.actor) throw new Error(ATTESTATION_NEEDS_A_PERSON);
+  return db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
+    const [row] = await tx
+      .insert(compliancePackAttestations)
+      .values({
+        packId: args.pack.id,
+        controlRef: args.controlRef,
+        statement: args.statement,
+        evidenceRef: args.evidenceRef,
+        validUntil: args.validUntil,
+        attestedByUserId: args.actor,
+      })
+      .returning();
+    await auditCompliancePack(
+      tx,
+      args.actor,
+      args.pack.id,
+      COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
+      `attestation recorded for '${args.controlRef}' on pack '${args.pack.framework}' v${args.pack.version} — this ` +
+        `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
+        `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
+        `no evidence for it and does not claim to have`,
+      {
+        controlRef: args.controlRef,
+        validUntil: args.validUntil ? args.validUntil.toISOString() : null,
+        framework: args.pack.framework,
+        version: args.pack.version,
+        ...(args.detail ?? {}),
+      },
+    );
+    return row!;
+  });
+}
+
 export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void {
-  async function audit(
+  const audit = (
     actor: string | null,
     objectId: string | null,
     ruleId: string,
     reason: string,
     detail: Record<string, unknown>,
     effect: "allow" | "deny" = "allow",
-  ) {
-    await db.insert(auditLog).values({
-      userId: actor ?? NO_IDENTITY,
-      objectType: "compliance_pack",
-      objectId,
-      detail,
-      effect,
-      ruleId,
-      ruleChain: [],
-      reason,
-    });
-  }
+  ) => auditCompliancePack(db, actor, objectId, ruleId, reason, detail, effect);
 
   // --- the catalogue, as DATA (admin-only via the global gate) -------------
 
@@ -1334,32 +1448,31 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
           `status is computed from the ledger and cannot be attested.`,
       });
     }
-    const [row] = await db
-      .insert(compliancePackAttestations)
-      .values({
-        packId: id,
-        controlRef: body.controlRef,
-        statement: body.statement,
-        evidenceRef: body.evidenceRef ?? null,
-        validUntil: body.validUntil ? new Date(body.validUntil) : null,
-        attestedByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
-    await audit(
-      req.authCtx.userId ?? null,
-      id,
-      COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
-      `attestation recorded for '${body.controlRef}' on pack '${pack.framework}' v${pack.version} — this ` +
-        `is the CUSTOMER'S OWN statement about an organisational control, attributed to a named human. ` +
-        `It is reported as 'attested', which is a distinct status from 'satisfied': RegulAIt collected ` +
-        `no evidence for it and does not claim to have`,
-      {
-        controlRef: body.controlRef,
-        validUntil: body.validUntil ?? null,
-        framework: pack.framework,
-        version: pack.version,
-      },
-    );
+    const person = req.authCtx.userId;
+    if (!person) {
+      // REFUSED, and audited: an attestation is a named person's statement, and the bootstrap token is nobody
+      await audit(
+        null,
+        id,
+        COMPLIANCE_PACK_RULE_IDS.attestationRecorded,
+        `refused an attestation on '${body.controlRef}': the caller has no user identity. An attestation is the ` +
+          `customer's statement attributed to a named human; sign in as a person to attest`,
+        { controlRef: body.controlRef, error: ATTESTATION_NEEDS_A_PERSON },
+        "deny",
+      );
+      return reply.status(403).send({
+        error: ATTESTATION_NEEDS_A_PERSON,
+        detail: "an attestation must be made by a named person; the bootstrap token cannot attest",
+      });
+    }
+    const row = await recordPackAttestation(db, {
+      actor: person,
+      pack,
+      controlRef: body.controlRef,
+      statement: body.statement,
+      evidenceRef: body.evidenceRef ?? null,
+      validUntil: body.validUntil ? new Date(body.validUntil) : null,
+    });
     return reply.status(201).send({
       attestation: row,
       note:

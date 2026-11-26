@@ -64,11 +64,49 @@ export interface ResourceApprovalRule extends ResourceBound {
   approverName?: string | null;
 }
 
-/** The approval rules that bind this call, most specific first (the first one names the approver). The gateway uses
- * the same predicate to decide whether a consent binding is needed, so the two can never disagree. */
-export function matchingResourceApprovalRules<R extends ResourceApprovalRule>(resource: GovernedResource, rules: readonly R[]): R[] {
-  const write = resourceIsWrite(resource);
-  return rules.filter((r) => binds(r, resource) && (!r.writeOnly || write)).sort(bySpecificity);
+/** ADR-0239 P8b (2026-11-21): the hand-written resource approval-rule predicate (`matchingResourceApprovalRules`) is
+ * removed. The match runs only on an injected engine (`matchingResourceApprovalRulesWith`, Cedar in the gateway); with
+ * no engine the kernel refuses. `resource-approval-rule-cedar.test.ts` keeps a transcription of the old predicate as
+ * its differential oracle. */
+const NO_RESOURCE_APPROVAL_RULE_EVALUATOR_MESSAGE = "no approval-rule evaluator is configured";
+
+/** ADR-0239 slice 2b — a resource approval-rule engine's answer: the binding rules (any order), or an error (a DENY). */
+export type ResourceApprovalRuleVerdict<R extends ResourceApprovalRule = ResourceApprovalRule> =
+  | { kind: "matched"; rules: R[] }
+  | { kind: "error"; message: string };
+
+/**
+ * ADR-0239 slice 2b — the approval-rule MATCH engine for model, connector and A2A calls (Cedar in the gateway). It
+ * answers only WHICH rules bind the call, as elements of the array it was given; the specificity order that names the
+ * approver stays here, in TypeScript, because Cedar returns an unordered set.
+ */
+export interface ResourceApprovalRuleEvaluator {
+  readonly engine: string;
+  matching(rules: readonly ResourceApprovalRule[], resource: GovernedResource): ResourceApprovalRuleVerdict;
+}
+
+/**
+ * ADR-0239 slice 2b — the match on an injected engine, most specific first (the first one names the approver). No
+ * rules = nothing matched, with no engine call. Rules but no engine (P8b), an engine error, a throw, or an answer that
+ * is not a subset of the input is an error verdict, never "nothing matched": the kernel turns it into a deny, and a
+ * gateway caller must not read it as "no rule binds this call".
+ */
+export function matchingResourceApprovalRulesWith<R extends ResourceApprovalRule>(
+  evaluator: ResourceApprovalRuleEvaluator | null | undefined,
+  resource: GovernedResource,
+  rules: readonly R[],
+): ResourceApprovalRuleVerdict<R> {
+  if (rules.length === 0) return { kind: "matched", rules: [] };
+  if (!evaluator) return { kind: "error", message: NO_RESOURCE_APPROVAL_RULE_EVALUATOR_MESSAGE };
+  try {
+    const v = evaluator.matching(rules, resource);
+    if (v.kind === "error") return v;
+    const given = new Set<ResourceApprovalRule>(rules);
+    if (v.rules.some((r) => !given.has(r))) return { kind: "error", message: "the approval-rule engine answered with a rule it was not given" };
+    return { kind: "matched", rules: [...new Set(v.rules as R[])].sort(bySpecificity) };
+  } catch (e) {
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** `currentCount` = allowed calls already inside the window, counted by the gateway on the database clock. */
@@ -111,6 +149,8 @@ export const RESOURCE_RULE_IDS = {
   abacForbid: "abac-forbid",
   abacApproval: "abac-require-approval",
   approvalRule: "resource-approval-rule",
+  /** ADR-0239 slice 2b: the approval-rule engine failed (the same id as the MCP path's) */
+  approvalEngineError: "approval-rule-engine-error",
   approvalUnqueueable: "approval-not-queueable",
   coreError: "governed-core-error",
 } as const;
@@ -124,6 +164,10 @@ export interface ComposeResourceInput {
   attributionRequired: boolean;
   rateLimits?: readonly ResourceRateLimit[];
   approvalRules?: readonly ResourceApprovalRule[];
+  /** ADR-0239 slice 2b: the approval-rule match engine (Cedar in the gateway). REQUIRED (P8b, review #1093 finding 1,
+   * issue #1097), so the compiler finds every caller. null with any approval rule present, an engine error or a throw
+   * DENIES the call (`approval-rule-engine-error`). */
+  approvalRuleEvaluator: ResourceApprovalRuleEvaluator | null;
   /** ADR-0040 verdict for this call; null/undefined = no active policy applies (no rule-chain entry) */
   abacDecision?: AbacDecision | null;
   /** a bound, fresh consent the gateway found for exactly this call */
@@ -193,7 +237,17 @@ export function composeResourceDecision(input: ComposeResourceInput): GovernedRe
   //    closed). These paths bind consent to approval rules and the execution dial only, so the hold could otherwise be
   //    released by another rule's consent, or queued with no consent bound to the policy version. Here, in the kernel,
   //    so no caller can skip it; the audit chain then says `deny`, never `satisfied-by-approval`.
-  const matched = matchingResourceApprovalRules(resource, input.approvalRules ?? []);
+  const verdict = matchingResourceApprovalRulesWith(input.approvalRuleEvaluator, resource, input.approvalRules ?? []);
+  if (verdict.kind === "error") {
+    // ADR-0239 slice 2b: an engine failure is a deny, never "no rule binds" (ADR-0180)
+    chain.push({ rule: RESOURCE_RULE_IDS.approvalRule, outcome: "deny", grantId: RESOURCE_RULE_IDS.approvalEngineError });
+    return out({
+      effect: "deny",
+      ruleId: RESOURCE_RULE_IDS.approvalEngineError,
+      reason: `approval-rule evaluation failed for ${subject}, so the call is refused; nothing was sent: ${verdict.message}`,
+    });
+  }
+  const matched = verdict.rules;
   const matchedIds = matched.map((r) => r.id);
   if (abac?.effect === "require_approval") {
     chain.push({ rule: RESOURCE_RULE_IDS.abacApproval, outcome: "deny", ...(abac.policyId ? { grantId: abac.policyId } : {}) });

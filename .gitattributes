@@ -9,6 +9,10 @@ engines/modelscan/*.toml text eol=lf
 engines/garak/*.py text eol=lf
 engines/garak/requirements*.txt text eol=lf
 engines/garak/excluded-data.txt text eol=lf
+# ADR-0346 (M-069): the fairlearn image build executes the metric step and the gate, and parses the lockfile
+engines/fairlearn/*.py text eol=lf
+engines/fairlearn/*.mjs text eol=lf
+engines/fairlearn/requirements.txt text eol=lf
 # ADR-0190 I4 (M-069): the sandbox init is executed inside every stdio sandbox (its shebang line must stay LF)
 packages/sandbox-executor/sandbox-init/*.mjs text eol=lf
 # ADR-0187 decision 186: vendored dataset bytes are pinned by sha256; no end-of-line conversion on any checkout

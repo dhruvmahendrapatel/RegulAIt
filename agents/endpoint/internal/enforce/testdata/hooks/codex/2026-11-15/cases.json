@@ -3,5 +3,5 @@
   {"input": "mcp-allowed.json", "policy": "none", "want": "deny"},
   {"input": "mcp-unlisted.json", "policy": "enforce", "want": "deny"},
   {"input": "mcp-unlisted.json", "policy": "audit", "want": "none"},
-  {"input": "builtin-shell.json", "policy": "none", "want": "none"}
+  {"input": "builtin-shell.json", "policy": "none", "want": "deny"}
 ]

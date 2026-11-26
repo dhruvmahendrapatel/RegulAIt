@@ -31,4 +31,7 @@ module "byoc" {
   ingress_allowed_cidrs                = var.ingress_allowed_cidrs
   ingress_hostname                     = var.ingress_hostname
   ingress_certificate_arn              = var.ingress_certificate_arn
+  operator_backups                     = var.operator_backups
+  backup_installation_name             = var.backup_installation_name
+  backup_retention_days                = var.backup_retention_days
 }

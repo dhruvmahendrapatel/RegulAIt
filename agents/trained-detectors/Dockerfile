@@ -69,13 +69,17 @@ FROM --platform=linux/amd64 python:3.12-slim-trixie@sha256:4840d514c583a4d3d8cad
 # then drop what apt and dpkg wrote with wall-clock content (the lists, their logs and ldconfig's
 # aux-cache), so the layer stays byte-reproducible (ADR-0187 addendum 2026-10-21: build and rebuild
 # must match). Remove this when a rebuilt base digest already carries the fix.
+# CVE-2026-124851 (libzstd1, HIGH, 2026-11-25): the same treatment. Neither the pinned base digest nor the
+# newest published one ships the fix; trixie-security has 1.5.7+dfsg-1+deb13u1. Remove with the zlib1g pin.
 RUN apt-get update \
- && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && apt-get install -y --only-upgrade --no-install-recommends zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 libzstd1=1.5.7+dfsg-1+deb13u1 \
  && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/cache/ldconfig/aux-cache
 RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin detector
 COPY --from=closure /venv /venv
 COPY --from=export --chown=root:root /opt/models/prompt-injection /opt/models/prompt-injection
 COPY --from=export --chown=root:root /opt/models/harm /opt/models/harm
+# ADR-0352: the embedder is used as published (no export stage), verified by sha256 in `weights`
+COPY --from=weights --chown=root:root /opt/models/embedding /opt/models/embedding
 COPY agents/trained-detectors/detector_core.py agents/trained-detectors/server.py /app/
 ENV PATH=/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \

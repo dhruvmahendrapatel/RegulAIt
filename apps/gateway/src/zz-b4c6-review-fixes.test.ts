@@ -233,7 +233,7 @@ beforeAll(async () => {
   await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required', approval_delegation_enabled = true,
     approval_signature_mode = 'passkey',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management", "endpoint_remediation"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, trustProxy: [PROXY] });
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -338,7 +338,7 @@ describe("F32: adding an authenticator app is admitted by the passkey rule", () 
 
   it("sweep: an SSO identity is linked by proof only to an account without a passkey", async () => {
     const link = async (u: User) => {
-      await db.update(usersTable).set({ passwordHash: hashPassword("b4c6-pw-correct"), mustChangePassword: false }).where(eq(usersTable.id, u.id));
+      await db.update(usersTable).set({ passwordHash: await hashPassword("b4c6-pw-correct"), mustChangePassword: false }).where(eq(usersTable.id, u.id));
       const [row] = await db.select({ email: usersTable.email }).from(usersTable).where(eq(usersTable.id, u.id));
       const anchor = {
         ref: { kind: "saml" as const, id: samlProviderId, name: `b4c6-saml-${RUN}` },

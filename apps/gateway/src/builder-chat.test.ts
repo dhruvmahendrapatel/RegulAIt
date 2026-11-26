@@ -35,7 +35,8 @@ const usageCount = async (userId: string) =>
   (await k.db.select({ id: usageEvents.id }).from(usageEvents).where(eq(usageEvents.userId, userId))).length;
 
 beforeAll(async () => {
-  k = await builderKit("bld-chat");
+  // ADR-0180 addendum (E51): channel and schedule agents are autonomous; this suite is not about oversight
+  k = await builderKit("bld-chat", { relaxAutonomyGate: true });
   restoreSb2Gates = await relaxGovernanceGatesForTest(k.db, { mrmEnforced: false, dispatchAttributionRequired: false });
   owner = await k.person("owner");
   colleague = await k.person("colleague");

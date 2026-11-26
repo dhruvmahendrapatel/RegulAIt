@@ -34,6 +34,9 @@ import {
 } from "./scheduler.js";
 import { RISK_ACCEPTANCE_EXPIRY_JOB_NAME, SCHEDULER_JOB_NAMES, schedulerJobRegistry } from "./scheduler-jobs.js";
 import { GUARDRAIL_WINDOW_EXPIRY_JOB_NAME } from "./scheduler-jobs.js"; // ADR-0181 FX3
+import { AGENT_RISK_PROOF_JOB_NAME } from "./agent-risk-proof-runner.js"; // ADR-0345 slice 2a
+import { ROBOT_RUN_STALE_SWEEP_JOB_NAME } from "./robot-runs.js"; // ADR-0364 S3
+import { VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME } from "./vendor-agent-control-delegated.js"; // ADR-0338 slice 1c
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 /**
@@ -695,6 +698,11 @@ describe("every sweep is registered", () => {
         // is no second adjudication. Driven end-to-end in
         // mcp-admission-rescan.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0356 PR 2: writes PM-triggered workflows' progress back to their work items, each once; the backstop for
+        // transitions no route reports. Driven end-to-end in pm-write-back.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.pmWriteBackSweep,
+        // ADR-0356 PR 3: reads Atlassian Rovo/MCP audit events as read-only evidence. Driven in pm-audit-ingest.test.ts.
+        SCHEDULER_JOB_NAMES.pmAuditIngestSweep,
         // ADR-0126's ACTIVE half: probes every registered upstream — broken ones
         // first — and feeds the result to the breaker, so a dead server is
         // refused before a user finds it and a recovered one resumes without
@@ -801,6 +809,9 @@ describe("every sweep is registered", () => {
         // ADR-0195 SD4b: commits accepted endpoint agent reports through SD0's fenced path; driven end to end in
         // zz-adr0195-sd4b-endpoint-agent.test.ts (with no endpoint agent source enabled it does nothing)
         SCHEDULER_JOB_NAMES.endpointAgentIngest,
+        // ADR-0367: audits an enabled detection feed that no longer verifies or is past its maximum age; driven end to
+        // end in detection-feed.test.ts (with the feed off it does nothing)
+        SCHEDULER_JOB_NAMES.detectionFeedHealth,
         // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints; driven end to end in
         // zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts (with no endpoint set it fetches nothing)
         SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
@@ -812,9 +823,58 @@ describe("every sweep is registered", () => {
         // ADR-0303: audit-chain delivery to enabled SIEM destinations; driven end to end in
         // zz-adr0303-siem-delivery.test.ts (with no destination enabled it sends nothing)
         SCHEDULER_JOB_NAMES.siemDeliverySweep,
+        // ADR-0359 (E40): behaviour baselines (shadow findings); driven end to end in zz-adr0359-behaviour.test.ts
+        SCHEDULER_JOB_NAMES.behaviourBaselineSweep,
+        // ADR-0333 (E15): evaluates the detection rule pack over new audit-chain rows; driven end-to-end in
+        // zz-adr0333-detection.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.agentDetectionSweep,
+        // ADR-0312: records cost-per-outcome evidence; driven end to end in zz-adr0312-cost-per-outcome.test.ts
+        SCHEDULER_JOB_NAMES.costOutcomeRecorder,
+        // ADR-0312 (pilot addendum): the spend-budget pass; driven end to end in zz-adr0312-cost-per-outcome.test.ts
+        SCHEDULER_JOB_NAMES.spendBudgetAlerts,
+        // ADR-0313: expired paid-call holds; driven end to end in zz-adr0313-paid-call-budgets.test.ts
+        SCHEDULER_JOB_NAMES.paidCallHoldSweeper,
         // ADR-0302: third-party ingest evidence past the audit floor; driven end to end in
         // zz-adr0302-evidence-retention.test.ts (with no floor configured it deletes nothing)
         SCHEDULER_JOB_NAMES.thirdPartyEvidenceRetentionSweep,
+        // ADR-0349 slice 4 (lane E30): starts due workflow schedules as their creators; driven end to end in
+        // zz-adr0349-schedules.test.ts (with no schedule it starts nothing)
+        SCHEDULER_JOB_NAMES.workflowSchedules,
+        // ADR-0360 slice 2 (lane E41): EDR signal sync, and isolation polling with the webhook replay-table prune
+        SCHEDULER_JOB_NAMES.edrSync,
+        SCHEDULER_JOB_NAMES.edrIsolationPoll,
+        SCHEDULER_JOB_NAMES.endpointUpdateExpiry,
+        // ADR-0334 (owner decision B2): captured browser prompts past retention; driven end to end in
+        // zz-adr0334-browser-governance.test.ts (with capture off nothing is stored, so it deletes nothing)
+        SCHEDULER_JOB_NAMES.browserPromptCaptureRetentionSweep,
+        // ADR-0322: vendor usage/cost pull from enabled connectors; driven end to end in
+        // zz-adr0322-vendor-usage-pull.test.ts (with the org policy off, the default, it pulls nothing)
+        SCHEDULER_JOB_NAMES.vendorUsagePullSweep,
+        // ADR-0339: scores every agent a change marked. Driven end-to-end in zz-adr0339-agent-risk.test.ts.
+        SCHEDULER_JOB_NAMES.agentRiskRecomputeSweep,
+        SCHEDULER_JOB_NAMES.agentRiskDailyMark,
+        // ADR-0342 (lane E23): rebuilds the process analytics read model from the workflow history; driven end to end
+        // in zz-adr0342-process-analytics.test.ts (reads workflow state only)
+        SCHEDULER_JOB_NAMES.processAnalyticsProjector,
+        // ADR-0345 slice 2a (lane E26): runs the due agent-risk proofs and records their evidence; driven end to end
+        // in zz-adr0345-proof-runner.test.ts
+        AGENT_RISK_PROOF_JOB_NAME,
+        // ADR-0358 (lane E39): pushes the AI asset inventory to enabled CMDB connectors; driven end to end in
+        // zz-adr0358-cmdb-sync.test.ts (with no connector enabled it sends nothing)
+        SCHEDULER_JOB_NAMES.cmdbSyncSweep,
+        // ADR-0364 S3 (lane E45): ends robot runs no gateway still holds; driven in zz-adr0364-robots-s3.test.ts
+        ROBOT_RUN_STALE_SWEEP_JOB_NAME,
+        // ADR-0361: AI SaaS compliance-export reads (nothing while the org policy is off, the default) and their
+        // evidence retention (nothing with no floor); driven end to end in zz-adr0361-ai-saas-monitoring.test.ts
+        SCHEDULER_JOB_NAMES.aiSaasMonitorSweep,
+        SCHEDULER_JOB_NAMES.aiSaasEvidenceRetentionSweep,
+        // ADR-0338 slice 1c (lane E19): expires delegated control sign-ins and destroys what they held; driven in
+        // zz-adr0338-1c-delegated.test.ts
+        VENDOR_CONTROL_DELEGATED_EXPIRY_JOB_NAME,
+        // ADR-0365 slice 2 (lane E46): the context graph's hourly incremental and daily full sync; driven end to end in
+        // zz-adr0365-context-graph-sync.test.ts (with no source bound it does nothing)
+        SCHEDULER_JOB_NAMES.contextGraphSync,
+        SCHEDULER_JOB_NAMES.contextGraphFullSync,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;

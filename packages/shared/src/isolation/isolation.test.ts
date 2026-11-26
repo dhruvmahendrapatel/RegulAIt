@@ -116,7 +116,7 @@ describe("decision 2: the shipped profiles", () => {
   });
 
   it("every shipped profile validates, is frozen, and its digest is the SHA-256 of its RFC 8785 text", () => {
-    expect(Object.keys(SHIPPED_EXECUTION_PROFILES).sort()).toEqual(["engine-worker", "restricted", "restricted-microvm"]);
+    expect(Object.keys(SHIPPED_EXECUTION_PROFILES).sort()).toEqual(["engine-worker", "restricted", "restricted-microvm", "robot-browser"]);
     for (const [name, body] of Object.entries(SHIPPED_EXECUTION_PROFILES)) {
       expect(executionProfileBodySchema.parse(body), name).toEqual(body);
       expect(body.name).toBe(name);
@@ -128,7 +128,7 @@ describe("decision 2: the shipped profiles", () => {
       expect(executionProfileDigest(body)).toBe(createHash("sha256").update(text, "utf8").digest("hex"));
     }
     const digests = new Set(Object.values(SHIPPED_EXECUTION_PROFILES).map(executionProfileDigest));
-    expect(digests.size).toBe(3);
+    expect(digests.size).toBe(4);
     // key order does not change the digest
     const reverseKeys = (v: unknown): unknown =>
       Array.isArray(v)
@@ -262,6 +262,7 @@ describe("decision 11: the isolation org settings", () => {
       isolationFloorRegulated: "microvm",
       isolationFloorMcpStdio: "user_space_kernel",
       isolationFloorEngineWorker: "user_space_kernel",
+      isolationFloorRobotBrowser: "user_space_kernel",
       executorAttestationMaxAgeMinutes: 120,
     });
     expect(Object.keys(SENSITIVITY_FLOOR_KEYS).sort()).toEqual([...AI_USE_CASE_DATA_SENSITIVITIES].sort());

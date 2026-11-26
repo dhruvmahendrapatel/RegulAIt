@@ -144,6 +144,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/rules": "sliders",
   "/admin/abac-policies": "tag",
   "/admin/guardrails": "rails",
+  "/admin/sensitivity-labels": "tag", // ADR-0363
   "/admin/content-trust": "shield", // ADR-0193 (I4)
   "/admin/model-policy": "modelGrid",
   "/admin/prompt-versions": "history",
@@ -159,6 +160,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/client-access": "laptop",
   "/admin/virtual-keys": "key",
   "/admin/credentials": "key",
+  "/admin/agent-credentials": "idCard", // ADR-0315 G7
   "/admin/workload-identities": "robot", // ADR-0188 S6
   "/admin/sso": "lock",
   "/admin/provisioning": "sync",
@@ -170,6 +172,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/connectors": "plug",
   "/admin/mcp-servers": "server",
   "/admin/webhooks": "sync",
+  "/admin/siem": "report", // ADR-0303
   "/admin/engines": "box", // ADR-0187
   "/admin/admission": "shield",
   "/admin/git-connections": "branch",

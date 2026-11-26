@@ -2,11 +2,14 @@
  * The project create and edit forms, shared by the Cost dashboard and the Projects
  * screens (G2, owner decision on #453): an admin creates a project from Projects and
  * edits one from its own page, with the same fields and the same budget-approver rule.
+ * Also the overage state both screens show beside a project's budget (CXR-CST-002): it lives here, in the module the
+ * two screens already share, so it adds no chunk of its own.
  */
 import { useState } from "react";
 import { api } from "../../api/client";
 import type { Initiative } from "../../api/adminTypes";
-import { Button, Field, Input, Select } from "../../ui/kit";
+import type { ProjectCosts } from "../../api/types";
+import { Badge, Button, Field, Input, Select } from "../../ui/kit";
 import { optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../admin/adminKit";
 import a from "../admin/admin.module.css";
 import v from "../views.module.css";
@@ -226,5 +229,32 @@ export function ProjectEditForm(props: {
       </form>
       <p className={v.faint}>Only the fields you fill in change. A budget still requires a named approver after the edit.</p>
     </>
+  );
+}
+
+// ---- CXR-CST-002: the overage state the server ENFORCES, not the raw latch -----------------------------------
+// The gateway suppresses budget enforcement only while `overageActive` is true (a monthly budget's approval covers only
+// the period it was granted in), so a latch left over from an earlier month is history, not "approved now".
+
+type Budget = NonNullable<ProjectCosts["budget"]>;
+
+/** the badge for an over-budget project: warn while an approved overage is in force, danger otherwise */
+export function OverageBadge(props: { budget: Budget }) {
+  return props.budget.overageActive ? (
+    <Badge tone="warn">overage approved</Badge>
+  ) : (
+    <Badge tone="danger">over budget</Badge>
+  );
+}
+
+/** a line naming an approval that no longer covers this period; nothing when there is none */
+export function OverageHistory(props: { budget: Budget }) {
+  const b = props.budget;
+  if (!b.overageApproved || b.overageActive) return null;
+  return (
+    <span className={v.faint} data-testid="overage-history">
+      An overage was approved {b.overageApprovedPeriod ? `for ${b.overageApprovedPeriod}` : "in an earlier period"}; it
+      does not cover this period, so the budget is enforced again.
+    </span>
   );
 }
